@@ -1,0 +1,137 @@
+//! proto/taktdash.proto の読み取り API 契約を検証する。
+//!
+//! このテストは、proto/ の定義本文と、そこから生成した Rust の型の両方を観測する。
+//! proto を変えて生成物が追随しない状態、読み取り以外の RPC が増えた状態、
+//! 判断待ちの種類が要件の2種類から外れた状態を、それぞれ失敗させる。
+
+use takt_dash_backend::takt_dash::v1;
+
+const PROTO_SOURCE: &str = include_str!("../../proto/taktdash.proto");
+
+/// service 本文の `rpc <名前>(...) returns (...)` から、RPC の名前を出現順に取り出す。
+fn rpc_declarations(source: &str) -> Vec<String> {
+  let mut names = Vec::new();
+  for line in source.lines() {
+    let trimmed = line.trim();
+    let Some(rest) = trimmed.strip_prefix("rpc ") else {
+      continue;
+    };
+    let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    if !name.is_empty() {
+      names.push(name);
+    }
+  }
+  names
+}
+
+#[test]
+fn proto_defines_exactly_the_six_read_rpcs() {
+  let names = rpc_declarations(PROTO_SOURCE);
+  let mut sorted = names.clone();
+  sorted.sort();
+  sorted.dedup();
+  assert_eq!(
+    sorted,
+    vec![
+      "GetActivity".to_owned(),
+      "GetOverview".to_owned(),
+      "GetPendingDecisions".to_owned(),
+      "GetProjects".to_owned(),
+      "GetRunDetail".to_owned(),
+      "WatchState".to_owned(),
+    ],
+    "読み取り系の6 RPC だけが定義されている必要があります: {names:?}"
+  );
+}
+
+#[test]
+fn watch_state_is_a_server_streaming_rpc() {
+  let declarations: Vec<&str> =
+    PROTO_SOURCE.lines().map(str::trim).filter(|line| line.starts_with("rpc WatchState")).collect();
+  assert_eq!(declarations.len(), 1, "WatchState の宣言は1つだけ必要です: {declarations:?}");
+  assert!(
+    declarations[0].contains("returns (stream "),
+    "WatchState は server streaming として宣言する必要があります: {}",
+    declarations[0]
+  );
+  for name in ["GetOverview", "GetProjects", "GetPendingDecisions", "GetActivity", "GetRunDetail"] {
+    let line = PROTO_SOURCE
+      .lines()
+      .map(str::trim)
+      .find(|line| line.starts_with(&format!("rpc {name}")))
+      .unwrap_or_else(|| panic!("{name} の宣言が見つかりません"));
+    assert!(!line.contains("stream "), "{name} は unary として宣言する必要があります: {line}");
+  }
+}
+
+#[test]
+fn pending_decision_type_is_limited_to_inquiry_and_awaiting_merge() {
+  let line = PROTO_SOURCE
+    .lines()
+    .map(str::trim)
+    .find(|line| line.starts_with("enum PendingDecisionType"))
+    .unwrap_or_else(|| panic!("enum PendingDecisionType が見つかりません"));
+  let body = PROTO_SOURCE
+    .split("enum PendingDecisionType")
+    .nth(1)
+    .and_then(|rest| rest.split('}').next())
+    .unwrap_or_else(|| panic!("PendingDecisionType の本文が見つかりません: {line}"));
+  let members: Vec<&str> = body
+    .split(';')
+    .filter_map(|part| part.split('=').next())
+    .map(|name| name.trim().trim_start_matches('{').trim())
+    .filter(|name| !name.is_empty())
+    .collect();
+  assert_eq!(
+    members,
+    vec!["PENDING_DECISION_TYPE_UNSPECIFIED", "PENDING_DECISION_TYPE_INQUIRY", "PENDING_DECISION_TYPE_AWAITING_MERGE",],
+    "判断待ちの種類は問い合わせとマージ待ちの2種類だけにする必要があります: {members:?}"
+  );
+}
+
+#[test]
+fn generated_dashboard_state_carries_the_read_state() {
+  let state = v1::DashboardState {
+    servers: vec![v1::Server {
+      server_id:    "mini".to_owned(),
+      name:         "j5ik2o-mac-mini".to_owned(),
+      kind:         "Mac mini".to_owned(),
+      connected:    false,
+      last_read_at: None,
+      concurrency:  4,
+    }],
+    thresholds: Some(v1::AnomalyThresholds { pending_decision_stale_minutes: 240, run_log_silent_minutes: 10 }),
+    ..Default::default()
+  };
+
+  assert_eq!(state.servers.len(), 1);
+  assert!(!state.servers[0].connected);
+  assert_eq!(state.thresholds.expect("thresholds が設定されている").pending_decision_stale_minutes, 240);
+}
+
+#[test]
+fn generated_client_exposes_the_read_calls() {
+  fn client_type(
+    client: v1::takt_dash_service_client::TaktDashServiceClient<tonic::transport::Channel>,
+  ) -> v1::takt_dash_service_client::TaktDashServiceClient<tonic::transport::Channel> {
+    client
+  }
+  let _: fn(
+    v1::takt_dash_service_client::TaktDashServiceClient<tonic::transport::Channel>,
+  ) -> v1::takt_dash_service_client::TaktDashServiceClient<tonic::transport::Channel> = client_type;
+
+  let _request_types = (
+    std::marker::PhantomData::<v1::GetOverviewRequest>,
+    std::marker::PhantomData::<v1::GetProjectsRequest>,
+    std::marker::PhantomData::<v1::GetPendingDecisionsRequest>,
+    std::marker::PhantomData::<v1::GetActivityRequest>,
+    std::marker::PhantomData::<v1::GetRunDetailRequest>,
+    std::marker::PhantomData::<v1::WatchStateRequest>,
+  );
+  let _response_types = (
+    std::marker::PhantomData::<v1::GetProjectsResponse>,
+    std::marker::PhantomData::<v1::GetPendingDecisionsResponse>,
+    std::marker::PhantomData::<v1::GetActivityResponse>,
+    std::marker::PhantomData::<v1::GetRunDetailResponse>,
+  );
+}

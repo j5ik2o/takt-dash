@@ -1,0 +1,319 @@
+syntax = "proto3";
+
+package takt_dash.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// taktDash の読み取り系 API を提供する。
+// このサービスは状態を返すだけで、状態を書き換える操作は提供しない。
+service TaktDashService {
+  // すべての集約対象の今の状態を返す。
+  rpc GetOverview(GetOverviewRequest) returns (DashboardState);
+
+  // プロジェクトごとの状態と、直近の出来事を返す。
+  rpc GetProjects(GetProjectsRequest) returns (GetProjectsResponse);
+
+  // 未回答の問い合わせと人のマージ待ちのゴールからなる判断待ちを返す。
+  rpc GetPendingDecisions(GetPendingDecisionsRequest) returns (GetPendingDecisionsResponse);
+
+  // 出来事の一覧と直近7日分の日次集計を返す。
+  rpc GetActivity(GetActivityRequest) returns (GetActivityResponse);
+
+  // 1つの run について、takt_get_run で取得できる範囲を返す。
+  rpc GetRunDetail(GetRunDetailRequest) returns (GetRunDetailResponse);
+
+  // 接続時に即時に全件を返し、その後は状態が変わるたびに送る。
+  rpc WatchState(WatchStateRequest) returns (stream DashboardState);
+}
+
+// ゴールの状態を表す。
+enum GoalStatus {
+  GOAL_STATUS_UNSPECIFIED = 0;
+  GOAL_STATUS_CREATED = 1;
+  GOAL_STATUS_AWAITING_MERGE = 2;
+  GOAL_STATUS_COMPLETED = 3;
+}
+
+// ゴールの実行状態を表す。
+enum ExecutionStatus {
+  EXECUTION_STATUS_UNSPECIFIED = 0;
+  EXECUTION_STATUS_ACTIVE = 1;
+  EXECUTION_STATUS_PAUSED = 2;
+  EXECUTION_STATUS_ABORTED = 3;
+}
+
+// run の状態を表す。
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  RUN_STATUS_RUNNING = 1;
+  RUN_STATUS_COMPLETED = 2;
+  RUN_STATUS_ABORTED = 3;
+  RUN_STATUS_FAILED = 4;
+}
+
+// タスクの状態を表す。
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_PENDING = 1;
+  TASK_STATUS_RUNNING = 2;
+  TASK_STATUS_COMPLETED = 3;
+  TASK_STATUS_FAILED = 4;
+  TASK_STATUS_EXCEEDED = 5;
+  TASK_STATUS_PR_FAILED = 6;
+}
+
+// アクティビティの出来事の種類を表す。
+enum ActivityKind {
+  ACTIVITY_KIND_UNSPECIFIED = 0;
+  ACTIVITY_KIND_GOAL_CREATED = 1;
+  ACTIVITY_KIND_RUN_STARTED = 2;
+  ACTIVITY_KIND_TASK_COMPLETED = 3;
+  ACTIVITY_KIND_INQUIRY = 4;
+  ACTIVITY_KIND_AWAITING_MERGE = 5;
+  ACTIVITY_KIND_PAUSED = 6;
+  ACTIVITY_KIND_BLOCKED = 7;
+  ACTIVITY_KIND_CONNECTION_LOST = 8;
+}
+
+// 判断待ちの問い合わせの種類を表す。
+enum InquiryKind {
+  INQUIRY_KIND_UNSPECIFIED = 0;
+  INQUIRY_KIND_QUESTION = 1;
+  INQUIRY_KIND_OPERATION_REQUEST = 2;
+}
+
+// 判断待ちの種類を表す。
+// 判断待ちの一覧は未回答の問い合わせと人のマージ待ちのゴールに限る。
+enum PendingDecisionType {
+  PENDING_DECISION_TYPE_UNSPECIFIED = 0;
+  PENDING_DECISION_TYPE_INQUIRY = 1;
+  PENDING_DECISION_TYPE_AWAITING_MERGE = 2;
+}
+
+// 集約対象のサーバーを表す。
+message Server {
+  string server_id = 1;                        // 識別子
+  string name = 2;                             // 名前
+  string kind = 3;                             // 表示用の機種ラベル（"Mac mini" など）
+  bool connected = 4;                          // 応答の有無
+  google.protobuf.Timestamp last_read_at = 5;  // 最後に読めた時刻
+  int32 concurrency = 6;                       // 同時実行の上限
+}
+
+// 集約対象のプロジェクトを表す。
+message Project {
+  string name = 1;                  // 名前
+  string about = 2;                 // 説明
+  string server_id = 3;             // 集約設定上のサーバー
+  int32 completed_tasks_24h = 4;    // 直近24時間に完了したタスクの件数
+}
+
+// タスクの状態ごとの件数を表す。
+message TaskStatusCounts {
+  int32 pending = 1;
+  int32 running = 2;
+  int32 completed = 3;
+  int32 failed = 4;
+  int32 exceeded = 5;
+  int32 pr_failed = 6;
+}
+
+// プルリクエストを表す。
+message PullRequest {
+  int64 number = 1;  // 番号
+  string url = 2;    // URL
+}
+
+// ゴールを表す。
+message Goal {
+  string goal_id = 1;                                  // ID
+  string server_id = 2;                                // サーバー
+  string project = 3;                                  // プロジェクト
+  string name = 4;                                     // 名前
+  GoalStatus status = 5;                               // 状態
+  ExecutionStatus execution_status = 6;                // 実行状態
+  TaskStatusCounts task_counts = 7;                    // タスクの状態ごとの件数
+  optional string paused_reason = 8;                   // 一時停止の理由
+  PullRequest pull_request = 9;                        // プルリクエストの番号と URL
+  optional google.protobuf.Timestamp awaiting_merge_at = 10;  // マージ待ちになった時刻
+  optional TaskStatus merge_task_last = 11;            // 仕上げタスクの最後の状態（なければ人のマージ待ち）
+}
+
+// ゴールの実行で通ったステップを表す。
+message RunStep {
+  string step_name = 1;                           // ステップ名
+  string model = 2;                               // モデル
+  google.protobuf.Timestamp started_at = 3;       // 開始時刻
+  optional google.protobuf.Timestamp ended_at = 4;  // 終了時刻（継続中は省略する）
+}
+
+// run のレポートの要約を表す。
+message ReportSummary {
+  string filename = 1;  // ファイル名
+  int64 size_bytes = 2;  // 大きさ（バイト）
+}
+
+// 走っている run を表す。
+message Run {
+  string run_slug = 1;                              // runSlug
+  string session_id = 2;                            // セッション
+  string server_id = 3;                             // サーバー
+  string project = 4;                               // プロジェクト
+  string goal_id = 5;                               // ゴール ID
+  string task_name = 6;                             // タスク名
+  string summary = 7;                               // 要約
+  google.protobuf.Timestamp started_at = 8;         // 開始時刻
+  repeated RunStep steps = 9;                       // ステップの並び（最後が今のステップ）
+  optional google.protobuf.Timestamp current_step_started_at = 10;  // 今のステップの開始時刻
+  google.protobuf.Timestamp last_log_at = 11;       // 最後のログの時刻
+  repeated ReportSummary reports = 12;              // レポートの一覧
+  RunStatus status = 13;                            // 状態
+  bool log_silent = 14;                             // ログの無音の判定済みフラグ
+}
+
+// 判断待ちの項目を表す。
+message PendingDecision {
+  PendingDecisionType type = 1;           // 種類（問い合わせ・マージ待ち）。判断待ちはこの2種のみ
+  string server_id = 2;                   // サーバー
+  string project = 3;                     // プロジェクト
+  optional string goal_id = 4;            // ゴール ID（ゴールに属さない問い合わせは省略する）
+  InquiryKind inquiry_kind = 5;           // 問い合わせの種類（質問・作業の依頼）
+  google.protobuf.Timestamp created_at = 6;  // 作成時刻
+  string body = 7;                        // 本文
+  repeated string options = 8;            // 選択肢
+  PullRequest pull_request = 9;           // マージ待ちのプルリクエスト
+  bool stale = 10;                        // 滞留の判定済みフラグ
+}
+
+// 異常判定の基準を表す。
+message AnomalyThresholds {
+  int32 pending_decision_stale_minutes = 1;  // 判断待ちの滞留の基準（分）
+  int32 run_log_silent_minutes = 2;          // ログの無音の基準（分）
+}
+
+// 集約した状態のまとまりを表す。
+message DashboardState {
+  google.protobuf.Timestamp read_at = 1;    // この状態を読んだ時刻
+  repeated Server servers = 2;              // サーバー
+  repeated Project projects = 3;            // プロジェクト
+  repeated Goal goals = 4;                  // ゴール
+  repeated Run runs = 5;                    // run
+  repeated PendingDecision pending_decisions = 6;  // 判断待ち
+  AnomalyThresholds thresholds = 7;         // 異常判定の基準
+}
+
+// 概要の取得を要求する。
+message GetOverviewRequest {}
+
+// プロジェクトの取得を要求する。
+message GetProjectsRequest {}
+
+// プロジェクトの取得への応答を表す。
+message GetProjectsResponse {
+  DashboardState state = 1;                  // 状態
+  repeated ActivityEvent recent_events = 2;  // 直近の出来事
+}
+
+// 判断待ちの取得を要求する。
+message GetPendingDecisionsRequest {}
+
+// 判断待ちの取得への応答を表す。
+message GetPendingDecisionsResponse {
+  DashboardState state = 1;  // 状態
+}
+
+// アクティビティの取得を要求する。
+message GetActivityRequest {}
+
+// アクティビティの出来事を表す。
+message ActivityEvent {
+  google.protobuf.Timestamp occurred_at = 1;  // 時刻
+  string server_id = 2;                       // サーバー
+  optional string project = 3;                // プロジェクト（接続断などサーバー全体の出来事は省略する）
+  ActivityKind kind = 4;                      // 種類
+  string body = 5;                            // 本文
+  optional string run_slug = 6;               // 対象の run
+}
+
+// 日次集計を表す。
+message DailySummary {
+  string date = 1;       // 日付（JST の日を "YYYY-MM-DD" で表す）
+  int32 total = 2;       // 総数
+  int32 attention = 3;   // 判断待ちと異常の件数
+}
+
+// サーバーごとの出来事の件数を表す。
+message ServerEventCount {
+  string server_id = 1;  // サーバー
+  int32 count = 2;       // 件数
+}
+
+// アクティビティの取得への応答を表す。
+message GetActivityResponse {
+  DashboardState state = 1;                      // 状態
+  repeated ActivityEvent events = 2;             // 出来事の一覧（新しい順）
+  repeated DailySummary daily_summaries = 3;     // 7日分の日次集計
+  repeated ServerEventCount today_counts_by_server = 4;  // サーバーごとの当日の出来事の件数
+}
+
+// run 詳細の取得を要求する。
+message GetRunDetailRequest {
+  string run_slug = 1;  // runSlug
+}
+
+// run のステップの記録を表す。
+message StepLog {
+  string step_name = 1;                       // ステップ名
+  string persona = 2;                         // ペルソナ
+  string status = 3;                          // 状態
+  string content = 4;                         // 本文
+  google.protobuf.Timestamp timestamp = 5;    // 時刻
+  int32 iteration = 6;                        // 反復回数
+}
+
+// run のレポートを表す。
+message RunReport {
+  string filename = 1;  // ファイル名
+  string content = 2;   // 本文
+  int64 size_bytes = 3;  // 大きさ（バイト）
+}
+
+// run への指示書を表す。
+message RunInstruction {
+  int32 instruction_id = 1;                    // 指示書の ID
+  google.protobuf.Timestamp issued_at = 2;     // 発行時刻
+  string state = 3;                            // 状態
+  string content = 4;                          // 本文
+}
+
+// run 詳細の取得への応答を表す。
+// takt_get_run で取得できる範囲を表現する。
+message GetRunDetailResponse {
+  string run_slug = 1;                          // runSlug
+  string session_id = 2;                        // セッション
+  string server_id = 3;                         // サーバー
+  string project = 4;                           // プロジェクト
+  string goal_id = 5;                           // ゴール ID
+  string task_name = 6;                         // タスク名
+  string task_text = 7;                         // タスクの本文
+  string summary = 8;                           // 要約
+  string workflow = 9;                          // ワークフロー
+  RunStatus status = 10;                        // 状態
+  google.protobuf.Timestamp started_at = 11;    // 開始時刻
+  optional string current_step = 12;            // 今のステップ
+  optional int32 current_iteration = 13;        // 今の反復回数
+  optional google.protobuf.Timestamp current_step_started_at = 14;  // 今のステップの開始時刻
+  optional int32 current_step_execution_count = 15;  // 今のステップの実行回数
+  optional int32 phase = 16;                    // フェーズ
+  repeated StepLog step_logs = 17;              // ステップの一覧とその本文
+  string log_tail = 18;                         // ログの末尾
+  repeated RunReport reports = 19;              // レポートの一覧と本文
+  repeated RunInstruction instructions = 20;    // 指示書の一覧
+  google.protobuf.Timestamp last_log_at = 21;   // 最後のログの時刻
+  bool log_silent = 22;                         // ログの無音の判定済みフラグ
+  bool server_connected = 23;                   // 読み先の応答の有無
+  google.protobuf.Timestamp server_last_read_at = 24;  // 読み先から最後に読めた時刻
+}
+
+// 状態ストリーミングの接続を要求する。
+message WatchStateRequest {}
