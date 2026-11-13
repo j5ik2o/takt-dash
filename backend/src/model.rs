@@ -102,6 +102,8 @@ pub struct GoalEntry {
   pub pull_request_url:    Option<String>,
   /// takt_get_goal の通知（path=notifications）から得た、awaiting_merge の種類の通知の記録時刻。
   pub awaiting_merge_at:   Option<DateTime<Utc>>,
+  /// 一時停止の理由。実行状態が paused で理由が報告されたときだけ持ちます。
+  pub paused_reason:       Option<String>,
 }
 
 /// タスクの一覧に含まれるタスク。配列順は tasks.yaml の順を保ちます。
@@ -140,17 +142,99 @@ pub struct NotificationEntry {
   pub recorded_at:     DateTime<Utc>,
 }
 
+/// run の状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+  Running,
+  Completed,
+  Aborted,
+  Failed,
+}
+
+/// run の実行で通ったステップ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStepEntry {
+  pub step_name:  String,
+  pub model:      String,
+  pub started_at: DateTime<Utc>,
+  /// 終了時刻。継続中のステップは持ちません。
+  pub ended_at:   Option<DateTime<Utc>>,
+}
+
+/// run のレポートの要約。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportEntry {
+  pub filename:   String,
+  pub size_bytes: i64,
+}
+
 /// takt_get_run から得た run の情報。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunEntry {
   pub run_slug:                String,
+  pub session_id:              String,
   pub task_name:               String,
   pub goal_id:                 Option<String>,
+  pub summary:                 String,
+  pub status:                  RunStatus,
   pub current_step:            Option<String>,
   pub started_at:              DateTime<Utc>,
   pub current_step_started_at: Option<DateTime<Utc>>,
   pub last_log_at:             DateTime<Utc>,
-  pub steps:                   Vec<String>,
+  pub steps:                   Vec<RunStepEntry>,
+  pub reports:                 Vec<ReportEntry>,
+}
+
+/// takt_get_run から得た、run 詳細の本文。一覧の投影では使わない詳細情報です。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunDetail {
+  pub run_slug: String,
+  pub session_id: String,
+  pub task_name: String,
+  pub goal_id: Option<String>,
+  pub task_text: String,
+  pub summary: String,
+  pub workflow: String,
+  pub status: RunStatus,
+  pub started_at: DateTime<Utc>,
+  pub current_step: Option<String>,
+  pub current_iteration: Option<i32>,
+  pub current_step_started_at: Option<DateTime<Utc>>,
+  pub current_step_execution_count: Option<i32>,
+  pub phase: Option<i32>,
+  pub step_logs: Vec<StepLogEntry>,
+  pub log_tail: String,
+  pub reports: Vec<RunReportEntry>,
+  pub instructions: Vec<RunInstructionEntry>,
+  pub last_log_at: DateTime<Utc>,
+}
+
+/// run のステップの記録。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepLogEntry {
+  pub step_name: String,
+  pub persona:   String,
+  pub status:    String,
+  pub content:   String,
+  pub timestamp: DateTime<Utc>,
+  pub iteration: i32,
+}
+
+/// run のレポートの一覧項目と本文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunReportEntry {
+  pub filename:   String,
+  pub content:    String,
+  pub size_bytes: i64,
+}
+
+/// run への指示書。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunInstructionEntry {
+  pub instruction_id: i32,
+  pub issued_at:      DateTime<Utc>,
+  pub state:          String,
+  pub content:        String,
 }
 
 /// 1回の読み取りで得た、1プロジェクト分の状態。

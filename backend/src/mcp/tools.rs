@@ -4,16 +4,34 @@
 //! 追従して全件を集めます。道具が isError を返した場合は [`ToolError::Tool`] として扱い、
 //! 輸送エラーとは区別します。
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use super::client::{CallError, McpClient};
-use crate::model::{
-  ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, RunEntry,
-  TaskEntry, TaskStatus,
+use super::client::{CallError, McpClient, McpClientConfig};
+use crate::{
+  config::McpServer,
+  model::{
+    ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, ReportEntry,
+    RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, RunStatus, RunStepEntry, StepLogEntry, TaskEntry,
+    TaskStatus,
+  },
 };
+
+/// takt-mcp 子プロセスの起動設定を作る。
+///
+/// poller の定期読み取りと GetRunDetail の要求時読み取りが、同じ起動条件（タイムアウトを含む）を
+/// 共有するために公開します。
+pub fn client_config(server: &McpServer, cwd: &std::path::Path) -> McpClientConfig {
+  McpClientConfig {
+    command:         server.command.clone(),
+    args:            server.args.clone(),
+    env:             server.env.clone(),
+    cwd:             cwd.to_path_buf(),
+    request_timeout: Duration::from_secs(15),
+  }
+}
 
 /// 読み取り道具の呼び出しで起きる失敗。
 #[derive(Debug, thiserror::Error)]
@@ -232,7 +250,7 @@ impl<'a> ToolSet<'a> {
   /// stepLogPage.nextOffset が残っていれば追加ページを取得して末尾のログの時刻を求める。
   async fn parse_run_with_pages(&mut self, value: &Value, task: &TaskEntry) -> Result<RunEntry, ToolError> {
     let mut latest_seen = last_step_timestamp(value);
-    let mut steps = step_names(value);
+    let mut steps = step_entries(value);
     let mut next_offset = step_log_next_offset(value);
     let run_slug = string_field(value, "runSlug")?;
     let mut pages_taken = 0;
@@ -245,7 +263,7 @@ impl<'a> ToolSet<'a> {
       if let Some(timestamp) = last_step_timestamp(&page_value) {
         latest_seen = Some(timestamp);
       }
-      steps.extend(step_names(&page_value));
+      steps.extend(step_entries(&page_value));
       next_offset = step_log_next_offset(&page_value);
     }
     parse_run(value, task, latest_seen, steps)
@@ -402,6 +420,7 @@ fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
     pull_request_number,
     pull_request_url,
     awaiting_merge_at: None,
+    paused_reason: optional_string(value, "pausedReason"),
   })
 }
 
@@ -511,7 +530,7 @@ fn parse_run(
   value: &Value,
   task: &TaskEntry,
   last_step_timestamp: Option<DateTime<Utc>>,
-  steps: Vec<String>,
+  steps: Vec<RunStepEntry>,
 ) -> Result<RunEntry, ToolError> {
   let run_slug = string_field(value, "runSlug")?;
   let started_at = parse_time(value.get("startedAt"))?
@@ -521,14 +540,28 @@ fn parse_run(
   let last_log_at = last_step_timestamp.or(current_step_started_at).unwrap_or(started_at);
   Ok(RunEntry {
     run_slug,
+    session_id: optional_string(value, "sessionId").unwrap_or_default(),
     task_name: task.name.clone(),
     goal_id: task.goal_id.clone(),
+    summary: optional_string(value, "summary").unwrap_or_default(),
+    status: parse_run_status(value.get("status")),
     current_step: optional_string(value, "currentStep"),
     started_at,
     current_step_started_at,
     last_log_at,
     steps,
+    reports: report_summaries(value),
   })
+}
+
+/// run の状態を寛容に解析する。欠落と未知の値は継続中として扱います。
+fn parse_run_status(value: Option<&Value>) -> RunStatus {
+  match value.and_then(Value::as_str) {
+    | Some("completed") => RunStatus::Completed,
+    | Some("aborted") => RunStatus::Aborted,
+    | Some("failed") => RunStatus::Failed,
+    | _ => RunStatus::Running,
+  }
 }
 
 /// 応答の stepLogs 配列の末尾の timestamp を取り出す。先頭ページのウィンドウ末尾の時刻です。
@@ -541,16 +574,163 @@ fn last_step_timestamp(value: &Value) -> Option<DateTime<Utc>> {
   DateTime::parse_from_rfc3339(timestamp.as_str()?).ok().map(|time| time.with_timezone(&Utc))
 }
 
-/// 応答の stepLogs 配列からステップ名を出現順に取り出す。
-fn step_names(value: &Value) -> Vec<String> {
+/// 応答の stepLogs 配列からステップの記録を出現順に取り出す。
+///
+/// 実 takt-mcp の応答で欠ける項目を解析エラーにしないため、開始時刻は `startedAt` を優先し、
+/// 無ければ `timestamp` で補い、どちらも無ければ `UNIX_EPOCH` に落とします。開始時刻を run の
+/// 開始時刻で補うことはしません（run の開始時刻は step の開始より前になり得るため）。
+fn step_entries(value: &Value) -> Vec<RunStepEntry> {
+  let Some(logs) = value.get("stepLogs").and_then(Value::as_array) else {
+    return Vec::new();
+  };
+  let mut steps = Vec::new();
+  for log in logs {
+    let step_name = optional_string(log, "step").unwrap_or_default();
+    let started_at =
+      parse_time(log.get("startedAt")).ok().flatten().or_else(|| parse_time(log.get("timestamp")).ok().flatten());
+    let ended_at = parse_time(log.get("endedAt")).ok().flatten();
+    steps.push(RunStepEntry {
+      step_name,
+      model: optional_string(log, "model").unwrap_or_default(),
+      started_at: started_at.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+      ended_at,
+    });
+  }
+  steps
+}
+
+/// 応答の reports 配列からレポートの要約を出現順に取り出す。
+fn report_summaries(value: &Value) -> Vec<ReportEntry> {
   value
-    .get("stepLogs")
+    .get("reports")
     .and_then(Value::as_array)
-    .map(|logs| logs.iter().filter_map(|log| log.get("step")).filter_map(Value::as_str).map(str::to_owned).collect())
+    .map(|reports| {
+      reports
+        .iter()
+        .map(|report| ReportEntry {
+          filename:   optional_string(report, "filename").unwrap_or_default(),
+          size_bytes: report.get("sizeBytes").and_then(Value::as_i64).unwrap_or_default(),
+        })
+        .collect()
+    })
     .unwrap_or_default()
 }
 
 /// stepLogPage.nextOffset を取り出す。null または欠落なら None（追従終端）。
 fn step_log_next_offset(value: &Value) -> Option<usize> {
   value.get("stepLogPage").and_then(|page| page.get("nextOffset")).and_then(Value::as_u64).map(|offset| offset as usize)
+}
+
+impl<'a> ToolSet<'a> {
+  /// 指定した runSlug の詳細を takt_get_run から読み取る。
+  ///
+  /// stepLogs は先頭 50 件のウィンドウで返るため、stepLogPage.nextOffset が残っていれば追加ページを
+  /// 取得して全件を集めます。レポートと指示書の本文は一覧に含まれないため、一覧の filename と
+  /// instructionId を使って1件ずつ本文を取得します。
+  pub async fn read_run_detail(&mut self, run_slug: &str) -> Result<RunDetail, ToolError> {
+    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug })).await?;
+    let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_deref() == Some(run_slug));
+    let mut step_logs = step_log_entries(&value);
+    let mut next_offset = step_log_next_offset(&value);
+    let mut pages_taken = 0;
+    while let Some(offset) = next_offset {
+      if pages_taken >= MAX_PAGES {
+        return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
+      }
+      pages_taken += 1;
+      let page_value = self.call_json("takt_get_run", json!({ "runSlug": run_slug, "offset": offset })).await?;
+      step_logs.extend(step_log_entries(&page_value));
+      next_offset = step_log_next_offset(&page_value);
+    }
+    let mut reports = Vec::new();
+    for summary in report_summaries(&value) {
+      let report_value =
+        self.call_json("takt_get_run", json!({ "runSlug": run_slug, "report": summary.filename })).await?;
+      reports.push(RunReportEntry {
+        filename:   summary.filename.clone(),
+        content:    optional_string(&report_value, "content").unwrap_or_default(),
+        size_bytes: report_value.get("sizeBytes").and_then(Value::as_i64).unwrap_or(summary.size_bytes),
+      });
+    }
+    let mut instructions = Vec::new();
+    for instruction in value.get("instructions").and_then(Value::as_array).cloned().unwrap_or_default() {
+      let instruction_id = instruction.get("instructionId").and_then(Value::as_i64).unwrap_or_default() as i32;
+      let instruction_value =
+        self.call_json("takt_get_run", json!({ "runSlug": run_slug, "instructionId": instruction_id })).await?;
+      instructions.push(RunInstructionEntry {
+        instruction_id,
+        issued_at: parse_time(instruction_value.get("issuedAt"))
+          .ok()
+          .flatten()
+          .or_else(|| parse_time(instruction.get("issuedAt")).ok().flatten())
+          .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+        state: optional_string(&instruction_value, "state")
+          .or_else(|| optional_string(&instruction, "state"))
+          .unwrap_or_default(),
+        content: optional_string(&instruction_value, "content").unwrap_or_default(),
+      });
+    }
+    parse_run_detail(&value, run_slug, task.as_ref(), step_logs, reports, instructions)
+  }
+}
+
+fn parse_run_detail(
+  value: &Value,
+  run_slug: &str,
+  task: Option<&TaskEntry>,
+  step_logs: Vec<StepLogEntry>,
+  reports: Vec<RunReportEntry>,
+  instructions: Vec<RunInstructionEntry>,
+) -> Result<RunDetail, ToolError> {
+  let started_at =
+    parse_time(value.get("startedAt"))?.ok_or_else(|| ToolError::Parse("run の開始時刻を取得できません".to_owned()))?;
+  let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
+  let last_log_at = parse_time(value.get("lastLogAt"))?.or(current_step_started_at).unwrap_or(started_at);
+  let task_name = optional_string(value, "taskName").or_else(|| task.map(|task| task.name.clone())).unwrap_or_default();
+  let goal_id = optional_string(value, "goalId").or_else(|| task.and_then(|task| task.goal_id.clone()));
+  Ok(RunDetail {
+    run_slug: run_slug.to_owned(),
+    session_id: optional_string(value, "sessionId").unwrap_or_default(),
+    task_name,
+    goal_id,
+    task_text: optional_string(value, "taskText").unwrap_or_default(),
+    summary: optional_string(value, "summary").unwrap_or_default(),
+    workflow: optional_string(value, "workflow").unwrap_or_default(),
+    status: parse_run_status(value.get("status")),
+    started_at,
+    current_step: optional_string(value, "currentStep"),
+    current_iteration: value.get("currentIteration").and_then(Value::as_i64).map(|value| value as i32),
+    current_step_started_at,
+    current_step_execution_count: value
+      .get("currentStepExecutionCount")
+      .and_then(Value::as_i64)
+      .map(|value| value as i32),
+    phase: value.get("phase").and_then(Value::as_i64).map(|value| value as i32),
+    step_logs,
+    log_tail: optional_string(value, "logTail").unwrap_or_default(),
+    reports,
+    instructions,
+    last_log_at,
+  })
+}
+
+/// 応答の stepLogs 配列から、本文を含むステップの記録を出現順に取り出す。
+fn step_log_entries(value: &Value) -> Vec<StepLogEntry> {
+  value
+    .get("stepLogs")
+    .and_then(Value::as_array)
+    .map(|logs| {
+      logs
+        .iter()
+        .map(|log| StepLogEntry {
+          step_name: optional_string(log, "step").unwrap_or_default(),
+          persona:   optional_string(log, "persona").unwrap_or_default(),
+          status:    optional_string(log, "status").unwrap_or_default(),
+          content:   optional_string(log, "content").unwrap_or_default(),
+          timestamp: parse_time(log.get("timestamp")).ok().flatten().unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+          iteration: log.get("iteration").and_then(Value::as_i64).unwrap_or_default() as i32,
+        })
+        .collect()
+    })
+    .unwrap_or_default()
 }

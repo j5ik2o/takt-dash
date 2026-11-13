@@ -8,12 +8,13 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
+use tokio::sync::broadcast;
 
 use crate::{
   activity::ActivityStore,
-  config::{load_config, Config, McpServer, Project, DEFAULT_INTERVAL_SECONDS},
+  config::{load_config, Config, Project, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
-  mcp::{McpClient, McpClientConfig, ToolError, ToolSet},
+  mcp::{client_config, McpClient, ToolError, ToolSet},
   model::ProjectSnapshot,
   store::StateStore,
 };
@@ -26,6 +27,7 @@ pub struct Poller {
   clients:            BTreeMap<String, McpClient>,
   previous:           BTreeMap<String, ProjectSnapshot>,
   previous_connected: BTreeMap<String, bool>,
+  changes:            broadcast::Sender<()>,
 }
 
 /// 1サイクルで読み取った件数と、記録した出来事の件数、次の待機に使う間隔。
@@ -40,7 +42,15 @@ pub struct CycleReport {
 
 impl Poller {
   /// 設定ファイルのパスと記録先から調整役を作る。
-  pub fn new(config_path: PathBuf, activity: Arc<ActivityStore>, store: Arc<StateStore>) -> Self {
+  ///
+  /// `changes` は、状態が変わったサイクルの末尾で1回だけ通知を送るチャネルです。
+  /// WatchState はこの通知を購読して、状態を組み立て直してストリームへ送ります。
+  pub fn new(
+    config_path: PathBuf,
+    activity: Arc<ActivityStore>,
+    store: Arc<StateStore>,
+    changes: broadcast::Sender<()>,
+  ) -> Self {
     Poller {
       config_path,
       activity,
@@ -48,6 +58,7 @@ impl Poller {
       clients: BTreeMap::new(),
       previous: BTreeMap::new(),
       previous_connected: BTreeMap::new(),
+      changes,
     }
   }
 
@@ -57,6 +68,7 @@ impl Poller {
   /// 追随させます。読み取り間隔もこのサイクルで解決し、[`CycleReport::interval`] で返します。
   pub async fn read_cycle_once(&mut self) -> Result<CycleReport, crate::config::ConfigError> {
     let config = load_config(&self.config_path)?;
+    let before = StoreSignature::capture(&self.store);
     self.store.set_thresholds(config.thresholds);
     self.store.set_projects(config.projects.clone());
     self.sync_clients(&config);
@@ -92,6 +104,9 @@ impl Poller {
           tracing::warn!(project = %project.name, error = %error, "プロジェクトの読み取りに失敗しました。");
         },
       }
+    }
+    if StoreSignature::capture(&self.store) != before {
+      let _ = self.changes.send(());
     }
     Ok(report)
   }
@@ -140,13 +155,22 @@ impl Poller {
   }
 }
 
-fn client_config(server: &McpServer, cwd: &std::path::Path) -> McpClientConfig {
-  McpClientConfig {
-    command:         server.command.clone(),
-    args:            server.args.clone(),
-    env:             server.env.clone(),
-    cwd:             cwd.to_path_buf(),
-    request_timeout: Duration::from_secs(15),
+/// サイクルの前後で観測可能な状態が変わったかを判定するための指紋。
+///
+/// WatchState
+/// は「状態が変わるたび送る」ため、プロジェクトの並び・読み取り成否・状態・閾値のいずれかが
+/// 変わったサイクルだけを変化とみなします。読めた時刻（last_read_at）は読み取りのたびに進むため、
+/// 内容が同じサイクルを変化として扱わないよう指紋から除きます。
+#[derive(Debug, PartialEq, Eq)]
+struct StoreSignature {
+  thresholds: Thresholds,
+  projects:   Vec<(String, bool, Option<ProjectSnapshot>)>,
+}
+
+impl StoreSignature {
+  fn capture(store: &StateStore) -> Self {
+    let projects = store.project_views().into_iter().map(|view| (view.name, view.connected, view.snapshot)).collect();
+    StoreSignature { thresholds: store.thresholds(), projects }
   }
 }
 

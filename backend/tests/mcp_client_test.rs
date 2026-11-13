@@ -407,13 +407,22 @@ async fn is_error_on_get_run_keeps_previous_runs_without_transport_failure() {
   let prev = takt_dash_backend::model::ProjectSnapshot {
     runs: vec![takt_dash_backend::model::RunEntry {
       run_slug:                "r1".to_owned(),
+      session_id:              String::new(),
       task_name:               "a".to_owned(),
       goal_id:                 None,
+      summary:                 String::new(),
+      status:                  takt_dash_backend::model::RunStatus::Running,
       current_step:            Some("implement".to_owned()),
       started_at:              time("2026-11-13T10:00:00Z"),
       current_step_started_at: None,
       last_log_at:             time("2026-11-13T10:05:00Z"),
-      steps:                   vec!["implement".to_owned()],
+      steps:                   vec![takt_dash_backend::model::RunStepEntry {
+        step_name:  "implement".to_owned(),
+        model:      String::new(),
+        started_at: time("2026-11-13T10:05:00Z"),
+        ended_at:   None,
+      }],
+      reports:                 Vec::new(),
     }],
     ..takt_dash_backend::model::ProjectSnapshot::empty()
   };
@@ -448,13 +457,22 @@ async fn one_run_tool_error_keeps_only_that_run_previous_and_updates_the_healthy
   let prev = takt_dash_backend::model::ProjectSnapshot {
     runs: vec![takt_dash_backend::model::RunEntry {
       run_slug:                "runA".to_owned(),
+      session_id:              String::new(),
       task_name:               "a".to_owned(),
       goal_id:                 None,
+      summary:                 String::new(),
+      status:                  takt_dash_backend::model::RunStatus::Running,
       current_step:            Some("implement".to_owned()),
       started_at:              time("2026-11-13T10:00:00Z"),
       current_step_started_at: None,
       last_log_at:             time("2026-11-13T10:05:00Z"),
-      steps:                   vec!["implement".to_owned()],
+      steps:                   vec![takt_dash_backend::model::RunStepEntry {
+        step_name:  "implement".to_owned(),
+        model:      String::new(),
+        started_at: time("2026-11-13T10:05:00Z"),
+        ended_at:   None,
+      }],
+      reports:                 Vec::new(),
     }],
     ..takt_dash_backend::model::ProjectSnapshot::empty()
   };

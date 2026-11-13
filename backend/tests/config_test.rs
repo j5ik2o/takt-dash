@@ -5,8 +5,8 @@ mod common;
 use std::path::Path;
 
 use takt_dash_backend::config::{
-  load_config, parse_config, ConfigError, DEFAULT_INTERVAL_SECONDS, DEFAULT_PENDING_DECISION_STALE_MINUTES,
-  DEFAULT_RUN_LOG_SILENT_MINUTES,
+  load_config, parse_config, ConfigError, DEFAULT_INTERVAL_SECONDS, DEFAULT_LISTEN,
+  DEFAULT_PENDING_DECISION_STALE_MINUTES, DEFAULT_RUN_LOG_SILENT_MINUTES,
 };
 
 fn repo_config_path() -> &'static Path {
@@ -142,4 +142,49 @@ fn zero_interval_is_rejected() {
 fn malformed_json_is_reported_as_parse_error() {
   let error = parse_config("{ not json", Path::new("/base")).expect_err("壊れた JSON は拒否します");
   assert!(matches!(error, ConfigError::Parse { .. }), "解析エラーになります: {error}");
+}
+
+#[test]
+fn committed_config_listens_on_the_default_address() {
+  let config = load_config(repo_config_path()).expect("設定ファイルを読み込めます");
+  assert_eq!(config.listen.to_string(), DEFAULT_LISTEN, "listen を書かない設定は既定の listen を使います");
+}
+
+#[test]
+fn omitted_listen_falls_back_to_the_default_localhost_address() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [ { "name": "p", "server": "mini", "cwd": "/abs/p" } ]
+  }"#;
+  let config = parse_config(text, Path::new("/base")).expect("既定値が適用されます");
+
+  assert_eq!(config.listen.to_string(), DEFAULT_LISTEN);
+  assert_eq!(config.listen.ip().to_string(), "127.0.0.1", "既定の待ち受けは 127.0.0.1 です");
+  assert_eq!(config.listen.port(), 50051, "既定の待ち受けポートは 50051 です");
+}
+
+#[test]
+fn explicit_listen_overrides_the_default() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [],
+    "listen": "0.0.0.0:9000"
+  }"#;
+  let config = parse_config(text, Path::new("/base")).expect("設定ファイルを解析できます");
+
+  assert_eq!(config.listen.to_string(), "0.0.0.0:9000");
+}
+
+#[test]
+fn malformed_listen_is_rejected_at_the_config_boundary() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [],
+    "listen": "not-an-address"
+  }"#;
+  let error = parse_config(text, Path::new("/base")).expect_err("不正な listen は拒否します");
+  assert!(
+    matches!(&error, ConfigError::Invalid(message) if message.contains("listen")),
+    "listen を含む検証エラーになります: {error}"
+  );
 }

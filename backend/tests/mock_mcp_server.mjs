@@ -16,7 +16,9 @@
 //     "tasks": [ {"name","goalId","status","startedAt","runSlug","currentStep","mergeTask"} ],
 //     "goalQuestions": { "<goalId>": [ {"id","status","kind","body","options","createdAt"} ] },
 //     "standaloneInquiries": [ {"id","status","kind","body","options","createdAt"} ],
-//     "runs": { "<runSlug>": {"runSlug","currentStep","startedAt","currentStepStartedAt","stepLogs"} },
+//     "runs": { "<runSlug>": {"runSlug","currentStep","startedAt","currentStepStartedAt","stepLogs",
+//                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
+//                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
@@ -111,10 +113,19 @@ const handleServerNotifications = () => {
 };
 
 // takt_get_run の応答。stepLogs を PAGE_SIZE 件ずつ窓切りし、stepLogPage.nextOffset を返す。
+// report 引数と instructionId 引数が来たら、その本文だけを取り出して返す。
 const runResponse = (state, args) => {
   const run = (state.runs ?? {})[args.runSlug];
   if (run === undefined) {
     return {};
+  }
+  if (args.report !== undefined) {
+    const report = (run.reports ?? []).find((entry) => entry.filename === args.report);
+    return report === undefined ? {} : { filename: report.filename, content: report.content ?? "", sizeBytes: report.sizeBytes ?? 0 };
+  }
+  if (args.instructionId !== undefined) {
+    const instruction = (run.instructions ?? []).find((entry) => entry.instructionId === Number(args.instructionId));
+    return instruction === undefined ? {} : instruction;
   }
   const stepLogs = run.stepLogs ?? [];
   const offset = Number(args.offset ?? 0);
