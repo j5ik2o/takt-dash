@@ -1,0 +1,228 @@
+//! takt-mcp から集約した内部状態の型。
+//!
+//! これらの型は lib の公開 API の一部であり、後続のタスクの gRPC サーバーが
+//! 読み取り系 API の応答を組み立てるために使います。
+
+use chrono::{DateTime, Utc};
+
+/// ゴールの状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalStatus {
+  Created,
+  AwaitingMerge,
+  Completed,
+}
+
+/// ゴールの実行状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionStatus {
+  Active,
+  Paused,
+  Aborted,
+}
+
+/// タスクの状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+  Pending,
+  Running,
+  Completed,
+  Failed,
+  Exceeded,
+  PrFailed,
+}
+
+/// アクティビティの出来事の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EventKind {
+  GoalCreated,
+  RunStarted,
+  TaskCompleted,
+  Inquiry,
+  AwaitingMerge,
+  Paused,
+  Blocked,
+  ConnectionLost,
+}
+
+impl EventKind {
+  /// SQLite に保存するときの種類の文字列。
+  pub fn as_str(self) -> &'static str {
+    match self {
+      | EventKind::GoalCreated => "goal_created",
+      | EventKind::RunStarted => "run_started",
+      | EventKind::TaskCompleted => "task_completed",
+      | EventKind::Inquiry => "inquiry",
+      | EventKind::AwaitingMerge => "awaiting_merge",
+      | EventKind::Paused => "paused",
+      | EventKind::Blocked => "blocked",
+      | EventKind::ConnectionLost => "connection_lost",
+    }
+  }
+
+  /// 保存済みの種類の文字列から復元する。
+  pub fn from_stored(value: &str) -> Option<Self> {
+    match value {
+      | "goal_created" => Some(EventKind::GoalCreated),
+      | "run_started" => Some(EventKind::RunStarted),
+      | "task_completed" => Some(EventKind::TaskCompleted),
+      | "inquiry" => Some(EventKind::Inquiry),
+      | "awaiting_merge" => Some(EventKind::AwaitingMerge),
+      | "paused" => Some(EventKind::Paused),
+      | "blocked" => Some(EventKind::Blocked),
+      | "connection_lost" => Some(EventKind::ConnectionLost),
+      | _ => None,
+    }
+  }
+}
+
+/// 判断待ちの種類。未回答の問い合わせと人のマージ待ちのゴールの2種類だけを使います。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingDecisionType {
+  Inquiry,
+  AwaitingMerge,
+}
+
+/// 判断待ちの問い合わせの種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InquiryKind {
+  Question,
+  OperationRequest,
+}
+
+/// ゴールの一覧に含まれるゴール。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalEntry {
+  pub goal_id:             String,
+  pub status:              GoalStatus,
+  pub execution_status:    ExecutionStatus,
+  pub objective:           String,
+  pub integration_branch:  String,
+  pub pull_request_number: Option<i64>,
+  pub pull_request_url:    Option<String>,
+  /// takt_get_goal の通知（path=notifications）から得た、awaiting_merge の種類の通知の記録時刻。
+  pub awaiting_merge_at:   Option<DateTime<Utc>>,
+}
+
+/// タスクの一覧に含まれるタスク。配列順は tasks.yaml の順を保ちます。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskEntry {
+  pub name:         String,
+  pub goal_id:      Option<String>,
+  pub status:       TaskStatus,
+  pub started_at:   Option<DateTime<Utc>>,
+  pub run_slug:     Option<String>,
+  pub current_step: Option<String>,
+  /// ゴールの仕上げタスクかどうか。
+  pub merge_task:   bool,
+}
+
+/// ゴールに属する問い合わせ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InquiryEntry {
+  pub inquiry_id: String,
+  pub goal_id:    Option<String>,
+  pub kind:       InquiryKind,
+  pub body:       String,
+  pub options:    Vec<String>,
+  pub answered:   bool,
+  pub created_at: DateTime<Utc>,
+}
+
+/// takt_get_goal の通知（path=notifications）から得た通知。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationEntry {
+  pub notification_id: String,
+  /// 通知を読んだゴール。道具エラー時の前回値保持で、ゴール単位に引き継ぐために使います。
+  pub goal_id:         String,
+  pub kind:            String,
+  pub body:            String,
+  pub recorded_at:     DateTime<Utc>,
+}
+
+/// takt_get_run から得た run の情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunEntry {
+  pub run_slug:                String,
+  pub task_name:               String,
+  pub goal_id:                 Option<String>,
+  pub current_step:            Option<String>,
+  pub started_at:              DateTime<Utc>,
+  pub current_step_started_at: Option<DateTime<Utc>>,
+  pub last_log_at:             DateTime<Utc>,
+  pub steps:                   Vec<String>,
+}
+
+/// 1回の読み取りで得た、1プロジェクト分の状態。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSnapshot {
+  pub goals:         Vec<GoalEntry>,
+  pub tasks:         Vec<TaskEntry>,
+  pub inquiries:     Vec<InquiryEntry>,
+  pub runs:          Vec<RunEntry>,
+  pub notifications: Vec<NotificationEntry>,
+}
+
+impl ProjectSnapshot {
+  /// 空の状態。対象プロジェクトにゴールもタスクもない場合に使います。
+  pub fn empty() -> Self {
+    ProjectSnapshot {
+      goals:         Vec::new(),
+      tasks:         Vec::new(),
+      inquiries:     Vec::new(),
+      runs:          Vec::new(),
+      notifications: Vec::new(),
+    }
+  }
+}
+
+/// 検出した出来事。SQLite へ記録する単位です。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityEvent {
+  pub occurred_at: DateTime<Utc>,
+  pub server_id:   String,
+  pub project:     Option<String>,
+  pub kind:        EventKind,
+  pub body:        String,
+  pub run_slug:    Option<String>,
+}
+
+/// 判断待ちの項目。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDecision {
+  pub decision_type:       PendingDecisionType,
+  pub server_id:           String,
+  pub project:             String,
+  pub goal_id:             Option<String>,
+  pub inquiry_kind:        Option<InquiryKind>,
+  pub created_at:          DateTime<Utc>,
+  pub body:                String,
+  pub options:             Vec<String>,
+  pub pull_request_number: Option<i64>,
+  pub pull_request_url:    Option<String>,
+  pub stale:               bool,
+}
+
+/// 判断待ちの一覧の排他的な見方。問い合わせと人のマージ待ちを別々に取り出せます。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingDecisionFilter {
+  All,
+  Inquiry,
+  AwaitingMerge,
+}
+
+/// 状態ストアが返す、1プロジェクト分の投影。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectView {
+  pub name:         String,
+  pub about:        String,
+  pub server_id:    String,
+  pub connected:    bool,
+  /// 最後に読めた時刻。応答がない間も保持します。
+  pub last_read_at: Option<DateTime<Utc>>,
+  pub goals:        Vec<GoalEntry>,
+  pub tasks:        Vec<TaskEntry>,
+  pub runs:         Vec<RunEntry>,
+  /// 状態の元になった snapshot。プロジェクトがまだ一度も読めていない場合は None。
+  pub snapshot:     Option<ProjectSnapshot>,
+}
