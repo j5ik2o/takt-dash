@@ -1,10 +1,14 @@
-//! taktDash のバックエンドを起動する。設定を読んで定期読み取りを開始し、終了シグナルで停止する。
+//! taktDash のバックエンドを起動する。
+//!
+//! 設定を読んで gRPC サーバーと定期読み取りを一緒に起動し、SIGTERM/SIGINT の終了シグナルで
+//! 両方を停止します。gRPC サーバーは設定の listen か `--listen` の待ち受けアドレスで待ち受けます。
 
-use std::{path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use takt_dash_backend::{
   activity::ActivityStore,
   config::load_config,
+  grpc::{serve_with_listener, TaktDashServiceImpl},
   poller::{run_until_stopped, Poller},
   store::StateStore,
 };
@@ -13,11 +17,13 @@ use takt_dash_backend::{
 struct Arguments {
   config_path: PathBuf,
   sqlite_path: Option<PathBuf>,
+  listen:      Option<SocketAddr>,
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
   let mut config_path = PathBuf::from("taktdash.config.json");
   let mut sqlite_path = None;
+  let mut listen = None;
   let mut args = std::env::args().skip(1);
   while let Some(argument) = args.next() {
     match argument.as_str() {
@@ -29,10 +35,16 @@ fn parse_arguments() -> Result<Arguments, String> {
         let value = args.next().ok_or_else(|| "--sqlite にはパスが必要です。".to_owned())?;
         sqlite_path = Some(PathBuf::from(value));
       },
+      | "--listen" => {
+        let value = args.next().ok_or_else(|| "--listen には待ち受けアドレスが必要です。".to_owned())?;
+        listen = Some(
+          value.parse::<SocketAddr>().map_err(|error| format!("--listen {value} を解釈できませんでした: {error}"))?,
+        );
+      },
       | other => return Err(format!("未知の引数です: {other}")),
     }
   }
-  Ok(Arguments { config_path, sqlite_path })
+  Ok(Arguments { config_path, sqlite_path, listen })
 }
 
 #[tokio::main]
@@ -44,11 +56,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   if let Some(parent) = sqlite_path.parent() {
     std::fs::create_dir_all(parent)?;
   }
+  let listen = arguments.listen.unwrap_or(config.listen);
+  // 待ち受けアドレスを先に確保する。確保に失敗したら、
+  // 定期読み取りを始める前に即座にエラー終了する。
+  let listener = tokio::net::TcpListener::bind(listen).await?;
   let activity = Arc::new(ActivityStore::open(&sqlite_path)?);
   let store = Arc::new(StateStore::new(config.server_meta.clone(), config.projects.clone(), config.thresholds));
-  let mut poller = Poller::new(arguments.config_path.clone(), activity, store);
-
+  let (changes, _) = tokio::sync::broadcast::channel(16);
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+  let service = TaktDashServiceImpl::new(
+    store.clone(),
+    activity.clone(),
+    arguments.config_path.clone(),
+    changes.clone(),
+    stop_rx.clone(),
+  );
+  let mut poller = Poller::new(arguments.config_path.clone(), activity, store, changes);
   let signal_sender = stop_tx.clone();
   tokio::spawn(async move {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -60,6 +83,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = signal_sender.send(true);
   });
 
-  run_until_stopped(&mut poller, || *stop_rx.borrow()).await;
+  tracing::info!(%listen, "gRPC サーバーを起動します。");
+  let server = serve_with_listener(listener, service, stop_rx.clone());
+  let poller_stop = stop_rx.clone();
+  let poll = async move {
+    run_until_stopped(&mut poller, || *poller_stop.borrow()).await;
+  };
+  let (server_result, ()) = tokio::join!(server, poll);
+  server_result?;
   Ok(())
 }

@@ -133,6 +133,19 @@ impl StateStore {
     self.inner.lock().expect("状態ストアのロックが壊れています").servers.clone()
   }
 
+  /// 異常判定の閾値を返す。稼働中の設定変更を反映した現在の値です。
+  pub fn thresholds(&self) -> Thresholds {
+    self.inner.lock().expect("状態ストアのロックが壊れています").thresholds
+  }
+
+  /// runSlug を持つ run のプロジェクトを探し、その投影を返す。
+  ///
+  /// GetRunDetail は読み先の cwd とサーバーを状態ストアの run
+  /// から解決するため、この投影を使います。
+  pub fn find_run_project(&self, run_slug: &str) -> Option<ProjectView> {
+    self.project_views().into_iter().find(|view| view.runs.iter().any(|run| run.run_slug == run_slug))
+  }
+
   /// 判断待ちの一覧を、`filter` の見方で組み立てる。
   pub fn pending_decisions(&self, now: DateTime<Utc>, filter: PendingDecisionFilter) -> Vec<PendingDecision> {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");

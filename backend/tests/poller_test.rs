@@ -21,6 +21,7 @@ struct Harness {
   state_path:  PathBuf,
   activity:    Arc<ActivityStore>,
   store:       Arc<StateStore>,
+  changes:     tokio::sync::broadcast::Sender<()>,
 }
 
 fn write_json(path: &Path, value: &Value) {
@@ -57,11 +58,12 @@ impl Harness {
       run_log_silent_minutes:         10,
     }));
     let activity = Arc::new(ActivityStore::open_in_memory().expect("メモリ上の SQLite を開けます"));
-    Harness { _directory: directory, config_path, state_path, activity, store }
+    let (changes, _) = tokio::sync::broadcast::channel(16);
+    Harness { _directory: directory, config_path, state_path, activity, store, changes }
   }
 
   fn poller(&self) -> Poller {
-    Poller::new(self.config_path.clone(), self.activity.clone(), self.store.clone())
+    Poller::new(self.config_path.clone(), self.activity.clone(), self.store.clone(), self.changes.clone())
   }
 
   fn rewrite_state(&self, state: Value) {
@@ -421,4 +423,44 @@ async fn merge_wait_uses_notification_recorded_at_and_becomes_stale_through_the_
 
   assert_eq!(decisions.len(), 1, "人のマージ待ちを判断待ちに含めます");
   assert!(decisions[0].stale, "通知の recordedAt が240分より前なので滞留になります");
+}
+
+#[tokio::test]
+async fn change_notification_is_sent_once_when_the_state_changes_between_cycles() {
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut changes = harness.changes.subscribe();
+  let mut poller = harness.poller();
+
+  // 未読から読めた状態への初回の遷移も状態の変化なので通知します。
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  assert!(changes.try_recv().is_ok(), "初回の読み取りは未読からの変化なので通知します");
+
+  // 状態を変えないサイクルでは通知しません。
+  poller.read_cycle_once().await.expect("状態を変えないサイクルを実行できます");
+  assert!(changes.try_recv().is_err(), "状態を変えないサイクルでは通知しません");
+
+  harness.rewrite_state(state_with_goal("g2"));
+  let required = poller.read_cycle_once().await.expect("状態を変えるサイクルを実行できます");
+
+  assert!(required.projects_read > 0);
+  assert!(changes.try_recv().is_ok(), "状態が変わったサイクルでは通知を1回送ります");
+  assert!(changes.try_recv().is_err(), "同じサイクルで通知を重ねて送りません");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn change_notification_is_sent_when_a_project_becomes_unreachable() {
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut changes = harness.changes.subscribe();
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  let _ = changes.try_recv();
+
+  // 状態ファイルを壊して、子プロセスを不正な応答に変える。接続断も状態の変化として通知します。
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+
+  assert!(changes.try_recv().is_ok(), "接続断への変化も通知します");
+  poller.shutdown().await;
 }

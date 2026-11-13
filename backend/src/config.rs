@@ -6,6 +6,7 @@
 
 use std::{
   collections::BTreeMap,
+  net::SocketAddr,
   path::{Path, PathBuf},
 };
 
@@ -19,6 +20,8 @@ pub const DEFAULT_PENDING_DECISION_STALE_MINUTES: u32 = 240;
 pub const DEFAULT_RUN_LOG_SILENT_MINUTES: u32 = 10;
 /// SQLite の置き場所の既定値（設定ファイルのディレクトリ基準の相対パス）。
 pub const DEFAULT_SQLITE_PATH: &str = "data/taktdash.sqlite";
+/// gRPC サーバーの待ち受けアドレスの既定値。
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:50051";
 
 /// 設定ファイルの読み込みと検証で起きる失敗。
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +43,8 @@ pub struct Config {
   pub interval_seconds: u64,
   pub thresholds:       Thresholds,
   pub sqlite_path:      PathBuf,
+  /// gRPC サーバーの待ち受けアドレス。設定の境界で SocketAddr へ解決済みです。
+  pub listen:           SocketAddr,
 }
 
 /// takt-mcp の起動方法。
@@ -88,6 +93,7 @@ struct RawConfig {
   thresholds:       RawThresholds,
   #[serde(default)]
   sqlite:           RawSqlite,
+  listen:           Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,5 +196,9 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
       .unwrap_or(DEFAULT_PENDING_DECISION_STALE_MINUTES),
     run_log_silent_minutes:         raw.thresholds.run_log_silent_minutes.unwrap_or(DEFAULT_RUN_LOG_SILENT_MINUTES),
   };
-  Ok(Config { servers, server_meta, projects, interval_seconds, thresholds, sqlite_path })
+  let listen_raw = raw.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
+  let listen = listen_raw.parse::<SocketAddr>().map_err(|error| {
+    ConfigError::Invalid(format!("listen {listen_raw} を待ち受けアドレスとして解釈できませんでした: {error}"))
+  })?;
+  Ok(Config { servers, server_meta, projects, interval_seconds, thresholds, sqlite_path, listen })
 }
