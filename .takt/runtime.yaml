@@ -1,0 +1,105 @@
+version: 1
+provider:
+  profiles:
+    # 強いモデル（クラウド上位の既定）。計画・設計・レビューが使う
+    cloud-codex:
+      provider: codex
+    # 強いモデルの代替。codex の使用量上限中の暫定 assignment が使う
+    cloud-claude:
+      provider: claude-sdk
+    # 弱いモデル（DGX）。実装・テストが使う。opencode は model 必須
+    dgx-flash:
+      provider: opencode
+      model: dgx/deepseek-v4.1-flash
+    # Ollama Cloud（Max プラン。月 300 ドル、30 日リセット、同時 10 は DGX の 16 と独立）。
+    # 弱いモデルの Cloud 版。手順を固定できる作業で DGX の代わりや溢れ分に使う
+    ollama-flash:
+      provider: opencode
+      model: ollama/deepseek-v4.1-flash:cloud
+    # 強いモデル（Opus 級）の Cloud 版。Claude の週次制限中に判断級の作業を止めない受け皿
+    ollama-strong:
+      provider: opencode
+      model: ollama/glm-5.3:cloud
+    # 強いモデルの Cloud 版の別系統（Kimi）。ollama-strong と並べて使える
+    ollama-strong-kimi:
+      provider: opencode
+      model: ollama/kimi-k3:cloud
+  defaults:
+    # Claude の週次制限（リセットは 2026-11-15 01:00 JST）に当たっているため、
+    # 当面の既定は interim-ollama とする
+    assignment: interim-ollama
+  assignments:
+    # 割り当て原則（2026-11-12 オーナー指示）: 計画・設計・レビューは強いモデル、
+    # 実装・テストは弱いモデル。やり直し（差し戻し後の再実行）は ladder の次の段へ
+    # 上がる（昇格の宣言はワークフロー側の promotion {at: N}）
+    standard:
+      defaults:
+        profile: cloud-codex
+      targets:
+        personas:
+          # 実装・テスト系（development-core / mini-core の implement 等）。
+          # 初回は弱いモデル、promotion を宣言したステップは 2 回目から強いモデル
+          coder:
+            ladder:
+              - dgx-flash
+              - cloud-codex
+        steps:
+          # mini-core 内のレビュー後の再実装は一段強いモデル。fix_both の並列
+          # sub-step 2 本も同じ経路（両レビュー REJECT 時の主経路）なので含める
+          mini-core/ai-antipattern-fix:
+            profile: cloud-codex
+          mini-core/supervise_fix:
+            profile: cloud-codex
+          mini-core/ai-antipattern-fix-parallel:
+            profile: cloud-codex
+          mini-core/supervise_fix_parallel:
+            profile: cloud-codex
+        internal_agents:
+          loop-judge:
+            profile: cloud-codex
+    # codex の使用量上限中の暫定。strong を claude に置き換えた standard。
+    # 発行時に --runtime-assignment interim-claude で選ぶ
+    interim-claude:
+      defaults:
+        profile: cloud-claude
+      targets:
+        personas:
+          coder:
+            ladder:
+              - dgx-flash
+              - cloud-claude
+        steps:
+          mini-core/ai-antipattern-fix:
+            profile: cloud-claude
+          mini-core/supervise_fix:
+            profile: cloud-claude
+          mini-core/ai-antipattern-fix-parallel:
+            profile: cloud-claude
+          mini-core/supervise_fix_parallel:
+            profile: cloud-claude
+        internal_agents:
+          loop-judge:
+            profile: cloud-claude
+    # 強いモデルを Ollama Cloud（ollama-strong）にした interim-claude の対。
+    # Claude の週次制限中に、発行時の --runtime-assignment interim-ollama で選ぶ
+    interim-ollama:
+      defaults:
+        profile: ollama-strong
+      targets:
+        personas:
+          coder:
+            ladder:
+              - dgx-flash
+              - ollama-strong
+        steps:
+          mini-core/ai-antipattern-fix:
+            profile: ollama-strong
+          mini-core/supervise_fix:
+            profile: ollama-strong
+          mini-core/ai-antipattern-fix-parallel:
+            profile: ollama-strong
+          mini-core/supervise_fix_parallel:
+            profile: ollama-strong
+        internal_agents:
+          loop-judge:
+            profile: ollama-strong

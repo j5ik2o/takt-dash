@@ -1,15 +1,35 @@
 language: ja
+# 全体で同時 2 本まで
+concurrency: 2
 base_branch: main
 
-# provider が rate limit に達したときの切替先（順に試す）
+# マージ用ワークフローの関門ステップ（tools/merge-gate/review_threads_gate.py）を
+# system step の固定コマンドとして実行するために必要
+workflow_system_commands:
+  custom_scripts: true
+
+# provider が rate limit に達したときの切替先（順に試す）。同格のクラウド provider に
+# 限る。chain が尽きた run は失敗で止まり、成果は .takt/runs/ と作業ツリーに残る
+# （直接実行の run は takt resume、manager タスクは requeue で再開）
 rate_limit_fallback:
   switch_chain:
     - provider: claude
+    # Ollama Cloud の Opus 級。Claude の週次制限に当たった run を止めずに
+    # 判断級の作業を続けるための受け皿
     - provider: opencode
       model: ollama/glm-5.3:cloud
 
-# manager（ゴール管理）がタスクに使ってよいワークフロー
+# マージ用タスク（takt_merge_goal_pr の until: merge）が使うワークフロー。builtin の
+# merge-review-fix-simple は caccia が skipped のとき未解決スレッドがあっても merge へ
+# 進むため、未解決レビュースレッドが 0 件のときだけ merge する関門を足した
+# ワークフローを指定する（fraktor-ng-rs から複製したもの）
+merge:
+  workflow: merge-review-fix-simple-thread-gate
+
+# manager（ゴール管理）がタスクに使ってよいワークフロー。未設定だと default と simple
+# だけになる
 manager:
   workflows:
     - default
     - simple
+    - taktdash-change: taktDash の変更作業（計画・実装・レビュー・修正）の標準ワークフロー
