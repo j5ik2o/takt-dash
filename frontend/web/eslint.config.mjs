@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // proto/ から生成したコードは lint の対象にしない。
+    "src/proto/**",
   ]),
 ]);
 

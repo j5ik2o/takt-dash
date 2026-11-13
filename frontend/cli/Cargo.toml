@@ -9,3 +9,10 @@ name = "takt-dash-cli"
 path = "src/main.rs"
 
 [dependencies]
+prost = "0.14"
+prost-types = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+
+[build-dependencies]
+tonic-prost-build = "0.14"

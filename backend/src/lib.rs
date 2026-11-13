@@ -1,7 +1,13 @@
 //! taktDash のバックエンド。
 //!
-//! このクレートは、土台の段階では最小のライブラリだけを持ちます。
-//! gRPC の読み取り系 API と takt-mcp からの状態の集約は、後続のタスクでこのクレートへ足します。
+//! このクレートは、proto/ の .proto から生成した gRPC の型とクライアントを公開します。
+//! takt-mcp からの状態の集約と gRPC サーバーの実装は、後続のタスクでこのクレートへ足します。
+
+pub mod takt_dash {
+  pub mod v1 {
+    tonic::include_proto!("takt_dash.v1");
+  }
+}
 
 #[cfg(test)]
 mod tests {

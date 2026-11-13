@@ -8,9 +8,12 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "node --test smoke.test.mjs"
+    "test": "node --test smoke.test.mjs",
+    "proto:generate": "protoc -I ../../proto --plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=src/proto --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,annotateFilesWithVersion=false ../../proto/taktdash.proto"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "2.17.0",
+    "@grpc/grpc-js": "1.14.7",
     "next": "16.4.6",
     "react": "19.3.0",
     "react-dom": "19.3.0"
@@ -21,6 +24,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
+    "ts-proto": "2.20.0",
     "typescript": "^5"
   }
 }
