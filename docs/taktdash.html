@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>taktDash</title>
+<style>
+:root{--bg:#f6f8f8;--surface:#fff;--line:#e3e7e8;--line2:#eef1f2;--text:#262b30;--muted:#646c73;--faint:#9aa1a7;--teal:#0f8b8d;--teal-d:#0b6466;--teal-soft:#e2f3f3;--track:#e9eef0;--orange:#d9661a;--orange-d:#9a4510;--orange-soft:#fdf1e7;--orange-line:#f2c39d;--gray-soft:#f0f2f3;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Hiragino Kaku Gothic ProN","Noto Sans JP","Noto Sans CJK JP","Yu Gothic",Meiryo,sans-serif;font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--teal-d)}
+.sr{position:absolute;left:-9999px}
+/* sidebar */
+.side{position:fixed;inset:0 auto 0 0;width:252px;background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:20px 14px 16px;overflow-y:auto;z-index:5}
+.logo{display:flex;align-items:center;gap:10px;padding:0 8px 18px;font-size:21px;font-weight:700;text-decoration:none;color:var(--text)}
+.logo .mark{width:30px;height:30px;border-radius:8px;background:var(--teal);color:#fff;font-size:15px;display:grid;place-items:center;font-weight:700}
+.logo span b{color:var(--teal)}
+.side h2{font-size:12px;letter-spacing:.08em;color:var(--faint);margin:14px 8px 6px;font-weight:700}
+.srv-list,.nav{list-style:none;margin:0;padding:0}
+.srv-list a,.nav a{display:flex;align-items:center;gap:10px;padding:8px;border-radius:8px;text-decoration:none;color:var(--text);font-size:14px}
+.srv-list a:hover,.nav a:hover{background:var(--gray-soft)}
+.srv-list a.on,.nav a.on{background:var(--teal-soft);color:var(--teal-d);font-weight:700}
+.srv-list .nm{flex:1;min-width:0}
+.srv-list .nm b{display:block;font-weight:600;overflow-wrap:anywhere;font-size:13.5px}
+.srv-list .nm small{display:block;font-size:13px;color:var(--muted)}
+.srv-list .nm small.warn{color:var(--orange-d);font-weight:600}
+.srv-list .cnt{font-size:13px;color:var(--muted);white-space:nowrap}
+.nav .badge{margin-left:auto;font-size:12px;background:var(--orange-soft);color:var(--orange-d);border:1px solid var(--orange-line);border-radius:999px;padding:0 8px;font-weight:700}
+.side .foot{margin-top:auto;padding:12px 8px 0;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.side .foot b{color:var(--text);font-weight:600}
+/* dots */
+.dot{width:10px;height:10px;border-radius:50%;flex:none;display:inline-block}
+.dot.live{background:var(--teal);box-shadow:0 0 0 0 rgba(15,139,141,.45);animation:pulse 2.4s ease-in-out infinite}
+.dot.idle{background:#b5bbc0}
+.dot.warn{background:var(--orange)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(15,139,141,.5)}70%{box-shadow:0 0 0 7px rgba(15,139,141,0)}100%{box-shadow:0 0 0 0 rgba(15,139,141,0)}}
+/* main */
+.main{margin-left:252px;padding:28px 36px 48px;min-width:0}
+.page-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px 24px;flex-wrap:wrap;margin-bottom:22px}
+.page-head h1{margin:0;font-size:26px}
+.page-head p{margin:2px 0 0;color:var(--muted);font-size:14px}
+.health{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;padding:8px 14px;border-radius:8px;max-width:100%}
+.health.attention{background:var(--orange-soft);color:var(--orange-d);border:1px solid var(--orange-line)}
+.health.calm{background:var(--teal-soft);color:var(--teal-d);border:1px solid #bfe2e2}
+section{margin-top:28px}
+h2.sec{font-size:16px;margin:0 0 12px}
+h2.sec .sub{font-weight:400;color:var(--muted);font-size:14px;margin-left:8px}
+.note{font-size:14px;color:var(--muted)}
+.en{font-family:var(--mono);font-size:12px;color:var(--faint);margin-left:4px;font-weight:400}
+/* tiles */
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;min-width:0}
+.tile.attention{border-color:var(--orange-line);background:linear-gradient(0deg,#fffaf5,#fff)}
+.tile .label{color:var(--muted);font-size:14px}
+.tile .num{font-size:32px;font-weight:700;line-height:1.25;margin:4px 0 6px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.tile .num small{font-size:16px;font-weight:500;color:var(--muted);margin-left:4px}
+.tile.attention .num{color:var(--orange)}
+.tile .num.word{font-size:22px;line-height:1.5;padding:6px 0}
+.tile .t-note{font-size:14px;color:var(--muted)}
+.tile .t-note.warn{color:var(--orange-d);font-weight:600}
+.kv{list-style:none;margin:6px 0 0;padding:0;font-size:14px;color:var(--muted)}
+.kv li{display:flex;justify-content:space-between;gap:8px}
+.kv li b{font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
+.kv li b.warn{color:var(--orange)}
+.bar{height:8px;background:var(--track);border-radius:4px;overflow:hidden;margin:6px 0}
+.bar>i{display:block;height:100%;background:var(--teal);border-radius:4px}
+.bar.thick{height:12px;border-radius:6px}
+.bar.live>i{background-color:var(--teal);background-image:linear-gradient(45deg,rgba(255,255,255,.28) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.28) 50%,rgba(255,255,255,.28) 75%,transparent 75%);background-size:24px 24px;animation:flow 1.6s linear infinite}
+.bar.idle>i{background:#b5bbc0}
+.bar.warn>i{background:var(--orange)}
+@keyframes flow{from{background-position:0 0}to{background-position:24px 0}}
+/* callout */
+.callout{background:var(--surface);border:1px solid var(--orange-line);border-left:5px solid var(--orange);border-radius:12px;padding:14px 20px}
+.callout h2{margin:0 0 6px;font-size:16px;color:var(--orange-d)}
+.callout ul{margin:0;padding:0;list-style:none}
+.callout li{display:flex;gap:6px 14px;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line2);font-size:15px}
+.callout li:first-child{border-top:none}
+.callout li .w{color:var(--orange-d);font-weight:600;white-space:nowrap}
+.callout li .s{color:var(--muted);font-size:14px;white-space:nowrap}
+/* server cards */
+.scards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.scard{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px 20px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.scard.down{border-color:var(--orange-line);background:#fffcf9}
+.sc-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap}
+.sc-head h3{margin:0;font-size:18px;display:flex;align-items:center;gap:10px;overflow-wrap:anywhere;min-width:0}
+.sc-head .kind{display:block;font-size:13px;font-weight:400;color:var(--muted);margin-left:20px}
+.big-badge{display:inline-flex;align-items:center;gap:8px;font-size:16px;font-weight:700;padding:5px 14px;border-radius:999px;white-space:nowrap}
+.big-badge.live{background:var(--teal-soft);color:var(--teal-d)}
+.big-badge.idle{background:var(--gray-soft);color:var(--muted)}
+.big-badge.warn{background:var(--orange-soft);color:var(--orange-d);border:1px solid var(--orange-line)}
+.stale-note{font-size:14px;color:var(--orange-d);background:var(--orange-soft);border-radius:8px;padding:6px 10px}
+.read-at{font-size:13px;color:var(--muted)}
+.runs{list-style:none;margin:0;padding:0}
+.run-row{display:grid;grid-template-columns:96px minmax(0,1fr) 200px;gap:4px 16px;align-items:center;padding:11px 0;border-top:1px solid var(--line2)}
+.run-row:first-child{border-top:none}
+.st{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;line-height:1.35}
+.st.live{color:var(--teal-d)}.st.idle{color:var(--muted)}.st.warn{color:var(--orange-d)}
+.run-main{min-width:0}
+.run-main .p{font-weight:700}
+.run-main .g{display:block;color:var(--muted);font-size:13px;line-height:1.45}
+.run-main .task{font-size:14px;overflow-wrap:anywhere}
+.run-main .model{font-size:13px;color:var(--muted)}
+.run-prog{min-width:0}
+.run-prog .stp{font-size:14px;overflow-wrap:anywhere}
+.run-prog .stp b{font-family:var(--mono);font-size:14px}
+.run-prog .meta{display:flex;justify-content:space-between;gap:8px;font-size:13px;color:var(--muted);flex-wrap:wrap}
+.run-prog .meta a{font-weight:600;text-decoration:none;white-space:nowrap}
+.run-prog .meta a:hover{text-decoration:underline}
+.run-prog .meta .warn{color:var(--orange-d);font-weight:600}
+.empty{color:var(--muted);font-size:14px;padding:6px 0}
+.sc-foot{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding-top:12px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.sc-foot b{display:block;font-size:18px;color:var(--text);font-variant-numeric:tabular-nums}
+.sc-foot b.warn{color:var(--orange)}
+.sc-foot b.quiet{color:var(--faint)}
+.filter-note{font-size:14px;margin:-8px 0 14px}
+/* tray */
+.tray{background:var(--surface);border:1px solid var(--orange-line);border-left:5px solid var(--orange);border-radius:12px;padding:18px 22px}
+.tray-list{list-style:none;margin:0;padding:0}
+.tray-item{display:grid;grid-template-columns:220px minmax(0,1fr) 170px 100px;gap:8px 22px;align-items:start;padding:14px 0;border-top:1px solid var(--line)}
+.tray-item:first-child{border-top:none;padding-top:4px}
+.tray-item .proj{font-weight:700;overflow-wrap:anywhere}
+.tray-item .kind,.tray-item .srv{display:block;font-size:14px;font-weight:400;color:var(--muted)}
+.tray-item .kind.k{color:var(--orange-d);font-weight:600}
+.tray-item .desc{margin:0}
+.tray-item .opts{font-size:14px;color:var(--muted)}
+.tray-item .url{display:block;font-size:14px;color:var(--muted);overflow-wrap:anywhere;font-family:var(--mono)}
+.tray-item .wait{font-size:14px;color:var(--muted)}
+.tray-item .wait b{display:block;font-size:16px;color:var(--text)}
+.tray-item.stale .wait b{color:var(--orange)}
+.tray-item .wait .stale-label{color:var(--orange-d);font-weight:600}
+a.view{color:var(--teal-d);font-weight:600;text-decoration:none;white-space:nowrap}
+a.view:hover{text-decoration:underline}
+.foot-notes{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:14px;color:var(--muted)}
+.foot-notes p{margin:2px 0}
+.quiet-box{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 20px}
+/* project cards */
+.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.card.attention{border-color:var(--orange-line)}
+.card.paused{background:#fbfbfb}
+.card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap}
+.card-head h3{margin:0;font-size:17px;overflow-wrap:anywhere}
+.card-head .about{display:block;font-size:14px;font-weight:400;color:var(--muted)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:14px;padding:2px 10px;border-radius:999px;white-space:nowrap}
+.pill.live{color:var(--teal-d);background:var(--teal-soft)}
+.pill.warn{color:var(--orange-d);background:var(--orange-soft);font-weight:600}
+.pill.idle{color:var(--muted);background:var(--gray-soft)}
+.k{font-size:14px;color:var(--muted)}
+.goal{padding:8px 0;border-top:1px dashed var(--line)}
+.goal:first-of-type{border-top:none}
+.goal .gn{font-weight:600}
+.goal .gs{font-size:13px;color:var(--muted)}
+.goal .gs .warn{color:var(--orange-d);font-weight:600}
+.goal .pt{font-size:14px;color:var(--muted)}
+.goal .why{font-size:14px;color:var(--muted);background:var(--gray-soft);border-radius:8px;padding:6px 10px;margin-top:6px}
+.mini-runs{list-style:none;margin:0;padding:0}
+.mini-runs li{padding:7px 0;border-top:1px solid var(--line2);font-size:14px}
+.mini-runs li:first-child{border-top:none}
+.mini-runs .r1{display:flex;align-items:center;gap:8px;min-width:0}
+.mini-runs .r1 .tn{font-weight:600;overflow-wrap:anywhere;min-width:0}
+.mini-runs .r2{color:var(--muted);font-size:13px;display:flex;flex-wrap:wrap;gap:2px 10px;padding-left:18px}
+.meta2{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;padding-top:10px;border-top:1px solid var(--line)}
+.meta2 .v{font-size:15px}.meta2 .v.quiet{color:var(--muted)}.meta2 .v.warn{color:var(--orange);font-weight:700}
+.last{font-size:14px;color:var(--muted)}
+.last time{color:var(--text);font-variant-numeric:tabular-nums;margin-right:6px}
+/* chips & filters */
+.filters{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;display:flex;flex-direction:column;gap:10px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.chips .lbl{font-size:13px;color:var(--muted);margin-right:2px}
+.chip{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:999px;padding:3px 12px;cursor:pointer;display:inline-flex;gap:6px;align-items:center}
+.chip b{font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums}
+.chip[aria-pressed="true"]{background:var(--teal-soft);border-color:#9fd3d3;color:var(--teal-d);font-weight:700}
+.chip.warnc[aria-pressed="true"]{background:var(--orange-soft);border-color:var(--orange-line);color:var(--orange-d)}
+.search{font:inherit;font-size:14px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;width:100%;max-width:420px;background:#fff;color:var(--text)}
+/* activity */
+.daychart{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 20px}
+.daychart .cols{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:12px;align-items:end;height:170px;margin-top:8px}
+.daychart .col{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px;min-width:0}
+.daychart .stack{width:100%;max-width:56px;display:flex;flex-direction:column;justify-content:flex-end;border-radius:6px 6px 2px 2px;overflow:hidden}
+.daychart .stack i{display:block;background:var(--teal)}
+.daychart .stack i.w{background:var(--orange)}
+.daychart .n{font-size:13px;color:var(--text);font-weight:600;font-variant-numeric:tabular-nums;text-align:center;line-height:1.3}
+.daychart .n small{display:block;font-weight:400;color:var(--orange-d)}
+.daychart .d{font-size:13px;color:var(--muted)}
+.legend{display:flex;gap:14px;font-size:13px;color:var(--muted);flex-wrap:wrap}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--teal);margin-right:6px;vertical-align:-1px}
+.legend span.w::before{background:var(--orange)}
+.days{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.day-h{display:flex;justify-content:space-between;background:#f9fafa;padding:9px 18px;font-size:14px;font-weight:700;border-top:1px solid var(--line)}
+.day-h:first-child{border-top:none}
+.day-h span{color:var(--muted);font-weight:400}
+.ev{display:grid;grid-template-columns:56px 150px minmax(0,1fr) 200px 110px;gap:4px 14px;padding:10px 18px;border-top:1px solid var(--line2);align-items:baseline;font-size:14px}
+.ev time{font-family:var(--mono);color:var(--muted)}
+.ev .kl{display:inline-flex;align-items:center;gap:6px;font-weight:600;white-space:nowrap}
+.ev .kl.warn{color:var(--orange-d)}
+.ev .msg{font-size:15px;overflow-wrap:anywhere}
+.ev .msg b{font-weight:700}
+.ev .sv{color:var(--muted);overflow-wrap:anywhere}
+.ev .lk{text-align:right}
+.ev .lk a{font-weight:600;text-decoration:none;white-space:nowrap}
+/* run detail */
+.back{display:inline-block;margin-bottom:10px;font-size:14px;font-weight:600;text-decoration:none}
+.summary{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 22px}
+.sum-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px 24px}
+.sum-grid .f{min-width:0}
+.sum-grid .f .v{font-size:15px;overflow-wrap:anywhere}
+.sum-grid .f .v.mono{font-family:var(--mono);font-size:13px}
+.sum-grid .f.wide{grid-column:span 2}
+.src{font-size:12px;color:var(--faint)}
+.steps-line{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.stepchip{font-family:var(--mono);font-size:13px;border:1px solid var(--line);border-radius:6px;padding:1px 8px;color:var(--muted)}
+.stepchip.done{background:var(--gray-soft)}
+.stepchip.cur{border-color:#9fd3d3;background:var(--teal-soft);color:var(--teal-d);font-weight:700}
+.files{font-family:var(--mono);font-size:13px;color:var(--muted);margin:6px 0 0;padding-left:18px}
+.files li{overflow-wrap:anywhere}
+.log{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.log-step{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;background:#f4f8f8;border-top:1px solid var(--line);padding:9px 18px;font-size:14px;font-weight:700;color:var(--teal-d)}
+.log-step:first-child{border-top:none}
+.log-step span{font-weight:400;color:var(--muted)}
+.rec{display:grid;grid-template-columns:76px 170px minmax(0,1fr);gap:4px 16px;padding:10px 18px;border-top:1px solid var(--line2);font-size:14px}
+.rec.err{background:#fff8f2;border-left:4px solid var(--orange);padding-left:14px}
+.rec time{font-family:var(--mono);color:var(--muted);font-size:13px}
+.rec .rk{font-weight:600}
+.rec .rk small{display:block;font-family:var(--mono);font-size:12px;color:var(--faint);font-weight:400}
+.rec.err .rk{color:var(--orange-d)}
+.rec .rb{min-width:0;overflow-wrap:anywhere}
+.rec .rb p{margin:0}
+.rec .rb .from{font-size:12px;color:var(--faint)}
+details{margin-top:4px}
+summary{cursor:pointer;color:var(--teal-d);font-size:13px;font-weight:600}
+pre{margin:6px 0 0;background:#f6f8f9;border:1px solid var(--line2);border-radius:8px;padding:10px 12px;font-family:var(--mono);font-size:12.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;color:#2b3237;max-height:360px;overflow:auto}
+.count-line{font-size:14px;color:var(--muted);margin:10px 0 8px}
+footer{margin-top:28px;font-size:13px;color:var(--faint)}
+@media (prefers-reduced-motion:reduce){.dot.live,.bar.live>i{animation:none}}
+@media (max-width:1280px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.scards{grid-template-columns:minmax(0,1fr)}.tray-item{grid-template-columns:170px minmax(0,1fr) 140px}.tray-item .lc{grid-column:2/4}.sum-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ev{grid-template-columns:52px 130px minmax(0,1fr) 110px}.ev .sv{grid-column:3}.ev .lk{grid-row:1;grid-column:4}}
+@media (max-width:760px){
+ .side{position:static;width:auto;border-right:none;border-bottom:1px solid var(--line);padding:12px 14px 8px;overflow:visible}
+ .logo{padding:0 0 8px}
+ .side h2{display:none}
+ .srv-list{display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;-webkit-overflow-scrolling:touch}
+ .srv-list li{flex:none}
+ .srv-list a{border:1px solid var(--line);padding:6px 10px;gap:8px}
+ .srv-list .nm b{max-width:150px}
+ .srv-list .cnt{display:none}
+ .nav{display:flex;gap:4px;overflow-x:auto;margin-top:6px}
+ .nav li{flex:none}.nav a{padding:6px 10px}
+ .side .foot{border-top:none;padding:6px 0 0;margin:0}
+ .main{margin-left:0;padding:18px 14px 36px}
+ .page-head h1{font-size:22px}
+ .health{font-size:14px;width:100%}
+ .tiles{grid-template-columns:minmax(0,1fr);gap:12px}
+ .cards{grid-template-columns:minmax(0,1fr)}
+ .scard{padding:16px}
+ .run-row{grid-template-columns:minmax(0,1fr);gap:6px}
+ .sc-foot{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .tray{padding:14px 16px}.tray-item{grid-template-columns:minmax(0,1fr);gap:6px}.tray-item .lc{grid-column:auto}.tray-item .wait b{display:inline;margin-right:6px}
+ .daychart{padding:14px}.daychart .cols{gap:4px;height:150px}.daychart .d{font-size:11px}
+ .ev{grid-template-columns:48px minmax(0,1fr);padding:10px 14px}.ev .kl{grid-column:2;grid-row:1}.ev .msg,.ev .sv{grid-column:1/3}.ev .lk{grid-column:1/3;grid-row:auto;text-align:left}
+ .sum-grid{grid-template-columns:minmax(0,1fr)}.sum-grid .f.wide{grid-column:auto}
+ .summary{padding:16px}
+ .rec{grid-template-columns:minmax(0,1fr);gap:2px;padding:10px 14px}.rec.err{padding-left:10px}
+ .log-step{padding:9px 14px}
+ .callout{padding:12px 14px}
+}
+</style>
+</head>
+<body>
+<nav class="side" aria-label="サイドバー">
+  <a class="logo" href="#overview"><span class="mark" aria-hidden="true">t</span><span>takt<b>Dash</b></span></a>
+  <h2>サーバー</h2>
+  <ul class="srv-list" id="srv-list"></ul>
+  <h2>ページ</h2>
+  <ul class="nav" id="nav"></ul>
+  <div class="foot" id="side-foot"></div>
+</nav>
+<main class="main" id="main"></main>
+<!-- run 20261113-065158-takt-create-goal-q8m2xz のログ（takt の JSONL 形式に忠実なダミー）。
+     本体: .takt/runs/<runSlug>/logs/<sessionId>.jsonl -->
+<script type="application/x-ndjson" id="log-session-20261113-065158-takt-create-goal-q8m2xz">
+{"type":"workflow_start","task":"takt-mcp に、ゴールを新しく登録する takt_create_goal ツールの入力スキーマを定義する。","workflowName":"simple-mini","startTime":"2026-11-13T06:52:01.120Z"}
+{"type":"step_start","step":"plan","persona":"planner","iteration":1,"timestamp":"2026-11-13T06:52:02.004Z","workflow":"simple-mini","provider":"claude-sdk","model":"opus"}
+{"type":"phase_start","step":"plan","iteration":1,"workflow":"simple-mini","phase":1,"phaseName":"execute","phaseExecutionId":"ph-0001","timestamp":"2026-11-13T06:52:02.110Z"}
+{"type":"phase_complete","step":"plan","iteration":1,"workflow":"simple-mini","phase":1,"phaseName":"execute","phaseExecutionId":"ph-0001","status":"done","content":"既存の takt_enqueue_goal_task と同じく cwd を受け取り、title と goal を必須、workflow を任意にする計画を立てました。テストを先に書き、その後に server.ts へ登録します。","timestamp":"2026-11-13T06:57:31.800Z"}
+{"type":"phase_start","step":"plan","iteration":1,"workflow":"simple-mini","phase":2,"phaseName":"report","phaseExecutionId":"ph-0002","timestamp":"2026-11-13T06:57:32.010Z"}
+{"type":"phase_complete","step":"plan","iteration":1,"workflow":"simple-mini","phase":2,"phaseName":"report","phaseExecutionId":"ph-0002","status":"done","content":"plan.md を書き出しました。","timestamp":"2026-11-13T06:58:10.400Z"}
+{"type":"phase_start","step":"plan","iteration":1,"workflow":"simple-mini","phase":3,"phaseName":"judge","phaseExecutionId":"ph-0003","timestamp":"2026-11-13T06:58:11.020Z"}
+{"type":"phase_judge_stage","step":"plan","iteration":1,"workflow":"simple-mini","phase":3,"phaseName":"judge","phaseExecutionId":"ph-0003","stage":1,"method":"structured_output","status":"done","instruction":"計画の結果に当てはまるルールを1つ選んでください。","response":"{\"matched_rule_index\":0}","timestamp":"2026-11-13T06:58:30.700Z"}
+{"type":"phase_complete","step":"plan","iteration":1,"workflow":"simple-mini","phase":3,"phaseName":"judge","phaseExecutionId":"ph-0003","status":"done","timestamp":"2026-11-13T06:58:31.010Z"}
+{"type":"step_complete","step":"plan","persona":"planner","iteration":1,"status":"done","content":"要件は明確で、実装に進めます。入力スキーマは cwd・title・goal・workflow の4項目です。","instruction":"takt-mcp に takt_create_goal を足すための計画を立ててください。","workflow":"simple-mini","matchedRuleIndex":0,"matchedRuleMethod":"structured_output","timestamp":"2026-11-13T06:58:39.500Z"}
+{"type":"step_start","step":"implement","persona":"coder","iteration":2,"timestamp":"2026-11-13T06:58:40.020Z","workflow":"simple-mini","provider":"opencode","model":"glm-5.3"}
+{"type":"phase_start","step":"implement","iteration":2,"workflow":"simple-mini","phase":1,"phaseName":"execute","phaseExecutionId":"ph-0004","timestamp":"2026-11-13T06:58:40.130Z"}
+</script>
+<!-- 付随ファイル: .takt/runs/<runSlug>/logs/<sessionId>-provider-events.jsonl（logging.provider_events: true のとき） -->
+<script type="application/x-ndjson" id="log-provider-20261113-065158-takt-create-goal-q8m2xz">
+{"timestamp":"2026-11-13T06:52:03.200Z","provider":"claude-sdk","provider_model":"opus","event_type":"init","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"plan","session_id":"5d2f8c1e-7a41-4b0e-9c3d-2f6a8e1b7c55","data":{"model":"opus","sessionId":"5d2f8c1e-7a41-4b0e-9c3d-2f6a8e1b7c55"}}
+{"timestamp":"2026-11-13T06:52:09.480Z","provider":"claude-sdk","provider_model":"opus","event_type":"thinking","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"plan","data":{"thinking":"既存のゴール関連ツールの入力スキーマを先に読み、命名と必須項目をそろえる。"}}
+{"timestamp":"2026-11-13T06:52:15.020Z","provider":"claude-sdk","provider_model":"opus","event_type":"tool_use","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"plan","call_id":"toolu_01HxV3","data":{"tool":"Read","input":{"file_path":"src/features/mcp/schemas.ts"},"id":"toolu_01HxV3"}}
+{"timestamp":"2026-11-13T06:52:15.910Z","provider":"claude-sdk","provider_model":"opus","event_type":"tool_result","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"plan","call_id":"toolu_01HxV3","data":{"id":"toolu_01HxV3","content":"export const enqueueGoalTaskInputSchema = {\n  cwd: z.string().min(1),\n  goalId: GoalIdSchema,\n  task: z.string().min(1),\n  ...\n};","isError":false}}
+{"timestamp":"2026-11-13T06:53:02.300Z","provider":"claude-sdk","provider_model":"opus","event_type":"tool_use","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"plan","call_id":"toolu_01Kp7Q","data":{"tool":"Grep","input":{"pattern":"takt_enqueue_goal_task","path":"src/features/mcp"},"id":"toolu_01Kp7Q"}}
+{"timestamp":"2026-11-13T06:53:02.880Z","provider":"claude-sdk","provider_model":"opus","event_type":"tool_result","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"plan","call_id":"toolu_01Kp7Q","data":{"id":"toolu_01Kp7Q","content":"src/features/mcp/server.ts:99:  'takt_enqueue_goal_task', 'takt_list_workflows', 'takt_get_workflow',","isError":false}}
+{"timestamp":"2026-11-13T06:57:20.150Z","provider":"claude-sdk","provider_model":"opus","event_type":"text","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"plan","data":{"text":"既存の takt_enqueue_goal_task と同じく cwd を受け取り、title と goal を必須にする計画にします。workflow は任意にして、省略時はリポジトリの既定を使います。"}}
+{"timestamp":"2026-11-13T06:57:31.640Z","provider":"claude-sdk","provider_model":"opus","event_type":"result","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"plan","session_id":"5d2f8c1e-7a41-4b0e-9c3d-2f6a8e1b7c55","data":{"result":"計画をまとめました。","sessionId":"5d2f8c1e-7a41-4b0e-9c3d-2f6a8e1b7c55","success":true}}
+{"timestamp":"2026-11-13T06:58:41.300Z","provider":"opencode","provider_model":"glm-5.3","event_type":"init","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","session_id":"ses_9Qk2LmT4","data":{"model":"glm-5.3","sessionId":"ses_9Qk2LmT4"}}
+{"timestamp":"2026-11-13T07:05:12.040Z","provider":"opencode","provider_model":"glm-5.3","event_type":"tool_use","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","call_id":"call_7a1","data":{"tool":"edit","input":{"filePath":"src/features/mcp/schemas.ts","oldString":"export const enqueueGoalTaskInputSchema = {","newString":"export const createGoalInputSchema = {\n  cwd: z.string().min(1),\n  title: z.string(),\n  goal: z.string().min(1),\n  workflow: z.string().min(1).optional(),\n};\n\nexport const enqueueGoalTaskInputSchema = {"},"id":"call_7a1"}}
+{"timestamp":"2026-11-13T07:05:12.610Z","provider":"opencode","provider_model":"glm-5.3","event_type":"tool_result","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","call_id":"call_7a1","data":{"id":"call_7a1","content":"Edit applied successfully.","isError":false}}
+{"timestamp":"2026-11-13T07:12:40.220Z","provider":"opencode","provider_model":"glm-5.3","event_type":"tool_use","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","call_id":"call_7b4","data":{"tool":"bash","input":{"command":"npx vitest run src/__tests__/mcp-create-goal.test.ts","description":"新しいスキーマのテストを実行する"},"id":"call_7b4"}}
+{"timestamp":"2026-11-13T07:13:30.880Z","provider":"opencode","provider_model":"glm-5.3","event_type":"tool_result","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","call_id":"call_7b4","data":{"id":"call_7b4","content":"FAIL  src/__tests__/mcp-create-goal.test.ts > createGoalInputSchema > rejects an empty title\nAssertionError: expected [Function] to throw an error\n\n Test Files  1 failed (1)\n      Tests  1 failed | 5 passed (6)","isError":true}}
+{"timestamp":"2026-11-13T07:14:02.400Z","provider":"opencode","provider_model":"glm-5.3","event_type":"text","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","data":{"text":"空の title を受け付けてしまったため、title に trim と min(1) を足します。"}}
+{"timestamp":"2026-11-13T07:18:20.770Z","provider":"opencode","provider_model":"glm-5.3","event_type":"tool_use","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","call_id":"call_7c9","data":{"tool":"edit","input":{"filePath":"src/features/mcp/schemas.ts","oldString":"  title: z.string(),","newString":"  title: z.string().trim().min(1),"},"id":"call_7c9"}}
+{"timestamp":"2026-11-13T07:18:21.200Z","provider":"opencode","provider_model":"glm-5.3","event_type":"tool_result","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","call_id":"call_7c9","data":{"id":"call_7c9","content":"Edit applied successfully.","isError":false}}
+{"timestamp":"2026-11-13T07:22:55.010Z","provider":"opencode","provider_model":"glm-5.3","event_type":"tool_use","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","call_id":"call_7d2","data":{"tool":"bash","input":{"command":"npx vitest run src/__tests__/mcp-create-goal.test.ts","description":"直したスキーマのテストを実行する"},"id":"call_7d2"}}
+{"timestamp":"2026-11-13T07:23:40.330Z","provider":"opencode","provider_model":"glm-5.3","event_type":"tool_result","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","call_id":"call_7d2","data":{"id":"call_7d2","content":" ✓ src/__tests__/mcp-create-goal.test.ts (6 tests) 412ms\n\n Test Files  1 passed (1)\n      Tests  6 passed (6)","isError":false}}
+{"timestamp":"2026-11-13T07:23:48.060Z","provider":"opencode","provider_model":"glm-5.3","event_type":"text","run_id":"20261113-065158-takt-create-goal-q8m2xz","step":"implement","data":{"text":"テストが通りました。続けて server.ts に takt_create_goal を登録します。"}}
+</script>
+<!-- 付随ファイル: .takt/runs/<runSlug>/logs/<sessionId>-usage-events.jsonl（logging.usage_events: true のとき） -->
+<script type="application/x-ndjson" id="log-usage-20261113-065158-takt-create-goal-q8m2xz">
+{"run_id":"20261113-065158-takt-create-goal-q8m2xz","session_id":"20261113-065201-h4p7td","provider":"claude-sdk","provider_model":"opus","step":"plan","step_type":"normal","timestamp":"2026-11-13T06:57:31.900Z","success":true,"usage_missing":false,"usage":{"input_tokens":48210,"output_tokens":3120,"total_tokens":51330,"cache_read_input_tokens":31800}}
+</script>
+<script>
+// ===== ダミーデータ（takt-mcp の read-only ツールから taktDash が集めた想定） =====
+// 画面の「いま」。待ち時間・経過・「◯秒前」はこの時刻から画面側で計算する。
+const NOW = Date.parse("2026-11-13T07:24:00Z"); // 16:24 JST
+const STALE_WAIT_MIN = 240;   // 判断待ちの滞留の基準（taktDash の基準。takt の基準ではない）
+const LOG_SILENT_MIN = 10;    // ログがこの分数より長く出ていなければ異常とみなす（taktDash の基準）
+const WORKFLOW_STEPS = { "simple-mini": ["plan", "implement", "review", "follow-up-review", "remediation"] }; // ワークフロー定義の steps の並び
+const MODEL_LABEL = { "opus": "Opus 級", "glm-5.3": "GLM 5.3", "deepseek-v4.1-flash": "DeepSeek V4.1 Flash" };
+const PROVIDER_OF = { "opus": "claude-sdk", "glm-5.3": "opencode", "deepseek-v4.1-flash": "deepseek-harness" };
+
+const SERVERS = [
+  { id: "mini", name: "j5ik2o-mac-mini", kind: "Mac mini", connected: true, lastReadAt: "2026-11-13T07:23:40Z", concurrency: 4 },
+  { id: "studio", name: "j5ik2o-mac-studio", kind: "Mac Studio", connected: true, lastReadAt: "2026-11-13T07:23:10Z", concurrency: 4 },
+  { id: "ubuntu", name: "j5ik2o-ubuntu-4090", kind: "Ubuntu 機（RTX4090）", connected: true, lastReadAt: "2026-11-13T07:22:30Z", concurrency: 4 },
+  { id: "dgx", name: "j5ik2o-dgx-spark", kind: "DGX Spark", connected: false, lastReadAt: "2026-11-13T07:02:10Z", concurrency: 4 }
+];
+
+const PROJECTS = [
+  { name: "fraktor-ng-rs", about: "Pekko の Rust 移植。台帳で進捗を管理しています。", completed24h: 18 },
+  { name: "ddd-principles", about: "DDD の知識リポジトリ。本の取り込みを進めています。", completed24h: 11 },
+  { name: "modern-ddd-book", about: "技術書の執筆", completed24h: 5 },
+  { name: "corporate-site", about: "IDEO PLUS のコーポレートサイト", completed24h: 6 },
+  { name: "ESA", about: "イベントストアアダプター", completed24h: 0 },
+  { name: "takt", about: "takt 本体。takt-mcp にゴール登録の道具を足しています。", completed24h: 7 }
+];
+
+// takt_list_goals / takt_get_goal の形に寄せたゴール。tasks はタスクの状態ごとの件数。
+const GOALS = [
+  { id: "g-fr-a", server: "ubuntu", project: "fraktor-ng-rs", name: "actor モジュール移植の後半（supervision と DeathWatch）を完了させる", status: "created", executionStatus: "active",
+    tasks: { completed: 9, running: 2, pending: 3, failed: 0, exceeded: 0, pr_failed: 0 } },
+  { id: "g-fr-b", server: "ubuntu", project: "fraktor-ng-rs", name: "actor モジュール移植の前半（Props と ActorRef）を完了させる", status: "awaiting_merge", executionStatus: "active",
+    tasks: { completed: 10, running: 0, pending: 0, failed: 0, exceeded: 0, pr_failed: 0 }, mergeTaskLast: null,
+    pullRequest: { number: 218, url: "https://github.com/j5ik2o/fraktor-ng-rs/pull/218" }, awaitingMergeRecordedAt: "2026-11-13T02:12:00Z" },
+  { id: "g-fr-c", server: "dgx", project: "fraktor-ng-rs", name: "remote モジュールの移植を始める", status: "created", executionStatus: "active",
+    tasks: { completed: 4, running: 1, pending: 5, failed: 0, exceeded: 0, pr_failed: 0 } },
+  { id: "g-ddd", server: "studio", project: "ddd-principles", name: "『実践ドメイン駆動設計』第8章を取り込む", status: "created", executionStatus: "active",
+    tasks: { completed: 9, running: 2, pending: 1, failed: 0, exceeded: 0, pr_failed: 0 } },
+  { id: "g-mod", server: "studio", project: "modern-ddd-book", name: "第5章「集約の境界」の初稿を書き上げる", status: "created", executionStatus: "active",
+    tasks: { completed: 3, running: 1, pending: 4, failed: 0, exceeded: 0, pr_failed: 0 } },
+  { id: "g-corp", server: "mini", project: "corporate-site", name: "採用ページの文面とレイアウトを改訂する", status: "created", executionStatus: "active",
+    tasks: { completed: 4, running: 1, pending: 1, failed: 0, exceeded: 0, pr_failed: 0 } },
+  { id: "g-esa", server: "mini", project: "ESA", name: "v2.4.0 を公開する", status: "created", executionStatus: "paused",
+    pausedReason: "v2.4.0 の準備は終わっており、公開の日取りが決まるまでゴールを一時停止しています。",
+    tasks: { completed: 5, running: 0, pending: 1, failed: 0, exceeded: 0, pr_failed: 0 } },
+  { id: "g-takt", server: "mini", project: "takt", name: "takt-mcp にゴール登録のツールを追加する", status: "created", executionStatus: "active",
+    tasks: { completed: 6, running: 2, pending: 2, failed: 0, exceeded: 0, pr_failed: 0 } }
+];
+
+// ゴールの未回答の問い合わせ（questions[] の status=pending）と、ゴールに属さない問い合わせ
+const QUESTIONS = [
+  { server: "mini", project: "takt", goalId: "g-takt", kind: "question", status: "pending", createdAt: "2026-11-13T07:20:00Z",
+    body: "manager が、takt-mcp に追加するゴール登録ツールの名前を takt_create_goal と takt_register_goal のどちらにするかを尋ねています。",
+    options: ["takt_create_goal", "takt_register_goal"] }
+];
+const STANDALONE_INQUIRIES = [];
+
+// 走っている run（takt_list_tasks の status=running と takt_get_run の値）
+// steps: これまでに始まったステップの並び。最後が今のステップ。
+const RUNS = [
+  { slug: "20261113-061003-saiyo-layout-2kq9vd", session: "20261113-061005-p2w8ma", server: "mini", project: "corporate-site", goalId: "g-corp",
+    task: "採用ページのレイアウトを直す", summary: "採用ページのカードの並びを、スマートフォンでも1列に収まるように直します。", startedAt: "2026-11-13T06:10:03Z",
+    steps: [["plan", "glm-5.3", "06:10:05", "06:16:40"], ["implement", "glm-5.3", "06:16:42"]], lastLogAt: "2026-11-13T07:23:20Z", reports: [["plan.md", 2310]] },
+  { slug: "20261113-065158-takt-create-goal-q8m2xz", session: "20261113-065201-h4p7td", server: "mini", project: "takt", goalId: "g-takt", literal: true,
+    task: "takt_create_goal の入力スキーマを定義する", summary: "takt-mcp に、ゴールを新しく登録する takt_create_goal ツールの入力スキーマを定義する。", startedAt: "2026-11-13T06:51:58Z",
+    steps: [["plan", "opus"], ["implement", "glm-5.3"]], currentStepStartedAt: "2026-11-13T06:58:40.020Z", lastLogAt: "2026-11-13T07:23:48.060Z", reports: [["plan.md", 4120]] },
+  { slug: "20261113-070104-goal-tool-tests-f7n2ce", session: "20261113-070106-c9t3rb", server: "mini", project: "takt", goalId: "g-takt",
+    task: "ゴール登録ツールのテストを書く", summary: "takt_create_goal の正常系と、入力の誤りを拒むテストを書きます。", startedAt: "2026-11-13T07:01:04Z",
+    steps: [["plan", "opus", "07:01:06", "07:04:30"], ["implement", "glm-5.3", "07:04:32", "07:17:55"], ["review", "opus", "07:17:57"]], lastLogAt: "2026-11-13T07:23:35Z", reports: [["plan.md", 1980], ["review.md", 640]] },
+  { slug: "20261113-063011-ch8-3-summary-m4x1zp", session: "20261113-063013-k8d2qe", server: "studio", project: "ddd-principles", goalId: "g-ddd",
+    task: "第8章 8.3 節を要約する", summary: "第8章 8.3 節「イベントの公開」の要約ノートを書きます。", startedAt: "2026-11-13T06:30:11Z",
+    steps: [["plan", "deepseek-v4.1-flash", "06:30:13", "06:34:02"], ["implement", "deepseek-v4.1-flash", "06:34:04"]], lastLogAt: "2026-11-13T07:23:52Z", reports: [["plan.md", 1420]] },
+  { slug: "20261113-071202-ch8-quotes-r6v0ny", session: "20261113-071204-w1h7sx", server: "studio", project: "ddd-principles", goalId: "g-ddd",
+    task: "第8章の引用箇所を確かめる", summary: "第8章のノートに引いた箇所が原文のページと合っているかを確かめます。", startedAt: "2026-11-13T07:12:02Z",
+    steps: [["plan", "deepseek-v4.1-flash", "07:12:04"]], lastLogAt: "2026-11-13T07:23:29Z", reports: [] },
+  { slug: "20261113-064420-ch5-3-draft-b2k8tw", session: "20261113-064422-e5m9ua", server: "studio", project: "modern-ddd-book", goalId: "g-mod",
+    task: "5.3 節の初稿を書く", summary: "5.3 節「集約をまたぐ整合性」の初稿を書きます。", startedAt: "2026-11-13T06:44:20Z",
+    steps: [["plan", "opus", "06:44:22", "06:51:10"], ["implement", "opus", "06:51:12"]], lastLogAt: "2026-11-13T07:22:55Z", reports: [["plan.md", 2870]] },
+  { slug: "20261113-060215-supervision-port-x3c7jd", session: "20261113-060217-n4q1vb", server: "ubuntu", project: "fraktor-ng-rs", goalId: "g-fr-a",
+    task: "supervision を移植する", summary: "Pekko の SupervisorStrategy と再起動の手順を Rust に移植します。", startedAt: "2026-11-13T06:02:15Z",
+    steps: [["plan", "glm-5.3", "06:02:17", "06:08:50"], ["implement", "glm-5.3", "06:08:52", "06:41:30"], ["review", "glm-5.3", "06:41:32", "06:52:10"], ["remediation", "glm-5.3", "06:52:12", "07:11:40"], ["review", "glm-5.3", "07:11:42"]],
+    lastLogAt: "2026-11-13T07:23:42Z", reports: [["plan.md", 3650], ["review.md", 1210]] },
+  { slug: "20261113-064005-deathwatch-tests-h9p4lm", session: "20261113-064007-a6r2kc", server: "ubuntu", project: "fraktor-ng-rs", goalId: "g-fr-a",
+    task: "DeathWatch のテストを書く", summary: "watch と unwatch、Terminated の届き方を確かめるテストを書きます。", startedAt: "2026-11-13T06:40:05Z",
+    steps: [["plan", "glm-5.3", "06:40:07", "06:45:33"], ["implement", "glm-5.3", "06:45:35"]], lastLogAt: "2026-11-13T07:23:10Z", reports: [["plan.md", 1760]] },
+  { slug: "20261113-062018-remote-association-t5w8qf", session: "20261113-062020-y3j6nd", server: "dgx", project: "fraktor-ng-rs", goalId: "g-fr-c",
+    task: "remote の Association を移植する", summary: "Artery の Association の状態遷移を Rust に移植します。", startedAt: "2026-11-13T06:20:18Z",
+    steps: [["plan", "deepseek-v4.1-flash", "06:20:20", "06:27:02"], ["implement", "deepseek-v4.1-flash", "06:27:04"]], lastLogAt: "2026-11-13T07:01:30Z", reports: [["plan.md", 2240]] }
+];
+
+const TOKENS_24H = [ { model: "GLM 5.3", m: 11.2 }, { model: "DeepSeek V4.1 Flash", m: 6.1 }, { model: "Opus 級", m: 1.3 } ];
+
+// アクティビティ（takt_list_goals の通知・問い合わせと takt_list_tasks の変化を、taktDash が時系列にまとめたもの）
+// kind: goal_created / task_started / task_completed / question / awaiting_merge / paused / blocked / connection
+const EVENTS = [
+  { at: "2026-11-13T07:20:00Z", server: "mini", project: "takt", kind: "question", text: "manager が、ゴール登録ツールの名前について人に質問しました。" },
+  { at: "2026-11-13T07:12:02Z", server: "studio", project: "ddd-principles", kind: "task_started", run: "20261113-071202-ch8-quotes-r6v0ny", text: "タスク「第8章の引用箇所を確かめる」の run が始まりました。" },
+  { at: "2026-11-13T07:11:30Z", server: "studio", project: "ddd-principles", kind: "task_completed", text: "タスク「第8章 8.2 節を要約する」が完了しました。" },
+  { at: "2026-11-13T07:04:10Z", server: "dgx", project: null, kind: "connection", text: "j5ik2o-dgx-spark の takt-mcp から応答が返らなくなりました。" },
+  { at: "2026-11-13T07:01:04Z", server: "mini", project: "takt", kind: "task_started", run: "20261113-070104-goal-tool-tests-f7n2ce", text: "タスク「ゴール登録ツールのテストを書く」の run が始まりました。" },
+  { at: "2026-11-13T06:58:20Z", server: "ubuntu", project: "fraktor-ng-rs", kind: "task_completed", text: "タスク「ActorCell を移植する」が完了しました。" },
+  { at: "2026-11-13T06:51:58Z", server: "mini", project: "takt", kind: "task_started", run: "20261113-065158-takt-create-goal-q8m2xz", text: "タスク「takt_create_goal の入力スキーマを定義する」の run が始まりました。" },
+  { at: "2026-11-13T06:44:20Z", server: "studio", project: "modern-ddd-book", kind: "task_started", run: "20261113-064420-ch5-3-draft-b2k8tw", text: "タスク「5.3 節の初稿を書く」の run が始まりました。" },
+  { at: "2026-11-13T06:40:30Z", server: "studio", project: "modern-ddd-book", kind: "task_completed", text: "タスク「5.2 節の初稿を書く」が完了しました。" },
+  { at: "2026-11-13T06:40:05Z", server: "ubuntu", project: "fraktor-ng-rs", kind: "task_started", run: "20261113-064005-deathwatch-tests-h9p4lm", text: "タスク「DeathWatch のテストを書く」の run が始まりました。" },
+  { at: "2026-11-13T06:30:11Z", server: "studio", project: "ddd-principles", kind: "task_started", run: "20261113-063011-ch8-3-summary-m4x1zp", text: "タスク「第8章 8.3 節を要約する」の run が始まりました。" },
+  { at: "2026-11-13T06:21:00Z", server: "mini", project: "takt", kind: "goal_created", text: "ゴール「takt-mcp にゴール登録のツールを追加する」が登録されました。" },
+  { at: "2026-11-13T06:20:18Z", server: "dgx", project: "fraktor-ng-rs", kind: "task_started", run: "20261113-062018-remote-association-t5w8qf", text: "タスク「remote の Association を移植する」の run が始まりました。" },
+  { at: "2026-11-13T06:10:03Z", server: "mini", project: "corporate-site", kind: "task_started", run: "20261113-061003-saiyo-layout-2kq9vd", text: "タスク「採用ページのレイアウトを直す」の run が始まりました。" },
+  { at: "2026-11-13T06:02:15Z", server: "ubuntu", project: "fraktor-ng-rs", kind: "task_started", run: "20261113-060215-supervision-port-x3c7jd", text: "タスク「supervision を移植する」の run が始まりました。" },
+  { at: "2026-11-13T05:52:00Z", server: "mini", project: "corporate-site", kind: "task_completed", text: "タスク「採用ページの文面を改訂する」が完了しました。" },
+  { at: "2026-11-13T04:47:00Z", server: "studio", project: "modern-ddd-book", kind: "goal_created", text: "ゴール「第5章「集約の境界」の初稿を書き上げる」が登録されました。" },
+  { at: "2026-11-13T02:12:00Z", server: "ubuntu", project: "fraktor-ng-rs", kind: "awaiting_merge", text: "ゴール「actor モジュール移植の前半」のプルリクエスト #218 が作られ、人のマージ待ちになりました。" },
+  { at: "2026-11-12T09:30:00Z", server: "mini", project: "ESA", kind: "paused", text: "ゴール「v2.4.0 を公開する」が一時停止されました。公開の日取りが決まるまで止めています。" },
+  { at: "2026-11-12T09:05:00Z", server: "mini", project: "ESA", kind: "task_completed", text: "タスク「v2.4.0 のリリース準備をする」が完了しました。" },
+  { at: "2026-11-12T08:12:00Z", server: "ubuntu", project: "fraktor-ng-rs", kind: "blocked", text: "manager が blocked を通知しました。cargo の依存解決に失敗したため、DeathWatch のタスクを止めています。" }
+];
+// 日ごとの出来事の件数（全件。一覧に読み込むのは新しい21件だけ）。attention は判断待ち・異常の件数。
+const DAYS = [
+  { d: "2026-11-07", total: 23, attention: 0 }, { d: "2026-11-08", total: 9, attention: 0 }, { d: "2026-11-09", total: 31, attention: 1 },
+  { d: "2026-11-10", total: 44, attention: 0 }, { d: "2026-11-11", total: 38, attention: 1 }, { d: "2026-11-12", total: 41, attention: 1 },
+  { d: "2026-11-13", total: 58, attention: 3 }
+];
+const TODAY_BY_SERVER = { mini: 17, studio: 21, ubuntu: 14, dgx: 6 };
+// ===== 共通 =====
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const T = (iso) => Date.parse(iso);
+const jstParts = (ms) => { const d = new Date(ms + 9 * 3600e3); return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes(), s: d.getUTCSeconds(), wd: d.getUTCDay() }; };
+const p2 = (n) => String(n).padStart(2, "0");
+const hm = (iso) => { const p = jstParts(T(iso)); return `${p2(p.h)}:${p2(p.mi)}`; };
+const hms = (iso) => { const p = jstParts(T(iso)); return `${p2(p.h)}:${p2(p.mi)}:${p2(p.s)}`; };
+const dur = (sec) => { sec = Math.max(0, Math.round(sec)); if (sec < 60) return `${sec}秒`; const m = Math.floor(sec / 60); if (m < 60) return `${m}分`; const h = Math.floor(m / 60); return `${h}時間${m % 60 ? (m % 60) + "分" : ""}`; };
+const ago = (iso) => `${dur((NOW - T(iso)) / 1000)}前`;
+const minsSince = (iso) => (NOW - T(iso)) / 60000;
+const pct = (a, b) => b ? Math.round(a / b * 100) : 0;
+const SRV = Object.fromEntries(SERVERS.map(s => [s.id, s]));
+const GOAL = Object.fromEntries(GOALS.map(g => [g.id, g]));
+const srvName = (id) => SRV[id].name;
+
+// ===== takt の定義に合わせた集計 =====
+// 人のマージ待ち: awaiting_merge で、仕上げタスクが pending/running でも failed/exceeded/pr_failed でもない（activity.ts）
+const isHumanMerge = (g) => g.status === "awaiting_merge" && !["pending", "running", "failed", "exceeded", "pr_failed"].includes(g.mergeTaskLast);
+const isMergeFinishFailed = (g) => g.status === "awaiting_merge" && ["failed", "exceeded", "pr_failed"].includes(g.mergeTaskLast);
+// 進行中のゴール（TUI と同じ）: 中止・完了でなく、人のマージ待ちでない（一時停止中も含む）
+const isInProgress = (g) => g.executionStatus !== "aborted" && g.status !== "completed" && !isHumanMerge(g);
+const failedTasks = (g) => g.tasks.failed + g.tasks.exceeded + g.tasks.pr_failed;
+const totalTasks = (g) => Object.values(g.tasks).reduce((a, b) => a + b, 0);
+
+const pendingItems = [
+  ...QUESTIONS.filter(q => q.status === "pending").map(q => ({ type: "question", server: q.server, project: q.project, kind: q.kind, waitFrom: q.createdAt, desc: q.body, options: q.options, goalId: q.goalId })),
+  ...STANDALONE_INQUIRIES.filter(q => q.status === "pending").map(q => ({ type: "question", server: q.server, project: q.project, kind: q.kind, waitFrom: q.createdAt, desc: q.body, options: q.options })),
+  ...GOALS.filter(isHumanMerge).map(g => ({ type: "merge", server: g.server, project: g.project, waitFrom: g.awaitingMergeRecordedAt, goalId: g.id,
+    desc: `ゴール「${g.name}」の作業が済み、プルリクエスト #${g.pullRequest.number} を main にマージするかどうかの判断を待っています。`, url: g.pullRequest.url }))
+].map(p => ({ ...p, waitMin: minsSince(p.waitFrom), stale: minsSince(p.waitFrom) >= STALE_WAIT_MIN })).sort((a, b) => b.waitMin - a.waitMin);
+const abnormalGoals = GOALS.filter(isMergeFinishFailed);
+const countBy = (arr, f) => arr.reduce((m, x) => (m[f(x)] = (m[f(x)] || 0) + 1, m), {});
+const pendingByServer = countBy(pendingItems, p => p.server);
+const pendingByProject = countBy(pendingItems, p => p.project);
+const questionCount = pendingItems.filter(p => p.type === "question").length;
+const mergeCount = pendingItems.filter(p => p.type === "merge").length;
+const inProgressGoals = GOALS.filter(isInProgress);
+const totalRuns = RUNS.length;
+const runLimit = SERVERS.reduce((s, x) => s + x.concurrency, 0);
+const completed24h = PROJECTS.reduce((s, p) => s + p.completed24h, 0);
+const failedTotal = GOALS.reduce((s, g) => s + failedTasks(g), 0);
+const downServers = SERVERS.filter(s => !s.connected);
+const qKindLabel = (k) => k === "operation_request" ? "作業の依頼" : "質問";
+
+// run の状態（画面の言葉）。takt の task.status=running を「実行中」と呼ぶ。
+function runState(r) {
+  const s = SRV[r.server];
+  if (!s.connected) return { cls: "idle", label: `実行中（${hm(s.lastReadAt)} 時点）`, note: "サーバーから応答がないため、最後に読めた時点の状態です。" };
+  if (minsSince(r.lastLogAt) > LOG_SILENT_MIN) return { cls: "warn", label: "ログが止まっています", note: `ログが ${dur((NOW - T(r.lastLogAt)) / 1000)} 出ていません。` };
+  return { cls: "live", label: "実行中", note: "" };
+}
+function serverState(s) {
+  if (!s.connected) return { cls: "warn", label: "応答なし" };
+  const n = RUNS.filter(r => r.server === s.id).length;
+  return n ? { cls: "live", label: "動作中" } : { cls: "idle", label: "待機中" };
+}
+const curStep = (r) => r.steps[r.steps.length - 1][0];
+const stepPos = (r) => { const list = WORKFLOW_STEPS["simple-mini"]; return { i: list.indexOf(curStep(r)) + 1, n: list.length }; };
+const curModel = (r) => r.steps[r.steps.length - 1][1];
+
+// ===== ログ（JSONL）=====
+// 本物と同じ形の JSONL 文字列を作る（literal: true の run は HTML 内の <script type="application/x-ndjson"> をそのまま使う）
+const SAMPLE_TOOL = {
+  "fraktor-ng-rs": [["Read", { file_path: "modules/actor/src/supervision/strategy.rs" }, "pub enum SupervisorDirective { Resume, Restart, Stop, Escalate }"], ["bash", { command: "cargo test -p fraktor-actor supervision", description: "supervision のテストを実行する" }, "test result: ok. 18 passed; 0 failed"]],
+  "ddd-principles": [["Read", { file_path: "books/iddd/ch08/notes.md" }, "## 8.3 イベントの公開\n- 発行はトランザクションの外で行う"], ["Grep", { pattern: "ドメインイベント", path: "books/iddd/ch08" }, "books/iddd/ch08/notes.md:12:ドメインイベントは過去形で名付ける"]],
+  "modern-ddd-book": [["Read", { file_path: "chapters/05-aggregate/5-2.md" }, "# 5.2 集約の大きさ\n集約は小さく保ちます。"], ["Write", { file_path: "chapters/05-aggregate/5-3.md", content: "# 5.3 集約をまたぐ整合性\n..." }, "File written successfully."]],
+  "corporate-site": [["Read", { file_path: "src/pages/recruit.astro" }, "<section class=\"jobs\">..."], ["bash", { command: "npm run build", description: "サイトをビルドする" }, "build complete in 6.2s"]],
+  "takt": [["Read", { file_path: "src/__tests__/mcp-create-goal.test.ts" }, "describe('createGoalInputSchema', () => {"], ["bash", { command: "npx vitest run src/__tests__/mcp-create-goal.test.ts", description: "テストを実行する" }, " ✓ 6 passed"]]
+};
+const SAMPLE_TEXT = { plan: "計画をまとめ、次のステップに渡します。", implement: "変更を加え、テストで確かめています。", review: "差分を読み、指摘を整理しています。", remediation: "指摘に合わせて直しています。", "follow-up-review": "直した点を確かめています。" };
+function iso(hmsStr, addSec = 0) { return new Date(T(`2026-11-13T${hmsStr}Z`) + addSec * 1000).toISOString(); }
+function generateLogs(r) {
+  const session = [], provider = [], usage = [];
+  const persona = { plan: "planner", implement: "coder", review: "reviewer", remediation: "coder", "follow-up-review": "reviewer" };
+  session.push({ type: "workflow_start", task: r.summary, workflowName: "simple-mini", startTime: iso(r.steps[0][2], -2) });
+  r.steps.forEach(([step, model, start, end], idx) => {
+    const it = idx + 1, prov = PROVIDER_OF[model];
+    session.push({ type: "step_start", step, persona: persona[step], iteration: it, timestamp: iso(start), workflow: "simple-mini", provider: prov, model });
+    session.push({ type: "phase_start", step, iteration: it, workflow: "simple-mini", phase: 1, phaseName: "execute", phaseExecutionId: `ph-${r.session.slice(-4)}-${it}`, timestamp: iso(start, 0.1) });
+    provider.push({ timestamp: iso(start, 1.2), provider: prov, provider_model: model, event_type: "init", run_id: r.slug, step, session_id: `ses_${r.session.slice(-6)}${it}`, data: { model, sessionId: `ses_${r.session.slice(-6)}${it}` } });
+    const tools = SAMPLE_TOOL[r.project];
+    const isLast = idx === r.steps.length - 1;
+    const base = isLast ? (T(r.lastLogAt) - T(iso(start))) / 1000 : (T(iso(end)) - T(iso(start))) / 1000;
+    tools.forEach(([tool, input, out], k) => {
+      const callId = `call_${r.session.slice(-3)}${it}${k}`;
+      provider.push({ timestamp: iso(start, base * (0.2 + k * 0.3)), provider: prov, provider_model: model, event_type: "tool_use", run_id: r.slug, step, call_id: callId, data: { tool, input, id: callId } });
+      provider.push({ timestamp: iso(start, base * (0.2 + k * 0.3) + 2), provider: prov, provider_model: model, event_type: "tool_result", run_id: r.slug, step, call_id: callId, data: { id: callId, content: out, isError: false } });
+    });
+    if (isLast) {
+      provider.push({ timestamp: r.lastLogAt, provider: prov, provider_model: model, event_type: "text", run_id: r.slug, step, data: { text: SAMPLE_TEXT[step] } });
+    } else {
+      provider.push({ timestamp: iso(end, -3), provider: prov, provider_model: model, event_type: "result", run_id: r.slug, step, data: { result: SAMPLE_TEXT[step], sessionId: `ses_${r.session.slice(-6)}${it}`, success: true } });
+      session.push({ type: "phase_complete", step, iteration: it, workflow: "simple-mini", phase: 1, phaseName: "execute", phaseExecutionId: `ph-${r.session.slice(-4)}-${it}`, status: "done", content: SAMPLE_TEXT[step], timestamp: iso(end, -2) });
+      session.push({ type: "step_complete", step, persona: persona[step], iteration: it, status: "done", content: SAMPLE_TEXT[step], instruction: `${step} を進めてください。`, workflow: "simple-mini", matchedRuleIndex: 0, matchedRuleMethod: "structured_output", timestamp: iso(end) });
+      const inT = 30000 + it * 7300, outT = 2400 + it * 310;
+      usage.push({ run_id: r.slug, session_id: r.session, provider: prov, provider_model: model, step, step_type: "normal", timestamp: iso(end, -1), success: true, usage_missing: false, usage: { input_tokens: inT, output_tokens: outT, total_tokens: inT + outT } });
+    }
+  });
+  const toL = (a) => a.map(o => JSON.stringify(o)).join("\n");
+  return { session: toL(session), provider: toL(provider), usage: toL(usage) };
+}
+function rawLogs(r) {
+  if (r.literal) {
+    const read = (k) => ($(`log-${k}-${r.slug}`)?.textContent || "").trim();
+    return { session: read("session"), provider: read("provider"), usage: read("usage") };
+  }
+  return generateLogs(r);
+}
+function parseJsonl(text, source) {
+  return text.split("\n").filter(l => l.trim()).map((line, i) => {
+    try { return { source, line: i + 1, raw: line, rec: JSON.parse(line) }; }
+    catch (e) { return { source, line: i + 1, raw: line, rec: null, bad: String(e) }; }
+  });
+}
+const PHASE_JA = { execute: "実行", report: "レポート", judge: "判定" };
+const KIND = {
+  workflow_start: ["ワークフロー開始", "step"], workflow_complete: ["ワークフロー完了", "step"], workflow_abort: ["ワークフロー中止", "step"],
+  workflow_call_start: ["ワークフロー呼び出しの開始", "step"], workflow_call_complete: ["ワークフロー呼び出しの終了", "step"],
+  step_start: ["ステップ開始", "step"], step_complete: ["ステップ完了", "step"], phase_start: ["フェーズ開始", "step"], phase_complete: ["フェーズ完了", "step"], phase_judge_stage: ["判定の段階", "step"],
+  companion_review_round: ["コンパニオンのレビュー", "step"], companion_call: ["コンパニオンの呼び出し", "step"], companion_review_skipped: ["コンパニオンのレビュー省略", "step"], companion_queue_coalesced: ["コンパニオンの待ち行列の統合", "step"],
+  interactive_start: ["対話の開始", "step"], interactive_end: ["対話の終了", "step"],
+  init: ["セッション開始", "speech"], text: ["エージェントの発言", "speech"], thinking: ["思考", "speech"], result: ["応答の終わり", "speech"], context_compacted: ["文脈の圧縮", "speech"],
+  tool_use: ["ツール呼び出し", "tool"], tool_result: ["ツールの結果", "tool"], tool_output: ["ツールの出力", "tool"], permission_asked: ["権限の確認", "tool"], permission_summary: ["権限の一覧", "tool"],
+  error: ["エラー", "error"], assistant_error: ["エージェントのエラー", "error"], rate_limit: ["利用制限", "error"],
+  usage: ["トークン使用量", "usage"]
+};
+function describe(e) {
+  const r = e.rec, d = r.data || {};
+  const disc = e.source === "usage" ? "usage" : e.source === "provider" ? r.event_type : r.type;
+  const k = KIND[disc] || ["不明な種類", "step"];
+  let err = false, body = "", details = [];
+  const det = (title, v, open = false) => details.push([title, typeof v === "string" ? v : JSON.stringify(v, null, 2), open]);
+  switch (disc) {
+    case "workflow_start": body = `ワークフロー「${r.workflowName}」を開始しました。`; det("タスクの本文を見る", r.task); break;
+    case "workflow_complete": body = `ワークフローが ${r.iterations} 回の反復で完了しました。`; break;
+    case "workflow_abort": err = true; body = `ワークフローが中止されました。理由は「${r.reason}」です。`; break;
+    case "workflow_call_start": body = `ステップ ${r.step} が子ワークフロー「${r.childWorkflow}」を呼び出しました。`; break;
+    case "workflow_call_complete": err = r.status !== "completed"; body = `子ワークフロー「${r.childWorkflow}」が ${r.status} で戻りました。`; break;
+    case "step_start": body = `ステップ ${r.step} を ${r.persona} が始めました（反復 ${r.iteration} 回目${r.model ? `、${r.provider} / ${r.model}` : ""}）。`; if (r.instruction) det("指示を見る", r.instruction); break;
+    case "step_complete": err = !!r.error || r.status === "error"; body = `ステップ ${r.step} が ${r.status} で終わりました${r.matchedRuleIndex != null ? `（ルール ${r.matchedRuleIndex} 番に一致、${r.matchedRuleMethod}）` : ""}。`; det("本文を見る", r.content); if (r.instruction) det("指示を見る", r.instruction); if (r.error) det("エラーを見る", r.error); break;
+    case "phase_start": body = `フェーズ ${r.phase}（${PHASE_JA[r.phaseName]}）を始めました。`; break;
+    case "phase_complete": err = !!r.error || r.status === "error"; body = `フェーズ ${r.phase}（${PHASE_JA[r.phaseName]}）が ${r.status} で終わりました。`; if (r.content) det("本文を見る", r.content); if (r.error) det("エラーを見る", r.error); break;
+    case "phase_judge_stage": err = r.status === "error"; body = `判定の段階 ${r.stage}（${r.method}）が ${r.status} でした。`; det("判定の指示と応答を見る", { instruction: r.instruction, response: r.response }); break;
+    case "init": body = `プロバイダー ${r.provider} のセッションを始めました（モデル ${d.model}）。`; break;
+    case "thinking": body = "エージェントが考えています。"; det("思考の内容を見る", d.thinking); break;
+    case "text": body = d.text; break;
+    case "result": err = d.success === false; body = d.success ? "エージェントの応答が成功で終わりました。" : `エージェントの応答が失敗で終わりました。${d.error || ""}`; det("応答の本文を見る", d.result); break;
+    case "tool_use": { const hint = d.input && (d.input.command || d.input.file_path || d.input.filePath || d.input.pattern); body = `ツール ${d.tool} を呼び出しました${hint ? `。対象は「${hint}」です` : ""}。`; } det("入力を見る", d.input); break;
+    case "tool_result": err = d.isError === true; body = err ? "ツールがエラーを返しました。" : "ツールの結果が返りました。"; det(err ? "エラーの内容を見る" : "結果を見る", d.content, err); break;
+    case "tool_output": body = `ツール ${d.tool} が出力しました。`; det("出力を見る", d.output); break;
+    case "error": case "assistant_error": err = true; body = d.message || d.error; det("エラーの内容を見る", d, true); break;
+    case "rate_limit": err = d.status === "rejected"; body = `利用制限の状態は ${d.status} です。`; break;
+    case "usage": body = r.usage_missing ? `トークン数は記録されていません（${r.reason}）。` : `トークンを使いました。入力は ${r.usage.input_tokens.toLocaleString()}、出力は ${r.usage.output_tokens.toLocaleString()}、合計は ${r.usage.total_tokens.toLocaleString()} です。`; break;
+    default: body = "この種類のレコードは表示の対象外です。";
+  }
+  const ts = r.timestamp || r.startTime || r.endTime;
+  return { disc, label: k[0], cat: err ? "error" : k[1], err, body, details, ts, step: r.step || null, iteration: r.iteration };
+}
+const SOURCE_JA = { session: "本体", provider: "provider-events", usage: "usage-events" };
+// ===== サイドバー =====
+function renderSide(route) {
+  $("srv-list").innerHTML = SERVERS.map(s => {
+    const st = serverState(s), n = RUNS.filter(r => r.server === s.id).length;
+    const on = route.page === "overview" && route.server === s.id;
+    return `<li><a href="#overview/${s.id}" class="${on ? "on" : ""}" aria-label="${esc(s.name)}、${st.label}、run ${n}件">
+      <span class="dot ${st.cls}" aria-hidden="true"></span>
+      <span class="nm"><b>${esc(s.name)}</b><small class="${st.cls === "warn" ? "warn" : ""}">${st.label}${s.connected ? "" : `・${hm(s.lastReadAt)} 時点`}</small></span>
+      <span class="cnt">run ${n}件</span></a></li>`;
+  }).join("");
+  const nav = [["overview", "概要"], ["pending", "判断待ち"], ["projects", "プロジェクト"], ["activity", "アクティビティ"]];
+  $("nav").innerHTML = nav.map(([id, ja]) => `<li><a href="#${id}" class="${route.page === id && !(id === "overview" && route.server) ? "on" : ""}">${ja}${id === "pending" && pendingItems.length ? `<span class="badge">${pendingItems.length}件</span>` : ""}</a></li>`).join("");
+  $("side-foot").innerHTML = `最後の更新は <b>${hm(new Date(NOW).toISOString())}</b> です。<br>${SERVERS.length}台のうち ${SERVERS.length - downServers.length}台から読めています。`;
+}
+
+function healthLine() {
+  const parts = [];
+  if (pendingItems.length) parts.push(`判断待ちが ${pendingItems.length}件あります`);
+  if (downServers.length) parts.push(`${downServers.map(s => s.name).join("、")} から応答がありません`);
+  if (abnormalGoals.length) parts.push(`仕上げが失敗したマージ待ちが ${abnormalGoals.length}件あります`);
+  return parts.length
+    ? `<div class="health attention"><span class="dot warn" aria-hidden="true"></span><span>${parts.join("。")}。</span></div>`
+    : `<div class="health calm"><span class="dot live" aria-hidden="true"></span><span>すべてのサーバーとプロジェクトが正常に動いています。</span></div>`;
+}
+
+function tilesHtml() {
+  const longest = pendingItems[0];
+  return `<div class="tiles">
+    <div class="tile"><div class="label">実行中の run（全サーバー）</div>
+      <div class="num">${totalRuns}<small>/ ${runLimit} 件</small></div>
+      <div class="bar" role="img" aria-label="同時実行の上限 ${runLimit}件のうち ${totalRuns}件"><i style="width:${pct(totalRuns, runLimit)}%"></i></div>
+      <div class="t-note">上限は各サーバーの concurrency（${SERVERS.map(s => s.concurrency).join("・")}）の合計です。</div></div>
+    <div class="tile ${pendingItems.length ? "attention" : ""}"><div class="label">判断待ち（全サーバー）</div>
+      <div class="num">${pendingItems.length}<small>件</small></div>
+      <ul class="kv"><li><span>未回答の問い合わせ</span><b class="${questionCount ? "warn" : ""}">${questionCount}件</b></li><li><span>人のマージ待ち</span><b class="${mergeCount ? "warn" : ""}">${mergeCount}件</b></li><li><span>進行中のゴール</span><b>${inProgressGoals.length}件</b></li></ul>
+      ${longest && longest.stale ? `<div class="t-note warn">最も長いものは ${dur(longest.waitMin * 60)} 待っています。</div>` : ""}</div>
+    <div class="tile"><div class="label">24時間に完了したタスク</div>
+      <div class="num">${completed24h}<small>件</small></div>
+      <div class="t-note ${failedTotal ? "warn" : ""}">${failedTotal ? `失敗したタスクが ${failedTotal}件残っています。` : "失敗したタスクは残っていません。"}</div>
+      <div class="t-note">失敗・上限超過・PR作成失敗を合わせて数えています。</div></div>
+    <div class="tile"><div class="label">24時間のトークン消費</div>
+      <div class="num">${TOKENS_24H.reduce((s, t) => s + t.m, 0).toFixed(1)}<small>M トークン</small></div>
+      <ul class="kv">${TOKENS_24H.map(t => `<li><span>${esc(t.model)}</span><b>${t.m.toFixed(1)}M</b></li>`).join("")}</ul></div>
+  </div>`;
+}
+
+function runRowHtml(r) {
+  const st = runState(r), pos = stepPos(r), g = GOAL[r.goalId];
+  const barCls = st.cls === "live" ? "live" : st.cls === "warn" ? "warn" : "idle";
+  return `<li class="run-row">
+    <span class="st ${st.cls}"><span class="dot ${st.cls}" aria-hidden="true"></span>${esc(st.label)}</span>
+    <div class="run-main"><span class="p">${esc(r.project)}</span><span class="g">${esc(g.name)}</span>
+      <div class="task">タスク「${esc(r.task)}」</div>
+      <div class="model">モデルは ${esc(MODEL_LABEL[curModel(r)])} です。</div></div>
+    <div class="run-prog"><div class="stp">ステップ <b>${esc(curStep(r))}</b>（${pos.n} ステップ中 ${pos.i} つ目、反復 ${r.steps.length} 回目）</div>
+      <div class="bar thick ${barCls}" role="img" aria-label="${pos.n} ステップ中 ${pos.i} つ目"><i style="width:${pct(pos.i, pos.n)}%"></i></div>
+      <div class="meta"><span class="${st.cls === "warn" ? "warn" : ""}">最後のログは ${ago(r.lastLogAt)}</span><a href="#run/${r.slug}">run の詳細を見る</a></div></div>
+  </li>`;
+}
+
+// ===== 概要 =====
+function renderOverview(route) {
+  const list = route.server ? SERVERS.filter(s => s.id === route.server) : SERVERS;
+  const onlineCnt = SERVERS.length - downServers.length;
+  const cards = list.map(s => {
+    const st = serverState(s), runs = RUNS.filter(r => r.server === s.id);
+    const goals = GOALS.filter(g => g.server === s.id);
+    const paused = goals.filter(g => g.executionStatus === "paused");
+    const prog = goals.filter(isInProgress).length, merge = goals.filter(isHumanMerge).length;
+    const q = pendingItems.filter(p => p.server === s.id && p.type === "question").length;
+    const waiting = goals.reduce((a, g) => a + g.tasks.pending, 0);
+    return `<article class="scard ${s.connected ? "" : "down"}" aria-label="${esc(s.name)}">
+      <div class="sc-head"><h3><span class="dot ${st.cls}" aria-hidden="true"></span><span>${esc(s.name)}<span class="kind" style="margin-left:0">${esc(s.kind)}</span></span></h3>
+        <span class="big-badge ${st.cls}"><span class="dot ${st.cls}" aria-hidden="true"></span>${st.label}</span></div>
+      ${s.connected ? `<div class="read-at">takt-mcp から ${ago(s.lastReadAt)}（${hms(s.lastReadAt)}）に読みました。</div>`
+        : `<div class="stale-note">${hms(s.lastReadAt)} を最後に takt-mcp から応答がありません。このカードの内容は、${ago(s.lastReadAt)}に読めた時点のものです。</div>`}
+      <ul class="runs">${runs.map(runRowHtml).join("")}
+        ${paused.map(g => `<li class="run-row"><span class="st idle"><span class="dot idle" aria-hidden="true"></span>一時停止中</span>
+          <div class="run-main"><span class="p">${esc(g.project)}</span><span class="g">${esc(g.name)}</span><div class="task">${esc(g.pausedReason)}</div></div>
+          <div class="run-prog"><div class="stp">タスク ${totalTasks(g)}件中 ${g.tasks.completed}件が完了しています。</div><div class="bar thick idle" role="img" aria-label="タスク ${totalTasks(g)}件中 ${g.tasks.completed}件が完了"><i style="width:${pct(g.tasks.completed, totalTasks(g))}%"></i></div><div class="meta"><span>走っている run はありません。</span></div></div></li>`).join("")}
+        ${!runs.length && !paused.length ? `<li class="empty">走っている run はありません。</li>` : ""}</ul>
+      <div class="sc-foot">
+        <div>run<b>${runs.length} / ${s.concurrency}</b></div>
+        <div>進行中のゴール<b>${prog}件</b></div>
+        <div>判断待ち<b class="${q + merge ? "warn" : "quiet"}">${q + merge}件</b></div>
+        <div>待機中のタスク<b class="${waiting ? "" : "quiet"}">${waiting}件</b></div>
+      </div></article>`;
+  }).join("");
+  $("main").innerHTML = `
+    <div class="page-head"><div><h1>概要</h1><p>${SERVERS.length}台のサーバーのうち ${onlineCnt}台から読めており、合わせて ${totalRuns}件の run が動いています。</p></div>${healthLine()}</div>
+    ${tilesHtml()}
+    ${pendingItems.length ? `<section class="callout" aria-labelledby="h-call"><h2 id="h-call">判断待ちが ${pendingItems.length}件あります</h2><ul>
+      ${pendingItems.map(p => `<li><span><b>${esc(p.project)}</b>：${p.type === "merge" ? "人のマージ待ちのプルリクエストがあります。" : `${qKindLabel(p.kind)}の問い合わせに回答が付いていません。`}</span><span class="s">${esc(srvName(p.server))}</span><span class="${p.stale ? "w" : "s"}">${dur(p.waitMin * 60)} 待っています${p.stale ? "（滞留）" : ""}</span><a class="view" href="#pending">内容を見る</a></li>`).join("")}</ul></section>` : ""}
+    <section aria-labelledby="h-srv"><h2 class="sec" id="h-srv">サーバー<span class="sub">点が脈打っているものが動いており、灰色の点は止まっています。</span></h2>
+      ${route.server ? `<p class="filter-note note">${esc(srvName(route.server))} だけを表示しています。<a href="#overview">すべてのサーバーを表示する</a></p>` : ""}
+      <div class="scards">${cards}</div></section>
+    <footer>この画面は読み取り専用のモックで、表示しているのはファイル内のダミーデータです。各サーバーの takt-mcp（読み取り専用のツール）から集める仕組みは taktDash の側にあります。</footer>`;
+}
+
+// ===== 判断待ち =====
+function renderPending() {
+  const items = pendingItems.map(p => `<li class="tray-item ${p.stale ? "stale" : ""}">
+    <div class="proj">${esc(p.project)}<span class="srv">${esc(srvName(p.server))}</span>
+      <span class="kind k">${p.type === "merge" ? `人のマージ待ち<span class="en">awaiting_merge</span>` : `問い合わせ（${qKindLabel(p.kind)}）<span class="en">${esc(p.kind)}</span>`}</span></div>
+    <div><p class="desc">${esc(p.desc)}</p>
+      ${p.options ? `<div class="opts">選択肢は ${p.options.map(esc).join(" と ")} です。</div>` : ""}
+      ${p.kind === "operation_request" ? `<div class="opts">人が作業を行い、「実施した」か「対応できない」で答えます。</div>` : ""}
+      ${p.url ? `<span class="url">${esc(p.url)}</span>` : ""}</div>
+    <div class="wait"><b>${dur(p.waitMin * 60)} 待ち</b>${p.stale ? `<span class="stale-label">滞留しています。</span>` : `<span>${p.type === "merge" ? "マージ待ちの通知" : "問い合わせ"}から ${hm(p.waitFrom)} 以降です。</span>`}</div>
+    <div class="lc"><a class="view" href="#">内容を見る</a></div></li>`).join("");
+  $("main").innerHTML = `
+    <div class="page-head"><div><h1>判断待ち</h1><p>全サーバーで、人の判断を待っている項目が ${pendingItems.length}件あります。待ち時間の長い順に並べています。</p></div>${healthLine()}</div>
+    <section class="tray" aria-label="判断待ちの一覧" style="margin-top:0">
+      ${pendingItems.length ? `<ul class="tray-list">${items}</ul>` : `<p class="note">判断待ちはありません。</p>`}
+      <div class="foot-notes">
+        <p>判断待ちは、未回答の問い合わせ（ゴールのものと、ゴールに属さないもの）と、人のマージ待ちのゴールの合計です。</p>
+        <p>待ち時間は、問い合わせの createdAt と、マージ待ちの通知の recordedAt から、この画面が計算しています。${STALE_WAIT_MIN / 60}時間を超えたものを滞留として示しますが、この基準は takt ではなく taktDash の基準です。</p>
+        <p>ゴール登録の承認は takt-mcp から見えないため、takt manager の TUI で確認します。</p>
+      </div></section>
+    <section aria-labelledby="h-abn"><h2 class="sec" id="h-abn">異常<span class="sub">判断待ちの件数には入れていません。</span></h2>
+      <div class="quiet-box">${abnormalGoals.length ? abnormalGoals.map(g => `<p>${esc(g.project)} のゴール「${esc(g.name)}」は、仕上げタスクが失敗したマージ待ちです（${esc(srvName(g.server))}）。</p>`).join("")
+        : `<p class="note" style="margin:0">仕上げタスクが失敗したマージ待ちのゴールはありません。失敗したタスクは ${failedTotal}件で、${downServers.length ? `応答のないサーバーは ${downServers.map(s => s.name).join("、")} です。` : "応答のないサーバーはありません。"}</p>`}</div></section>`;
+}
+
+// ===== プロジェクト =====
+const GOAL_STATUS_JA = { created: "作成済み", awaiting_merge: "人のマージ待ち", completed: "完了" };
+const EXEC_JA = { active: "稼働中", paused: "一時停止中", aborted: "中止" };
+function renderProjects() {
+  const lastEvent = (name) => EVENTS.find(e => e.project === name);
+  const cards = PROJECTS.map(p => {
+    const goals = GOALS.filter(g => g.project === p.name), runs = RUNS.filter(r => r.project === p.name);
+    const servers = [...new Set(goals.map(g => g.server))].map(srvName);
+    const pend = pendingByProject[p.name] || 0, failed = goals.reduce((s, g) => s + failedTasks(g), 0);
+    const allPaused = goals.length && goals.every(g => g.executionStatus === "paused");
+    let cls = "card", pill;
+    if (allPaused) { cls += " paused"; pill = `<span class="pill idle"><span class="dot idle" aria-hidden="true"></span>一時停止中</span>`; }
+    else if (pend || failed) { cls += " attention"; pill = `<span class="pill warn"><span class="dot warn" aria-hidden="true"></span>判断待ち ${pend}件</span>`; }
+    else pill = `<span class="pill live"><span class="dot live" aria-hidden="true"></span>稼働中</span>`;
+    const goalHtml = goals.map(g => {
+      const n = totalTasks(g), hm_ = isHumanMerge(g);
+      return `<div class="goal"><div class="gn">${esc(g.name)}</div>
+        <div class="gs">${esc(srvName(g.server))}・ゴールは<span class="${hm_ ? "warn" : ""}">${GOAL_STATUS_JA[g.status]}</span>で、実行状態は${EXEC_JA[g.executionStatus]}です。<span class="en">${g.status} / ${g.executionStatus}</span></div>
+        <div class="bar ${g.executionStatus === "paused" ? "idle" : ""}" role="img" aria-label="タスク ${n}件中 ${g.tasks.completed}件が完了"><i style="width:${pct(g.tasks.completed, n)}%"></i></div>
+        <div class="pt">タスク ${n}件中 ${g.tasks.completed}件が完了しています（実行中 ${g.tasks.running}件、待機 ${g.tasks.pending}件）。</div>
+        ${hm_ ? `<div class="pt">プルリクエスト #${g.pullRequest.number} のマージを待っています。</div>` : ""}
+        ${g.pausedReason ? `<div class="why">${esc(g.pausedReason)}</div>` : ""}</div>`;
+    }).join("");
+    const runHtml = runs.length ? `<ul class="mini-runs">${runs.map(r => { const st = runState(r); return `<li><div class="r1"><span class="dot ${st.cls}" aria-hidden="true"></span><span class="tn">${esc(r.task)}</span></div>
+        <div class="r2"><span>${esc(st.label)}</span><span>ステップ ${esc(curStep(r))}</span><span>${esc(MODEL_LABEL[curModel(r)])}</span><span>経過 ${dur((NOW - T(r.startedAt)) / 1000)}</span><span>${esc(srvName(r.server))}</span><a href="#run/${r.slug}">run の詳細を見る</a></div></li>`; }).join("")}</ul>`
+      : `<p class="empty" style="margin:0">走っている run はありません。</p>`;
+    const le = lastEvent(p.name);
+    return `<article class="${cls}"><div class="card-head"><h3>${esc(p.name)}<span class="about">${esc(p.about)}</span></h3>${pill}</div>
+      <div class="k">動いているサーバー：${servers.map(esc).join("、")}</div>
+      <div><div class="k">ゴール</div>${goalHtml}</div>
+      <div><div class="k">走っている run（${runs.length}件）</div>${runHtml}</div>
+      <div class="meta2"><div><div class="k">判断待ち</div><div class="v ${pend ? "warn" : "quiet"}">${pend}件</div></div>
+        <div><div class="k">24時間の完了</div><div class="v ${p.completed24h ? "" : "quiet"}">${p.completed24h}件</div></div>
+        <div><div class="k">失敗したタスク</div><div class="v ${failed ? "warn" : "quiet"}">${failed}件</div></div></div>
+      ${le ? `<div class="last"><div class="k">直近の出来事</div><time>${hm(le.at)}</time>${esc(le.text)}</div>` : ""}</article>`;
+  }).join("");
+  const active = PROJECTS.filter(p => GOALS.some(g => g.project === p.name && g.executionStatus === "active")).length;
+  $("main").innerHTML = `<div class="page-head"><div><h1>プロジェクト</h1><p>${PROJECTS.length}件のうち ${active}件が稼働中で、${PROJECTS.length - active}件は一時停止中です。</p></div>${healthLine()}</div>
+    <div class="cards">${cards}</div>`;
+}
+
+// ===== アクティビティ =====
+const EV_KIND = { goal_created: ["ゴール登録", "idle"], task_started: ["run の開始", "live"], task_completed: ["タスク完了", "live"], question: ["問い合わせ", "warn"], awaiting_merge: ["人のマージ待ち", "warn"], paused: ["一時停止", "idle"], blocked: ["blocked 通知", "warn"], connection: ["接続（taktDash）", "warn"] };
+const actState = { kind: "all", server: "all", q: "" };
+function renderActivity() {
+  const filtered = EVENTS.filter(e => (actState.kind === "all" || e.kind === actState.kind) && (actState.server === "all" || e.server === actState.server)
+    && (!actState.q || (e.text + (e.project || "") + srvName(e.server)).toLowerCase().includes(actState.q.toLowerCase())));
+  const kc = countBy(EVENTS, e => e.kind), sc = countBy(EVENTS, e => e.server);
+  const max = Math.max(...DAYS.map(d => d.total));
+  const weekTotal = DAYS.reduce((s, d) => s + d.total, 0);
+  const today = DAYS[DAYS.length - 1];
+  const topSrv = Object.entries(TODAY_BY_SERVER).sort((a, b) => b[1] - a[1])[0];
+  const wd = "日月火水木金土";
+  const dayLabel = (ms) => { const p = jstParts(ms); return `${p.mo}月${p.d}日（${wd[p.wd]}）`; };
+  const groups = [];
+  filtered.forEach(e => { const p = jstParts(T(e.at)), key = `${p.y}-${p.mo}-${p.d}`; let g = groups.find(x => x.key === key); if (!g) groups.push(g = { key, label: dayLabel(T(e.at)), items: [] }); g.items.push(e); });
+  $("main").innerHTML = `
+    <div class="page-head"><div><h1>アクティビティ</h1><p>全サーバーで起きた出来事を、新しいものから並べています。ゴールの通知と問い合わせ、タスクの状態の変化は takt-mcp から読み、接続の出来事は taktDash が記録しています。</p></div>${healthLine()}</div>
+    <div class="tiles">
+      <div class="tile"><div class="label">今日の出来事</div><div class="num">${today.total}<small>件</small></div><div class="t-note">直近7日では ${weekTotal}件です。</div></div>
+      <div class="tile ${today.attention ? "attention" : ""}"><div class="label">今日の判断待ちと異常の出来事</div><div class="num">${today.attention}<small>件</small></div><div class="t-note">問い合わせ、マージ待ち、応答なしを数えています。</div></div>
+      <div class="tile"><div class="label">残っている失敗したタスク</div><div class="num">${failedTotal}<small>件</small></div><div class="t-note">失敗・上限超過・PR作成失敗の合計です。</div></div>
+      <div class="tile"><div class="label">今日いちばん出来事が多いサーバー</div><div class="num word">${esc(srvName(topSrv[0]))}</div><div class="t-note">今日は ${topSrv[1]}件の出来事がありました。</div></div>
+    </div>
+    <section class="daychart" aria-labelledby="h-day"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap"><h2 class="sec" id="h-day" style="margin:0">日ごとの出来事</h2><div class="legend"><span>出来事</span><span class="w">判断待ちと異常</span></div></div>
+      <div class="cols">${DAYS.map(d => { const ms = T(d.d + "T03:00:00Z"), p = jstParts(ms); const h = Math.max(4, Math.round(d.total / max * 110)); const wH = d.attention ? Math.max(4, Math.round(d.attention / max * 110)) : 0;
+        return `<div class="col"><div class="n">${d.total}件${d.attention ? `<small>うち ${d.attention}件</small>` : ""}</div><div class="stack" style="height:${h}px" role="img" aria-label="${p.mo}月${p.d}日は ${d.total}件、うち判断待ちと異常が ${d.attention}件"><i class="w" style="height:${wH}px"></i><i style="flex:1"></i></div><div class="d">${p.mo}/${p.d}</div></div>`; }).join("")}</div></section>
+    <section class="filters" aria-label="絞り込み">
+      <div class="chips"><span class="lbl">種類</span>${[["all", "すべて", EVENTS.length], ...Object.keys(EV_KIND).filter(k => kc[k]).map(k => [k, EV_KIND[k][0], kc[k]])].map(([k, ja, n]) => `<button type="button" class="chip ${EV_KIND[k]?.[1] === "warn" ? "warnc" : ""}" data-kind="${k}" aria-pressed="${actState.kind === k}">${ja}<b>${n}</b></button>`).join("")}</div>
+      <div class="chips"><span class="lbl">サーバー</span>${[["all", "すべて", EVENTS.length], ...SERVERS.map(s => [s.id, s.name, sc[s.id] || 0])].map(([k, ja, n]) => `<button type="button" class="chip" data-server="${k}" aria-pressed="${actState.server === k}">${esc(ja)}<b>${n}</b></button>`).join("")}</div>
+      <input class="search" id="act-q" type="search" placeholder="文やプロジェクト名で探します" value="${esc(actState.q)}" aria-label="出来事を文字で探す">
+    </section>
+    <p class="count-line">読み込んだ ${EVENTS.length}件のうち ${filtered.length}件を表示しています。日ごとの件数は全件の数です。</p>
+    <div class="days">${groups.length ? groups.map(g => `<div class="day-h">${g.label}<span>${g.items.length}件</span></div>${g.items.map(e => { const k = EV_KIND[e.kind]; return `<div class="ev"><time>${hm(e.at)}</time><span class="kl ${k[1] === "warn" ? "warn" : ""}"><span class="dot ${k[1]}" style="animation:none" aria-hidden="true"></span>${k[0]}</span><span class="msg">${e.project ? `<b>${esc(e.project)}</b>：` : ""}${esc(e.text)}</span><span class="sv">${esc(srvName(e.server))}</span><span class="lk">${e.run ? `<a href="#run/${e.run}">ログを見る</a>` : ""}</span></div>`; }).join("")}`).join("") : `<p class="note" style="padding:14px 18px;margin:0">条件に合う出来事はありません。</p>`}</div>`;
+  document.querySelectorAll("[data-kind]").forEach(b => b.onclick = () => { actState.kind = b.dataset.kind; renderActivity(); });
+  document.querySelectorAll("[data-server]").forEach(b => b.onclick = () => { actState.server = b.dataset.server; renderActivity(); });
+  const q = $("act-q"); q.oninput = () => { actState.q = q.value; const pos = q.selectionStart; renderActivity(); const n = $("act-q"); n.focus(); n.setSelectionRange(pos, pos); };
+}
+
+// ===== run の詳細とログ =====
+const logState = { cat: "all", q: "" };
+function renderRun(slug) {
+  const r = RUNS.find(x => x.slug === slug);
+  if (!r) { $("main").innerHTML = `<a class="back" href="#projects">プロジェクト一覧に戻る</a><p>この run は見つかりませんでした。</p>`; return; }
+  const s = SRV[r.server], g = GOAL[r.goalId], st = runState(r), pos = stepPos(r);
+  const raw = rawLogs(r);
+  const entries = [...parseJsonl(raw.session, "session"), ...parseJsonl(raw.provider, "provider"), ...parseJsonl(raw.usage, "usage")]
+    .filter(e => e.rec).map(e => ({ ...e, ...describe(e) })).sort((a, b) => T(a.ts) - T(b.ts));
+  const sessionRecs = entries.filter(e => e.source === "session");
+  const stepLogs = sessionRecs.filter(e => e.disc === "step_complete");
+  const lastStart = [...sessionRecs].reverse().find(e => e.disc === "step_start");
+  const curStartedAt = r.currentStepStartedAt || lastStart?.ts;
+  const execCount = sessionRecs.filter(e => e.disc === "step_start" && e.step === curStep(r)).length;
+  const lastPhase = [...sessionRecs].reverse().find(e => e.disc === "phase_start");
+  const cats = [["all", "すべて"], ["step", "ステップ・フェーズ"], ["speech", "発言・思考"], ["tool", "ツール"], ["usage", "トークン"], ["error", "エラー"]];
+  const cc = countBy(entries, e => e.cat);
+  const shown = entries.filter(e => (logState.cat === "all" || e.cat === logState.cat) && (!logState.q || (e.raw + e.body).toLowerCase().includes(logState.q.toLowerCase())));
+  let html = "", curKey = null;
+  shown.forEach(e => {
+    const key = e.step ? `${e.step}#${e.iteration ?? ""}` : "__wf";
+    const stepKey = e.step || "__wf";
+    if (stepKey !== curKey) {
+      curKey = stepKey;
+      html += `<div class="log-step">${e.step ? `ステップ ${esc(e.step)}` : "ワークフロー全体"}<span>${e.step ? `${hms(e.ts)} から` : ""}</span></div>`;
+    }
+    html += `<div class="rec ${e.err ? "err" : ""}"><time>${hms(e.ts)}</time>
+      <div class="rk">${esc(e.label)}<small>${esc(e.disc)}</small></div>
+      <div class="rb"><p>${esc(e.body)}</p>
+        ${e.details.map(([t, v, o]) => `<details${o ? " open" : ""}><summary>${esc(t)}</summary><pre>${esc(v)}</pre></details>`).join("")}
+        <details><summary>元の JSON を見る</summary><pre>${esc(JSON.stringify(e.rec, null, 2))}</pre></details>
+        <div class="from">${SOURCE_JA[e.source]} の ${e.line} 行目</div></div></div>`;
+  });
+  const f = (label, v, src, cls = "") => `<div class="f ${cls}"><div class="k">${label}</div><div class="v">${v}</div><div class="src">${src}</div></div>`;
+  const logDir = `.takt/runs/${r.slug}/logs/`;
+  $("main").innerHTML = `
+    <a class="back" href="#projects">プロジェクト一覧に戻る</a>
+    <div class="page-head"><div><h1>${esc(r.task)}</h1><p>${esc(r.project)} の run です。${esc(s.name)}（${esc(s.kind)}）で動いています。</p></div>
+      <span class="big-badge ${st.cls}"><span class="dot ${st.cls}" aria-hidden="true"></span>${esc(st.label)}</span></div>
+    ${s.connected ? "" : `<div class="stale-note" style="margin-bottom:14px">${esc(s.name)} から応答がないため、この画面は ${hms(s.lastReadAt)}（${ago(s.lastReadAt)}）に読めた時点の内容です。</div>`}
+    <section class="summary" aria-label="run の要約" style="margin-top:0">
+      <div class="sum-grid">
+        ${f("サーバー", esc(s.name), "taktDash が読み先として持つ情報")}
+        ${f("タスクの状態", `実行中<span class="en">running</span>`, "takt_list_tasks の status")}
+        ${f("run の状態", `実行中<span class="en">running</span>`, "takt_get_run の status")}
+        ${f("開始と経過", `${hm(r.startedAt)} に始まり、${dur((NOW - T(r.startedAt)) / 1000)} 経っています。`, "takt_list_tasks の startedAt から画面が計算")}
+        ${f("ゴール", esc(g.name), "takt_list_tasks の goalId と takt_list_goals", "wide")}
+        ${f("要約", esc(r.summary), "takt_list_tasks の summary", "wide")}
+        ${f("ワークフロー", "simple-mini", "takt_get_run の workflow")}
+        ${f("今のステップ", `<b>${esc(curStep(r))}</b>（${pos.n} ステップ中 ${pos.i} つ目）`, "takt_get_run の currentStep と、ワークフロー定義の steps")}
+        ${f("反復とフェーズ", `反復 ${r.steps.length} 回目、フェーズ ${lastPhase ? `${lastPhase.rec.phase}（${PHASE_JA[lastPhase.rec.phaseName]}）` : "なし"}`, "takt_get_run の currentIteration と phase")}
+        ${f("このステップ", `${curStartedAt ? hm(curStartedAt) : "—"} に始まり、このステップは ${execCount} 回目の実行です。`, "takt_get_run の currentStepStartedAt と currentStepExecutionCount")}
+        ${f("モデル", `${esc(MODEL_LABEL[curModel(r)])}<span class="en">${esc(PROVIDER_OF[curModel(r)])} / ${esc(curModel(r))}</span>`, "ログの step_start の provider と model")}
+        ${f("最後のログ", `${hms(r.lastLogAt)}（${ago(r.lastLogAt)}）`, "ログの最後のレコードの timestamp")}
+        ${f("runSlug", `<span class="mono">${esc(r.slug)}</span>`, "takt_list_tasks の runSlug", "wide")}
+        ${f("完了したステップ", stepLogs.length ? `<div class="steps-line">${stepLogs.map(e => `<span class="stepchip done">${esc(e.step)}（${esc(e.rec.status)}）</span>`).join("")}<span class="stepchip cur">${esc(curStep(r))}（実行中）</span></div>` : `<div class="steps-line"><span class="stepchip cur">${esc(curStep(r))}（実行中）</span></div>`, "takt_get_run の stepLogs")}
+        ${f("レポート", r.reports.length ? r.reports.map(([n, b]) => `${esc(n)}（${b.toLocaleString()} バイト）`).join("、") : "まだありません。", "takt_get_run の reports")}
+      </div></section>
+    <section aria-labelledby="h-log"><h2 class="sec" id="h-log">ログ<span class="sub">${entries.length}件のレコードを時刻順に並べています。</span></h2>
+      <div class="filters" style="margin-bottom:12px">
+        <div class="note">次の JSONL を読み、1レコードを1ブロックにしています（worktree で動く run では worktree 側の .takt/runs に置かれます）。takt-mcp の takt_get_run で読めるのは完了したステップの本文までなので、ファイルの読み取りは taktDash の側で行う想定です。</div>
+        <details><summary>読んでいる JSONL ファイルを見る</summary><ul class="files"><li>${esc(logDir)}${esc(r.session)}.jsonl（本体）</li><li>${esc(logDir)}${esc(r.session)}-provider-events.jsonl（logging.provider_events が true のとき）</li><li>${esc(logDir)}${esc(r.session)}-usage-events.jsonl（logging.usage_events が true のとき）</li></ul></details>
+        <div class="chips"><span class="lbl">種類</span>${cats.map(([k, ja]) => `<button type="button" class="chip ${k === "error" ? "warnc" : ""}" data-cat="${k}" aria-pressed="${logState.cat === k}">${ja}<b>${k === "all" ? entries.length : (cc[k] || 0)}</b></button>`).join("")}</div>
+        <input class="search" id="log-q" type="search" placeholder="ログの文字で探します" value="${esc(logState.q)}" aria-label="ログを文字で探す">
+      </div>
+      <p class="count-line">${shown.length}件を表示しています。${cc.error ? `エラーのレコードが ${cc.error}件あり、橙で示しています。` : "エラーのレコードはありません。"}</p>
+      <div class="log">${html || `<p class="note" style="padding:14px 18px;margin:0">条件に合うレコードはありません。</p>`}</div>
+    </section>
+    <a class="back" href="#projects" style="margin-top:16px">プロジェクト一覧に戻る</a>`;
+  document.querySelectorAll("[data-cat]").forEach(b => b.onclick = () => { logState.cat = b.dataset.cat; renderRun(slug); });
+  const q = $("log-q"); q.oninput = () => { logState.q = q.value; const pos = q.selectionStart; renderRun(slug); const n = $("log-q"); n.focus(); n.setSelectionRange(pos, pos); };
+}
+
+// ===== ルーター（ハッシュ） =====
+function route() {
+  const h = location.hash.replace(/^#/, "");
+  const [page, arg] = h.split("/");
+  const rt = { page: page || "overview", server: page === "overview" ? arg : undefined };
+  if (rt.page === "run") { renderSide({ page: "run" }); renderRun(arg); }
+  else if (rt.page === "pending") { renderSide(rt); renderPending(); }
+  else if (rt.page === "projects") { renderSide(rt); renderProjects(); }
+  else if (rt.page === "activity") { renderSide(rt); renderActivity(); }
+  else { rt.page = "overview"; renderSide(rt); renderOverview(rt); }
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", route);
+route();
+</script>
+</body></html>

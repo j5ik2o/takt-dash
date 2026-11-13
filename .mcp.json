@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "takt": {
+      "command": "node",
+      "args": [
+        "/Users/j5ik2o/local/takt-custom/dist/app/mcp/index.js"
+      ]
+    }
+  }
+}

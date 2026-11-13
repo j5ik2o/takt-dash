@@ -1,0 +1,15 @@
+language: ja
+base_branch: main
+
+# provider が rate limit に達したときの切替先（順に試す）
+rate_limit_fallback:
+  switch_chain:
+    - provider: claude
+    - provider: opencode
+      model: ollama/glm-5.3:cloud
+
+# manager（ゴール管理）がタスクに使ってよいワークフロー
+manager:
+  workflows:
+    - default
+    - simple
