@@ -10,6 +10,7 @@ taktDash の計画・実装・テスト・レビューでは、このルール�
 
 ## 構成
 
+- リポジトリの配置は、ルートに proto/（.proto、API 定義の正）と backend/（Rust バックエンド）と frontend/cli（Rust の CLI）と frontend/web（Next.js）を置く形とします。ルートの Cargo.toml がワークスペースであり、メンバーは backend と frontend/cli です。3者は対等に proto/ へ依存し、フロントエンドがバックエンドの内部へ依存する形にはしません。
 - バックエンドは1つだけ置き、バックエンドが複数サーバーを集約します。バックエンドは Rust で実装し、API は tonic による gRPC で、API 定義の正は .proto です。
 - フロントエンドは Next.js と CLI の2つです。Next.js はサーバー側（RSC と Route Handlers）が gRPC クライアントとしてバックエンドと通信する BFF 構成であり、ブラウザはバックエンドへ直接つながりません。gRPC-Web は使いません。CLI は Rust で実装し、同じ .proto から生成したクライアントでネイティブ gRPC により接続し、最初の版から全機能を持ちます。
 - フロントエンドが takt-mcp や .takt のファイルへ直接触れる実装は作りません。状態の取得と操作は、すべてバックエンドの API を経由します。
