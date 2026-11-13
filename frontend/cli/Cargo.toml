@@ -1,0 +1,11 @@
+[package]
+name = "takt-dash-cli"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "takt-dash-cli"
+path = "src/main.rs"
+
+[dependencies]
