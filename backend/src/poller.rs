@@ -71,7 +71,8 @@ impl Poller {
     let before = StoreSignature::capture(&self.store);
     self.store.set_thresholds(config.thresholds);
     self.store.set_projects(config.projects.clone());
-    self.sync_clients(&config);
+    let rebuilt = self.sync_clients(&config).await;
+    self.reset_rebuilt_projects(&rebuilt);
     let mut report = CycleReport {
       projects_read:   0,
       projects_failed: 0,
@@ -129,14 +130,44 @@ impl Poller {
     self.clients.clear();
   }
 
-  fn sync_clients(&mut self, config: &Config) {
+  /// 設定を再読み込みし、プロジェクトのクライアントを設定に追随させる。
+  ///
+  /// 設定から消えたプロジェクトのクライアントを破棄し、起動設定（`command`・`args`・`env`・
+  /// `cwd`）が変わったプロジェクトのクライアントは旧プロセスを終了して作り直します。設定が
+  /// 変わっていないプロジェクトのクライアントは子プロセスを保ったまま再利用します。作り直した
+  /// プロジェクト名を返し、呼び出し側が旧接続先の差分基準をリセットできるようにします。
+  async fn sync_clients(&mut self, config: &Config) -> Vec<String> {
     let wanted: Vec<&str> = config.projects.iter().map(|project| project.name.as_str()).collect();
     self.clients.retain(|project, _| wanted.contains(&project.as_str()));
+    let mut rebuilt = Vec::new();
     for project in &config.projects {
       let Some(server) = config.servers.get(&project.server) else {
         continue;
       };
-      self.clients.entry(project.name.clone()).or_insert_with(|| McpClient::new(client_config(server, &project.cwd)));
+      let wanted_config = client_config(server, &project.cwd);
+      if let Some(client) = self.clients.get(&project.name) {
+        if client.config() == &wanted_config {
+          continue;
+        }
+        if let Some(mut client) = self.clients.remove(&project.name) {
+          client.shutdown().await;
+        }
+        rebuilt.push(project.name.clone());
+      }
+      self.clients.insert(project.name.clone(), McpClient::new(wanted_config));
+    }
+    rebuilt
+  }
+
+  /// クライアントを作り直したプロジェクトの差分基準と状態をリセットする。
+  ///
+  /// 旧接続先の snapshot と接続状態を新接続先の所属で投影しないよう、スロットを未読へ戻し、
+  /// 前サイクルの差分基準も捨てます。新接続先の初回読み取りは基準化のみになります。
+  fn reset_rebuilt_projects(&mut self, rebuilt: &[String]) {
+    for project in rebuilt {
+      self.previous.remove(project);
+      self.previous_connected.remove(project);
+      self.store.reset_project(project);
     }
   }
 

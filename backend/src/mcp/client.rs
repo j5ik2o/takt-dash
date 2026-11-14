@@ -81,6 +81,11 @@ impl McpClient {
     McpClient { config, process: None, next_id: 1 }
   }
 
+  /// このクライアントが子プロセスの起動に使う設定を返す。稼働中の設定変更の検出に使います。
+  pub fn config(&self) -> &McpClientConfig {
+    &self.config
+  }
+
   /// 渡された順序で、指定した道具を1つずつ呼び出して応答の本文テキストを返す。
   ///
   /// 輸送エラーが起きたら子プロセスを破棄し、次の呼び出しで新しい子プロセスを起動します。
