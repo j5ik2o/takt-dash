@@ -78,6 +78,9 @@ impl Poller {
       events_recorded: 0,
       interval:        Duration::from_secs(config.interval_seconds),
     };
+    // 記録に失敗したプロジェクトがあっても、残りのプロジェクトの読み取りと状態変化の通知を
+    // 続けるため、最初の記録エラーだけを保持してサイクルの末尾で返します。
+    let mut record_error: Option<crate::config::ConfigError> = None;
     for project in &config.projects {
       let read_at = Utc::now();
       let prev = self.previous.get(&project.name).cloned();
@@ -85,18 +88,28 @@ impl Poller {
       match self.read_one(project, prev.as_ref()).await {
         | Ok(snapshot) => {
           let events = detect(&project.server, &project.name, prev.as_ref(), prev_connected, true, &snapshot, read_at);
-          self.store.record_success(&project.name, snapshot.clone(), read_at);
-          self.previous.insert(project.name.clone(), snapshot);
-          self.previous_connected.insert(project.name.clone(), true);
-          self.record_events(&events)?;
-          report.projects_read += 1;
-          report.events_recorded += events.len();
+          match self.record_events(&events) {
+            | Ok(()) => {
+              self.store.record_success(&project.name, snapshot.clone(), read_at);
+              self.previous.insert(project.name.clone(), snapshot);
+              self.previous_connected.insert(project.name.clone(), true);
+              report.projects_read += 1;
+              report.events_recorded += events.len();
+            },
+            | Err(error) => {
+              record_error.get_or_insert(error);
+            },
+          }
         },
         | Err(error) => {
           if let Some(prev) = prev.as_ref() {
             let events = detect(&project.server, &project.name, Some(prev), prev_connected, false, prev, read_at);
-            self.record_events(&events)?;
-            report.events_recorded += events.len();
+            match self.record_events(&events) {
+              | Ok(()) => report.events_recorded += events.len(),
+              | Err(record_failure) => {
+                record_error.get_or_insert(record_failure);
+              },
+            }
           }
           self.store.record_failure(&project.name);
           self.previous_connected.insert(project.name.clone(), false);
@@ -108,17 +121,17 @@ impl Poller {
     if StoreSignature::capture(&self.store) != before {
       let _ = self.changes.send(());
     }
-    Ok(report)
+    match record_error {
+      | Some(error) => Err(error),
+      | None => Ok(report),
+    }
   }
 
   fn record_events(&self, events: &[crate::model::ActivityEvent]) -> Result<(), crate::config::ConfigError> {
-    for event in events {
-      self
-        .activity
-        .record(event)
-        .map_err(|error| crate::config::ConfigError::Invalid(format!("出来事を記録できませんでした: {error}")))?;
-    }
-    Ok(())
+    self
+      .activity
+      .record_all(events)
+      .map_err(|error| crate::config::ConfigError::Invalid(format!("出来事を記録できませんでした: {error}")))
   }
 
   /// すべてのプロジェクトの子プロセスを終了する。
