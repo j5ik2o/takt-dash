@@ -16,16 +16,36 @@ use takt_dash_backend::{
 };
 
 struct Harness {
-  _directory:  tempfile::TempDir,
-  config_path: PathBuf,
-  state_path:  PathBuf,
-  activity:    Arc<ActivityStore>,
-  store:       Arc<StateStore>,
-  changes:     tokio::sync::broadcast::Sender<()>,
+  _directory:       tempfile::TempDir,
+  config_path:      PathBuf,
+  state_path:       PathBuf,
+  activity:         Arc<ActivityStore>,
+  activity_db_path: PathBuf,
+  store:            Arc<StateStore>,
+  changes:          tokio::sync::broadcast::Sender<()>,
 }
 
 fn write_json(path: &Path, value: &Value) {
   std::fs::write(path, value.to_string()).expect("JSON ファイルを書けます");
+}
+
+/// 記録先の SQLite に、指定したサーバーの出来事の INSERT を中断させるトリガーを仕込む。
+///
+/// トリガーは保存処理そのものを既存のコネクション上で失敗させるため、権限や root 実行に
+/// 依存せず、特定プロジェクトの出来事の記録だけを決定的に失敗させられます。
+fn fail_event_recording_for(db_path: &Path, server_id: &str) {
+  let connection = rusqlite::Connection::open(db_path).expect("記録先へ直接接続できます");
+  connection
+    .execute_batch(&format!(
+      "CREATE TRIGGER reject_events BEFORE INSERT ON events WHEN NEW.server_id = '{server_id}'
+       BEGIN SELECT RAISE(ABORT, '出来事の記録に失敗しました'); END;"
+    ))
+    .expect("記録を中断させるトリガーを作れます");
+}
+
+fn allow_event_recording(db_path: &Path) {
+  let connection = rusqlite::Connection::open(db_path).expect("記録先へ直接接続できます");
+  connection.execute_batch("DROP TRIGGER IF EXISTS reject_events").expect("記録の中断を解除できます");
 }
 
 fn state_with_goal(goal_id: &str) -> Value {
@@ -57,9 +77,10 @@ impl Harness {
       pending_decision_stale_minutes: 240,
       run_log_silent_minutes:         10,
     }));
-    let activity = Arc::new(ActivityStore::open_in_memory().expect("メモリ上の SQLite を開けます"));
+    let activity_db_path = directory.path().join("events.sqlite");
+    let activity = Arc::new(ActivityStore::open(&activity_db_path).expect("SQLite を開けます"));
     let (changes, _) = tokio::sync::broadcast::channel(16);
-    Harness { _directory: directory, config_path, state_path, activity, store, changes }
+    Harness { _directory: directory, config_path, state_path, activity, activity_db_path, store, changes }
   }
 
   fn poller(&self) -> Poller {
@@ -571,4 +592,150 @@ async fn unchanged_client_settings_keep_the_baseline_and_emit_no_duplicate_event
   let slot = harness.store.slot("takt-dash").expect("スロットがあります");
   assert!(slot.connected, "クライアントを保持したまま読み続けます");
   poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_event_record_keeps_the_baseline_and_records_the_event_once_after_recovery() {
+  // 読み取りは成功したが出来事の記録に失敗したサイクルでは、差分基準を進めません。
+  // 記録が回復した後のサイクルで、未記録だった変化をちょうど1回だけ記録します。
+  // 記録の成功前に基準を進める実装では、失敗したサイクルの変化が失われ、回復後にも記録されません。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  harness.rewrite_state(state_with_goal("g2"));
+  fail_event_recording_for(&harness.activity_db_path, "mac-mini");
+  poller.read_cycle_once().await.expect_err("記録できないサイクルは記録の失敗で終わります");
+
+  // 失敗したサイクルの時点で、差分基準も状態ストアも進んでいないことを観測する。
+  let failed_slot = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert_eq!(
+    failed_slot.snapshot.expect("状態があります").goals[0].goal_id,
+    "g1",
+    "記録に失敗した状態を成功として残しません"
+  );
+
+  allow_event_recording(&harness.activity_db_path);
+  let recovered = poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
+  assert_eq!(recovered.events_recorded, 1, "未記録だった変化を回復後に記録します");
+  poller.shutdown().await;
+
+  let created: Vec<String> = harness
+    .activity
+    .recent_events(50)
+    .expect("記録した出来事を読めます")
+    .into_iter()
+    .filter(|event| event.kind == EventKind::GoalCreated)
+    .map(|event| event.body)
+    .collect();
+  assert_eq!(created.len(), 1, "記録に失敗したサイクルの変化が失われず、二重にもなりません: {created:?}");
+  assert!(created[0].contains("g2"), "回復後に記録された変化は失敗したサイクルの状態です: {created:?}");
+}
+
+#[tokio::test]
+async fn failed_event_record_on_the_failure_path_still_marks_the_project_disconnected() {
+  // 接続断の出来事の記録に失敗したサイクルでも、そのプロジェクトの connected は偽にします。
+  // 記録エラーを `?` で先に伝えて record_failure に到達しない実装では、応答がないプロジェクトが
+  // connected 真のまま残ります。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  fail_event_recording_for(&harness.activity_db_path, "mac-mini");
+  poller.read_cycle_once().await.expect_err("接続断の出来事を記録できないサイクルは失敗で終わります");
+
+  let slot = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert!(!slot.connected, "記録に失敗しても応答がないプロジェクトは connected 偽です");
+  assert!(slot.snapshot.is_some(), "最後に読めた状態は保持します");
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_event_record_does_not_stop_the_remaining_projects() {
+  // 先頭のプロジェクトの出来事の記録に失敗しても、
+  // 後続のプロジェクトは読み取りと状態更新を続けます。 記録エラーを `?`
+  // でループから抜ける実装では、後続プロジェクトの状態が更新されず、通知も届きません。
+  let harness = Harness::new(state_with_goal("g1"));
+  let directory = harness._directory.path();
+  let project_two_dir = directory.join("project-two");
+  std::fs::create_dir_all(&project_two_dir).expect("2つ目の cwd を作れます");
+  let state_two = directory.join("state-two.json");
+  write_json(&state_two, &state_with_goal("x1"));
+  let mut config: Value = serde_json::from_str(&std::fs::read_to_string(&harness.config_path).unwrap()).unwrap();
+  config["mcpServers"]["mini-two"] = json!({
+    "command": "node",
+    "args": [mock_script().display().to_string(), "--state", state_two.display().to_string()],
+    "env": {}
+  });
+  config["servers"]["mini-two"] = json!({ "name": "j5ik2o-mac-mini-2", "kind": "Mac mini", "concurrency": 4 });
+  config["projects"].as_array_mut().unwrap().push(json!({
+    "name": "other", "server": "mini-two", "about": "説明2", "cwd": project_two_dir.display().to_string()
+  }));
+  write_json(&harness.config_path, &config);
+
+  let mut changes = harness.changes.subscribe();
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  let _ = changes.try_recv();
+
+  harness.rewrite_state(state_with_goal("g2"));
+  write_json(&state_two, &state_with_goal("x2"));
+  fail_event_recording_for(&harness.activity_db_path, "mac-mini");
+  poller.read_cycle_once().await.expect_err("記録できないサイクルは失敗で終わります");
+
+  assert!(changes.try_recv().is_ok(), "記録に失敗しても状態変化を通知します");
+  let second = harness.store.slot("other").expect("後続のスロットがあります");
+  assert!(second.connected, "後続プロジェクトは記録の失敗に巻き込まれません");
+  assert_eq!(
+    second.snapshot.expect("後続の状態があります").goals[0].goal_id,
+    "x2",
+    "後続プロジェクトの状態を更新します"
+  );
+
+  // 記録が回復した次のサイクルでは、先頭プロジェクトの未記録の変化だけが記録されます。
+  allow_event_recording(&harness.activity_db_path);
+  let recovered = poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
+  assert_eq!(recovered.events_recorded, 1, "未記録だった変化だけを回復後に記録します");
+  poller.shutdown().await;
+
+  let mut recorded: Vec<String> =
+    harness.activity.recent_events(50).unwrap().into_iter().map(|event| event.body).collect();
+  recorded.sort();
+  // 後続プロジェクトの変化は失敗したサイクルで記録され、先頭プロジェクトの変化は回復後に
+  // 1回だけ記録されます。どちらも欠落も二重記録もありません。
+  assert_eq!(recorded.len(), 2, "両プロジェクトの変化をちょうど1件ずつ記録します: {recorded:?}");
+  assert!(recorded.iter().any(|body| body.contains("g2")), "先頭プロジェクトの未記録の変化を記録します: {recorded:?}");
+  assert!(recorded.iter().any(|body| body.contains("x2")), "後続プロジェクトの変化を失敗サイクルで記録します: {recorded:?}");
+}
+
+#[tokio::test]
+async fn failed_event_record_keeps_the_connection_lost_event_once_after_recovery() {
+  // 接続断を検出したがその出来事を記録できなかったサイクルでは、connected 偽を確定させます。
+  // 回復したサイクルでは接続断を二重に記録せず、その後の変化を通常どおり記録します。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  fail_event_recording_for(&harness.activity_db_path, "mac-mini");
+  poller.read_cycle_once().await.expect_err("接続断の出来事を記録できないサイクルは失敗で終わります");
+  let down = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert!(!down.connected, "記録に失敗しても connected 偽を確定します");
+
+  allow_event_recording(&harness.activity_db_path);
+  harness.rewrite_state(state_with_goal("g1"));
+  poller.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
+  let recovered = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert!(recovered.connected, "復旧すれば connected 真です");
+  poller.shutdown().await;
+
+  let lost: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost, 0, "記録できなかった接続断を、復旧時に遡って二重に記録しません");
 }
