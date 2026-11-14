@@ -1,0 +1,52 @@
+import type { DashboardState } from "../proto/taktdash";
+import { restoreDashboardState } from "../state/restore-state";
+
+/** EventSource のうち、この画面が使う部分だけを表す。テストでは差し替える。 */
+export type EventSourceLike = {
+  onmessage: ((event: { data: string }) => void) | null;
+  onerror: ((event: unknown) => void) | null;
+  close(): void;
+};
+
+export type OpenStateStreamOptions = {
+  url: string;
+  createEventSource: (url: string) => EventSourceLike;
+  onState: (state: DashboardState) => void;
+  onError?: () => void;
+};
+
+export type StateStream = {
+  close: () => void;
+};
+
+export function openStateStream(options: OpenStateStreamOptions): StateStream {
+  let closed = false;
+  let source: EventSourceLike | undefined;
+
+  const connect = () => {
+    const current = options.createEventSource(options.url);
+    current.onmessage = (event) => {
+      // 送信側は DashboardState.toJSON の JSON（時刻は ISO 文字列）を送る。受信の境界で
+      // 内部の型へ復元し、Date 型の各フィールドを正規化する。
+      options.onState(restoreDashboardState(JSON.parse(event.data)));
+    };
+    current.onerror = () => {
+      if (closed) {
+        return;
+      }
+      current.close();
+      options.onError?.();
+      connect();
+    };
+    source = current;
+  };
+
+  connect();
+
+  return {
+    close: () => {
+      closed = true;
+      source?.close();
+    },
+  };
+}

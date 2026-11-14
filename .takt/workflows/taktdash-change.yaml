@@ -2,8 +2,8 @@ name: taktdash-change
 description: >-
   taktDash の変更作業の標準ワークフロー。builtin の development-core に
   taktdash-rules の知識を注入して計画・実装・レビュー・修正を行う。
-  機械ゲートの固定ステップ（make done 相当）は、ワークスペースの土台が
-  整った時点でこのワークフローへ足す。
+  develop の後、整形・clippy・テスト・型検査・lint を make done で
+  判定する機械ゲートの固定ステップを回す。
 all_steps:
   rules:
     - ref: findings-handling
@@ -12,7 +12,7 @@ all_steps:
       position: before_instruction
     - ref: taktdash-coding-rules
       position: before_instruction
-max_steps: 60
+max_steps: 70
 initial_step: develop
 steps:
   - name: develop
@@ -68,6 +68,41 @@ steps:
         - taktdash-rules
     rules:
       - condition: COMPLETE
-        next: COMPLETE
+        next: machine_gate
       - condition: ABORT
+        next: ABORT
+  - name: machine_gate
+    description: make done（整形・clippy・テスト・型検査・lint）をdevelop の成果に対して実行し、すべて通るときだけ完了とする
+    mode: system
+    system_inputs:
+      - type: command
+        as: result
+        command: make done
+        timeout_ms: 1800000
+    rules:
+      - condition: when(context.machine_gate.result.exit_code == 0)
+        next: COMPLETE
+      - condition: when(true)
+        next: fix_machine_gate
+  - name: fix_machine_gate
+    description: make done の出力を確認して失敗した検査を修正し、機械ゲートへ戻る
+    capabilities: edit
+    edit: true
+    persona: coder
+    policy: coding
+    knowledge: taktdash-rules
+    required_permission_mode: edit
+    pass_previous_response: false
+    instruction:
+      - fix-supervisor
+      - |
+        make done が失敗しました。次の出力の失敗している検査（整形・clippy・テスト・型検査・lint）を修正してください。
+        --- make done の stdout ---
+        {context:machine_gate.result.stdout}
+        --- make done の stderr ---
+        {context:machine_gate.result.stderr}
+    rules:
+      - condition: make done の失敗を修正して検証した
+        next: machine_gate
+      - condition: 裏付けられた原因を安全に修正または検証できない
         next: ABORT
