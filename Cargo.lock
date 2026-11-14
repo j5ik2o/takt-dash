@@ -968,8 +968,14 @@ dependencies = [
 name = "takt-dash-cli"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "prost",
  "prost-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
