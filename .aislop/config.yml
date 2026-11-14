@@ -1,0 +1,4 @@
+ci:
+  baseline: .aislop/ci-baseline.json
+telemetry:
+  enabled: false
