@@ -373,17 +373,31 @@ def rules_of(step):
     return [rule for rule in rules if isinstance(rule, dict)]
 
 
-def runs_make_done(step):
-    """mode が system のステップで、make done を固定コマンドとして実行するかを判定する。"""
+def runs_command(step, prefix):
+    """mode が system のステップで、指定した語で始まる固定コマンドを実行するかを判定する。"""
     if step.get("mode") != "system":
         return False
     for item in step.get("system_inputs") or []:
         if not isinstance(item, dict) or item.get("type") != "command":
             continue
         tokens = [token for token in str(item.get("command", "")).split() if token]
-        if tokens[:2] == ["make", "done"]:
+        if tokens[: len(prefix)] == prefix:
             return True
     return False
+
+
+def runs_make_done(step):
+    """mode が system のステップで、make done を固定コマンドとして実行するかを判定する。"""
+    return runs_command(step, ["make", "done"])
+
+
+def runs_aislop_gate(step):
+    """mode が system のステップで、aislop-gate の関門を固定コマンドとして実行するかを判定する。"""
+    return any(
+        "tools/aislop-gate/aislop_gate.py" in str(item.get("command", ""))
+        for item in step.get("system_inputs") or []
+        if isinstance(item, dict) and item.get("type") == "command"
+    ) and step.get("mode") == "system"
 
 
 def transition(rules, predicate):
@@ -391,6 +405,39 @@ def transition(rules, predicate):
         if predicate(rule):
             return rule.get("next")
     return None
+
+
+def check_machine_gate_step(named, name):
+    """機械ゲートの 1 ステップが、成功を次へ渡し、失敗を修正ステップへ回すかを検査する。"""
+    gate = named[name]
+    gate_rules = rules_of(gate)
+    succeeds = transition(
+        gate_rules,
+        lambda rule: "exit_code" in str(rule.get("condition", "")) and "== 0" in str(rule.get("condition", "")),
+    )
+    if succeeds is None:
+        raise GateError(f"{name} に成功（exit_code == 0）の遷移がありません")
+    failure_next = transition(gate_rules, lambda rule: rule.get("condition") == "when(true)")
+    if failure_next is None:
+        raise GateError(f"{name} に失敗時の遷移（when(true)）がありません")
+    if failure_next == "ABORT":
+        raise GateError(
+            f"{name} の失敗が修正ステップではなく ABORT へ遷移しています。"
+            f"失敗時は修正ステップ（例: fix_{name}）へ遷移してください"
+        )
+
+    fix = named.get(failure_next)
+    if fix is None:
+        raise GateError(f"{name} の失敗時の遷移先 {failure_next!r} のステップがありません")
+    instruction = fix.get("instruction")
+    instruction_text = "\n".join(instruction) if isinstance(instruction, list) else str(instruction or "")
+    if f"context:{name}.result.stdout" not in instruction_text and (
+        f"context:{name}.result.stderr" not in instruction_text
+    ):
+        raise GateError(f"{failure_next} の instruction に {name} の出力の参照がありません")
+    if transition(rules_of(fix), lambda rule: rule.get("next") == name) != name:
+        raise GateError(f"{failure_next} から {name} へ戻る遷移がありません")
+    return succeeds, failure_next
 
 
 def check_workflow_machine_gate(root):
@@ -412,36 +459,28 @@ def check_workflow_machine_gate(root):
     if complete_next != gate_name:
         raise GateError(f"develop の COMPLETE が {gate_name} へ遷移していません: {complete_next!r}")
 
+    aislop_steps = [step for step in steps if isinstance(step, dict) and runs_aislop_gate(step)]
+    if not aislop_steps:
+        raise GateError("aislop-gate を実行する mode: system のステップがありません")
+    aislop_name = aislop_steps[0]["name"]
+
     order = [step.get("name") for step in steps if isinstance(step, dict)]
     if order.index("develop") > order.index(gate_name):
         raise GateError(f"{gate_name} が develop より前の位置にあります")
+    if order.index(gate_name) > order.index(aislop_name):
+        raise GateError(f"{aislop_name} が {gate_name} より前の位置にあります")
 
-    gate_rules = rules_of(gate)
-    exit_code_next = transition(
-        gate_rules,
-        lambda rule: "exit_code" in str(rule.get("condition", "")) and rule.get("next") == "COMPLETE",
-    )
-    if exit_code_next != "COMPLETE":
-        raise GateError("機械ゲートの成功（exit_code == 0）で COMPLETE へ遷移していません")
-    failure_next = transition(gate_rules, lambda rule: rule.get("condition") == "when(true)")
-    if failure_next is None:
-        raise GateError("機械ゲートに失敗時の遷移（when(true)）がありません")
+    make_done_next, make_done_fix = check_machine_gate_step(named, gate_name)
+    if make_done_next != aislop_name:
+        raise GateError(f"{gate_name} の成功が {aislop_name} へ遷移していません: {make_done_next!r}")
 
-    fix = named.get(failure_next)
-    if fix is None:
-        raise GateError(f"機械ゲートの失敗時の遷移先 {failure_next!r} のステップがありません")
-    instruction = fix.get("instruction")
-    instruction_text = "\n".join(instruction) if isinstance(instruction, list) else str(instruction or "")
-    if f"context:{gate_name}.result.stdout" not in instruction_text and (
-        f"context:{gate_name}.result.stderr" not in instruction_text
-    ):
-        raise GateError(f"{failure_next} の instruction に make done の出力の参照がありません")
-    if transition(rules_of(fix), lambda rule: rule.get("next") == gate_name) != gate_name:
-        raise GateError(f"{failure_next} から {gate_name} へ戻る遷移がありません")
+    aislop_next, aislop_fix = check_machine_gate_step(named, aislop_name)
+    if aislop_next != "COMPLETE":
+        raise GateError(f"{aislop_name} の成功（exit_code == 0）で COMPLETE へ遷移していません: {aislop_next!r}")
 
     return {
-        "gate": gate_name,
-        "failure_step": failure_next,
+        "gates": [gate_name, aislop_name],
+        "failure_steps": [make_done_fix, aislop_fix],
         "develop_complete": complete_next,
         "max_steps": workflow.get("max_steps"),
     }
@@ -460,19 +499,44 @@ def check_ci(root):
     found = []
     for path in files:
         workflow = read_workflow(path)
-        runs = []
-        for job in (workflow.get("jobs") or {}).values():
+        ordered_runs = []
+        # チェックアウト順の不変条件はジョブ単位で判定する。ファイル全体で 1 回だけ
+        # 初期化すると、先のジョブの checkout が後続ジョブへ累積し、aislop を含む
+        # ジョブ自身に checkout が無くても合格してしまう。
+        aislop_misordered_jobs = []
+        aislop_ordered_jobs = []
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            checkout_seen = False
+            job_calls_aislop = False
+            job_aislop_ordered = False
             for step in job.get("steps") or []:
-                if isinstance(step.get("run"), str):
-                    runs.append(step["run"])
+                if not isinstance(step, dict):
+                    continue
+                uses = str(step.get("uses") or "")
+                if uses.startswith("actions/checkout"):
+                    checkout_seen = True
+                run = step.get("run")
+                if not isinstance(run, str):
+                    continue
+                ordered_runs.append(run)
+                if "tools/aislop-gate/aislop_gate.py" not in run:
+                    continue
+                job_calls_aislop = True
+                if checkout_seen:
+                    job_aislop_ordered = True
+                else:
+                    aislop_misordered_jobs.append(job_id)
+            if job_calls_aislop:
+                aislop_ordered_jobs.append(job_aislop_ordered)
         make_done = [
             line
-            for run in runs
+            for run in ordered_runs
             for line in run.splitlines()
             if [token for token in line.strip().split() if token][:2] == ["make", "done"]
         ]
         if not make_done:
             continue
+        aislop_called = bool(aislop_ordered_jobs)
         text = read_text(path)
         toolchains = re.findall(r"dtolnay/rust-toolchain@(stable|nightly)", text)
         components = re.findall(r"components:\s*([^\n]+)", text)
@@ -486,6 +550,10 @@ def check_ci(root):
             problems.append("Rust の nightly と rustfmt をセットアップしていません")
         if not has_node_action or not node_versions:
             problems.append("Node をセットアップしていません")
+        if not aislop_called:
+            problems.append("aislop のゲート（tools/aislop-gate/aislop_gate.py）を呼んでいません")
+        elif aislop_misordered_jobs:
+            problems.append("aislop のゲートをチェックアウトより前に呼んでいます")
         found.append({"file": str(path.relative_to(root)), "problems": problems})
 
     if not found:

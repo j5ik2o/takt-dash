@@ -35,7 +35,7 @@ export function StateStreamProvider({ initialState, children }: StateStreamProvi
       url: "/api/state",
       // ブラウザの EventSource は onmessage の引数が MessageEvent だが、この画面が
       // 使うのは data だけなので、必要な部分だけを持つ型として境界で受け取る。
-      createEventSource: (url) => new EventSource(url) as unknown as EventSourceLike,
+      createEventSource: (url) => toEventSourceLike(new EventSource(url)),
       onState: (next) => {
         setState(next);
         setDisconnected(false);
@@ -49,4 +49,24 @@ export function StateStreamProvider({ initialState, children }: StateStreamProvi
 
   const value = useMemo(() => ({ state, disconnected }), [state, disconnected]);
   return <StateStreamContext.Provider value={value}>{children}</StateStreamContext.Provider>;
+}
+
+// 二重の型アサーションを避けるため、EventSource をこの画面が使う EventSourceLike へ
+// 明示的に変換する。必要なメンバだけを渡し、型検査を迂回しない。
+function toEventSourceLike(source: EventSource): EventSourceLike {
+  return {
+    get onmessage() {
+      return source.onmessage as EventSourceLike["onmessage"];
+    },
+    set onmessage(handler) {
+      source.onmessage = handler as typeof source.onmessage;
+    },
+    get onerror() {
+      return source.onerror as EventSourceLike["onerror"];
+    },
+    set onerror(handler) {
+      source.onerror = handler as typeof source.onerror;
+    },
+    close: () => source.close(),
+  };
 }
