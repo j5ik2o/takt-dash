@@ -183,7 +183,7 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
         goal_id:                 run.goal_id.clone().unwrap_or_default(),
         task_name:               run.task_name.clone(),
         summary:                 run.summary.clone(),
-        started_at:              Some(timestamp(run.started_at)),
+        started_at:              optional_timestamp(run.started_at),
         steps:                   run
           .steps
           .iter()
@@ -195,7 +195,7 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
           })
           .collect(),
         current_step_started_at: optional_timestamp(run.current_step_started_at),
-        last_log_at:             Some(timestamp(run.last_log_at)),
+        last_log_at:             optional_timestamp(run.last_log_at),
         reports:                 run
           .reports
           .iter()
@@ -354,23 +354,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let task_name = if detail.task_name.is_empty() { stored_run.task_name.clone() } else { detail.task_name.clone() };
     let session_id =
       if detail.session_id.is_empty() { stored_run.session_id.clone() } else { detail.session_id.clone() };
-    let log_silent = self.store.is_log_silent(
-      &model::RunEntry {
-        run_slug:                detail.run_slug.clone(),
-        session_id:              session_id.clone(),
-        task_name:               task_name.clone(),
-        goal_id:                 goal_id.clone(),
-        summary:                 detail.summary.clone(),
-        status:                  detail.status,
-        current_step:            detail.current_step.clone(),
-        started_at:              detail.started_at,
-        current_step_started_at: detail.current_step_started_at,
-        last_log_at:             detail.last_log_at,
-        steps:                   Vec::new(),
-        reports:                 Vec::new(),
-      },
-      Utc::now(),
-    );
+    let log_silent = self.store.is_log_silent_at(detail.last_log_at, Utc::now());
     Ok(Response::new(GetRunDetailResponse {
       run_slug: detail.run_slug,
       session_id,
@@ -382,7 +366,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       summary: detail.summary,
       workflow: detail.workflow,
       status: run_status(detail.status) as i32,
-      started_at: Some(timestamp(detail.started_at)),
+      started_at: optional_timestamp(detail.started_at),
       current_step: detail.current_step,
       current_iteration: detail.current_iteration,
       current_step_started_at: optional_timestamp(detail.current_step_started_at),
@@ -409,7 +393,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
           content:        instruction.content,
         })
         .collect(),
-      last_log_at: Some(timestamp(detail.last_log_at)),
+      last_log_at: optional_timestamp(detail.last_log_at),
       log_silent,
       server_connected: view.connected,
       server_last_read_at: optional_timestamp(view.last_read_at),

@@ -43,9 +43,9 @@ fn run_entry(run_slug: &str) -> RunEntry {
     summary:                 "実装の run".to_owned(),
     status:                  takt_dash_backend::model::RunStatus::Running,
     current_step:            Some("implement".to_owned()),
-    started_at:              time("2026-11-13T09:00:00Z"),
+    started_at:              Some(time("2026-11-13T09:00:00Z")),
     current_step_started_at: Some(time("2026-11-13T09:05:00Z")),
-    last_log_at:             time("2026-11-13T09:06:00Z"),
+    last_log_at:             Some(time("2026-11-13T09:06:00Z")),
     steps:                   vec![
       takt_dash_backend::model::RunStepEntry {
         step_name:  "plan".to_owned(),
@@ -71,7 +71,7 @@ fn run_entry(run_slug: &str) -> RunEntry {
 /// run。一覧の組み立てで「無音ではない」経路を決定的に観測するために使う。
 fn recent_run(run_slug: &str) -> RunEntry {
   let mut run = run_entry(run_slug);
-  run.last_log_at = Utc::now();
+  run.last_log_at = Some(Utc::now());
   run
 }
 
@@ -206,7 +206,7 @@ async fn get_overview_marks_a_run_silent_beyond_the_configured_threshold() {
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
   let mut stale_run = run_entry("run-1");
-  stale_run.last_log_at = Utc::now() - Duration::minutes(30);
+  stale_run.last_log_at = Some(Utc::now() - Duration::minutes(30));
   let snapshot = ProjectSnapshot {
     goals:         vec![],
     tasks:         vec![],

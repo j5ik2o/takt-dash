@@ -170,13 +170,22 @@ impl StateStore {
 
   /// ログの無音の判定を、run ごとに返す。
   pub fn is_log_silent(&self, run: &RunEntry, now: DateTime<Utc>) -> bool {
+    self.is_log_silent_at(run.last_log_at, now)
+  }
+
+  /// 最後のログの時刻が分からない場合を「無音」と判定しない無音判定。takt_get_run の応答に
+  /// 最後のログの時刻が無い run の詳細取得で使います。
+  pub fn is_log_silent_at(&self, last_log_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
-    is_log_silent(run, now, inner.thresholds.run_log_silent_minutes)
+    is_log_silent_at(last_log_at, now, inner.thresholds.run_log_silent_minutes)
   }
 }
 
-fn is_log_silent(run: &RunEntry, now: DateTime<Utc>, silent_minutes: u32) -> bool {
-  now.signed_duration_since(run.last_log_at) > Duration::minutes(i64::from(silent_minutes))
+fn is_log_silent_at(last_log_at: Option<DateTime<Utc>>, now: DateTime<Utc>, silent_minutes: u32) -> bool {
+  let Some(last_log_at) = last_log_at else {
+    return false;
+  };
+  now.signed_duration_since(last_log_at) > Duration::minutes(i64::from(silent_minutes))
 }
 
 fn inquiry_decisions(

@@ -162,10 +162,10 @@ message Run {
   string goal_id = 5;                               // ゴール ID
   string task_name = 6;                             // タスク名
   string summary = 7;                               // 要約
-  google.protobuf.Timestamp started_at = 8;         // 開始時刻
+  optional google.protobuf.Timestamp started_at = 8;  // 開始時刻（実行中の run は未設定があり得る）
   repeated RunStep steps = 9;                       // ステップの並び（最後が今のステップ）
   optional google.protobuf.Timestamp current_step_started_at = 10;  // 今のステップの開始時刻
-  google.protobuf.Timestamp last_log_at = 11;       // 最後のログの時刻
+  optional google.protobuf.Timestamp last_log_at = 11;  // 最後のログの時刻（実行中の run は未設定があり得る）
   repeated ReportSummary reports = 12;              // レポートの一覧
   RunStatus status = 13;                            // 状態
   bool log_silent = 14;                             // ログの無音の判定済みフラグ
@@ -299,7 +299,7 @@ message GetRunDetailResponse {
   string summary = 8;                           // 要約
   string workflow = 9;                          // ワークフロー
   RunStatus status = 10;                        // 状態
-  google.protobuf.Timestamp started_at = 11;    // 開始時刻
+  optional google.protobuf.Timestamp started_at = 11;  // 開始時刻（実行中の run は未設定があり得る）
   optional string current_step = 12;            // 今のステップ
   optional int32 current_iteration = 13;        // 今の反復回数
   optional google.protobuf.Timestamp current_step_started_at = 14;  // 今のステップの開始時刻
@@ -309,7 +309,7 @@ message GetRunDetailResponse {
   string log_tail = 18;                         // ログの末尾
   repeated RunReport reports = 19;              // レポートの一覧と本文
   repeated RunInstruction instructions = 20;    // 指示書の一覧
-  google.protobuf.Timestamp last_log_at = 21;   // 最後のログの時刻
+  optional google.protobuf.Timestamp last_log_at = 21;  // 最後のログの時刻（実行中の run は未設定があり得る）
   bool log_silent = 22;                         // ログの無音の判定済みフラグ
   bool server_connected = 23;                   // 読み先の応答の有無
   google.protobuf.Timestamp server_last_read_at = 24;  // 読み先から最後に読めた時刻

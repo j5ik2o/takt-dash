@@ -133,23 +133,23 @@ pub fn notification(id: &str, kind: &str, recorded_at: DateTime<Utc>) -> Notific
 
 pub fn run(run_slug: &str, task_name: &str, last_log_at: DateTime<Utc>) -> RunEntry {
   RunEntry {
-    run_slug: run_slug.to_owned(),
-    session_id: String::new(),
-    task_name: task_name.to_owned(),
-    goal_id: None,
-    summary: String::new(),
-    status: takt_dash_backend::model::RunStatus::Running,
-    current_step: Some("implement".to_owned()),
-    started_at: last_log_at,
+    run_slug:                run_slug.to_owned(),
+    session_id:              String::new(),
+    task_name:               task_name.to_owned(),
+    goal_id:                 None,
+    summary:                 String::new(),
+    status:                  takt_dash_backend::model::RunStatus::Running,
+    current_step:            Some("implement".to_owned()),
+    started_at:              Some(last_log_at),
     current_step_started_at: None,
-    last_log_at,
-    steps: vec![takt_dash_backend::model::RunStepEntry {
+    last_log_at:             Some(last_log_at),
+    steps:                   vec![takt_dash_backend::model::RunStepEntry {
       step_name:  "implement".to_owned(),
       model:      String::new(),
       started_at: last_log_at,
       ended_at:   None,
     }],
-    reports: Vec::new(),
+    reports:                 Vec::new(),
   }
 }
 

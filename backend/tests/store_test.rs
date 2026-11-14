@@ -191,6 +191,15 @@ fn log_silent_uses_configured_threshold() {
 }
 
 #[test]
+fn log_silent_at_treats_an_unknown_last_log_time_as_not_silent() {
+  let store = store_with(240, 10);
+
+  assert!(store.is_log_silent_at(Some(minutes_before(now(), 30)), now()), "10分を超えた無音は異常です");
+  assert!(!store.is_log_silent_at(Some(minutes_before(now(), 2)), now()), "10分以内は異常ではありません");
+  assert!(!store.is_log_silent_at(None, now()), "最後のログの時刻が分からない run を無音と判定しません");
+}
+
+#[test]
 fn failure_keeps_snapshot_and_last_read_at_but_marks_disconnected() {
   let store = store_with(240, 10);
   let read_at = time("2026-11-13T11:00:00Z");

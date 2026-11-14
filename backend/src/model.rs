@@ -178,9 +178,9 @@ pub struct RunEntry {
   pub summary:                 String,
   pub status:                  RunStatus,
   pub current_step:            Option<String>,
-  pub started_at:              DateTime<Utc>,
+  pub started_at:              Option<DateTime<Utc>>,
   pub current_step_started_at: Option<DateTime<Utc>>,
-  pub last_log_at:             DateTime<Utc>,
+  pub last_log_at:             Option<DateTime<Utc>>,
   pub steps:                   Vec<RunStepEntry>,
   pub reports:                 Vec<ReportEntry>,
 }
@@ -196,7 +196,7 @@ pub struct RunDetail {
   pub summary: String,
   pub workflow: String,
   pub status: RunStatus,
-  pub started_at: DateTime<Utc>,
+  pub started_at: Option<DateTime<Utc>>,
   pub current_step: Option<String>,
   pub current_iteration: Option<i32>,
   pub current_step_started_at: Option<DateTime<Utc>>,
@@ -206,7 +206,7 @@ pub struct RunDetail {
   pub log_tail: String,
   pub reports: Vec<RunReportEntry>,
   pub instructions: Vec<RunInstructionEntry>,
-  pub last_log_at: DateTime<Utc>,
+  pub last_log_at: Option<DateTime<Utc>>,
 }
 
 /// run のステップの記録。
