@@ -706,7 +706,10 @@ async fn failed_event_record_does_not_stop_the_remaining_projects() {
   // 1回だけ記録されます。どちらも欠落も二重記録もありません。
   assert_eq!(recorded.len(), 2, "両プロジェクトの変化をちょうど1件ずつ記録します: {recorded:?}");
   assert!(recorded.iter().any(|body| body.contains("g2")), "先頭プロジェクトの未記録の変化を記録します: {recorded:?}");
-  assert!(recorded.iter().any(|body| body.contains("x2")), "後続プロジェクトの変化を失敗サイクルで記録します: {recorded:?}");
+  assert!(
+    recorded.iter().any(|body| body.contains("x2")),
+    "後続プロジェクトの変化を失敗サイクルで記録します: {recorded:?}"
+  );
 }
 
 #[tokio::test]
