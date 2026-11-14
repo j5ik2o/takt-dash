@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // gRPC はネイティブ実装をサーバー側だけで動かす。サーバーのバンドルからは外す。
+  serverExternalPackages: ["@grpc/grpc-js"],
 };
 
 export default nextConfig;

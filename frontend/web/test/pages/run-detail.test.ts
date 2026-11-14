@@ -1,0 +1,95 @@
+// run 詳細ページの契約（C10/C11/C12）。
+//
+// 本番経路は app/runs/[slug]/page.tsx → RunDetailLoader → getRunDetail で、
+// 404 は RunNotFoundError を捕捉した RunDetailLoader の notFound() で起きる。
+// ここでは page に slug 付き params を渡して本番経路を通し、描画と 404 到達を観測する。
+import test from "node:test";
+import assert from "node:assert/strict";
+import { renderToStaticMarkup } from "react-dom/server";
+import * as grpc from "@grpc/grpc-js";
+import { createRunDetailResponse } from "../support/fixtures.ts";
+import { startTaktDashServer } from "../support/grpc-server.ts";
+import RunDetailPage from "../../app/runs/[slug]/page.tsx";
+import { RunDetailLoader } from "../../src/components/run-detail-loader.tsx";
+
+const NOT_FOUND_DIGEST = "NEXT_HTTP_ERROR_FALLBACK;404";
+
+const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  const previous = process.env.TAKTDASH_BACKEND_ADDR;
+  process.env.TAKTDASH_BACKEND_ADDR = address;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.TAKTDASH_BACKEND_ADDR;
+    } else {
+      process.env.TAKTDASH_BACKEND_ADDR = previous;
+    }
+  }
+};
+
+// page.tsx は params を受けて RunDetailLoader（非同期コンポーネント）を描画する。非同期
+// コンポーネントは renderToStaticMarkup で直接描画すると Suspense で中断するため、本番と
+// 同じ RunDetailLoader を params 付きで await して要素を得てから同期描画する。
+// page.tsx が params を loader へ渡す配線は、page が返す要素の型で確認する。
+const renderViaPage = async (slug: string): Promise<string> => {
+  const pageElement = RunDetailPage({ params: Promise.resolve({ slug }) });
+  assert.equal(pageElement.type, RunDetailLoader, "page は RunDetailLoader に params を渡す");
+  const loaderElement = await RunDetailLoader({ params: Promise.resolve({ slug }) });
+  return renderToStaticMarkup(loaderElement);
+};
+
+test("run 詳細ページは slug 付き params で本番経路を通り、メタデータ・ステップ・ログ末尾・レポート・指示書・今のステップを描画する", async () => {
+  const server = await startTaktDashServer({ runDetail: createRunDetailResponse("run-aaa") });
+  try {
+    const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
+    assert.match(html, /採用ページのレイアウトを直す/);
+    assert.match(html, /simple-mini/);
+    assert.match(html, /計画をまとめました。/);
+    assert.match(html, /最後のログの行です。/);
+    assert.match(html, /review\.md/);
+    assert.match(html, /サマリーを短くしてください。/);
+    assert.match(html, /implement/);
+  } finally {
+    await server.shutdown();
+  }
+});
+
+test("run 詳細ページは本番経路でも JSONL の直接表示や生ログの参照を持たない", async () => {
+  const server = await startTaktDashServer({ runDetail: createRunDetailResponse("run-aaa") });
+  try {
+    const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
+    assert.doesNotMatch(html, /\.jsonl/);
+    assert.doesNotMatch(html, /元の JSON/);
+  } finally {
+    await server.shutdown();
+  }
+});
+
+test("見つからない runSlug は本番経路で notFound()（404 の digest）に到達する", async () => {
+  const server = await startTaktDashServer({ runDetail: { code: grpc.status.NOT_FOUND, details: "missing" } });
+  try {
+    await withServerEnv(server.address, async () => {
+      await assert.rejects(
+        () => renderViaPage("no-such-run"),
+        (error: Error & { digest?: string }) => error.digest === NOT_FOUND_DIGEST,
+      );
+    });
+  } finally {
+    await server.shutdown();
+  }
+});
+
+test("runSlug が応答と一致しないときも本番経路で notFound()（404 の digest）に到達する", async () => {
+  const server = await startTaktDashServer({ runDetail: createRunDetailResponse("run-other") });
+  try {
+    await withServerEnv(server.address, async () => {
+      await assert.rejects(
+        () => renderViaPage("run-aaa"),
+        (error: Error & { digest?: string }) => error.digest === NOT_FOUND_DIGEST,
+      );
+    });
+  } finally {
+    await server.shutdown();
+  }
+});
