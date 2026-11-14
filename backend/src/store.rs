@@ -88,6 +88,17 @@ impl StateStore {
     inner.projects = projects;
   }
 
+  /// 接続先の設定が変わったプロジェクトのスロットを未読へ戻す。
+  ///
+  /// 旧接続先の snapshot・読めた時刻・接続状態を新接続先へ持ち越さないために使います。プロジェクト
+  /// の一覧とスロットの位置は保持し、内容だけを未読へ戻します。
+  pub fn reset_project(&self, project: &str) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    if let Some(slot) = inner.slots.get_mut(project) {
+      *slot = ProjectSlot::unread();
+    }
+  }
+
   /// 読み取りが失敗したプロジェクトを接続断として扱う。snapshot と last_read_at は保持する。
   pub fn record_failure(&self, project: &str) {
     let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");

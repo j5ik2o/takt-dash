@@ -69,6 +69,13 @@ impl Harness {
   fn rewrite_state(&self, state: Value) {
     write_json(&self.state_path, &state);
   }
+
+  fn rewrite_config(&self, mutate: impl FnOnce(&mut Value)) {
+    let mut value: Value = serde_json::from_str(&std::fs::read_to_string(&self.config_path).expect("設定を読めます"))
+      .expect("設定を解析できます");
+    mutate(&mut value);
+    write_json(&self.config_path, &value);
+  }
 }
 
 #[tokio::test]
@@ -462,5 +469,106 @@ async fn change_notification_is_sent_when_a_project_becomes_unreachable() {
   poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
 
   assert!(changes.try_recv().is_ok(), "接続断への変化も通知します");
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn changed_client_settings_are_applied_on_the_same_poller() {
+  // 同じ Poller 実体のまま、既存サーバーの起動方法（args）を変えると、
+  // 次のサイクルから新しい設定で読む。 プロジェクト名だけで既存クライアントを再利用する実装では、
+  // 起動設定の変更が反映されず失敗する。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  let alternate = harness._directory.path().join("state-alternate.json");
+  write_json(&alternate, &state_with_goal("g-changed"));
+  harness.rewrite_config(|value| {
+    value["mcpServers"]["mac-mini"]["args"] =
+      json!([mock_script().display().to_string(), "--state", alternate.display().to_string()]);
+  });
+
+  poller.read_cycle_once().await.expect("設定変更後のサイクルを実行できます");
+  poller.shutdown().await;
+
+  let slot = harness.store.slot("takt-dash").expect("スロットがあります");
+  let goals: Vec<String> =
+    slot.snapshot.expect("読み取った状態があります").goals.into_iter().map(|goal| goal.goal_id).collect();
+  assert!(goals.contains(&"g-changed".to_owned()), "起動設定の変更が次のサイクルから反映されます: {goals:?}");
+}
+
+#[tokio::test]
+async fn changed_server_settings_read_new_state_without_stale_slot_on_failure() {
+  // 接続設定を変えた直後の読み取りが失敗しても、旧サーバー由来の snapshot をスロットに残さない。
+  // 差分基準とスロットをリセットしない実装では、旧サーバーの状態が新接続先の所属のまま残る。
+  let harness = Harness::new(state_with_goal("g1"));
+  let directory = harness._directory.path();
+  let broken = directory.join("state-broken.json");
+  std::fs::write(&broken, "{ this is not json").expect("壊れた状態ファイルを書けます");
+
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  let before = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert_eq!(before.snapshot.expect("旧サーバーの状態があります").goals[0].goal_id, "g1");
+
+  harness.rewrite_config(|value| {
+    value["mcpServers"]["mac-mini"]["args"] =
+      json!([mock_script().display().to_string(), "--state", broken.display().to_string()]);
+  });
+  let report = poller.read_cycle_once().await.expect("起動設定変更後のサイクルは完了します");
+  poller.shutdown().await;
+
+  assert_eq!(report.projects_failed, 1, "新接続先の初回読み取りは失敗します");
+  let slot = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert!(!slot.connected, "失敗したプロジェクトは connected 偽です");
+  assert!(
+    slot.snapshot.is_none(),
+    "接続先を変えたら旧サーバー由来の snapshot を残しません: {:?}",
+    slot.snapshot.map(|snapshot| snapshot.goals.into_iter().map(|goal| goal.goal_id).collect::<Vec<_>>())
+  );
+}
+
+#[tokio::test]
+async fn changed_server_baseline_reset_prevents_cross_server_transition_events() {
+  // 接続設定が変わったら旧接続先の差分基準をリセットする。リセットしない実装では、新サーバーの
+  // 同じ goal id の状態を旧サーバーの状態との差分として扱い、遷移の出来事を誤記録する。
+  let harness = Harness::new(state_with_goal("g1"));
+  let directory = harness._directory.path();
+  let alternate = directory.join("state-alternate.json");
+  write_json(
+    &alternate,
+    &json!({ "goals": [ { "id": "g1", "status": "created", "executionStatus": "paused", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ] }),
+  );
+
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  harness.rewrite_config(|value| {
+    value["mcpServers"]["mac-mini"]["args"] =
+      json!([mock_script().display().to_string(), "--state", alternate.display().to_string()]);
+  });
+  let report = poller.read_cycle_once().await.expect("起動設定変更後のサイクルを実行できます");
+  poller.shutdown().await;
+
+  assert_eq!(report.events_recorded, 0, "新接続先の初回は基準化のみで出来事を出しません");
+  let events: Vec<EventKind> =
+    harness.activity.recent_events(50).expect("記録した出来事を読めます").into_iter().map(|event| event.kind).collect();
+  assert!(!events.contains(&EventKind::Paused), "旧接続先との差分で一時停止を誤記録しません: {events:?}");
+}
+
+#[tokio::test]
+async fn unchanged_client_settings_keep_the_baseline_and_emit_no_duplicate_events() {
+  // 設定が変わっていないプロジェクトはクライアントも差分基準も保持する。
+  // 毎サイクル再作成する実装では、 2サイクル目が基準化からやり直しになり、
+  // 内容が同じでも出来事を取りこぼしたり重複させたりする。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  let second = poller.read_cycle_once().await.expect("設定を変えない2回目のサイクルを実行できます");
+
+  assert_eq!(second.events_recorded, 0, "内容が同じなら設定を変えないサイクルでは出来事を出しません");
+  let slot = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert!(slot.connected, "クライアントを保持したまま読み続けます");
   poller.shutdown().await;
 }
