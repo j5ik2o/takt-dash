@@ -149,7 +149,11 @@ async fn tools_parse_goals_and_tasks_into_typed_snapshot() {
   assert_eq!(snapshot.tasks[0].status, TaskStatus::Running);
   assert!(snapshot.tasks[1].merge_task, "仕上げタスクを読み取ります");
   assert_eq!(snapshot.runs.len(), 1);
-  assert_eq!(snapshot.runs[0].last_log_at, time("2026-11-13T10:05:00Z"), "最後のログの時刻は末尾の stepLogs です");
+  assert_eq!(
+    snapshot.runs[0].last_log_at,
+    Some(time("2026-11-13T10:05:00Z")),
+    "最後のログの時刻は末尾の stepLogs です"
+  );
   client.shutdown().await;
 }
 
@@ -389,7 +393,53 @@ async fn run_with_more_than_one_page_of_step_logs_uses_the_last_step_time() {
 
   let run = &snapshot.runs[0];
   assert_eq!(run.steps.len(), 51, "2 ページ目のステップも集めます");
-  assert_eq!(run.last_log_at, time("2026-11-13T10:50:00Z"), "最後のログの時刻は末尾ページの最終ステップです");
+  assert_eq!(run.last_log_at, Some(time("2026-11-13T10:50:00Z")), "最後のログの時刻は末尾ページの最終ステップです");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_snapshot_reads_start_time_only_run() {
+  // 実行中の run は開始時刻を `startTime` で返す。一覧の読み取りが `startedAt` だけを読むと
+  // parse エラーで一覧全体が失敗するため、`startTime` でも run を取り込めることを観測する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1" } ],
+      "runs": { "r1": { "runSlug": "r1", "currentStep": "implement", "startTime": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ] } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+
+  assert_eq!(snapshot.runs.len(), 1, "startTime だけを持つ run も一覧に含みます");
+  assert_eq!(snapshot.runs[0].started_at, Some(time("2026-11-13T10:00:00Z")), "開始時刻は startTime の値です");
+  assert_eq!(snapshot.runs[0].last_log_at, Some(time("2026-11-13T10:20:00Z")), "最後のログの時刻はステップの時刻です");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_snapshot_keeps_a_run_without_any_start_or_log_time() {
+  // 実行中の run が開始時刻も最後のログの時刻も持たない場合でも、一覧の読み取りが失敗せず
+  // run が snapshot に含まれることを観測する。一覧が解析エラーで全体失敗すると run が状態
+  // ストアに現れず、詳細取得の入口 find_run_project が成立しない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1" } ],
+      "runs": { "r1": { "runSlug": "r1", "currentStep": "implement", "stepLogs": [] } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+
+  assert_eq!(snapshot.runs.len(), 1, "開始時刻もログ時刻も無い run も一覧に含みます");
+  assert_eq!(snapshot.runs[0].run_slug, "r1");
+  assert_eq!(snapshot.runs[0].started_at, None, "開始時刻は未設定として保持します");
+  assert_eq!(snapshot.runs[0].last_log_at, None, "最後のログの時刻も未設定として保持します");
   client.shutdown().await;
 }
 
@@ -413,9 +463,9 @@ async fn is_error_on_get_run_keeps_previous_runs_without_transport_failure() {
       summary:                 String::new(),
       status:                  takt_dash_backend::model::RunStatus::Running,
       current_step:            Some("implement".to_owned()),
-      started_at:              time("2026-11-13T10:00:00Z"),
+      started_at:              Some(time("2026-11-13T10:00:00Z")),
       current_step_started_at: None,
-      last_log_at:             time("2026-11-13T10:05:00Z"),
+      last_log_at:             Some(time("2026-11-13T10:05:00Z")),
       steps:                   vec![takt_dash_backend::model::RunStepEntry {
         step_name:  "implement".to_owned(),
         model:      String::new(),
@@ -433,7 +483,7 @@ async fn is_error_on_get_run_keeps_previous_runs_without_transport_failure() {
     .expect("get_run の isError で全体は失敗しません");
 
   assert_eq!(snapshot.runs.len(), 1, "get_run の道具エラー時は前回の run を保持します");
-  assert_eq!(snapshot.runs[0].last_log_at, time("2026-11-13T10:05:00Z"));
+  assert_eq!(snapshot.runs[0].last_log_at, Some(time("2026-11-13T10:05:00Z")));
   client.shutdown().await;
 }
 
@@ -463,9 +513,9 @@ async fn one_run_tool_error_keeps_only_that_run_previous_and_updates_the_healthy
       summary:                 String::new(),
       status:                  takt_dash_backend::model::RunStatus::Running,
       current_step:            Some("implement".to_owned()),
-      started_at:              time("2026-11-13T10:00:00Z"),
+      started_at:              Some(time("2026-11-13T10:00:00Z")),
       current_step_started_at: None,
-      last_log_at:             time("2026-11-13T10:05:00Z"),
+      last_log_at:             Some(time("2026-11-13T10:05:00Z")),
       steps:                   vec![takt_dash_backend::model::RunStepEntry {
         step_name:  "implement".to_owned(),
         model:      String::new(),
@@ -484,9 +534,9 @@ async fn one_run_tool_error_keeps_only_that_run_previous_and_updates_the_healthy
 
   assert_eq!(snapshot.runs.len(), 2, "エラー run は前回値で残り、健常 run も含めて 2 件です");
   let run_a = snapshot.runs.iter().find(|run| run.run_slug == "runA").expect("runA が残ります");
-  assert_eq!(run_a.last_log_at, time("2026-11-13T10:05:00Z"), "道具エラーの runA は前回値です");
+  assert_eq!(run_a.last_log_at, Some(time("2026-11-13T10:05:00Z")), "道具エラーの runA は前回値です");
   let run_b = snapshot.runs.iter().find(|run| run.run_slug == "runB").expect("runB が残ります");
-  assert_eq!(run_b.last_log_at, time("2026-11-13T10:20:00Z"), "健常な runB は今回値へ更新されます");
+  assert_eq!(run_b.last_log_at, Some(time("2026-11-13T10:20:00Z")), "健常な runB は今回値へ更新されます");
   client.shutdown().await;
 }
 

@@ -510,8 +510,8 @@ export interface Run {
   taskName: string;
   /** 要約 */
   summary: string;
-  /** 開始時刻 */
-  startedAt:
+  /** 開始時刻（実行中の run は未設定があり得る） */
+  startedAt?:
     | Date
     | undefined;
   /** ステップの並び（最後が今のステップ） */
@@ -520,8 +520,8 @@ export interface Run {
   currentStepStartedAt?:
     | Date
     | undefined;
-  /** 最後のログの時刻 */
-  lastLogAt:
+  /** 最後のログの時刻（実行中の run は未設定があり得る） */
+  lastLogAt?:
     | Date
     | undefined;
   /** レポートの一覧 */
@@ -747,8 +747,8 @@ export interface GetRunDetailResponse {
   workflow: string;
   /** 状態 */
   status: RunStatus;
-  /** 開始時刻 */
-  startedAt:
+  /** 開始時刻（実行中の run は未設定があり得る） */
+  startedAt?:
     | Date
     | undefined;
   /** 今のステップ */
@@ -779,8 +779,8 @@ export interface GetRunDetailResponse {
   reports: RunReport[];
   /** 指示書の一覧 */
   instructions: RunInstruction[];
-  /** 最後のログの時刻 */
-  lastLogAt:
+  /** 最後のログの時刻（実行中の run は未設定があり得る） */
+  lastLogAt?:
     | Date
     | undefined;
   /** ログの無音の判定済みフラグ */
