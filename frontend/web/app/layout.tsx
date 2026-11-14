@@ -1,26 +1,50 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+import { BackendUnavailableError, createBackendClient } from "@/src/grpc/client";
+import { DashboardState } from "@/src/proto/taktdash";
+import { resolveThresholds } from "@/src/state/dashboard";
+import { StateStreamProvider } from "@/src/components/state-provider";
+import { Sidebar } from "@/src/components/sidebar";
+import { BackendUnavailableNotice } from "@/src/components/backend-unavailable-notice";
 
 export const metadata: Metadata = {
-  title: "taktDash のフロントエンド",
-  description: "taktDash のフロントエンドは、バックエンドから取得した状態を画面に表示します。",
+  title: "taktDash",
+  description: "taktDash は、takt manager 群の状態を集約する読み取り用のダッシュボードです。",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export const dynamic = "force-dynamic";
+
+const EMPTY_STATE = DashboardState.create({
+  thresholds: resolveThresholds(undefined),
+});
+
+async function loadInitialState(): Promise<{ state: DashboardState; unavailable: boolean }> {
+  const client = createBackendClient();
+  try {
+    return { state: await client.getOverview(), unavailable: false };
+  } catch (error) {
+    if (error instanceof BackendUnavailableError) {
+      return { state: EMPTY_STATE, unavailable: true };
+    }
+    throw error;
+  } finally {
+    await client.close();
+  }
+}
+
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  const { state, unavailable } = await loadInitialState();
   return (
-    <html lang="ja" className={`${geistSans.variable} ${geistMono.variable}`}>
-      <body>{children}</body>
+    <html lang="ja">
+      <body>
+        <div className="shell">
+          <Sidebar servers={state.servers} pendingCount={state.pendingDecisions.length} />
+          <div className="content">
+            {unavailable ? <BackendUnavailableNotice /> : null}
+            <StateStreamProvider initialState={state}>{children}</StateStreamProvider>
+          </div>
+        </div>
+      </body>
     </html>
   );
 }

@@ -1,13 +1,14 @@
 :root {
   --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --foreground: #1f2328;
+  --muted: #57606a;
+  --line: #d8dee4;
+  --surface: #f6f8fa;
+  --accent: #0f766e;
+  --warn: #b45309;
+  --warn-bg: #fff7ed;
+  --live: #0f766e;
+  --down: #9ca3af;
 }
 
 html {
@@ -22,13 +23,10 @@ body {
 
 body {
   min-height: 100%;
-  display: flex;
-  flex-direction: column;
   color: var(--foreground);
   background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: system-ui, -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
@@ -37,13 +35,395 @@ body {
   margin: 0;
 }
 
+ul {
+  list-style: none;
+}
+
 a {
   color: inherit;
   text-decoration: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  html {
-    color-scheme: dark;
+.shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--accent);
+}
+
+.side-title {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.srv-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 14px;
+}
+
+.srv-state {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.nav li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 14px;
+}
+
+.nav a:hover {
+  color: var(--accent);
+}
+
+.badge {
+  margin-left: auto;
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.content {
+  padding: 24px;
+  min-width: 0;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  max-width: 1200px;
+}
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.page-head h1 {
+  font-size: 22px;
+  margin-bottom: 6px;
+}
+
+.page-head p {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.banner {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+.banner.warn {
+  border-color: var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.tiles,
+.cards,
+.scards {
+  display: grid;
+  gap: 16px;
+}
+
+.tiles {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.cards {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.scards {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tile,
+.card,
+.scard {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  background: #fff;
+}
+
+.tile .label,
+.card .k,
+.tile .kv span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tile .num {
+  font-size: 30px;
+  font-weight: 700;
+  margin: 6px 0;
+}
+
+.tile .num small {
+  font-size: 14px;
+  margin-left: 4px;
+  color: var(--muted);
+}
+
+.tile .num.word {
+  font-size: 22px;
+}
+
+.t-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.kv li {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  padding: 2px 0;
+}
+
+.sec {
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+
+.card-head,
+.sc-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.about,
+.gs,
+.read-at {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.goals,
+.mini-runs,
+.runs,
+.steps,
+.reports,
+.instructions,
+.tray-list,
+.events,
+.daily,
+.counts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.run-row,
+.mini-runs li,
+.events li,
+.tray-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  font-size: 14px;
+}
+
+.st,
+.big-badge {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.big-badge {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--down);
+}
+
+.dot.live,
+.dot.idle {
+  background: var(--live);
+}
+
+.dot.down {
+  background: var(--down);
+}
+
+.scard.down {
+  border-color: var(--warn);
+}
+
+.scard.down .big-badge {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.view {
+  color: var(--accent);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.empty,
+.note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tray-item.stale {
+  background: var(--warn-bg);
+}
+
+.stale-label {
+  color: var(--warn);
+  margin-left: 8px;
+  font-size: 13px;
+}
+
+.daily li,
+.counts li {
+  display: flex;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.daily li.warn {
+  color: var(--warn);
+}
+
+.events li.warn .kind {
+  color: var(--warn);
+}
+
+.ev time {
+  color: var(--muted);
+  width: 48px;
+}
+
+.sum-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.sum-grid .f.wide {
+  grid-column: span 3;
+}
+
+.sum-grid .k {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sum-grid .v {
+  font-size: 14px;
+}
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 10px;
+  margin-top: 6px;
+}
+
+.back {
+  color: var(--accent);
+  font-size: 13px;
+}
+
+/* モバイルではサイドバーを横スクロールの帯にし、カード類を1列にする。 */
+@media (max-width: 720px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    gap: 14px;
+    padding: 12px 16px;
+  }
+
+  .side-block {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .side-title {
+    margin: 0;
+    white-space: nowrap;
+  }
+
+  .srv-list,
+  .nav {
+    flex-direction: row;
+    display: flex;
+    gap: 12px;
+  }
+
+  .tiles,
+  .cards,
+  .scards,
+  .sum-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sum-grid .f.wide {
+    grid-column: auto;
+  }
+
+  .content {
+    padding: 16px;
   }
 }
