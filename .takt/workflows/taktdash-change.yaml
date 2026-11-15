@@ -96,6 +96,19 @@ steps:
         next: create_pr
       - condition: when(true)
         next: fix_machine_gate
+  - name: aislop_gate
+    description: aislop の警告以上の指摘を受け入れ一覧と照合し、一覧に無ければ失敗する機械ゲート
+    mode: system
+    system_inputs:
+      - type: command
+        as: result
+        command: npm ci && node scripts/aislop-check-bootstrap.mjs check
+        timeout_ms: 900000
+    rules:
+      - condition: when(context.aislop_gate.result.exit_code == 0)
+        next: COMPLETE
+      - condition: when(true)
+        next: fix_aislop_gate
   - name: fix_machine_gate
     description: make done の出力を確認して失敗した検査を修正し、機械ゲートへ戻る
     capabilities: edit
@@ -144,7 +157,7 @@ steps:
         timeout_ms: 120000
     rules:
       - condition: when(context.create_pr.commit.exit_code == 0 && context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)
-        next: COMPLETE
+        next: aislop_gate
       - condition: when(true)
         next: fix_publish
   - name: fix_publish
@@ -175,3 +188,19 @@ steps:
         next: create_pr
       - condition: コードを修正して機械ゲートからやり直す
         next: machine_gate
+  - name: fix_aislop_gate
+    description: aislop の警告以上の指摘を修正するか、理由を述べて受け入れ一覧へ登録し、検証してから機械ゲートへ戻る
+    capabilities: edit
+    edit: true
+    instruction:
+      - aislop の指摘を直す
+      - |
+        次の aislop の判定を確認してください。指摘は修正するか、理由を述べて
+        scripts/aislop-accepted.json へ登録してください。
+        {context:aislop_gate.result.stdout}
+        {context:aislop_gate.result.stderr}
+    rules:
+      - condition: aislop の指摘を修正または受け入れ一覧へ登録し、検証した
+        next: machine_gate
+      - condition: 修正できない
+        next: ABORT

@@ -5,11 +5,11 @@
 mod common;
 mod grpc_harness;
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone, Utc};
 use common::*;
-use grpc_harness::{client, start_server, GrpcHarness};
+use grpc_harness::{client, start_server, start_server_at, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
   model::{
@@ -113,6 +113,7 @@ fn seeded_harness() -> GrpcHarness {
     ],
     runs:          vec![recent_run("run-1")],
     notifications: vec![],
+    proposals:     vec![],
   };
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
@@ -213,6 +214,7 @@ async fn get_overview_marks_a_run_silent_beyond_the_configured_threshold() {
     inquiries:     vec![],
     runs:          vec![stale_run],
     notifications: vec![],
+    proposals:     vec![],
   };
   harness.store.record_success("takt-dash", snapshot, Utc::now());
   let server = start_server(&harness).await;
@@ -349,7 +351,7 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
     .activity
     .record(&event(&(now - Duration::hours(24)).to_rfc3339(), "mac-studio", Some("ddd"), EventKind::RunStarted, "開始"))
     .expect("出来事を記録できます");
-  let server = start_server(&harness).await;
+  let server = start_server_at(&harness, Arc::new(move || now)).await;
   let mut client = client(server.address).await;
 
   let response = client.get_activity(GetActivityRequest {}).await.expect("アクティビティを取得できます").into_inner();

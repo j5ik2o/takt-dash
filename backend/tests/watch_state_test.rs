@@ -40,6 +40,7 @@ fn seeded_harness() -> GrpcHarness {
     inquiries:     vec![],
     runs:          vec![],
     notifications: vec![],
+    proposals:     vec![],
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   harness
@@ -69,6 +70,7 @@ async fn watch_state_sends_the_current_state_immediately_then_follows_changes_on
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   harness.rewrite_state(goal_state("g2"));
   poller.read_cycle_once().await.expect("状態を変えるサイクルを実行できます");
@@ -105,6 +107,7 @@ async fn watch_state_does_not_resend_when_a_cycle_leaves_the_state_unchanged() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   poller.read_cycle_once().await.expect("状態を変えないサイクルを実行できます");
 
@@ -174,6 +177,7 @@ async fn watch_state_sends_the_current_thresholds_after_a_config_change() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   poller.read_cycle_once().await.expect("閾値を変えるサイクルを実行できます");
 
@@ -222,6 +226,7 @@ async fn watch_state_sends_the_current_server_meta_after_a_config_change() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   poller.read_cycle_once().await.expect("サーバー表示情報を変えるサイクルを実行できます");
 
@@ -279,18 +284,26 @@ async fn watch_state_task_ends_when_the_server_stops_while_a_send_is_waiting() {
   // 送信のバッファを満たし、状態の送信が相手の受信待ちで詰まっている間にサーバーを止める。
   // 送信の待機中も停止通知を監視する実装では、送信の完了を待たずに送信タスクが終了する。
   // 停止通知を送信の後でしか見ない実装では、購読者が残り続ける。
-  use takt_dash_backend::{grpc::TaktDashServiceImpl, takt_dash::v1::takt_dash_service_server::TaktDashService};
+  use takt_dash_backend::{
+    grpc::{ServiceDeps, TaktDashServiceImpl},
+    takt_dash::v1::takt_dash_service_server::TaktDashService,
+  };
   use tokio::sync::watch;
 
   let harness = seeded_harness();
   let (stop, stop_rx) = watch::channel(false);
-  let service = TaktDashServiceImpl::new(
-    harness.store.clone(),
-    harness.activity.clone(),
-    harness.config_path().to_path_buf(),
-    harness.changes.clone(),
-    stop_rx,
-  );
+  let conversation = std::sync::Arc::new(takt_dash_backend::conversation::ConversationReader::new(
+    takt_dash_backend::conversation::ConversationPaths::from_home(harness.home()),
+  ));
+  let service = TaktDashServiceImpl::new(ServiceDeps {
+    store: harness.store.clone(),
+    activity: harness.activity.clone(),
+    config_path: harness.config_path().to_path_buf(),
+    conversation,
+    changes: harness.changes.clone(),
+    shutdown: stop_rx,
+    registry: harness.registry.clone(),
+  });
 
   let response = service.watch_state(Request::new(WatchStateRequest {})).await.expect("購読を開始できます");
   // クライアントをまだ読まず、送信タスクの送信をバッファで詰まらせる。変化通知を送り続けて
@@ -374,6 +387,7 @@ async fn watch_state_sends_added_server_metadata_after_a_config_change() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   poller.read_cycle_once().await.expect("サーバー情報を変えるサイクルを実行できます");
 
@@ -412,6 +426,7 @@ async fn watch_state_reassembles_and_returns_the_new_run_log_silent() {
     inquiries:     vec![],
     runs:          vec![run("run-1", "implement", recent)],
     notifications: vec![],
+    proposals:     vec![],
   };
   harness.store.record_success("takt-dash", snapshot, Utc::now());
 
@@ -436,6 +451,7 @@ async fn watch_state_reassembles_and_returns_the_new_run_log_silent() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   poller.read_cycle_once().await.expect("無音が閾値を跨いだサイクルを実行できます");
 

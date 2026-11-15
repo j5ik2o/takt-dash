@@ -7,12 +7,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   ActivityKind,
+  ConversationSpeaker,
   ExecutionStatus,
   GoalStatus,
   InquiryKind,
+  OperationAnswerReport,
   PendingDecisionType,
   RunStatus,
   TaskStatus,
+  conversationSpeakerFromJSON,
   executionStatusFromJSON,
   goalStatusFromJSON,
   inquiryKindFromJSON,
@@ -22,9 +25,11 @@ import {
 } from "../../src/proto/taktdash.ts";
 import {
   ACTIVITY_KIND,
+  CONVERSATION_SPEAKER,
   EXECUTION_STATUS,
   GOAL_STATUS,
   INQUIRY_KIND,
+  OPERATION_ANSWER_REPORT,
   PENDING_DECISION_TYPE,
   RUN_STATUS,
   enumFromWire,
@@ -56,8 +61,19 @@ test("proto-values は生成コードの enum と一致する", () => {
   assert.equal(INQUIRY_KIND.QUESTION, InquiryKind.INQUIRY_KIND_QUESTION);
   assert.equal(INQUIRY_KIND.OPERATION_REQUEST, InquiryKind.INQUIRY_KIND_OPERATION_REQUEST);
 
+  assert.equal(OPERATION_ANSWER_REPORT.COMPLETED, OperationAnswerReport.OPERATION_ANSWER_REPORT_COMPLETED);
+  assert.equal(OPERATION_ANSWER_REPORT.UNABLE, OperationAnswerReport.OPERATION_ANSWER_REPORT_UNABLE);
+
   assert.equal(PENDING_DECISION_TYPE.INQUIRY, PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY);
   assert.equal(PENDING_DECISION_TYPE.AWAITING_MERGE, PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE);
+  assert.equal(
+    PENDING_DECISION_TYPE.GOAL_REGISTRATION,
+    PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION,
+  );
+
+  assert.equal(CONVERSATION_SPEAKER.USER, ConversationSpeaker.CONVERSATION_SPEAKER_USER);
+  assert.equal(CONVERSATION_SPEAKER.MANAGER, ConversationSpeaker.CONVERSATION_SPEAKER_MANAGER);
+  assert.equal(CONVERSATION_SPEAKER.SYSTEM, ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM);
 });
 
 test("enumFromWire は生成コードの名称→数値の対応と一致する（受信した toJSON の列挙型を復元する）", () => {
@@ -68,6 +84,7 @@ test("enumFromWire は生成コードの名称→数値の対応と一致する�
     { wire: "TaskStatus", generated: TaskStatus, fromJSON: taskStatusFromJSON },
     { wire: "InquiryKind", generated: InquiryKind, fromJSON: inquiryKindFromJSON },
     { wire: "PendingDecisionType", generated: PendingDecisionType, fromJSON: pendingDecisionTypeFromJSON },
+    { wire: "ConversationSpeaker", generated: ConversationSpeaker, fromJSON: conversationSpeakerFromJSON },
   ];
   for (const { wire, generated, fromJSON } of cases) {
     // 生成 enum の各名称（数値キーは除外）について、名称文字列を渡したときの復元値が

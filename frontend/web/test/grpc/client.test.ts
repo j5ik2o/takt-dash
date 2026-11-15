@@ -6,20 +6,21 @@ import assert from "node:assert/strict";
 import * as grpc from "@grpc/grpc-js";
 import {
   createActivityResponse,
+  createConversationResponse,
   createDashboardState,
   createProjectsResponse,
   createRunDetailResponse,
 } from "../support/fixtures.ts";
-import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-server.ts";
-import { createBackendClient, resolveBackendAddress } from "../../src/grpc/client.ts";
+import { reserveClosedAddress, startTaktDashServer, type RunningServer } from "../support/grpc-server.ts";
+import { createBackendClient, resolveBackendAddress, type BackendClient } from "../../src/grpc/client.ts";
 
 const withServer = async (
   behavior: Parameters<typeof startTaktDashServer>[0],
-  run: (ctx: { address: string }) => Promise<void>,
+  run: (ctx: { address: string; conversationRequests: RunningServer["conversationRequests"] }) => Promise<void>,
 ) => {
   const server = await startTaktDashServer(behavior);
   try {
-    await run({ address: server.address });
+    await run({ address: server.address, conversationRequests: server.conversationRequests });
   } finally {
     await server.shutdown();
   }
@@ -105,6 +106,105 @@ test("NOT_FOUND は BackendUnavailableError と取り違えない", async () => 
     const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
     try {
       await assert.rejects(client.getRunDetail("x"), (error: Error) => error.name !== "BackendUnavailableError");
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("書き込みの要求は期限を過ぎると BackendUnavailableError として扱う", async () => {
+  const cases: Array<
+    [string, Parameters<typeof startTaktDashServer>[0], (client: BackendClient) => Promise<unknown>]
+  > = [
+    [
+      "回答",
+      { answerInquiry: { inquiryId: "inquiry-text" } },
+      (client) =>
+        client.answerInquiry({
+          serverId: "mini",
+          project: "esa",
+          goalId: "goal-2",
+          inquiryId: "inquiry-text",
+          text: "回答",
+        }),
+    ],
+    [
+      "マージ承認",
+      { approveGoalMerge: { taskName: "マージ", workflow: "simple" } },
+      (client) =>
+        client.approveGoalMerge({
+          serverId: "mini",
+          project: "corporate-site",
+          goalId: "goal-1",
+          prNumber: 418,
+          until: "merge",
+        }),
+    ],
+    [
+      "ゴール登録の承認",
+      { approveGoalRegistration: { revision: 7, goalId: "goal-new" } },
+      (client) => client.approveGoalRegistration({ serverId: "mini", project: "takt", revision: 7 }),
+    ],
+    [
+      "ゴール登録の却下",
+      { rejectGoalRegistration: { revision: 7 } },
+      (client) => client.rejectGoalRegistration({ serverId: "mini", project: "takt", revision: 7 }),
+    ],
+  ];
+
+  for (const [label, behavior, invoke] of cases) {
+    await withServer({ ...behavior, writeDelayMs: 300 }, async ({ address }) => {
+      const client = createBackendClient({
+        env: { TAKTDASH_BACKEND_ADDR: address },
+        writeDeadlineMs: 25,
+      });
+      try {
+        await assert.rejects(invoke(client), (error: Error) => {
+          assert.equal(error.name, "BackendUnavailableError", label);
+          return true;
+        });
+      } finally {
+        await client.close();
+      }
+    });
+  }
+});
+
+test("読み取りの要求には書き込みの期限を適用しない", async () => {
+  await withServer({ overview: createDashboardState(), readDelayMs: 300 }, async ({ address }) => {
+    const client = createBackendClient({
+      env: { TAKTDASH_BACKEND_ADDR: address },
+      writeDeadlineMs: 25,
+    });
+    try {
+      const state = await client.getOverview();
+      assert.equal(state.servers.length, 2);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("GetConversation を取得し、project・session_id・after_seq・limit を backend へ渡す", async () => {
+  await withServer({ conversation: createConversationResponse() }, async ({ address, conversationRequests }) => {
+    const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+    try {
+      const conversation = await client.getConversation({
+        project: "corporate-site",
+        sessionId: "session-conv-1",
+        afterSeq: 2,
+        limit: 50,
+      });
+
+      assert.equal(conversation.messages.length, 3);
+      assert.equal(conversation.sessionId, "session-conv-1");
+      assert.equal(conversation.nextAfterSeq, 3);
+      assert.equal(conversation.hasMore, false);
+      assert.equal(conversationRequests.length, 1);
+      assert.equal(conversationRequests[0]?.project, "corporate-site");
+      assert.equal(conversationRequests[0]?.sessionId, "session-conv-1");
+      assert.equal(conversationRequests[0]?.afterSeq, 2);
+      assert.equal(conversationRequests[0]?.limit, 50);
     } finally {
       await client.close();
     }

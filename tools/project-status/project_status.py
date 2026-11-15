@@ -257,6 +257,7 @@ def main(argv: list[str]) -> int:
         change_status(Path(args.config), args.issue, args.status)
     except StatusError as error:
         print(f"失敗: {error}")
+        return 0
     return 0
 
 
