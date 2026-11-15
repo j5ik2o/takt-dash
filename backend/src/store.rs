@@ -146,6 +146,14 @@ impl StateStore {
     self.project_views().into_iter().find(|view| view.runs.iter().any(|run| run.run_slug == run_slug))
   }
 
+  /// goal_id を持つゴールのプロジェクトを探し、その投影を返す。
+  ///
+  /// GetGoalDetail は読み先の cwd とサーバーを状態ストアのゴール
+  /// から解決するため、この投影を使います。
+  pub fn find_goal_project(&self, goal_id: &str) -> Option<ProjectView> {
+    self.project_views().into_iter().find(|view| view.goals.iter().any(|goal| goal.goal_id == goal_id))
+  }
+
   /// 判断待ちの一覧を、`filter` の見方で組み立てる。
   pub fn pending_decisions(&self, now: DateTime<Utc>, filter: PendingDecisionFilter) -> Vec<PendingDecision> {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");

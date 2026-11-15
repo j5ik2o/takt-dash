@@ -104,3 +104,33 @@ pub fn step_log(entry: &StepLogEntry) -> v1::StepLog {
     iteration: entry.iteration,
   }
 }
+
+/// ゴールの作業記録を proto の GoalWorkLog へ変換する。
+pub fn goal_work_log(entry: model::GoalWorkLogEntry) -> v1::GoalWorkLog {
+  v1::GoalWorkLog {
+    work_log_id: entry.work_log_id,
+    recorded_at: Some(timestamp(entry.recorded_at)),
+    summary:     entry.summary,
+  }
+}
+
+/// ゴールの質問と回答を proto の GoalQuestion へ変換する。
+pub fn goal_question(entry: model::GoalQuestionEntry) -> v1::GoalQuestion {
+  v1::GoalQuestion {
+    question_id:     entry.question_id,
+    kind:            entry.kind,
+    status:          entry.status,
+    body:            entry.body,
+    options:         entry.options,
+    answer_text:     entry.answer_text,
+    answer_decision: entry.answer_decision,
+    answer_report:   entry.answer_report,
+    created_at:      optional_timestamp(entry.created_at),
+    answered_at:     optional_timestamp(entry.answered_at),
+  }
+}
+
+/// ゴールに紐づくタスクを proto の GoalTask へ変換する。
+pub fn goal_task(entry: model::GoalTaskEntry) -> v1::GoalTask {
+  v1::GoalTask { task_name: entry.task_name, status: task_status(entry.status) as i32, run_slug: entry.run_slug }
+}
