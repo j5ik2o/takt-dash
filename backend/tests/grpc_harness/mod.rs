@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use takt_dash_backend::{
   activity::ActivityStore,
   config::{Project, ServerMeta, Thresholds},
+  conversation::{ConversationPaths, ConversationReader},
   store::StateStore,
 };
 
@@ -27,6 +28,9 @@ pub struct GrpcHarness {
   _directory:   tempfile::TempDir,
   config_path:  PathBuf,
   state_path:   PathBuf,
+  home:         PathBuf,
+  project_dir:  PathBuf,
+  project_cwds: BTreeMap<String, PathBuf>,
   pub store:    Arc<StateStore>,
   pub activity: Arc<ActivityStore>,
   pub changes:  tokio::sync::broadcast::Sender<()>,
@@ -54,7 +58,8 @@ impl Default for GrpcHarnessBuilder {
 }
 
 impl GrpcHarnessBuilder {
-  /// 1サーバー1プロジェクトの土台を作る。`state` は mock MCP サーバが返す状態です。
+  /// 1プロジェクトを土台へ加える。複数回呼ぶと複数プロジェクトの土台になります。
+  /// `state` は mock MCP サーバが返す状態です。
   pub fn single_project(mut self, project: Project, server: ServerMeta, state: Value) -> Self {
     self.servers.insert(project.server.clone(), server);
     self.projects.push(project);
@@ -73,12 +78,35 @@ impl GrpcHarnessBuilder {
     let projects = self.projects;
     let thresholds = self.thresholds;
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-    let project_dir = directory.path().join("project");
-    std::fs::create_dir_all(&project_dir).expect("プロジェクトの cwd を作れます");
-    // mock の子プロセスを起動する cwd は実在する必要があるため、渡された cwd
-    // を実在のディレクトリへ置き換える。
-    let projects: Vec<Project> =
-      projects.into_iter().map(|project| Project { cwd: project_dir.clone(), ..project }).collect();
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&home).expect("テスト用のホームを作れます");
+    let home = std::fs::canonicalize(&home).expect("テスト用のホームの実パスを解決できます");
+    // mock の子プロセスを起動する cwd は実在する必要があるため、プロジェクトごとに
+    // 実在のディレクトリを割り当てて置き換える。単一プロジェクトでは従来と同じ cwd を使う。
+    let multiple = projects.len() > 1;
+    let mut project_cwds = BTreeMap::new();
+    for project in &projects {
+      let path =
+        if multiple { directory.path().join("projects").join(&project.name) } else { directory.path().join("project") };
+      std::fs::create_dir_all(&path).expect("プロジェクトの cwd を作れます");
+      let path = std::fs::canonicalize(&path).expect("プロジェクトの cwd の実パスを解決できます");
+      project_cwds.insert(project.name.clone(), path);
+    }
+    let project_dir = match project_cwds.values().next() {
+      | Some(cwd) => cwd.clone(),
+      | None => {
+        let path = directory.path().join("project");
+        std::fs::create_dir_all(&path).expect("プロジェクトの cwd を作れます");
+        std::fs::canonicalize(&path).expect("プロジェクトの cwd の実パスを解決できます")
+      },
+    };
+    let projects: Vec<Project> = projects
+      .into_iter()
+      .map(|project| {
+        let cwd = project_cwds.get(&project.name).cloned().expect("プロジェクトの cwd は build 時に割り当て済みです");
+        Project { cwd, ..project }
+      })
+      .collect();
     let state_path = directory.path().join("state.json");
     std::fs::write(&state_path, self.state.to_string()).expect("状態ファイルを書けます");
     let config_path = directory.path().join("taktdash.config.json");
@@ -117,7 +145,17 @@ impl GrpcHarnessBuilder {
     let store = Arc::new(StateStore::new(servers, projects, thresholds));
     let activity = Arc::new(ActivityStore::open_in_memory().expect("メモリ上の SQLite を開けます"));
     let (changes, _) = tokio::sync::broadcast::channel(16);
-    GrpcHarness { _directory: directory, config_path, state_path, store, activity, changes }
+    GrpcHarness {
+      _directory: directory,
+      config_path,
+      state_path,
+      home,
+      project_dir,
+      project_cwds,
+      store,
+      activity,
+      changes,
+    }
   }
 }
 
@@ -128,6 +166,25 @@ impl GrpcHarness {
 
   pub fn config_path(&self) -> &Path {
     &self.config_path
+  }
+
+  /// manager の記録と opencode の DB を置く、テスト用のホーム。
+  pub fn home(&self) -> &Path {
+    &self.home
+  }
+
+  /// 設定の全プロジェクトに割り当てた、実在する cwd。
+  pub fn project_dir(&self) -> &Path {
+    &self.project_dir
+  }
+
+  /// 指定したプロジェクトに割り当てた、実在する cwd。
+  pub fn project_cwd(&self, name: &str) -> &Path {
+    self
+      .project_cwds
+      .get(name)
+      .map(PathBuf::as_path)
+      .unwrap_or_else(|| panic!("プロジェクト {name} はこの harness の設定にありません"))
   }
 
   pub fn rewrite_state(&self, state: Value) {
@@ -176,10 +233,12 @@ pub async fn start_server(harness: &GrpcHarness) -> RunningServer {
   let address = listener.local_addr().expect("待ち受けアドレスを取得できます");
   let (stop, _) = tokio::sync::watch::channel(false);
   let stop_rx = stop.subscribe();
+  let conversation = Arc::new(ConversationReader::new(ConversationPaths::from_home(harness.home())));
   let service = takt_dash_backend::grpc::TaktDashServiceImpl::new(
     harness.store.clone(),
     harness.activity.clone(),
     harness.config_path().to_path_buf(),
+    conversation,
     harness.changes.clone(),
     stop_rx.clone(),
   );
