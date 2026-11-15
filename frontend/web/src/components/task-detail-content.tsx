@@ -9,7 +9,8 @@ type TaskDetailContentProps = {
 };
 
 // タスク詳細は proto の GetTaskDetailResponse が返す範囲だけを表示する。
-// 作成時刻と完了時刻は proto にフィールドがないため、表示枠だけを置いて「未取得」と示す。
+// 作成・開始・完了の時刻は takt_list_tasks の createdAt / startedAt / completedAt に対応し、
+// 値が無い時刻は「未取得」と示す。
 export function TaskDetailContent({ detail }: TaskDetailContentProps): ReactElement {
   const runSlugs = Array.from(
     new Set([
@@ -79,7 +80,7 @@ export function TaskDetailContent({ detail }: TaskDetailContentProps): ReactElem
         <ul className="kv">
           <li>
             <span>作成時刻</span>
-            <b>未取得</b>
+            <b>{detail.createdAt === undefined ? "未取得" : formatDateTime(detail.createdAt)}</b>
           </li>
           <li>
             <span>開始時刻</span>
@@ -87,7 +88,7 @@ export function TaskDetailContent({ detail }: TaskDetailContentProps): ReactElem
           </li>
           <li>
             <span>完了時刻</span>
-            <b>未取得</b>
+            <b>{detail.completedAt === undefined ? "未取得" : formatDateTime(detail.completedAt)}</b>
           </li>
         </ul>
       </section>

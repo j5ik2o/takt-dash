@@ -404,6 +404,8 @@ message GetTaskDetailResponse {
   repeated string linked_run_slugs = 9;                // 紐づく run の一覧
   optional string branch = 10;                         // ゴールのブランチ
   optional string pull_request_url = 11;               // ゴールのプルリクエスト URL
+  optional google.protobuf.Timestamp created_at = 12;  // 作成時刻
+  optional google.protobuf.Timestamp completed_at = 13; // 完了時刻
 }
 
 // 状態ストリーミングの接続を要求する。

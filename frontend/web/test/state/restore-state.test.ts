@@ -54,6 +54,26 @@ test("タスク詳細の JSON を内部型へ復元し、開始時刻と列挙�
   assert.deepEqual(restored.linkedRunSlugs, ["run-aaa", "run-bbb"]);
 });
 
+test("タスク詳細の JSON を復元するとき、作成時刻と完了時刻を Date として保つ", () => {
+  const createdAt = new Date("2026-11-13T06:00:00Z");
+  const completedAt = new Date("2026-11-13T07:00:00Z");
+  const wire = GetTaskDetailResponse.toJSON(createTaskDetailResponse({ createdAt, completedAt }));
+  const restored = restoreTaskDetail(wire);
+  assert.ok(restored.createdAt instanceof Date, "作成時刻を Date として復元する");
+  assert.equal(restored.createdAt!.toISOString(), createdAt.toISOString());
+  assert.ok(restored.completedAt instanceof Date, "完了時刻を Date として復元する");
+  assert.equal(restored.completedAt!.toISOString(), completedAt.toISOString());
+});
+
+test("タスク詳細の JSON で作成時刻と完了時刻が省略されたときは undefined のまま復元する", () => {
+  const wire = GetTaskDetailResponse.toJSON(
+    createTaskDetailResponse({ createdAt: undefined, completedAt: undefined }),
+  );
+  const restored = restoreTaskDetail(wire);
+  assert.equal(restored.createdAt, undefined);
+  assert.equal(restored.completedAt, undefined);
+});
+
 test("タスク詳細の任意項目が省略された JSON は undefined のまま復元し、undefined 文字列を作らない", () => {
   const wire = GetTaskDetailResponse.toJSON(
     createTaskDetailResponse({

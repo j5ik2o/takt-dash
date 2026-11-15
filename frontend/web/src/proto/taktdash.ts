@@ -943,7 +943,15 @@ export interface GetTaskDetailResponse {
     | string
     | undefined;
   /** ゴールのプルリクエスト URL */
-  pullRequestUrl?: string | undefined;
+  pullRequestUrl?:
+    | string
+    | undefined;
+  /** 作成時刻 */
+  createdAt?:
+    | Date
+    | undefined;
+  /** 完了時刻 */
+  completedAt?: Date | undefined;
 }
 
 /** 状態ストリーミングの接続を要求する。 */
@@ -5899,6 +5907,8 @@ function createBaseGetTaskDetailResponse(): GetTaskDetailResponse {
     linkedRunSlugs: [],
     branch: undefined,
     pullRequestUrl: undefined,
+    createdAt: undefined,
+    completedAt: undefined,
   };
 }
 
@@ -5936,6 +5946,12 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
     }
     if (message.pullRequestUrl !== undefined) {
       writer.uint32(90).string(message.pullRequestUrl);
+    }
+    if (message.createdAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.createdAt), writer.uint32(98).fork()).join();
+    }
+    if (message.completedAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.completedAt), writer.uint32(106).fork()).join();
     }
     return writer;
   },
@@ -6041,6 +6057,22 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
             message.pullRequestUrl = reader.string();
             continue;
           }
+          case 12: {
+            if (tag !== 98) {
+              break;
+            }
+
+            message.createdAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 13: {
+            if (tag !== 106) {
+              break;
+            }
+
+            message.completedAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -6094,6 +6126,16 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
         : isSet(object.pull_request_url)
         ? globalThis.String(object.pull_request_url)
         : undefined,
+      createdAt: isSet(object.createdAt)
+        ? fromJsonTimestamp(object.createdAt)
+        : isSet(object.created_at)
+        ? fromJsonTimestamp(object.created_at)
+        : undefined,
+      completedAt: isSet(object.completedAt)
+        ? fromJsonTimestamp(object.completedAt)
+        : isSet(object.completed_at)
+        ? fromJsonTimestamp(object.completed_at)
+        : undefined,
     };
   },
 
@@ -6132,6 +6174,12 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
     if (message.pullRequestUrl !== undefined) {
       obj.pullRequestUrl = message.pullRequestUrl;
     }
+    if (message.createdAt !== undefined) {
+      obj.createdAt = message.createdAt.toISOString();
+    }
+    if (message.completedAt !== undefined) {
+      obj.completedAt = message.completedAt.toISOString();
+    }
     return obj;
   },
 
@@ -6151,6 +6199,8 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
     message.linkedRunSlugs = object.linkedRunSlugs?.map((e) => e) || [];
     message.branch = object.branch ?? undefined;
     message.pullRequestUrl = object.pullRequestUrl ?? undefined;
+    message.createdAt = object.createdAt ?? undefined;
+    message.completedAt = object.completedAt ?? undefined;
     return message;
   },
 };
