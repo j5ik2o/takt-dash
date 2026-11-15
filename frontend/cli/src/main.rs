@@ -639,6 +639,8 @@ mod tests {
         about:               "taktDash の概要を表示する閲覧コマンド".to_owned(),
         server_id:           "mini".to_owned(),
         completed_tasks_24h: 3,
+        connection_state:    v1::ConnectionState::Connected as i32,
+        last_read_at:        Some(ts(1_731_599_000)),
       }],
       goals:             vec![v1::Goal {
         goal_id:           "goal-cli".to_owned(),

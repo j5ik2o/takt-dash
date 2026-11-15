@@ -307,9 +307,31 @@ async fn get_run_detail_assembles_the_response_from_the_mock_takt_get_run() {
 }
 
 #[tokio::test]
+async fn get_run_detail_keeps_server_connected_while_the_project_is_delayed() {
+  let harness = seeded_harness(run_state());
+  harness.store.record_failure("takt-dash", time("2026-11-13T12:00:30Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("遅延中も run 詳細を組み立てられます")
+    .into_inner();
+
+  assert!(detail.server_connected, "遅延中は接続中として扱います");
+  assert_eq!(detail.server_last_read_at, Some(timestamp("2026-11-13T12:00:00Z")), "最後に読めた時刻を返します");
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn get_run_detail_reports_server_disconnected_while_keeping_last_read_at() {
   let harness = seeded_harness(run_state());
-  harness.store.record_failure("takt-dash");
+  let failed_at = time("2026-11-13T12:02:00Z");
+  for _ in 0..3 {
+    harness.store.record_failure("takt-dash", failed_at);
+  }
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 

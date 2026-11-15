@@ -5,36 +5,56 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::model::{ActivityEvent, EventKind, GoalStatus, ProjectSnapshot, TaskStatus};
+use crate::model::{
+  ActivityEvent, ConnectionState, ConnectionTransition, EventKind, GoalStatus, ProjectSnapshot, TaskStatus,
+};
 
 /// 1プロジェクトの前回状態と今回状態から、検出した出来事を返す。
 ///
-/// `prev` が None のときは基準化のみで、出来事を返しません。
-/// `connected` は今回の読み取りで応答が得られたかどうか、`prev_connected` は前回の応答の有無です。
+/// `prev` が None のときは基準化のみで、ゴール・タスクなどの差分は出しません。
+/// `transition` は今回の読み取りで生じた接続状態の遷移です。接続断は応答なしへ移ったときだけ、
+/// 復帰は応答なしから接続中へ戻ったときだけ出します。
 pub fn detect(
   server_id: &str,
   project: &str,
   prev: Option<&ProjectSnapshot>,
-  prev_connected: bool,
-  connected: bool,
   next: &ProjectSnapshot,
+  transition: Option<ConnectionTransition>,
   now: DateTime<Utc>,
 ) -> Vec<ActivityEvent> {
   let mut events = Vec::new();
-  if prev_connected && !connected {
-    events.push(event(
-      now,
-      server_id,
-      Some(project),
-      EventKind::ConnectionLost,
-      format!("{project} の takt-mcp から応答が返らなくなりました。"),
-      None,
-    ));
+  if let Some(transition) = transition {
+    if transition.next == Some(ConnectionState::Unresponsive)
+      && transition.previous != Some(ConnectionState::Unresponsive)
+    {
+      events.push(event(
+        now,
+        server_id,
+        Some(project),
+        EventKind::ConnectionLost,
+        format!("{project} の takt-mcp から応答が返らなくなりました。"),
+        None,
+      ));
+    }
+    if transition.previous == Some(ConnectionState::Unresponsive) && transition.next == Some(ConnectionState::Connected)
+    {
+      let outage = transition.outage.unwrap_or_else(chrono::Duration::zero).num_seconds().max(0);
+      events.push(event(
+        now,
+        server_id,
+        Some(project),
+        EventKind::ConnectionRestored,
+        format!("{project} の takt-mcp との接続が復帰しました。切断していた時間は {outage} 秒です。"),
+        None,
+      ));
+    }
   }
   let Some(prev) = prev else {
     return events;
   };
-  if !connected {
+  if transition.is_some_and(|transition| {
+    !matches!(transition.next, Some(ConnectionState::Connected) | Some(ConnectionState::Delayed))
+  }) {
     return events;
   }
   detect_goals(server_id, project, prev, next, now, &mut events);

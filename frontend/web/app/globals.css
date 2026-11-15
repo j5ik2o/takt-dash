@@ -712,3 +712,20 @@ pre {
     padding: 16px;
   }
 }
+
+.run-row .st.delayed {
+  color: var(--warn);
+}
+
+.run-row .dot.delayed {
+  background: var(--warn);
+}
+
+.bar.delayed > i {
+  background: var(--warn);
+}
+
+.run-note.delayed {
+  color: var(--warn);
+  font-weight: 600;
+}

@@ -6,8 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
-import { DashboardState } from "../../src/proto/taktdash.ts";
-import { createDashboardState } from "../support/fixtures.ts";
+import { ConnectionState, DashboardState } from "../../src/proto/taktdash.ts";
+import { createDashboardState, NOW } from "../support/fixtures.ts";
 import { openStateStream, type EventSourceLike } from "../../src/components/state-stream.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import { restoreDashboardState } from "../../src/state/restore-state.ts";
@@ -155,6 +155,20 @@ test("ステップ位置と反復回数は proto の JSON を経て復元後も�
   assert.equal(run.totalSteps, 5, "全ステップ数を保持する");
   assert.equal(run.currentIteration, 2, "反復回数を保持する");
   assert.equal(run.currentStepName, "implement", "今のステップ名を保持する");
+});
+
+test("プロジェクトの接続状態と最終読み取り時刻は proto の JSON を経て復元後も保持される", () => {
+  const wire = DashboardState.toJSON(createDashboardState());
+  const restored = restoreDashboardState(JSON.parse(JSON.stringify(wire)));
+  const project = restored.projects.find((item) => item.name === "corporate-site");
+
+  assert.ok(project !== undefined, "corporate-site のプロジェクトを復元する");
+  assert.equal(project.connectionState, ConnectionState.CONNECTION_STATE_CONNECTED, "接続状態を数値へ戻す");
+  assert.equal(
+    project.lastReadAt?.getTime(),
+    new Date(NOW.getTime() - 60_000).getTime(),
+    "最終読み取り時刻を Date へ戻す",
+  );
 });
 
 test("位置と反復回数とステップ名を持たない run を復元しても 0 や空文字を捏造しない", () => {

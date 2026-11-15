@@ -184,5 +184,10 @@ pub fn mcp_server() -> McpServer {
 }
 
 pub fn thresholds() -> Thresholds {
-  Thresholds { pending_decision_stale_minutes: 240, run_log_silent_minutes: 10 }
+  Thresholds {
+    pending_decision_stale_minutes: 240,
+    run_log_silent_minutes:         10,
+    connection_failure_count:       3,
+    connection_delay_seconds:       120,
+  }
 }

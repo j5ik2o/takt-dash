@@ -4,8 +4,13 @@
 // 閾値は proto の AnomalyThresholds から取り、240/10 を実装側へ直書きさせない。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
-import { createDashboardState, createNestedStepDashboardState, NOW } from "../support/fixtures.ts";
+import { ConnectionState, PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
+import {
+  createDashboardState,
+  createDashboardStateWithProjectConnection,
+  createNestedStepDashboardState,
+  NOW,
+} from "../support/fixtures.ts";
 import {
   buildOverviewView,
   DEFAULT_ANOMALY_THRESHOLDS,
@@ -166,4 +171,45 @@ test("入れ子 workflow の内側ログがあってもステップ名は位置�
   assert.equal(view.stepNumber, 1, "位置は同じ currentStep 由来の 1 つ目");
   assert.equal(view.totalSteps, 1, "総数も同じ workflow の step 集合から出す");
   assert.equal(view.iteration, 3, "反復回数は独立して保持する");
+});
+
+test("遅延中のプロジェクトの run は接続中のまま遅延の状態と最後に読めた時刻の注記を出す", () => {
+  const state = createDashboardStateWithProjectConnection(
+    "corporate-site",
+    ConnectionState.CONNECTION_STATE_DELAYED,
+    new Date(NOW.getTime() - 300 * 1_000),
+  );
+
+  const view = buildOverviewView(state, NOW);
+  const run = view.runs[0]!;
+
+  assert.equal(run.connected, true, "遅延中は接続中として扱う");
+  assert.equal(run.state, "delayed", "遅延中は idle にしない");
+  assert.equal(run.note, "読み取りが遅れています（最後に読めたのは 300 秒前）");
+});
+
+test("遅延の注記の秒数は時刻が1秒進むと1秒増える", () => {
+  const state = createDashboardStateWithProjectConnection(
+    "corporate-site",
+    ConnectionState.CONNECTION_STATE_DELAYED,
+    new Date(NOW.getTime() - 300 * 1_000),
+  );
+
+  const oneSecondLater = buildOverviewView(state, new Date(NOW.getTime() + 1_000));
+
+  assert.equal(oneSecondLater.runs[0]!.note, "読み取りが遅れています（最後に読めたのは 301 秒前）");
+});
+
+test("応答なしのプロジェクトの run は従来どおり最後に読めた時点の idle 表示になる", () => {
+  const state = createDashboardStateWithProjectConnection(
+    "corporate-site",
+    ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
+    new Date(NOW.getTime() - 21 * 60_000),
+  );
+
+  const view = buildOverviewView(state, NOW);
+  const run = view.runs[0]!;
+
+  assert.equal(run.state, "idle", "応答なしは idle のままにする");
+  assert.doesNotMatch(run.note ?? "", /読み取りが遅れています/);
 });

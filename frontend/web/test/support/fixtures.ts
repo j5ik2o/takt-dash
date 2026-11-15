@@ -5,6 +5,7 @@
 import {
   ActivityKind,
   AnomalyThresholds,
+  ConnectionState,
   DashboardState,
   ExecutionStatus,
   GoalStatus,
@@ -55,8 +56,22 @@ export function createDashboardState(): DashboardState {
       },
     ],
     projects: [
-      { name: "corporate-site", about: "採用ページを管理する", serverId: "mini", completedTasks24h: 3 },
-      { name: "esa", about: "イベントストアの実装", serverId: "mini", completedTasks24h: 1 },
+      {
+        name: "corporate-site",
+        about: "採用ページを管理する",
+        serverId: "mini",
+        completedTasks24h: 3,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+        lastReadAt: minutesAgo(1),
+      },
+      {
+        name: "esa",
+        about: "イベントストアの実装",
+        serverId: "mini",
+        completedTasks24h: 1,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+        lastReadAt: minutesAgo(1),
+      },
     ],
     goals: [
       {
@@ -129,6 +144,20 @@ export function createDashboardState(): DashboardState {
       },
     ],
     thresholds: createThresholds(),
+  });
+}
+
+export function createDashboardStateWithProjectConnection(
+  project: string,
+  connectionState: ConnectionState,
+  lastReadAt: Date,
+): DashboardState {
+  const base = createDashboardState();
+  return DashboardState.create({
+    ...base,
+    projects: base.projects.map((item) =>
+      item.name === project ? { ...item, connectionState, lastReadAt } : item,
+    ),
   });
 }
 
