@@ -8,6 +8,7 @@ import {
   type GetRunDetailResponse,
   type WatchStateRequest,
 } from "../proto/taktdash";
+import type { TimingSink } from "../telemetry/timing";
 
 export const BACKEND_ADDR_ENV = "TAKTDASH_BACKEND_ADDR";
 
@@ -52,6 +53,8 @@ export type BackendClient = {
 
 export type CreateBackendClientOptions = {
   env?: BackendEnv;
+  // 省略すると計測しない。既存の呼び出し元は従来どおり動く。
+  timing?: TimingSink;
 };
 
 const isConnectionFailure = (error: grpc.ServiceError): boolean =>
@@ -74,19 +77,43 @@ const unary = <Request, Response>(
     });
   });
 
+const timedUnary = async <Response>(
+  timing: TimingSink | undefined,
+  rpc: string,
+  run: () => Promise<Response>,
+): Promise<Response> => {
+  if (timing === undefined) {
+    return run();
+  }
+  const startedAt = performance.now();
+  try {
+    return await run();
+  } finally {
+    timing.recordRpc({ rpc, durationMs: performance.now() - startedAt });
+  }
+};
+
 export function createBackendClient(options: CreateBackendClientOptions = {}): BackendClient {
   const env = options.env ?? process.env;
   const address = resolveBackendAddress(env);
+  const timing = options.timing;
   const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
 
   return {
-    getOverview: () => unary<object, DashboardState>((request, callback) => client.getOverview(request, callback), {}),
+    getOverview: () =>
+      timedUnary(timing, "GetOverview", () =>
+        unary<object, DashboardState>((request, callback) => client.getOverview(request, callback), {}),
+      ),
     getProjects: () =>
-      unary<object, GetProjectsResponse>((request, callback) => client.getProjects(request, callback), {}),
+      timedUnary(timing, "GetProjects", () =>
+        unary<object, GetProjectsResponse>((request, callback) => client.getProjects(request, callback), {}),
+      ),
     getPendingDecisions: async () => {
-      const response = await unary<object, { state: DashboardState | undefined }>(
-        (request, callback) => client.getPendingDecisions(request, callback),
-        {},
+      const response = await timedUnary(timing, "GetPendingDecisions", () =>
+        unary<object, { state: DashboardState | undefined }>(
+          (request, callback) => client.getPendingDecisions(request, callback),
+          {},
+        ),
       );
       if (response.state === undefined) {
         throw new Error("GetPendingDecisions の応答に state がありません。");
@@ -94,11 +121,15 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       return response.state;
     },
     getActivity: () =>
-      unary<object, GetActivityResponse>((request, callback) => client.getActivity(request, callback), {}),
+      timedUnary(timing, "GetActivity", () =>
+        unary<object, GetActivityResponse>((request, callback) => client.getActivity(request, callback), {}),
+      ),
     getRunDetail: async (runSlug) => {
-      const detail = await unary<{ runSlug: string }, GetRunDetailResponse>(
-        (request, callback) => client.getRunDetail(request, callback),
-        { runSlug },
+      const detail = await timedUnary(timing, "GetRunDetail", () =>
+        unary<{ runSlug: string }, GetRunDetailResponse>(
+          (request, callback) => client.getRunDetail(request, callback),
+          { runSlug },
+        ),
       ).catch((error: unknown) => {
         if (error instanceof BackendUnavailableError) {
           throw error;

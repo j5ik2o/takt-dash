@@ -61,6 +61,11 @@ const loadSwc = async () => {
 };
 
 export async function load(url, context, nextLoad) {
+  if (url.endsWith(".css")) {
+    // ページのレイアウトはグローバル CSS を import する。Node は CSS を実行できないため
+    // 空のモジュールとして扱い、ページの実行だけを観測できるようにする。
+    return { format: "module", source: "", shortCircuit: true };
+  }
   if (url.endsWith(".tsx")) {
     const swc = await loadSwc();
     const fileName = fileURLToPath(url);

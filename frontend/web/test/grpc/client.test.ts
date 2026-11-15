@@ -100,6 +100,58 @@ test("backend に接続できないとき BackendUnavailableError として扱�
   }
 });
 
+test("unary RPC の所要時間を計測先へ名前つきで渡す", async () => {
+  await withServer(
+    {
+      overview: createDashboardState(),
+      projects: createProjectsResponse(),
+      pendingDecisions: { state: createDashboardState() },
+      activity: createActivityResponse(),
+      runDetail: createRunDetailResponse("run-aaa"),
+    },
+    async ({ address }) => {
+      const recorded: { rpc: string; durationMs: number }[] = [];
+      const client = createBackendClient({
+        env: { TAKTDASH_BACKEND_ADDR: address },
+        timing: { recordRpc: (timing: { rpc: string; durationMs: number }) => recorded.push(timing) },
+      });
+      try {
+        await client.getOverview();
+        await client.getProjects();
+        await client.getPendingDecisions();
+        await client.getActivity();
+        await client.getRunDetail("run-aaa");
+      } finally {
+        await client.close();
+      }
+      assert.deepEqual(
+        recorded.map((timing) => timing.rpc),
+        ["GetOverview", "GetProjects", "GetPendingDecisions", "GetActivity", "GetRunDetail"],
+      );
+      for (const timing of recorded) {
+        assert.ok(timing.durationMs >= 0, `${timing.rpc} の所要時間は 0 以上です`);
+      }
+    },
+  );
+});
+
+test("unary RPC が失敗しても所要時間を計測先へ渡す", async () => {
+  await withServer({}, async ({ address }) => {
+    const recorded: { rpc: string; durationMs: number }[] = [];
+    const client = createBackendClient({
+      env: { TAKTDASH_BACKEND_ADDR: address },
+      timing: { recordRpc: (timing: { rpc: string; durationMs: number }) => recorded.push(timing) },
+    });
+    try {
+      await assert.rejects(client.getOverview());
+    } finally {
+      await client.close();
+    }
+    assert.equal(recorded.length, 1, "失敗した RPC も1回として記録します");
+    assert.equal(recorded[0].rpc, "GetOverview");
+  });
+});
+
 test("NOT_FOUND は BackendUnavailableError と取り違えない", async () => {
   await withServer({ runDetail: { code: grpc.status.NOT_FOUND, details: "missing" } }, async ({ address }) => {
     const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });

@@ -3,7 +3,14 @@
 //! 日付の区切りは日本標準時（JST）の日で行います。判断待ちと異常に数える種類は
 //! 問い合わせ・マージ待ち・応答なしの3種類だけです。
 
-use std::{path::Path, sync::Mutex};
+use std::{
+  path::Path,
+  sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex, MutexGuard,
+  },
+  time::Instant,
+};
 
 use chrono::{DateTime, Duration, FixedOffset, Utc};
 use rusqlite::{params, Connection};
@@ -31,14 +38,16 @@ pub struct ServerCount {
 
 /// 出来事の記録とクエリを提供する。
 pub struct ActivityStore {
-  connection: Mutex<Connection>,
+  connection:         Mutex<Connection>,
+  /// 接続のロック取得を待った合計時間（µs）。処理時間と分けて観測するために累積する。
+  lock_wait_total_us: AtomicU64,
 }
 
 impl ActivityStore {
   /// 指定したパスの SQLite を開き、スキーマを用意する。
   pub fn open(path: &Path) -> rusqlite::Result<Self> {
     let connection = Connection::open(path)?;
-    let store = ActivityStore { connection: Mutex::new(connection) };
+    let store = ActivityStore { connection: Mutex::new(connection), lock_wait_total_us: AtomicU64::new(0) };
     store.migrate()?;
     Ok(store)
   }
@@ -46,13 +55,26 @@ impl ActivityStore {
   /// メモリ上の SQLite を開く（テスト用）。
   pub fn open_in_memory() -> rusqlite::Result<Self> {
     let connection = Connection::open_in_memory()?;
-    let store = ActivityStore { connection: Mutex::new(connection) };
+    let store = ActivityStore { connection: Mutex::new(connection), lock_wait_total_us: AtomicU64::new(0) };
     store.migrate()?;
     Ok(store)
   }
 
+  /// 接続のロックを取得する。取得までに待った時間を累積へ加算する。
+  fn connection(&self) -> MutexGuard<'_, Connection> {
+    let started_at = Instant::now();
+    let guard = self.connection.lock().expect("SQLite のロックが壊れています");
+    self.lock_wait_total_us.fetch_add(started_at.elapsed().as_micros() as u64, Ordering::Relaxed);
+    guard
+  }
+
+  /// これまでに接続のロック取得を待った合計時間（µs）。
+  pub(crate) fn lock_wait_total_us(&self) -> u64 {
+    self.lock_wait_total_us.load(Ordering::Relaxed)
+  }
+
   fn migrate(&self) -> rusqlite::Result<()> {
-    self.connection.lock().expect("SQLite のロックが壊れています").execute_batch(
+    self.connection().execute_batch(
       "CREATE TABLE IF NOT EXISTS events (
          id INTEGER PRIMARY KEY AUTOINCREMENT,
          occurred_at TEXT NOT NULL,
@@ -68,7 +90,7 @@ impl ActivityStore {
 
   /// 出来事を1件記録する。
   pub fn record(&self, event: &ActivityEvent) -> rusqlite::Result<()> {
-    self.connection.lock().expect("SQLite のロックが壊れています").execute(
+    self.connection().execute(
       "INSERT INTO events (occurred_at, server_id, project, kind, body, run_slug)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
       params![
@@ -85,7 +107,7 @@ impl ActivityStore {
 
   /// 出来事の一覧を新しい順に指定件数だけ返す。
   pub fn recent_events(&self, limit: usize) -> rusqlite::Result<Vec<ActivityEvent>> {
-    let connection = self.connection.lock().expect("SQLite のロックが壊れています");
+    let connection = self.connection();
     let mut statement = connection.prepare(
       "SELECT occurred_at, server_id, project, kind, body, run_slug
        FROM events ORDER BY occurred_at DESC, id DESC LIMIT ?1",
@@ -139,7 +161,7 @@ impl ActivityStore {
   }
 
   fn count_on(&self, jst_date: &str, kinds: Option<&[EventKind]>) -> rusqlite::Result<i32> {
-    let connection = self.connection.lock().expect("SQLite のロックが壊れています");
+    let connection = self.connection();
     let count: i64 = match kinds {
       | None => connection.query_row(
         "SELECT COUNT(*) FROM events WHERE date(occurred_at, '+9 hours') = ?1",
@@ -165,7 +187,7 @@ impl ActivityStore {
   pub fn today_counts_by_server(&self, now: DateTime<Utc>) -> rusqlite::Result<Vec<ServerCount>> {
     let jst = FixedOffset::east_opt(9 * 3600).expect("JST のオフセットは固定です");
     let date = now.with_timezone(&jst).date_naive().format("%Y-%m-%d").to_string();
-    let connection = self.connection.lock().expect("SQLite のロックが壊れています");
+    let connection = self.connection();
     let mut statement = connection.prepare(
       "SELECT server_id, COUNT(*) FROM events WHERE date(occurred_at, '+9 hours') = ?1
        GROUP BY server_id ORDER BY COUNT(*) DESC, server_id",
@@ -182,7 +204,7 @@ impl ActivityStore {
 
   /// 指定したプロジェクトで、`since` より後に完了したタスクの件数を返す。
   pub fn completed_tasks_since(&self, project: &str, since: DateTime<Utc>) -> rusqlite::Result<i32> {
-    let count: i64 = self.connection.lock().expect("SQLite のロックが壊れています").query_row(
+    let count: i64 = self.connection().query_row(
       "SELECT COUNT(*) FROM events
        WHERE project = ?1 AND kind = ?2 AND occurred_at >= ?3",
       params![project, EventKind::TaskCompleted.as_str(), format_timestamp(since)],
@@ -201,4 +223,48 @@ fn parse_timestamp(text: &str) -> DateTime<Utc> {
   DateTime::parse_from_rfc3339(text)
     .map(|time| time.with_timezone(&Utc))
     .unwrap_or_else(|_| DateTime::<Utc>::UNIX_EPOCH)
+}
+
+#[cfg(test)]
+mod tests {
+  use std::{
+    sync::{Arc, Barrier},
+    thread,
+    time::Duration,
+  };
+
+  use super::*;
+
+  #[test]
+  fn sqlite_lock_wait_is_counted_while_the_connection_is_held() {
+    let store = Arc::new(ActivityStore::open_in_memory().expect("メモリ上の SQLite を開けます"));
+    let acquired = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+
+    let holder = {
+      let store = store.clone();
+      let acquired = acquired.clone();
+      let release = release.clone();
+      thread::spawn(move || {
+        let connection = store.connection();
+        acquired.wait();
+        release.wait();
+        drop(connection);
+      })
+    };
+
+    acquired.wait();
+    let reader = {
+      let store = store.clone();
+      thread::spawn(move || store.recent_events(10).expect("保持中のロックを待って読み取れます"))
+    };
+    // 読み取り側が接続ロックの取得で待つ時間を作ってから、保持側に解放させる。
+    thread::sleep(Duration::from_millis(50));
+    release.wait();
+
+    reader.join().expect("読み取りスレッドが終了します");
+    holder.join().expect("保持スレッドが終了します");
+    let waited = store.lock_wait_total_us();
+    assert!(waited >= 1_000, "ロック保持中の呼び出しは取得待ちとして加算されます: {waited}µs");
+  }
 }
