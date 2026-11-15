@@ -284,10 +284,14 @@ async fn watch_state_task_ends_when_the_server_stops_while_a_send_is_waiting() {
 
   let harness = seeded_harness();
   let (stop, stop_rx) = watch::channel(false);
+  let conversation = std::sync::Arc::new(takt_dash_backend::conversation::ConversationReader::new(
+    takt_dash_backend::conversation::ConversationPaths::from_home(harness.home()),
+  ));
   let service = TaktDashServiceImpl::new(
     harness.store.clone(),
     harness.activity.clone(),
     harness.config_path().to_path_buf(),
+    conversation,
     harness.changes.clone(),
     stop_rx,
   );

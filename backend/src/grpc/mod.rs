@@ -2,7 +2,8 @@
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
-//! GetRunDetail は要求時に takt-mcp の takt_get_run を呼びます。WatchState は接続時に全件を返し、
+//! GetRunDetail は要求時に takt-mcp の takt_get_run を呼びます。GetConversation は保存領域の
+//! manager の会話を読みます。WatchState は接続時に全件を返し、
 //! 定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
 
 pub mod mapping;
@@ -11,8 +12,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use mapping::{
-  activity_kind, execution_status, goal_status, inquiry_kind, optional_timestamp, pending_decision_type, run_status,
-  step_log, task_status, timestamp,
+  activity_kind, conversation_speaker, execution_status, goal_status, inquiry_kind, optional_timestamp,
+  pending_decision_type, run_status, step_log, task_status, timestamp,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
@@ -21,14 +22,15 @@ use tonic::{Request, Response, Status};
 use crate::{
   activity::ActivityStore,
   config::load_config,
+  conversation::{ConversationPage, ConversationQuery, ConversationReader},
   mcp::{client_config, McpClient, ToolError, ToolSet},
   model::{self, TaskEntry},
   store::StateStore,
   takt_dash::v1::{
-    self, ActivityEvent, DashboardState, GetActivityRequest, GetActivityResponse, GetOverviewRequest,
-    GetPendingDecisionsRequest, GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse,
-    GetRunDetailRequest, GetRunDetailResponse, PendingDecision, Project, Run, RunInstruction, RunReport, Server,
-    TaskStatusCounts, WatchStateRequest,
+    self, ActivityEvent, DashboardState, GetActivityRequest, GetActivityResponse, GetConversationRequest,
+    GetConversationResponse, GetOverviewRequest, GetPendingDecisionsRequest, GetPendingDecisionsResponse,
+    GetProjectsRequest, GetProjectsResponse, GetRunDetailRequest, GetRunDetailResponse, PendingDecision, Project, Run,
+    RunInstruction, RunReport, Server, TaskStatusCounts, WatchStateRequest,
   },
 };
 
@@ -45,11 +47,12 @@ const WATCH_RESEND_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 
 /// 読み取り系 API のサービス。
 pub struct TaktDashServiceImpl {
-  store:       Arc<StateStore>,
-  activity:    Arc<ActivityStore>,
-  config_path: PathBuf,
-  changes:     broadcast::Sender<()>,
-  shutdown:    watch::Receiver<bool>,
+  store:        Arc<StateStore>,
+  activity:     Arc<ActivityStore>,
+  config_path:  PathBuf,
+  conversation: Arc<ConversationReader>,
+  changes:      broadcast::Sender<()>,
+  shutdown:     watch::Receiver<bool>,
 }
 
 impl TaktDashServiceImpl {
@@ -68,10 +71,11 @@ impl TaktDashServiceImpl {
     store: Arc<StateStore>,
     activity: Arc<ActivityStore>,
     config_path: PathBuf,
+    conversation: Arc<ConversationReader>,
     changes: broadcast::Sender<()>,
     shutdown: watch::Receiver<bool>,
   ) -> Self {
-    TaktDashServiceImpl { store, activity, config_path, changes, shutdown }
+    TaktDashServiceImpl { store, activity, config_path, conversation, changes, shutdown }
   }
 
   /// 状態ストアから DashboardState を組み立てる。
@@ -255,6 +259,36 @@ fn tool_error_status(error: ToolError) -> Status {
   }
 }
 
+/// 会話のページを proto の応答へ写す。
+fn conversation_response(page: ConversationPage) -> GetConversationResponse {
+  GetConversationResponse {
+    project:            page.project,
+    session_id:         page.session_id,
+    provider:           page.provider,
+    messages:           page
+      .messages
+      .into_iter()
+      .map(|message| v1::ConversationMessage {
+        seq:         message.seq,
+        occurred_at: Some(timestamp(message.occurred_at)),
+        speaker:     conversation_speaker(message.speaker) as i32,
+        text:        message.text,
+      })
+      .collect(),
+    next_after_seq:     page.next_after_seq,
+    has_more:           page.has_more,
+    skipped:            page
+      .skipped
+      .into_iter()
+      .map(|summary| v1::ConversationSkipped {
+        reason: summary.reason,
+        count:  i32::try_from(summary.count).unwrap_or(i32::MAX),
+      })
+      .collect(),
+    unavailable_reason: page.unavailable_reason,
+  }
+}
+
 #[tonic::async_trait]
 impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
   type WatchStateStream = ReceiverStream<Result<DashboardState, Status>>;
@@ -432,6 +466,37 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       server_connected: view.connected,
       server_last_read_at: optional_timestamp(view.last_read_at),
     }))
+  }
+
+  async fn get_conversation(
+    &self,
+    request: Request<GetConversationRequest>,
+  ) -> Result<Response<GetConversationResponse>, Status> {
+    let request = request.into_inner();
+    let project = request.project.trim();
+    if project.is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    let config = load_config(&self.config_path)
+      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
+    let configured = config
+      .projects
+      .iter()
+      .find(|configured| configured.name == project)
+      .ok_or_else(|| Status::not_found(format!("project {project} は設定にありません。")))?;
+    let query = ConversationQuery {
+      project:       project.to_owned(),
+      cwd:           configured.cwd.clone(),
+      project_roots: config.projects.iter().map(|project| project.cwd.clone()).collect(),
+      session_id:    request.session_id.filter(|session_id| !session_id.is_empty()),
+      after_seq:     request.after_seq,
+      limit:         usize::try_from(request.limit.max(1)).unwrap_or(usize::MAX),
+    };
+    let conversation = self.conversation.clone();
+    let page = tokio::task::spawn_blocking(move || conversation.read(&query))
+      .await
+      .map_err(|error| Status::internal(format!("会話の読み取りを実行できませんでした: {error}")))?;
+    Ok(Response::new(conversation_response(page)))
   }
 
   async fn watch_state(

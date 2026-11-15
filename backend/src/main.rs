@@ -8,6 +8,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use takt_dash_backend::{
   activity::ActivityStore,
   config::load_config,
+  conversation::{ConversationPaths, ConversationReader},
   grpc::{serve_with_listener, TaktDashServiceImpl},
   poller::{run_until_stopped, Poller},
   store::StateStore,
@@ -64,10 +65,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let store = Arc::new(StateStore::new(config.server_meta.clone(), config.projects.clone(), config.thresholds));
   let (changes, _) = tokio::sync::broadcast::channel(16);
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+  let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+  let conversation = Arc::new(ConversationReader::new(ConversationPaths::from_home(home)));
   let service = TaktDashServiceImpl::new(
     store.clone(),
     activity.clone(),
     arguments.config_path.clone(),
+    conversation,
     changes.clone(),
     stop_rx.clone(),
   );

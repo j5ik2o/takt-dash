@@ -6,20 +6,21 @@ import assert from "node:assert/strict";
 import * as grpc from "@grpc/grpc-js";
 import {
   createActivityResponse,
+  createConversationResponse,
   createDashboardState,
   createProjectsResponse,
   createRunDetailResponse,
 } from "../support/fixtures.ts";
-import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-server.ts";
+import { reserveClosedAddress, startTaktDashServer, type RunningServer } from "../support/grpc-server.ts";
 import { createBackendClient, resolveBackendAddress } from "../../src/grpc/client.ts";
 
 const withServer = async (
   behavior: Parameters<typeof startTaktDashServer>[0],
-  run: (ctx: { address: string }) => Promise<void>,
+  run: (ctx: { address: string; conversationRequests: RunningServer["conversationRequests"] }) => Promise<void>,
 ) => {
   const server = await startTaktDashServer(behavior);
   try {
-    await run({ address: server.address });
+    await run({ address: server.address, conversationRequests: server.conversationRequests });
   } finally {
     await server.shutdown();
   }
@@ -105,6 +106,32 @@ test("NOT_FOUND は BackendUnavailableError と取り違えない", async () => 
     const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
     try {
       await assert.rejects(client.getRunDetail("x"), (error: Error) => error.name !== "BackendUnavailableError");
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("GetConversation を取得し、project・session_id・after_seq・limit を backend へ渡す", async () => {
+  await withServer({ conversation: createConversationResponse() }, async ({ address, conversationRequests }) => {
+    const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+    try {
+      const conversation = await client.getConversation({
+        project: "corporate-site",
+        sessionId: "session-conv-1",
+        afterSeq: 2,
+        limit: 50,
+      });
+
+      assert.equal(conversation.messages.length, 3);
+      assert.equal(conversation.sessionId, "session-conv-1");
+      assert.equal(conversation.nextAfterSeq, 3);
+      assert.equal(conversation.hasMore, false);
+      assert.equal(conversationRequests.length, 1);
+      assert.equal(conversationRequests[0]?.project, "corporate-site");
+      assert.equal(conversationRequests[0]?.sessionId, "session-conv-1");
+      assert.equal(conversationRequests[0]?.afterSeq, 2);
+      assert.equal(conversationRequests[0]?.limit, 50);
     } finally {
       await client.close();
     }
