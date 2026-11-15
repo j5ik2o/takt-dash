@@ -137,6 +137,28 @@ test("ゴール登録の承認と却下はそれぞれの確認ダイアログ�
   assert.match(reject.slice(reject.indexOf('role="dialog"')), /却下/);
 });
 
+test("確認ダイアログの見出し・本文・確定ボタン名はダイアログの種類ごとに対応する", () => {
+  const dialogOf = (html: string): string => html.slice(html.indexOf('role="dialog"'));
+
+  const approveDialog = dialogOf(renderActions(registration(), "approve-registration"));
+  assert.match(approveDialog, /<h2[^>]*>ゴール登録の承認<\/h2>/);
+  assert.match(approveDialog, /revision 7 のゴール登録を承認します。/);
+  assert.match(approveDialog, /<button[^>]*>承認<\/button>/);
+  assert.doesNotMatch(approveDialog, /却下/);
+
+  const rejectDialog = dialogOf(renderActions(registration(), "reject-registration"));
+  assert.match(rejectDialog, /<h2[^>]*>ゴール登録の却下<\/h2>/);
+  assert.match(rejectDialog, /revision 7 のゴール登録を却下します。/);
+  assert.match(rejectDialog, /<button[^>]*>却下<\/button>/);
+  assert.doesNotMatch(rejectDialog, /承認/);
+
+  const mergeDialog = dialogOf(renderActions(merge(), "merge"));
+  assert.match(mergeDialog, /<h2[^>]*>マージの承認<\/h2>/);
+  assert.match(mergeDialog, /プルリクエスト #418 のマージを承認します。/);
+  assert.match(mergeDialog, /<button[^>]*>マージする<\/button>/);
+  assert.doesNotMatch(mergeDialog, /revision/);
+});
+
 test("送信中は確認ダイアログのボタンを無効化する", () => {
   const html = renderActions(merge(), "merge", true);
   const dialog = html.slice(html.indexOf('role="dialog"'));

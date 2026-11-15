@@ -11,32 +11,37 @@ const inquiryKindLabel = (kind: number): string =>
 const isPositiveInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value > 0;
 
-// 一覧の React key と操作結果の key に使う。SSE の再描画で並び順が変わっても、
-// 同じ判断待ちに同じ結果を紐づけられるよう、種別と識別子だけから作る。
+// 種別ごとの識別子。SSE の再描画で並び順が変わっても、同じ判断待ちに同じ結果を
+// 紐づけられるよう、種別と識別子だけから作る。
+type DecisionKeyBuilder = (decision: PendingDecision) => string;
+
+const DECISION_KEY_BY_TYPE: Partial<Record<number, DecisionKeyBuilder>> = {
+  [PENDING_DECISION_TYPE.AWAITING_MERGE]: (decision) =>
+    `merge:${decision.serverId}:${decision.project}:${decision.goalId ?? ""}`,
+  [PENDING_DECISION_TYPE.GOAL_REGISTRATION]: (decision) =>
+    `goal-registration:${decision.serverId}:${decision.project}:${decision.revision ?? ""}`,
+  [PENDING_DECISION_TYPE.INQUIRY]: (decision) =>
+    `inquiry:${decision.serverId}:${decision.project}:${decision.inquiryId}`,
+};
+
 export function decisionKey(decision: PendingDecision): string {
-  switch (decision.type) {
-    case PENDING_DECISION_TYPE.AWAITING_MERGE:
-      return `merge:${decision.serverId}:${decision.project}:${decision.goalId ?? ""}`;
-    case PENDING_DECISION_TYPE.GOAL_REGISTRATION:
-      return `goal-registration:${decision.serverId}:${decision.project}:${decision.revision ?? ""}`;
-    case PENDING_DECISION_TYPE.INQUIRY:
-      return `inquiry:${decision.serverId}:${decision.project}:${decision.inquiryId}`;
-    default:
-      return `pending:${decision.serverId}:${decision.project}:${decision.type}`;
-  }
+  const build = DECISION_KEY_BY_TYPE[decision.type];
+  return build === undefined
+    ? `pending:${decision.serverId}:${decision.project}:${decision.type}`
+    : build(decision);
 }
 
+type DecisionTypeLabelResolver = (decision: PendingDecision) => string;
+
+const DECISION_TYPE_LABEL_BY_TYPE: Partial<Record<number, DecisionTypeLabelResolver>> = {
+  [PENDING_DECISION_TYPE.AWAITING_MERGE]: () => "人のマージ待ち",
+  [PENDING_DECISION_TYPE.GOAL_REGISTRATION]: () => "ゴール登録の承認待ち",
+  [PENDING_DECISION_TYPE.INQUIRY]: (decision) => `問い合わせ（${inquiryKindLabel(decision.inquiryKind)}）`,
+};
+
 export function decisionTypeLabel(decision: PendingDecision): string {
-  switch (decision.type) {
-    case PENDING_DECISION_TYPE.AWAITING_MERGE:
-      return "人のマージ待ち";
-    case PENDING_DECISION_TYPE.GOAL_REGISTRATION:
-      return "ゴール登録の承認待ち";
-    case PENDING_DECISION_TYPE.INQUIRY:
-      return `問い合わせ（${inquiryKindLabel(decision.inquiryKind)}）`;
-    default:
-      return "判断待ち";
-  }
+  const resolve = DECISION_TYPE_LABEL_BY_TYPE[decision.type];
+  return resolve === undefined ? "判断待ち" : resolve(decision);
 }
 
 // 操作結果に出す項目名。どのプロジェクトの何に対する結果かが分かるようにする。
@@ -72,38 +77,50 @@ export type DecisionActionState =
 
 const unavailable = (reason: string): DecisionActionState => ({ kind: "unavailable", reason });
 
-export function decisionActionState(decision: PendingDecision): DecisionActionState {
-  switch (decision.type) {
-    case PENDING_DECISION_TYPE.AWAITING_MERGE:
-      if (!decision.goalId) {
-        return unavailable("ゴール ID が無いため、マージを承認できません。");
-      }
-      if (!isPositiveInteger(decision.pullRequest?.number)) {
-        return unavailable("プルリクエストの番号が無いため、マージを承認できません。");
-      }
-      return { kind: "merge" };
-    case PENDING_DECISION_TYPE.GOAL_REGISTRATION:
-      if (!isPositiveInteger(decision.revision)) {
-        return unavailable("revision が無いため、承認・却下できません。");
-      }
-      return { kind: "goal-registration" };
-    case PENDING_DECISION_TYPE.INQUIRY:
-      if (!decision.inquiryId) {
-        return unavailable("問い合わせの識別子が無いため、回答できません。");
-      }
-      if (!decision.goalId) {
-        return unavailable("ゴールに属さない問い合わせには回答できません。");
-      }
-      if (decision.inquiryKind === INQUIRY_KIND.OPERATION_REQUEST) {
-        return { kind: "operation" };
-      }
-      if (decision.options.length > 0) {
-        return { kind: "question-options", options: decision.options };
-      }
-      return { kind: "question-text" };
-    default:
-      return unavailable("この種別の判断待ちには対応していません。");
+const awaitingMergeActionState = (decision: PendingDecision): DecisionActionState => {
+  if (!decision.goalId) {
+    return unavailable("ゴール ID が無いため、マージを承認できません。");
   }
+  if (!isPositiveInteger(decision.pullRequest?.number)) {
+    return unavailable("プルリクエストの番号が無いため、マージを承認できません。");
+  }
+  return { kind: "merge" };
+};
+
+const goalRegistrationActionState = (decision: PendingDecision): DecisionActionState => {
+  if (!isPositiveInteger(decision.revision)) {
+    return unavailable("revision が無いため、承認・却下できません。");
+  }
+  return { kind: "goal-registration" };
+};
+
+const inquiryActionState = (decision: PendingDecision): DecisionActionState => {
+  if (!decision.inquiryId) {
+    return unavailable("問い合わせの識別子が無いため、回答できません。");
+  }
+  if (!decision.goalId) {
+    return unavailable("ゴールに属さない問い合わせには回答できません。");
+  }
+  if (decision.inquiryKind === INQUIRY_KIND.OPERATION_REQUEST) {
+    return { kind: "operation" };
+  }
+  if (decision.options.length > 0) {
+    return { kind: "question-options", options: decision.options };
+  }
+  return { kind: "question-text" };
+};
+
+const DECISION_ACTION_STATE_BY_TYPE: Partial<Record<number, (decision: PendingDecision) => DecisionActionState>> = {
+  [PENDING_DECISION_TYPE.AWAITING_MERGE]: awaitingMergeActionState,
+  [PENDING_DECISION_TYPE.GOAL_REGISTRATION]: goalRegistrationActionState,
+  [PENDING_DECISION_TYPE.INQUIRY]: inquiryActionState,
+};
+
+export function decisionActionState(decision: PendingDecision): DecisionActionState {
+  const resolve = DECISION_ACTION_STATE_BY_TYPE[decision.type];
+  return resolve === undefined
+    ? unavailable("この種別の判断待ちには対応していません。")
+    : resolve(decision);
 }
 
 type AnswerPayload = {

@@ -3,7 +3,7 @@
 // 判断待ち1件分の操作 UI。送信内容の組み立てと送信そのものは DecisionActions が担う。
 // この分離により、DOM を持たないテスト環境でもサーバー描画した HTML として操作要素を
 // 検証でき、フォーカス管理はブラウザでのマウント後にだけ働く。
-import { useCallback, useEffect, useId, useRef, type ReactElement } from "react";
+import { useCallback, useEffect, useId, useRef, type ReactElement, type RefObject } from "react";
 import type { PendingDecision } from "../proto/taktdash";
 import { OPERATION_ANSWER_REPORT } from "../state/proto-values";
 import {
@@ -223,6 +223,108 @@ function ConfirmDialog({ dialog, title, message, confirmLabel, busy, onAction }:
   );
 }
 
+type ConfirmDialogConfig = {
+  dialog: DialogKind;
+  title: string;
+  message: string;
+  confirmLabel: string;
+};
+
+type DialogTrigger = {
+  dialog: DialogKind;
+  label: string;
+};
+
+const DIALOG_TRIGGERS = {
+  merge: [{ dialog: "merge", label: "マージを承認" }],
+  goalRegistration: [
+    { dialog: "approve-registration", label: "承認" },
+    { dialog: "reject-registration", label: "却下" },
+  ],
+} as const satisfies Record<string, DialogTrigger[]>;
+
+type DialogGroup = "merge" | "goal-registration";
+
+// 種別ごとの見出し・本文・確定ボタン名。本文は対象の値（PR 番号・revision）を差し込む。
+function buildConfirmDialogs(group: DialogGroup, decision: PendingDecision): ConfirmDialogConfig[] {
+  if (group === "merge") {
+    return [
+      {
+        dialog: "merge",
+        title: "マージの承認",
+        message: `プルリクエスト #${decision.pullRequest?.number ?? ""} のマージを承認します。よろしいですか。`,
+        confirmLabel: "マージする",
+      },
+    ];
+  }
+  return [
+    {
+      dialog: "approve-registration",
+      title: "ゴール登録の承認",
+      message: `revision ${decision.revision ?? ""} のゴール登録を承認します。よろしいですか。`,
+      confirmLabel: "承認",
+    },
+    {
+      dialog: "reject-registration",
+      title: "ゴール登録の却下",
+      message: `revision ${decision.revision ?? ""} のゴール登録を却下します。よろしいですか。`,
+      confirmLabel: "却下",
+    },
+  ];
+}
+
+type DialogActionSectionProps = {
+  triggers: DialogTrigger[];
+  configs: ConfirmDialogConfig[];
+  active: DialogKind | null;
+  targetLabel: string;
+  busy: boolean;
+  triggerRefs: RefObject<Record<DialogKind, HTMLButtonElement | null>>;
+  onAction: (intent: DecisionActionsIntent) => void;
+};
+
+// 確認ダイアログを開くトリガー群と、いま開いている種別のダイアログをまとめて描画する。
+// 対象の識別子を含む aria-label と、種別ごとの見出し・本文・確定ボタン名が同じ形で並ぶ。
+function DialogActionSection({
+  triggers,
+  configs,
+  active,
+  targetLabel,
+  busy,
+  triggerRefs,
+  onAction,
+}: DialogActionSectionProps): ReactElement {
+  const current = configs.find((config) => config.dialog === active);
+  return (
+    <div className="actions">
+      {triggers.map(({ dialog, label }) => (
+        <button
+          key={dialog}
+          type="button"
+          disabled={busy}
+          ref={(element) => {
+            triggerRefs.current[dialog] = element;
+          }}
+          aria-label={`${label}（${targetLabel}）`}
+          onClick={() => onAction({ type: "open", dialog })}
+        >
+          {label}
+        </button>
+      ))}
+      {current === undefined ? null : (
+        <ConfirmDialog
+          dialog={current.dialog}
+          title={current.title}
+          message={current.message}
+          confirmLabel={current.confirmLabel}
+          busy={busy}
+          onAction={onAction}
+        />
+      )}
+    </div>
+  );
+}
+
 export function DecisionActionsView({
   decision,
   text,
@@ -339,77 +441,28 @@ export function DecisionActionsView({
 
     case "merge":
       return (
-        <div className="actions">
-          <button
-            type="button"
-            disabled={busy}
-            ref={(element) => {
-              triggerRefs.current.merge = element;
-            }}
-            aria-label={`マージを承認（${targetLabel}）`}
-            onClick={() => onAction({ type: "open", dialog: "merge" })}
-          >
-            マージを承認
-          </button>
-          {dialog === "merge" ? (
-            <ConfirmDialog
-              dialog="merge"
-              title="マージの承認"
-              message={`プルリクエスト #${decision.pullRequest?.number ?? ""} のマージを承認します。よろしいですか。`}
-              confirmLabel="マージする"
-              busy={busy}
-              onAction={onAction}
-            />
-          ) : null}
-        </div>
+        <DialogActionSection
+          triggers={DIALOG_TRIGGERS.merge}
+          configs={buildConfirmDialogs("merge", decision)}
+          active={dialog}
+          targetLabel={targetLabel}
+          busy={busy}
+          triggerRefs={triggerRefs}
+          onAction={onAction}
+        />
       );
 
     case "goal-registration":
       return (
-        <div className="actions">
-          <button
-            type="button"
-            disabled={busy}
-            ref={(element) => {
-              triggerRefs.current["approve-registration"] = element;
-            }}
-            aria-label={`承認（${targetLabel}）`}
-            onClick={() => onAction({ type: "open", dialog: "approve-registration" })}
-          >
-            承認
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            ref={(element) => {
-              triggerRefs.current["reject-registration"] = element;
-            }}
-            aria-label={`却下（${targetLabel}）`}
-            onClick={() => onAction({ type: "open", dialog: "reject-registration" })}
-          >
-            却下
-          </button>
-          {dialog === "approve-registration" ? (
-            <ConfirmDialog
-              dialog="approve-registration"
-              title="ゴール登録の承認"
-              message={`revision ${decision.revision ?? ""} のゴール登録を承認します。よろしいですか。`}
-              confirmLabel="承認"
-              busy={busy}
-              onAction={onAction}
-            />
-          ) : null}
-          {dialog === "reject-registration" ? (
-            <ConfirmDialog
-              dialog="reject-registration"
-              title="ゴール登録の却下"
-              message={`revision ${decision.revision ?? ""} のゴール登録を却下します。よろしいですか。`}
-              confirmLabel="却下"
-              busy={busy}
-              onAction={onAction}
-            />
-          ) : null}
-        </div>
+        <DialogActionSection
+          triggers={DIALOG_TRIGGERS.goalRegistration}
+          configs={buildConfirmDialogs("goal-registration", decision)}
+          active={dialog}
+          targetLabel={targetLabel}
+          busy={busy}
+          triggerRefs={triggerRefs}
+          onAction={onAction}
+        />
       );
   }
 }
