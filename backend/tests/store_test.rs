@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use common::*;
 use takt_dash_backend::{
+  config::ServerMeta,
   model::{EventKind, ExecutionStatus, GoalStatus, PendingDecisionFilter, PendingDecisionType, TaskStatus},
   store::{is_human_merge_wait, StateStore},
 };
@@ -320,6 +321,44 @@ fn set_projects_keeps_existing_project_slot() {
   assert!(takt_dash.connected, "既存プロジェクトの接続状態を保持します");
   assert_eq!(takt_dash.last_read_at, Some(read_at), "既存プロジェクトの読めた時刻を保持します");
   assert_eq!(takt_dash.snapshot.as_ref().expect("既存の状態を保持します").goals[0].goal_id, "g1");
+}
+
+#[test]
+fn set_servers_replaces_server_meta_on_the_same_store() {
+  let mut servers = BTreeMap::new();
+  servers.insert("mac-mini".to_owned(), server_meta());
+  let store =
+    StateStore::new(servers, vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))], thresholds());
+  assert_eq!(store.servers().len(), 1);
+
+  // 稼働中の再読み込みで、既存サーバーの表示情報を変え、新しいサーバーを追加する。
+  let mut changed = BTreeMap::new();
+  changed.insert("mac-mini".to_owned(), ServerMeta {
+    name:        "renamed-mini".to_owned(),
+    kind:        "Mac Studio".to_owned(),
+    concurrency: 8,
+  });
+  changed.insert("mac-studio".to_owned(), ServerMeta {
+    name:        "j5ik2o-mac-studio".to_owned(),
+    kind:        "Mac Studio".to_owned(),
+    concurrency: 2,
+  });
+  store.set_servers(changed);
+
+  let after = store.servers();
+  assert_eq!(after.len(), 2, "追加したサーバーを投影に載せます");
+  assert_eq!(after["mac-mini"].name, "renamed-mini", "改名を同じストアへ反映します");
+  assert_eq!(after["mac-mini"].kind, "Mac Studio", "種類の変更も反映します");
+  assert_eq!(after["mac-mini"].concurrency, 8, "同時実行数の変更も反映します");
+  assert_eq!(after["mac-studio"].name, "j5ik2o-mac-studio");
+
+  // 設定から消えたサーバーは投影に残さない。
+  let mut removed = BTreeMap::new();
+  removed.insert("mac-mini".to_owned(), after["mac-mini"].clone());
+  store.set_servers(removed);
+
+  assert_eq!(store.servers().len(), 1, "設定から消えたサーバーは投影から消えます");
+  assert!(!store.servers().contains_key("mac-studio"));
 }
 
 #[test]

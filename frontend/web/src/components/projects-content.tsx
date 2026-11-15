@@ -56,7 +56,7 @@ export function ProjectsContent({ response, now }: ProjectsContentProps): ReactE
                 <p className="k">走っている run（{runs.length}件）</p>
                 <ul className="mini-runs">
                   {runs.map((run) => {
-                    const view = toRunView(run, serverById, thresholds, now);
+                    const view = toRunView(run, serverById, now);
                     return (
                       <li key={run.runSlug}>
                         <span className="tn">{run.taskName}</span>

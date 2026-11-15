@@ -93,22 +93,17 @@ export function summarizePendingDecisions(decisions: readonly PendingDecisionVie
   return { total: decisions.length, inquiries, awaitingMerge };
 }
 
-export function toRunView(
-  run: Run,
-  serverById: ReadonlyMap<string, Server>,
-  thresholds: AnomalyThresholds,
-  now: Date,
-): RunView {
+export function toRunView(run: Run, serverById: ReadonlyMap<string, Server>, now: Date): RunView {
   const server = serverById.get(run.serverId);
   if (server !== undefined && !server.connected) {
     const at = server.lastReadAt ? formatClock(server.lastReadAt) : "不明";
     return { run, server, connected: false, label: `実行中（${at} 時点）`, note: "サーバーから応答がないため、最後に読めた時点の状態です。" };
   }
+  // 無音の判定はバックエンドが閾値と現在時刻で行う。画面側で丸め直すと、閾値直後の
+  // logSilent を落とすため、ここでは判定結果だけを使う。
   if (run.logSilent && run.lastLogAt) {
-    const silentMinutes = Math.round(minutesSince(run.lastLogAt, now));
-    if (silentMinutes > thresholds.runLogSilentMinutes) {
-      return { run, server, connected: true, label: "ログが止まっています", note: `ログが ${silentMinutes}分 出ていません。` };
-    }
+    const silentMinutes = Math.floor(minutesSince(run.lastLogAt, now));
+    return { run, server, connected: true, label: "ログが止まっています", note: `ログが ${silentMinutes}分 出ていません。` };
   }
   return { run, server, connected: true, label: "実行中", note: "" };
 }
@@ -137,7 +132,7 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
   const pendingDecisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
   });
-  const runs = state.runs.map((run) => toRunView(run, serverById, thresholds, now));
+  const runs = state.runs.map((run) => toRunView(run, serverById, now));
   const servers = state.servers.map((server) => {
     const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);
     const status = serverState(server, serverRuns);
@@ -145,7 +140,7 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
       server,
       state: status,
       stateLabel: serverStateLabel(status),
-      runs: serverRuns.map((run) => toRunView(run, serverById, thresholds, now)),
+      runs: serverRuns.map((run) => toRunView(run, serverById, now)),
     };
   });
   return {

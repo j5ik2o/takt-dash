@@ -94,6 +94,26 @@ test("プロジェクトページはゴール・タスク・run・判断待ち�
   }
 });
 
+test("バックエンドが無音と判定した run の警告を概要ページとプロジェクトページに表示する", () => {
+  const state = createDashboardState();
+  const base = state.runs[0]!;
+  const justOverThreshold = new Date(NOW.getTime() - (10 * 60_000 + 1_000));
+  const silentState = {
+    ...state,
+    runs: [{ ...base, logSilent: true, lastLogAt: justOverThreshold }],
+  };
+
+  const overviewHtml = renderPage(OverviewPage, { view: buildOverviewView(silentState, NOW) });
+  assert.match(overviewHtml, /ログが止まっています/, "概要の run 行に警告を出します");
+
+  const response = createProjectsResponse();
+  const projectsHtml = renderPage(ProjectsPage, {
+    response: { ...response, state: silentState },
+    now: NOW,
+  });
+  assert.match(projectsHtml, /ログが止まっています/, "プロジェクトの run 行に警告を出します");
+});
+
 test("判断待ちページは待ち時間順に描画し、滞留の項目に滞留の表示を付ける", async () => {
   const state = createDashboardState();
   const html = renderPage(DecisionsPage, { state, now: NOW });
