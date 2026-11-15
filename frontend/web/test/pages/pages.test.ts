@@ -314,6 +314,51 @@ const withServerName = (name: string) => {
   return { ...state, servers: state.servers.map((server) => ({ ...server, name })) };
 };
 
+const serverHeadingBlocks = (html: string): string[] =>
+  Array.from(html.matchAll(/<div class="sc-head">([\s\S]*?)<\/div>/g), (match) => match[1]);
+
+const serverHeadingFor = (html: string, needle: string): string => {
+  const block = serverHeadingBlocks(html).find((candidate) => candidate.includes(needle));
+  if (block === undefined) {
+    assert.fail(`サーバーカードの見出しに ${needle} を含む項目がある`);
+  }
+  return block;
+};
+
+const serverHeadingTextFor = (html: string, needle: string): string =>
+  serverHeadingFor(html, needle).replace(/<[^>]+>/g, "");
+
+const withServerIdentity = (identity: { serverId: string; name: string; kind: string }) => {
+  const base = createDashboardState();
+  return {
+    ...base,
+    servers: [{ ...base.servers[0]!, ...identity }],
+    runs: [],
+  };
+};
+
+test("概要ページのサーバーカード見出しは表示名・サーバー ID・機種をラベル付きで判別できる", () => {
+  const state = withServerIdentity({ serverId: "mac-mini", name: "j5ik2o-mac-mini", kind: "Mac mini" });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const heading = serverHeadingTextFor(html, "j5ik2o-mac-mini");
+
+  assert.match(heading, /表示名: j5ik2o-mac-mini/, "表示名を主として示す");
+  assert.match(heading, /サーバー ID: mac-mini/, "サーバー ID を副として示す");
+  assert.doesNotMatch(heading, /サーバー ID: j5ik2o-mac-mini/, "表示名をサーバー ID として示さない");
+  assert.match(heading, /機種: Mac mini/, "機種を失わない");
+  assert.doesNotMatch(heading, /j5ik2o-mac-miniMac mini/, "表示名と機種を区切らずに連結しない");
+});
+
+test("概要ページのサーバーカード見出しの変更後も状態表示・アンカー・見出しの id を維持する", () => {
+  const state = withServerIdentity({ serverId: "mac-mini", name: "j5ik2o-mac-mini", kind: "Mac mini" });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const heading = serverHeadingFor(html, "j5ik2o-mac-mini");
+
+  assert.match(html, /id="server-mac-mini"/, "サーバーカードのアンカーを維持する");
+  assert.match(html, /id="h-servers"/, "サーバー区画の見出し id を維持する");
+  assert.match(heading, /aria-hidden="true"/, "状態の点は読み上げ対象から外したままにする");
+});
+
 test("判断待ちページは各項目の見出しでプロジェクト・サーバーの表示名・種別・対象を判別できる", () => {
   const html = renderPage(DecisionsPage, { state: withServerName("j5ik2o-mac-mini"), now: NOW });
 

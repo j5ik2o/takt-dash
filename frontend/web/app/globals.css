@@ -264,6 +264,15 @@ a {
   margin-bottom: 8px;
 }
 
+/* サーバーカード見出しは表示名を主、サーバー ID と機種を副として縦に積む（issue #63）。 */
+.sc-head h3 .srv-id,
+.sc-head h3 .kind {
+  display: block;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
 .about,
 .gs,
 .read-at {
