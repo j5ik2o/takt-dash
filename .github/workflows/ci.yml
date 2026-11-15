@@ -19,9 +19,35 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: arduino/setup-protoc@v3
         with:
           version: "36.2"
+      - run: python3 -m pip install pyyaml
       - run: make done
       - run: npm ci
       - run: node scripts/aislop-check-bootstrap.mjs check
+
+  coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "36.2"
+      - run: rustup component add llvm-tools-preview
+      - run: cargo llvm-cov --version > /dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+      - run: python3 -m pip install pyyaml coverage
+      - run: make coverage
