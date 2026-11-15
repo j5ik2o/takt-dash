@@ -242,9 +242,9 @@ class Repo:
             for name in ("commit.ok", "push.ok", "pr.ok"):
                 (base / name).write_text("ok\n", encoding="utf-8")
 
-    def run(self, *args, response=True):
+    def run(self, *args, response=True, path=None):
         env = {
-            "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "PATH": path if path is not None else f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
             "HOME": str(self.home),
             "STUB_GIT_CONFIG": str(self.git_config),
             "STUB_GH_CONFIG": str(self.gh_config),
@@ -413,6 +413,27 @@ def test_pr_failure_without_existing_pr_is_failure() -> None:
         assert "HTTP 422" in result.stdout, f"失敗理由が stdout にありません: {result.stdout!r}"
 
 
+def test_status_requires_published_after_pr_failure() -> None:
+    with Repo() as repo:
+        repo.goal_task()
+        repo.write_order(f"対象: {ISSUE_URL}\n")
+        prepare_pushed(repo)
+        data = default_gh_config()
+        data["pr create"] = {"exit": 1, "stderr": "error: HTTP 422\n"}
+        data["pr list"] = {"stdout": "[]\n"}
+        data["project item-list"] = {
+            "stdout": json.dumps(
+                {"items": [{"id": "PVTI_item", "content": {"url": ISSUE_URL}}], "totalCount": 1}
+            )
+        }
+        repo.set_gh(data)
+        pr = repo.run("pr")
+        assert pr.returncode != 0, f"PR を作れない pr は非ゼロである必要があります: {pr.stdout!r}"
+        result = run_ok(repo, "status", "--status", "In Review", "--require-published")
+        assert not any(line.startswith("gh project") for line in repo.gh_calls()), repo.gh_calls()
+        assert "未実施" in result.stdout, result.stdout
+
+
 def test_pr_requires_successful_push() -> None:
     with Repo() as repo:
         repo.goal_task()
@@ -455,11 +476,36 @@ def test_status_builds_issue_url_from_number() -> None:
         expected = "https://github.com/j5ik2o/takt-dash/issues/32"
         repo.gh_with_item(expected)
         repo.mark_published()
-        run_ok(repo, "status", "--status", "In Review")
+        run_ok(repo, "status", "--status", "In Review", "--require-published")
         edits = [line for line in repo.gh_calls() if line.startswith("gh project item-edit")]
         assert len(edits) == 1, repo.gh_calls()
         assert f"--url {expected}" in edits[0], edits
         assert "--value In Review" in edits[0], edits
+
+
+def test_status_require_published_changes_after_publish() -> None:
+    with Repo() as repo:
+        repo.goal_task()
+        repo.write_order(f"対象: {ISSUE_URL}\n")
+        repo.gh_with_item(ISSUE_URL)
+        prepare_pushed(repo)
+        run_ok(repo, "pr")
+        result = run_ok(repo, "status", "--status", "In Review", "--require-published")
+        edits = [line for line in repo.gh_calls() if line.startswith("gh project item-edit")]
+        assert len(edits) == 1, repo.gh_calls()
+        assert "--value In Review" in edits[0], edits
+        assert "失敗" not in result.stdout, result.stdout
+
+
+def test_status_without_require_published_ignores_markers() -> None:
+    with Repo() as repo:
+        repo.write_order(f"対象: {ISSUE_URL}\n")
+        repo.gh_with_item(ISSUE_URL)
+        result = run_ok(repo, "status", "--status", "In Review")
+        edits = [line for line in repo.gh_calls() if line.startswith("gh project item-edit")]
+        assert len(edits) == 1, repo.gh_calls()
+        assert "--value In Review" in edits[0], edits
+        assert "失敗" not in result.stdout, result.stdout
 
 
 def test_status_pull_url_is_unprocessed() -> None:
@@ -526,6 +572,26 @@ def test_status_failure_is_non_fatal() -> None:
         assert "HTTP 401" in result.stdout, f"失敗理由が stdout にありません: {result.stdout!r}"
 
 
+def test_commit_without_git_is_failure_recorded() -> None:
+    with Repo() as repo:
+        (repo.bin / "git").unlink()
+        result = repo.run("commit", path=str(repo.bin))
+        assert result.returncode != 0, f"git を実行できない commit は非ゼロである必要があります: {result.stdout!r}"
+        assert "失敗" in result.stdout, f"失敗理由が stdout にありません: {result.stdout!r}"
+        assert "Traceback" not in result.stderr, f"traceback を出してはいけません: {result.stderr!r}"
+
+
+def test_status_without_gh_is_recorded_with_zero_exit() -> None:
+    with Repo() as repo:
+        repo.write_order(f"対象: {ISSUE_URL}\n")
+        (repo.bin / "gh").unlink()
+        result = repo.run("status", "--status", "In Progress", path=str(repo.bin))
+        assert result.returncode == 0, f"gh を実行できない status は exit 0 である必要があります: {result.stdout!r}"
+        assert "失敗" in result.stdout, f"失敗理由が stdout にありません: {result.stdout!r}"
+        assert "Traceback" not in result.stderr, f"traceback を出してはいけません: {result.stderr!r}"
+        assert repo.gh_calls() == [], repo.gh_calls()
+
+
 def main() -> int:
     tests = [
         test_commit_commits_staged_changes,
@@ -539,15 +605,20 @@ def main() -> int:
         test_pr_fails_without_base_branch,
         test_pr_existing_pull_request_is_success,
         test_pr_failure_without_existing_pr_is_failure,
+        test_status_requires_published_after_pr_failure,
         test_pr_requires_successful_push,
         test_new_commit_invalidates_previous_push,
         test_status_changes_issue_url_from_order,
         test_status_builds_issue_url_from_number,
+        test_status_require_published_changes_after_publish,
+        test_status_without_require_published_ignores_markers,
         test_status_pull_url_is_unprocessed,
         test_status_without_order_is_unprocessed,
         test_status_resolves_order_without_environment,
         test_status_resolves_order_from_tasks_yaml_task_dir,
         test_status_failure_is_non_fatal,
+        test_commit_without_git_is_failure_recorded,
+        test_status_without_gh_is_recorded_with_zero_exit,
     ]
     failures = 0
     for test in tests:

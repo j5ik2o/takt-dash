@@ -519,6 +519,38 @@ def test_timeout_is_recorded_with_zero_exit() -> None:
     assert out.getvalue().strip(), "stdout must record the timeout"
 
 
+def test_missing_executable_is_recorded_with_zero_exit() -> None:
+    class MissingStub(GhStub):
+        def run(self, command, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", list(command)[0])
+
+    with ConfigDir(base_config()) as configs:
+        stub = MissingStub()
+        # TimeoutExpired のテストと同じく、gh の起動（subprocess.run）だけを
+        # FileNotFoundError にして、`_run` の OSError → StatusError 変換を実経路で通す。
+        spec = importlib.util.spec_from_file_location("project_status", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        original_run = module.subprocess.run
+        module.subprocess.run = stub.run
+        out = io.StringIO()
+        err = io.StringIO()
+        saved_out, saved_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = out, err
+        try:
+            code = module.main(
+                ["--issue", str(ISSUE_NUMBER), "--status", "In Progress", "--config", str(configs.paths[0])]
+            )
+        finally:
+            sys.stdout, sys.stderr = saved_out, saved_err
+            module.subprocess.run = original_run
+    assert code == 0, f"missing executable must exit 0, got {code}"
+    recorded = out.getvalue()
+    assert "失敗" in recorded, f"stdout must record the failure: {recorded!r}"
+    assert "gh project item-list" in recorded, f"stdout must name the command: {recorded!r}"
+    assert "Traceback" not in err.getvalue(), f"stderr must not contain a traceback: {err.getvalue()!r}"
+
+
 def main() -> int:
     tests = [
         test_number_input_resolves_url_from_repository,
@@ -540,6 +572,7 @@ def main() -> int:
         test_item_list_failure_is_recorded_with_zero_exit,
         test_unexpected_response_shape_is_recorded_with_source,
         test_timeout_is_recorded_with_zero_exit,
+        test_missing_executable_is_recorded_with_zero_exit,
     ]
     failures = 0
     for test in tests:

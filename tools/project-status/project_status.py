@@ -65,6 +65,8 @@ def _run(command: list[str], cwd: str | None = None, timeout: float | None = Non
         raise StatusError(
             f"{' '.join(command)} が {timeout} 秒以内に終わりませんでした"
         )
+    except OSError as error:
+        raise StatusError(f"{' '.join(command)} を実行できません: {error}")
     return {"status": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
 
 

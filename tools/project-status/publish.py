@@ -5,7 +5,7 @@
     python3 tools/project-status/publish.py commit
     python3 tools/project-status/publish.py push
     python3 tools/project-status/publish.py pr
-    python3 tools/project-status/publish.py status --status <Status の選択肢名>
+    python3 tools/project-status/publish.py status --status <Status の選択肢名> [--require-published]
 
 段階の契約:
   commit  git add -A と git commit を行い、成功で <marker>/commit.ok を書く。
@@ -16,11 +16,15 @@
           して扱い、pr.ok を書く。
   status  order.md の issue を対象に Status を変更する。order.md や issue の
           記述が見つからないときは「未実施」を記録して終了コード 0 にする。
+          --require-published を付けると commit.ok / push.ok / pr.ok が揃って
+          いるときだけ変更し、揃わなければ「未実施」を記録して終了コード 0 にする。
           Status の失敗は公開の成否を止めない（常に終了コード 0）。
 
 段階の前提はマーカー（<context>/.publish/{commit,push,pr}.ok）で表す。TAKT は
 system step の command 入力を順にすべて実行するため、前段が失敗した後に後段の
-コマンドが走っても、マーカーが無ければ後段は外部コマンドを呼ばずに非ゼロで止まる。
+コマンドが走っても、マーカーが無ければ後段は外部コマンドを呼ばずに止まる
+（commit / push / pr は非ゼロ、status は前提を要求されたときだけ「未実施」で
+終了コード 0）。
 各段階は開始時に自分のマーカーと下流のマーカーを削除し、再試行で古い成功を残さない。
 
 失敗の理由はすべて標準出力へ出す（終了コードで成否を伝える）。
@@ -73,7 +77,10 @@ def _has_marker(markers: Path, name: str) -> bool:
 
 
 def _run(command):
-    return project_status.run_command(command)
+    try:
+        return project_status.run_command(command)
+    except project_status.StatusError as error:
+        raise PublishError(str(error))
 
 
 def _current_branch() -> str:
@@ -206,7 +213,21 @@ def stage_pr(environ) -> int:
     return created["status"] or 1
 
 
-def stage_status(environ, status_name: str) -> int:
+def stage_status(environ, status_name: str, require_published: bool = False) -> int:
+    if require_published:
+        markers = _markers(environ)
+        missing = [
+            name
+            for name in (COMMIT_MARKER, PUSH_MARKER, PR_MARKER)
+            if not _has_marker(markers, name)
+        ]
+        if missing:
+            print(
+                "未実施: 公開が成功していないため Status を変更しません"
+                f"（不足: {' / '.join(missing)}）"
+            )
+            return 0
+
     try:
         order = task_context.resolve_order(_root(), environ)
     except task_context.ContextError as error:
@@ -233,6 +254,11 @@ def main(argv) -> int:
     )
     parser.add_argument("stage", choices=("commit", "push", "pr", "status"))
     parser.add_argument("--status", help="status 段階で設定する Status の選択肢名")
+    parser.add_argument(
+        "--require-published",
+        action="store_true",
+        help="status 段階で commit / push / pr の成功マーカーが揃っていることを要求する",
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit:
@@ -254,7 +280,7 @@ def main(argv) -> int:
     if not args.status:
         print("未実施: status には --status が必要です")
         return 0
-    return stage_status(environ, args.status)
+    return stage_status(environ, args.status, require_published=args.require_published)
 
 
 if __name__ == "__main__":

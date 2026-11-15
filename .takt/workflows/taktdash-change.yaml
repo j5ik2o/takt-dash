@@ -153,7 +153,7 @@ steps:
       - type: command
         as: status
         command: |
-          python3 tools/project-status/publish.py status --status "In Review"
+          python3 tools/project-status/publish.py status --status "In Review" --require-published
         timeout_ms: 120000
     rules:
       - condition: when(context.create_pr.commit.exit_code == 0 && context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)
