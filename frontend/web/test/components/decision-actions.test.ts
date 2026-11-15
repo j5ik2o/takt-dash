@@ -473,6 +473,22 @@ test("一覧の操作要素と入力欄は対象を識別できる name を持�
   assert.match(textHtml, /aria-label="回答する（[^"]*inquiry-text[^"]*）"/);
 });
 
+test("同じ inquiryId でもゴールが違う問い合わせは別の項目として描画し、操作要素の name も区別する", () => {
+  const base = findDecision((decision) => decision.inquiryId === "inquiry-options");
+  const first: PendingDecision = { ...base, goalId: "goal-2" };
+  const second: PendingDecision = { ...base, goalId: "goal-3" };
+
+  const html = renderDecisions(stateWith([first, second]));
+
+  assert.equal((html.match(/class="tray-item/g) ?? []).length, 2);
+
+  const labels = [...html.matchAll(/aria-label="今週（([^"]*)）"/g)].map((match) => match[1]!);
+  assert.equal(labels.length, 2);
+  assert.equal(new Set(labels).size, 2);
+  assert.ok(labels.some((label) => label.includes("goal-2")));
+  assert.ok(labels.some((label) => label.includes("goal-3")));
+});
+
 test("操作の結果は成功を status、失敗を alert として表示する", () => {
   const html = renderToStaticMarkup(
     createElement(DecisionResults, {
