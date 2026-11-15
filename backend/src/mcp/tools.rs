@@ -662,7 +662,10 @@ impl<'a> ToolSet<'a> {
     }
     let mut instructions = Vec::new();
     for instruction in value.get("instructions").and_then(Value::as_array).cloned().unwrap_or_default() {
-      let instruction_id = instruction.get("instructionId").and_then(Value::as_i64).unwrap_or_default() as i32;
+      let instruction_id = match instruction.get("instructionId") {
+        | None => 0,
+        | Some(field) => checked_i32(Some(field), "instructionId")?,
+      };
       let instruction_value =
         self.call_json("takt_get_run", json!({ "runSlug": run_slug, "instructionId": instruction_id })).await?;
       instructions.push(RunInstructionEntry {
@@ -811,11 +814,16 @@ fn registration_summary_field(value: Option<&Value>) -> Option<String> {
 
 /// 応答の必須の整数フィールドを読み取る。欠落は解析エラーにします。
 fn required_i32(value: &Value, key: &str) -> Result<i32, ToolError> {
-  value
-    .get(key)
-    .and_then(Value::as_i64)
-    .map(|number| number as i32)
-    .ok_or_else(|| ToolError::Parse(format!("{key} が数値ではありません")))
+  checked_i32(value.get(key), key)
+}
+
+/// 任意の位置の整数を検査する。欠落・数値以外・i32 の範囲外は解析エラーにします。
+///
+/// `as i32` による切り詰めを避け、takt から受け取った値と異なる値を送らないようにします。
+fn checked_i32(value: Option<&Value>, key: &str) -> Result<i32, ToolError> {
+  let value = value.ok_or_else(|| ToolError::Parse(format!("{key} が数値ではありません")))?;
+  let number = value.as_i64().ok_or_else(|| ToolError::Parse(format!("{key} が数値ではありません")))?;
+  i32::try_from(number).map_err(|_| ToolError::Parse(format!("{key} が i32 の範囲外です: {number}")))
 }
 
 /// 応答の必須の文字列フィールドを読み取る。欠落は解析エラーにします。

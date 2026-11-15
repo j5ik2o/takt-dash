@@ -28,6 +28,7 @@
 //   }
 //
 // --calls <path> を渡すと、受け取った tools/call を {"name","arguments"} の JSONL として追記する。
+// --processes <path> を渡すと、起動時に自分の pid を 1 行追記する。
 import { appendFileSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isAbsolute } from "node:path";
@@ -43,6 +44,9 @@ const statePath = option("--state");
 // 受け取った tools/call を JSONL で追記する。テストは書き込み道具へ渡った引数を
 // ここから読み、backend が組み立てた引数を直接観測する。
 const callsPath = option("--calls");
+// 起動時に自分の pid を追記する。テストは読み取りと書き込みが同じ子プロセスを使うことを
+// この記録で観測する。
+const processesPath = option("--processes");
 // 実 takt-mcp と同じページサイズ（limit 既定 50）。
 const PAGE_SIZE = 50;
 // takt の入力契約では goalId は UUID（z.uuid()）。
@@ -50,6 +54,10 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 if (behavior === "exit") {
   process.exit(3);
+}
+
+if (processesPath !== undefined) {
+  appendFileSync(processesPath, `${process.pid}\n`);
 }
 
 const loadState = () => {

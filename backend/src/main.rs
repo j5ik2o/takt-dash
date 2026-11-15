@@ -9,6 +9,7 @@ use takt_dash_backend::{
   activity::ActivityStore,
   config::load_config,
   grpc::{serve_with_listener, TaktDashServiceImpl},
+  mcp::McpClientRegistry,
   poller::{run_until_stopped, Poller},
   store::StateStore,
 };
@@ -64,14 +65,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let store = Arc::new(StateStore::new(config.server_meta.clone(), config.projects.clone(), config.thresholds));
   let (changes, _) = tokio::sync::broadcast::channel(16);
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+  let registry = McpClientRegistry::new();
   let service = TaktDashServiceImpl::new(
     store.clone(),
     activity.clone(),
     arguments.config_path.clone(),
     changes.clone(),
     stop_rx.clone(),
+    registry.clone(),
   );
-  let mut poller = Poller::new(arguments.config_path.clone(), activity, store, changes);
+  let mut poller = Poller::new(arguments.config_path.clone(), activity, store, changes, registry);
   let signal_sender = stop_tx.clone();
   tokio::spawn(async move {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

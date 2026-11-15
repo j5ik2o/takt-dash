@@ -27,6 +27,7 @@ cargo build -p takt-dash-cli
 | `answer --server <名前> --project <名前> --question <ID> (--text <本文> \| --report completed\|unable)` | 判断待ちの問い合わせへ回答します。自由記述の質問は `--text`、作業の依頼は `--report`（実施した=`completed`／対応できない=`unable`）を使います。`--goal` でゴール ID を明示できます。 |
 | `merge --server <名前> --project <名前> --goal <ID> --pr <番号> --until prepare\|merge` | プルリクエストのマージを承認します。`--until prepare` は準備まで、`--until merge` はマージまで行います。 |
 | `registrations --server <名前> --project <名前>` | ゴール登録の承認待ちを一覧表示します。 |
+| `decisions --server <名前> --project <名前>` | 判断待ちの操作対象と識別子を一覧表示します。`--server` と `--project` はどちらも必須で、指定したサーバー・プロジェクトの判断待ちだけを表示します。 |
 | `approve-registration --server <名前> --project <名前> --revision <n>` | ゴール登録の承認待ちを承認します。 |
 | `reject-registration --server <名前> --project <名前> --revision <n>` | ゴール登録の承認待ちを却下します。 |
 | `--addr <待ち受けアドレス>` | 接続先の待ち受けアドレスを指定します（例: `127.0.0.1:50051`）。 |
@@ -49,6 +50,28 @@ cargo build -p takt-dash-cli
 - 異常判定の閾値（判断待ちの滞留の分数とログの無音の分数）
 
 一覧が空の項目は「（なし）」と表示します。
+
+## 判断待ちの一覧（decisions）
+
+`decisions` は、バックエンドの gRPC の `TaktDashService.GetPendingDecisions` が返す `DashboardState` から、`--server` と `--project` に一致する判断待ちだけを取り出して表示します。先頭に `判断待ち: <件数>件（<サーバー名>/<プロジェクト名>）` を出し、各項目の先頭行を `<種別>: <本文>` の形式で表示します。種別は次のいずれかです。
+
+- 問い合わせ（質問）
+- 問い合わせ（作業の依頼）
+- 人のマージ待ち
+- 承認待ち
+
+続けて、その項目に該当するものだけを次のラベルで表示します。該当しない項目の行は出しません。
+
+- 問い合わせID
+- ゴールID
+- プルリクエスト番号
+- リビジョン
+- 選択肢
+- 作成時刻と滞留期限（設定の滞留分数から算出）。ゴール登録の承認待ちでは作成時刻と滞留期限を表示しません
+
+表示した識別子は、それぞれ次のコマンドへそのまま渡せます。問い合わせIDは `answer --question`、ゴールIDは `answer --goal` または `merge --goal`、プルリクエスト番号は `merge --pr`、リビジョンは `approve-registration --revision` または `reject-registration --revision` に指定します。該当する判断待ちが無いときは「（なし）」と表示します。
+
+終了コードは概要の表示と同じ規則です。`--server`・`--project` の欠落などの使い方の誤りは、backend を呼ばずに使い方を標準エラーへ表示して終了コード 2 で終わります。backend へ接続できないときは「backend に接続できません。」を、backend が応答したうえで判断待ちを返せないときは「backend から判断待ちを取得できませんでした（ステータス）。詳細」を標準エラーへ表示し、どちらも終了コード 1 で終わります。接続不能とみなす gRPC ステータスの範囲は「接続できないとき」の節と同じです。
 
 ## 接続先の解決順
 

@@ -12,7 +12,8 @@ use std::{
 use common::*;
 use serde_json::{json, Value};
 use takt_dash_backend::{
-  activity::ActivityStore, config::Thresholds, model::EventKind, poller::Poller, store::StateStore,
+  activity::ActivityStore, config::Thresholds, mcp::McpClientRegistry, model::EventKind, poller::Poller,
+  store::StateStore,
 };
 
 struct Harness {
@@ -63,7 +64,13 @@ impl Harness {
   }
 
   fn poller(&self) -> Poller {
-    Poller::new(self.config_path.clone(), self.activity.clone(), self.store.clone(), self.changes.clone())
+    Poller::new(
+      self.config_path.clone(),
+      self.activity.clone(),
+      self.store.clone(),
+      self.changes.clone(),
+      McpClientRegistry::new(),
+    )
   }
 
   fn rewrite_state(&self, state: Value) {
