@@ -4,7 +4,7 @@
 // ブラウザ）はこの層が作った値をそのまま使い、同じ判定を各所で作り直さない。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
+import { PendingDecision as PendingDecisionMessage, PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { createActionableDashboardState } from "../support/fixtures.ts";
 import {
   buildAnswerAction,
@@ -54,6 +54,32 @@ test("判断待ちの識別子は3種別で重複しない", () => {
   assert.match(decisionKey(optionsQuestion()), /inquiry-options/);
   assert.match(decisionKey(merge()), /goal-1/);
   assert.match(decisionKey(registration()), /7/);
+});
+
+test("判断待ちの識別子は種別ごとに固有の接頭辞で始まる", () => {
+  const mergeDecision: PendingDecision = PendingDecisionMessage.create({
+    type: PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE,
+    serverId: "mini",
+    project: "corporate-site",
+    goalId: "goal-1",
+  });
+  const registrationDecision: PendingDecision = PendingDecisionMessage.create({
+    type: PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION,
+    serverId: "mini",
+    project: "takt",
+    revision: 7,
+  });
+  const inquiryDecision: PendingDecision = PendingDecisionMessage.create({
+    type: PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY,
+    serverId: "mini",
+    project: "esa",
+    goalId: "goal-2",
+    inquiryId: "inquiry-options",
+  });
+
+  assert.equal(decisionKey(mergeDecision), "merge:mini:corporate-site:goal-1");
+  assert.equal(decisionKey(registrationDecision), "goal-registration:mini:takt:7");
+  assert.equal(decisionKey(inquiryDecision), "inquiry:mini:esa:inquiry-options");
 });
 
 test("種別の表示名は3種別を判別できる", () => {
