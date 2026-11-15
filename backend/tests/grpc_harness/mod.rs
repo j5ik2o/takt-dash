@@ -158,6 +158,26 @@ impl GrpcHarness {
     std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
   }
 
+  /// 設定ファイルのサーバー表示情報を書き換える。poller の次の読み取りサイクルで state
+  /// store へ反映されます。
+  pub fn rewrite_servers(&self, mutate: impl FnOnce(&mut Value)) {
+    let text = std::fs::read_to_string(&self.config_path).expect("設定を読めます");
+    let mut value: Value = serde_json::from_str(&text).expect("設定を解析できます");
+    mutate(&mut value["servers"]);
+    std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
+  }
+
+  /// 設定ファイルのプロジェクト一覧を書き換える。追加するプロジェクトの `cwd` は、
+  /// この harness が作る実在のプロジェクトディレクトリの絶対パスに置き換えて書きます。
+  pub fn rewrite_projects(&self, mutate: impl FnOnce(&mut Value, &Path)) {
+    let text = std::fs::read_to_string(&self.config_path).expect("設定を読めます");
+    let mut value: Value = serde_json::from_str(&text).expect("設定を解析できます");
+    let directory = self._directory.path().join("project");
+    std::fs::create_dir_all(&directory).expect("プロジェクトの cwd を作れます");
+    mutate(&mut value["projects"], &directory);
+    std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
+  }
+
   /// 状態変化の通知チャネルの現在の購読者数。WatchState
   /// の送信タスクの生存を観測するために使います。
   pub fn change_receiver_count(&self) -> usize {

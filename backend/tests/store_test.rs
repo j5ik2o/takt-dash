@@ -322,6 +322,62 @@ fn set_projects_projects_added_projects_as_unread_and_removes_deleted_ones() {
 }
 
 #[test]
+fn set_servers_replaces_adds_and_removes_server_metadata() {
+  let mut servers = BTreeMap::new();
+  servers.insert("mac-mini".to_owned(), ServerMeta {
+    name:        "j5ik2o-mac-mini".to_owned(),
+    kind:        "Mac mini".to_owned(),
+    concurrency: 4,
+  });
+  let store =
+    StateStore::new(servers, vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))], thresholds());
+
+  // 稼働中の再読み込みで、既存サーバーの表示情報を変え、新規サーバーを追加し、旧サーバーを消す。
+  let mut refreshed = BTreeMap::new();
+  refreshed.insert("mac-mini".to_owned(), ServerMeta {
+    name:        "mini-renamed".to_owned(),
+    kind:        "Mac mini (改称)".to_owned(),
+    concurrency: 8,
+  });
+  refreshed.insert("mac-studio".to_owned(), ServerMeta {
+    name:        "j5ik2o-mac-studio".to_owned(),
+    kind:        "Mac Studio".to_owned(),
+    concurrency: 2,
+  });
+  store.set_servers(refreshed);
+
+  let after = store.servers();
+  assert_eq!(after.len(), 2, "追加したサーバーが投影に載り、削除したサーバーは消えます: {after:?}");
+  let mini = after.get("mac-mini").expect("既存サーバーは残ります");
+  assert_eq!(mini.name, "mini-renamed", "既存サーバーの表示情報を新しい設定で置き換えます");
+  assert_eq!(mini.kind, "Mac mini (改称)");
+  assert_eq!(mini.concurrency, 8, "並列度の変更も反映します");
+  assert_eq!(after.get("mac-studio").expect("追加サーバーがあります").name, "j5ik2o-mac-studio");
+}
+
+#[test]
+fn set_servers_does_not_disturb_project_slots() {
+  let mut servers = BTreeMap::new();
+  servers.insert("mac-mini".to_owned(), server_meta());
+  let store =
+    StateStore::new(servers, vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))], thresholds());
+  let read_at = time("2026-11-13T11:00:00Z");
+  store.record_success(
+    "takt-dash",
+    snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]),
+    read_at,
+  );
+
+  let mut refreshed = BTreeMap::new();
+  refreshed.insert("mac-mini".to_owned(), server_meta());
+  store.set_servers(refreshed);
+
+  let view = &store.project_views()[0];
+  assert!(view.connected, "サーバー情報の反映はプロジェクトの接続状態を変えません");
+  assert_eq!(view.last_read_at, Some(read_at), "サーバー情報の反映は読めた時刻を変えません");
+}
+
+#[test]
 fn set_projects_keeps_existing_project_slot() {
   let mut servers = BTreeMap::new();
   servers.insert("mac-mini".to_owned(), server_meta());

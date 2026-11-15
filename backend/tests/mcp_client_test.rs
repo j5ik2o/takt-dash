@@ -11,6 +11,7 @@ use takt_dash_backend::{
   mcp::{CallError, TransportError},
   model::{GoalStatus, TaskStatus},
 };
+use tokio::time::timeout;
 
 fn transport(error: CallError) -> TransportError {
   match error {
@@ -70,6 +71,34 @@ async fn hanging_server_times_out() {
   );
 
   assert!(matches!(error, TransportError::Timeout(_)), "タイムアウトとして扱います: {error}");
+}
+
+#[tokio::test]
+async fn drip_feed_that_keeps_the_connection_busy_still_times_out_on_the_whole_call() {
+  // 応答を細切れに返し続けるサーバーは、行単位のタイムアウトを満たし続ける。
+  // 呼び出し全体の期限で打ち切る実装では Timeout になり、行単位だけで判定する実装では
+  // 期限を超えても呼び出しが返らない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, Some("drip"), 1));
+
+  let started = std::time::Instant::now();
+  let error = transport(
+    timeout(
+      std::time::Duration::from_secs(10),
+      client.call_tool("takt_list_goals", with_cwd(directory.path(), json!({}))),
+    )
+    .await
+    .expect("全体の期限を超えたら呼び出しは打ち切られます")
+    .expect_err("細切れの応答だけでは完了しません"),
+  );
+
+  assert!(matches!(error, TransportError::Timeout(_)), "全体の期限超過はタイムアウトとして扱います: {error}");
+  assert!(
+    started.elapsed() < std::time::Duration::from_secs(5),
+    "呼び出し全体の期限で打ち切ります（経過: {:?}）",
+    started.elapsed()
+  );
 }
 
 #[tokio::test]

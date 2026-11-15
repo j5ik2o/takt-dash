@@ -125,12 +125,12 @@ test("proto の JSON（時刻は ISO 文字列、列挙型は名称文字列）�
   assert.equal(overview.pendingCounts.awaitingMerge, 1, "人のマージ待ちが1件として数えられる");
 
   // 判断待ち: 種類表示が送信値に対応する（マージ待ちは「人のマージ待ち」）。
-  const decisionsHtml = renderToStaticMarkup(createElement(DecisionsContent, { state, now }));
+  const decisionsHtml = renderToStaticMarkup(createElement(DecisionsContent, { state, now, disconnected: false }));
   assert.match(decisionsHtml, /人のマージ待ち/);
   assert.match(decisionsHtml, /問い合わせ（質問）/);
 
   // 概要: 実行中の run 件数が描画に現れる。
-  const overviewHtml = renderToStaticMarkup(createElement(OverviewContent, { view: overview }));
+  const overviewHtml = renderToStaticMarkup(createElement(OverviewContent, { view: overview, disconnected: false }));
   assert.match(overviewHtml, /1/);
 
   stream.close();
