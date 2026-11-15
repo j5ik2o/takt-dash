@@ -1,0 +1,59 @@
+// 判断待ちの書き込み Route Handler の共通処理。
+//
+// 入力の形だけを検証し、値はそのまま gRPC の書き込み API へ渡す。業務的な検証
+// （ゴールの所属、pull_request の有無など）は backend に任せ、ここでは重複しない。
+import * as grpc from "@grpc/grpc-js";
+import { BackendUnavailableError, createBackendClient, type BackendClient } from "../../../src/grpc/client";
+
+const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" } as const;
+
+const jsonResponse = (status: number, body: unknown): Response =>
+  new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+
+export const badRequest = (message: string): Response => jsonResponse(400, { ok: false, error: message });
+
+export async function readJsonObject(request: Request): Promise<Record<string, unknown> | undefined> {
+  try {
+    const value: unknown = await request.json();
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return undefined;
+    }
+    return value as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+export const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === "string" && value.trim() !== "";
+
+export const isPositiveInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value > 0;
+
+// 書き込みを実行し、成功・入力不正・接続不能を HTTP の応答へ一度だけ変換する。
+export async function runWrite(call: (client: BackendClient) => Promise<unknown>): Promise<Response> {
+  const client = createBackendClient();
+  try {
+    await call(client);
+    return jsonResponse(200, { ok: true });
+  } catch (error) {
+    if (error instanceof BackendUnavailableError) {
+      // backend が応答の中で UNAVAILABLE を返した場合は、接続障害ではないため
+      // 接続できない旨に置き換えず、backend が返した理由を伝える。
+      if (error.kind === "server") {
+        return jsonResponse(502, {
+          ok: false,
+          error: error.details !== "" ? error.details : "backend が操作を受け付けられませんでした。",
+        });
+      }
+      return jsonResponse(503, { ok: false, error: "backend に接続できません。" });
+    }
+    const serviceError = error as grpc.ServiceError;
+    if (serviceError.code === grpc.status.INVALID_ARGUMENT) {
+      return jsonResponse(400, { ok: false, error: serviceError.details || "入力が正しくありません。" });
+    }
+    return jsonResponse(500, { ok: false, error: "操作に失敗しました。" });
+  } finally {
+    await client.close();
+  }
+}

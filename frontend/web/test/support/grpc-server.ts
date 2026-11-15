@@ -5,13 +5,33 @@
 import * as grpc from "@grpc/grpc-js";
 import {
   TaktDashServiceService,
+  type AnswerInquiryRequest,
+  type AnswerInquiryResponse,
+  type ApproveGoalMergeRequest,
+  type ApproveGoalMergeResponse,
+  type ApproveGoalRegistrationRequest,
+  type ApproveGoalRegistrationResponse,
   type DashboardState,
   type GetActivityResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
+  type RejectGoalRegistrationRequest,
+  type RejectGoalRegistrationResponse,
 } from "../../src/proto/taktdash.ts";
 
 export type ServerError = { code: grpc.status; details: string };
+
+// 書き込み系 RPC の呼び出しを、メソッド名と送られたリクエストで記録する。
+export type WriteMethod =
+  | "answerInquiry"
+  | "approveGoalMerge"
+  | "approveGoalRegistration"
+  | "rejectGoalRegistration";
+
+export type RecordedCall = {
+  method: WriteMethod;
+  request: unknown;
+};
 
 export type ServerBehavior = {
   overview?: DashboardState;
@@ -19,6 +39,10 @@ export type ServerBehavior = {
   pendingDecisions?: { state: DashboardState };
   activity?: GetActivityResponse;
   runDetail?: GetRunDetailResponse | ServerError;
+  answerInquiry?: AnswerInquiryResponse | ServerError;
+  approveGoalMerge?: ApproveGoalMergeResponse | ServerError;
+  approveGoalRegistration?: ApproveGoalRegistrationResponse | ServerError;
+  rejectGoalRegistration?: RejectGoalRegistrationResponse | ServerError;
   watch?: DashboardState[];
   // ストリームを送り終えた後も接続を保ち、クライアントの切断を待つか。
   holdWatchOpen?: boolean;
@@ -31,11 +55,36 @@ const notFound = (details: string): ServerError => ({ code: grpc.status.NOT_FOUN
 export type RunningServer = {
   address: string;
   port: number;
+  // 書き込み系 RPC が受け取ったリクエスト（呼ばれた順）。
+  requests: RecordedCall[];
   shutdown: () => Promise<void>;
+};
+
+const isServerError = (value: unknown): value is ServerError =>
+  typeof value === "object" && value !== null && "code" in value;
+
+const respondUnary = <Response>(
+  result: Response | ServerError | undefined,
+  callback: grpc.sendUnaryData<Response>,
+): void => {
+  if (result === undefined) {
+    callback(notFound("未設定"));
+    return;
+  }
+  if (isServerError(result)) {
+    // server が応答としてエラーを返したことを、接続できない失敗と区別できるようにする。
+    // trailer を渡すと実 backend と同じく応答ヘッダが metadata に載る。
+    const trailer = new grpc.Metadata();
+    trailer.set("x-taktdash-server-error", "1");
+    callback(result, null, trailer);
+    return;
+  }
+  callback(null, result);
 };
 
 export async function startTaktDashServer(behavior: ServerBehavior): Promise<RunningServer> {
   const server = new grpc.Server();
+  const requests: RecordedCall[] = [];
   server.addService(TaktDashServiceService, {
     getOverview: (_call: grpc.ServerUnaryCall<unknown, unknown>, callback: grpc.sendUnaryData<DashboardState>) => {
       if (!behavior.overview) {
@@ -110,6 +159,34 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       }, 10);
       void timer;
     },
+    answerInquiry: (
+      call: grpc.ServerUnaryCall<AnswerInquiryRequest, AnswerInquiryResponse>,
+      callback: grpc.sendUnaryData<AnswerInquiryResponse>,
+    ) => {
+      requests.push({ method: "answerInquiry", request: call.request });
+      respondUnary(behavior.answerInquiry, callback);
+    },
+    approveGoalMerge: (
+      call: grpc.ServerUnaryCall<ApproveGoalMergeRequest, ApproveGoalMergeResponse>,
+      callback: grpc.sendUnaryData<ApproveGoalMergeResponse>,
+    ) => {
+      requests.push({ method: "approveGoalMerge", request: call.request });
+      respondUnary(behavior.approveGoalMerge, callback);
+    },
+    approveGoalRegistration: (
+      call: grpc.ServerUnaryCall<ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse>,
+      callback: grpc.sendUnaryData<ApproveGoalRegistrationResponse>,
+    ) => {
+      requests.push({ method: "approveGoalRegistration", request: call.request });
+      respondUnary(behavior.approveGoalRegistration, callback);
+    },
+    rejectGoalRegistration: (
+      call: grpc.ServerUnaryCall<RejectGoalRegistrationRequest, RejectGoalRegistrationResponse>,
+      callback: grpc.sendUnaryData<RejectGoalRegistrationResponse>,
+    ) => {
+      requests.push({ method: "rejectGoalRegistration", request: call.request });
+      respondUnary(behavior.rejectGoalRegistration, callback);
+    },
   } as unknown as grpc.UntypedServiceImplementation);
 
   const port = await new Promise<number>((resolve, reject) => {
@@ -125,6 +202,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
   return {
     address: `127.0.0.1:${port}`,
     port,
+    requests,
     shutdown: () =>
       new Promise<void>((resolve) => {
         server.tryShutdown(() => resolve());
