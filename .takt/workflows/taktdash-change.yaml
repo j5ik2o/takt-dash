@@ -13,8 +13,37 @@ all_steps:
     - ref: taktdash-coding-rules
       position: before_instruction
 max_steps: 70
-initial_step: develop
+initial_step: set_in_progress
 steps:
+  - name: set_in_progress
+    description: タスクの指示文から対象 issue を特定し、ボードの Status を作業開始の In Progress へ変更する
+    mode: system
+    system_inputs:
+      - type: command
+        as: status
+        timeout_ms: 300000
+        command: |
+          context=$(dirname "$(dirname "$(dirname "${TAKT_PREVIOUS_RESPONSE_FILE:-}")")")
+          order="$context/task/order.md"
+          if [ -z "${TAKT_PREVIOUS_RESPONSE_FILE:-}" ] || [ ! -f "$order" ]; then
+            echo "未実施: タスクの指示文（order.md）を特定できないため Status を変更しません"
+            exit 0
+          fi
+          ref=$(grep -oiE 'https://github\.com/[^/[:space:]]+/[^/[:space:]]+/issues/[0-9]+' "$order" | head -n 1)
+          if [ -z "$ref" ]; then
+            ref=$(grep -oiE 'issue[[:space:]]*#?[[:space:]]*[0-9]+' "$order" | grep -oE '[0-9]+' | head -n 1)
+          fi
+          if [ -z "$ref" ]; then
+            ref=$(grep -oiE 'https://github\.com/[^/[:space:]]+/[^/[:space:]]+/pull/[0-9]+' "$order" | head -n 1)
+          fi
+          if [ -z "$ref" ]; then
+            echo "未実施: $order に issue の記述が見つからないため Status を変更しません"
+            exit 0
+          fi
+          python3 tools/project-status/project_status.py --issue "$ref" --status "In Progress"
+    rules:
+      - condition: when(true)
+        next: develop
   - name: develop
     description: development-core で計画・テスト作成・実装・レビュー・修正・要件確認を行う
     kind: workflow_call
@@ -71,6 +100,64 @@ steps:
         next: machine_gate
       - condition: ABORT
         next: ABORT
+  - name: create_pr
+    description: 対象 issue を特定してプルリクエストを作成し、ボードの Status を In Review へ変更する
+    mode: system
+    system_inputs:
+      - type: command
+        as: publish
+        timeout_ms: 300000
+        command: |
+          if [ -z "${HOME:-}" ]; then
+            HOME=$(python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')
+            export HOME
+          fi
+          run_name=workflow-result
+          if [ -n "${TAKT_PREVIOUS_RESPONSE_FILE:-}" ]; then
+            context=$(dirname "$(dirname "$(dirname "$TAKT_PREVIOUS_RESPONSE_FILE")")")
+            run_name=$(basename "$(dirname "$context")")
+          fi
+          git add -A
+          if [ -n "$(git diff --cached --name-only)" ]; then
+            git commit --no-verify -m "takt: $run_name"
+          else
+            echo "コミットする変更はありません"
+          fi
+          git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
+      - type: command
+        as: pr
+        timeout_ms: 300000
+        command: |
+          if [ -z "${HOME:-}" ]; then
+            HOME=$(python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')
+            export HOME
+          fi
+          gh pr create --base main --head "$(git rev-parse --abbrev-ref HEAD)" --fill
+      - type: command
+        as: review
+        timeout_ms: 300000
+        command: |
+          context=$(dirname "$(dirname "$(dirname "${TAKT_PREVIOUS_RESPONSE_FILE:-}")")")
+          order="$context/task/order.md"
+          if [ -z "${TAKT_PREVIOUS_RESPONSE_FILE:-}" ] || [ ! -f "$order" ]; then
+            echo "未実施: タスクの指示文（order.md）を特定できないため Status を変更しません"
+            exit 0
+          fi
+          ref=$(grep -oiE 'https://github\.com/[^/[:space:]]+/[^/[:space:]]+/issues/[0-9]+' "$order" | head -n 1)
+          if [ -z "$ref" ]; then
+            ref=$(grep -oiE 'issue[[:space:]]*#?[[:space:]]*[0-9]+' "$order" | grep -oE '[0-9]+' | head -n 1)
+          fi
+          if [ -z "$ref" ]; then
+            ref=$(grep -oiE 'https://github\.com/[^/[:space:]]+/[^/[:space:]]+/pull/[0-9]+' "$order" | head -n 1)
+          fi
+          if [ -z "$ref" ]; then
+            echo "未実施: $order に issue の記述が見つからないため Status を変更しません"
+            exit 0
+          fi
+          python3 tools/project-status/project_status.py --issue "$ref" --status "In Review"
+    rules:
+      - condition: when(true)
+        next: COMPLETE
   - name: machine_gate
     description: make done（整形・clippy・テスト・型検査・lint）をdevelop の成果に対して実行し、すべて通るときだけ完了とする
     mode: system
@@ -81,7 +168,7 @@ steps:
         timeout_ms: 1800000
     rules:
       - condition: when(context.machine_gate.result.exit_code == 0)
-        next: COMPLETE
+        next: create_pr
       - condition: when(true)
         next: fix_machine_gate
   - name: fix_machine_gate
