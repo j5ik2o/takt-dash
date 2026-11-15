@@ -454,6 +454,36 @@ async fn merge_wait_uses_notification_recorded_at_and_becomes_stale_through_the_
 }
 
 #[tokio::test]
+async fn merge_wait_without_notification_keeps_first_observed_start_through_the_cycle() {
+  // awaiting_merge 通知が無いゴールでも、poller の初回サイクル（prev=None）で起点を確定し、
+  // 以降の投影で同じ created_at を保ち、時間経過で滞留になる。起点を都度 now にすると
+  // created_at が投影ごとに進み、300 分後の投影でも滞留にならない。
+  let harness = Harness::new(json!({
+    "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1", "pullRequest": { "number": 5, "url": "https://example.test/pr/5" } } ],
+    "tasks": [ { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true } ],
+    "notifications": { "g1": [ { "id": "n-progress", "kind": "progress", "body": "進捗", "recordedAt": "2026-11-13T08:00:00Z" } ] }
+  }));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  let first =
+    harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge);
+  assert_eq!(first.len(), 1, "通知が無くても人のマージ待ちを判断待ちに含めます");
+  let started_at = first[0].created_at;
+  assert!(!first[0].stale, "確定直後の起点は滞留ではありません");
+
+  let later = harness.store.pending_decisions(
+    chrono::Utc::now() + chrono::Duration::minutes(300),
+    takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge,
+  );
+  poller.shutdown().await;
+
+  assert_eq!(later.len(), 1);
+  assert_eq!(later[0].created_at, started_at, "時間が経っても起点は初回観測のまま固定されます");
+  assert!(later[0].stale, "初回観測の起点から240分を超えた待ちは滞留になります");
+}
+
+#[tokio::test]
 async fn change_notification_is_sent_once_when_the_state_changes_between_cycles() {
   let harness = Harness::new(state_with_goal("g1"));
   let mut changes = harness.changes.subscribe();
