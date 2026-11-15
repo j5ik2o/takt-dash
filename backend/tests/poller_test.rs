@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use takt_dash_backend::{
   activity::ActivityStore,
   config::Thresholds,
+  mcp::McpClientRegistry,
   model::EventKind,
   poller::{run_until_stopped, Poller},
   store::StateStore,
@@ -109,7 +110,13 @@ impl Harness {
   }
 
   fn poller(&self) -> Poller {
-    Poller::new(self.config_path.clone(), self.activity.clone(), self.store.clone(), self.changes.clone())
+    Poller::new(
+      self.config_path.clone(),
+      self.activity.clone(),
+      self.store.clone(),
+      self.changes.clone(),
+      McpClientRegistry::new(),
+    )
   }
 
   fn rewrite_state(&self, state: Value) {
@@ -686,6 +693,37 @@ async fn changed_server_baseline_reset_prevents_cross_server_transition_events()
   let events: Vec<EventKind> =
     harness.activity.recent_events(50).expect("記録した出来事を読めます").into_iter().map(|event| event.kind).collect();
   assert!(!events.contains(&EventKind::Paused), "旧接続先との差分で一時停止を誤記録しません: {events:?}");
+}
+
+#[tokio::test]
+async fn baseline_is_reset_only_once_after_a_client_rebuild() {
+  // 設定変更でクライアントを作り直したサイクルは、新接続先の初回として基準化のみにする。
+  // 作り直しの記録を消費しない実装では、次サイクル以降も毎回基準化され、
+  // 新接続先で起きた状態の変化が出来事として記録されない。
+  let harness = Harness::new(state_with_goal("g1"));
+  let alternate = harness._directory.path().join("state-alternate.json");
+  write_json(&alternate, &state_with_goal("g1"));
+
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  harness.rewrite_config(|value| {
+    value["mcpServers"]["mac-mini"]["args"] =
+      json!([mock_script().display().to_string(), "--state", alternate.display().to_string()]);
+  });
+  let rebuilt = poller.read_cycle_once().await.expect("起動設定変更後のサイクルを実行できます");
+  assert_eq!(rebuilt.events_recorded, 0, "作り直したクライアントの初回は基準化のみで出来事を出しません");
+
+  // 同じ接続先のまま状態だけを変える。作り直しの記録が消費済みなら、この差分は基準化されず
+  // 出来事として記録されます。
+  write_json(&alternate, &state_with_goal("g2"));
+  let changed = poller.read_cycle_once().await.expect("作り直しの次のサイクルを実行できます");
+  poller.shutdown().await;
+
+  assert_eq!(changed.events_recorded, 1, "作り直しの次のサイクルは基準化せず、状態の変化を記録します");
+  let events = harness.activity.recent_events(10).expect("記録した出来事を読めます");
+  assert_eq!(events[0].kind, EventKind::GoalCreated, "状態の変化に対応する出来事を記録します");
+  assert_eq!(events[0].project.as_deref(), Some("takt-dash"));
 }
 
 #[tokio::test]

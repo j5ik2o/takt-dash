@@ -14,7 +14,7 @@ use crate::{
   activity::ActivityStore,
   config::{load_config, Config, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
-  mcp::{client_config, McpClient, ToolError, ToolSet},
+  mcp::{client_config, McpClientRegistry, ToolError, ToolSet},
   model::{PendingDecisionFilter, PendingDecisionType, ProjectSnapshot},
   store::StateStore,
 };
@@ -24,7 +24,7 @@ pub struct Poller {
   config_path:        PathBuf,
   activity:           Arc<ActivityStore>,
   store:              Arc<StateStore>,
-  clients:            BTreeMap<String, McpClient>,
+  registry:           McpClientRegistry,
   previous:           BTreeMap<String, ProjectSnapshot>,
   previous_connected: BTreeMap<String, bool>,
   changes:            broadcast::Sender<()>,
@@ -51,12 +51,13 @@ impl Poller {
     activity: Arc<ActivityStore>,
     store: Arc<StateStore>,
     changes: broadcast::Sender<()>,
+    registry: McpClientRegistry,
   ) -> Self {
     Poller {
       config_path,
       activity,
       store,
-      clients: BTreeMap::new(),
+      registry,
       previous: BTreeMap::new(),
       previous_connected: BTreeMap::new(),
       changes,
@@ -66,8 +67,9 @@ impl Poller {
 
   /// 1サイクル分、全プロジェクトの状態を読み取って差し替え、出来事を記録する。
   ///
-  /// 設定ファイルを再読み込みし、プロジェクト一覧の変化（追加・削除）を状態ストアと clients へ
-  /// 追随させます。読み取り間隔もこのサイクルで解決し、[`CycleReport::interval`] で返します。
+  /// 設定ファイルを再読み込みし、プロジェクト一覧の変化（追加・削除）を状態ストアと
+  /// takt-mcp のクライアントのレジストリへ追随させます。読み取り間隔もこのサイクルで解決し、
+  /// [`CycleReport::interval`] で返します。
   pub async fn read_cycle_once(&mut self) -> Result<CycleReport, crate::config::ConfigError> {
     let now = Utc::now();
     self.read_cycle_once_at(now).await
@@ -87,8 +89,7 @@ impl Poller {
     self.store.set_thresholds(config.thresholds);
     self.store.set_servers(config.server_meta.clone());
     self.store.set_projects(config.projects.clone());
-    let rebuilt = self.sync_clients(&config).await;
-    self.reset_rebuilt_projects(&rebuilt);
+    self.sync_clients(&config);
     let mut report = CycleReport {
       projects_read:   0,
       projects_failed: 0,
@@ -99,6 +100,11 @@ impl Poller {
     // 続けるため、最初の記録エラーだけを保持してサイクルの末尾で返します。
     let mut record_error: Option<crate::config::ConfigError> = None;
     for project in &config.projects {
+      // 設定変更（読み取り側・書き込み RPC 経由の双方）でクライアントを作り直した
+      // プロジェクトは、旧接続先の差分基準を新接続先へ投影しないよう読み取り前にリセットします。
+      if self.registry.take_rebuilt_for(&project.server, &project.name) {
+        self.reset_project_baseline(&project.name);
+      }
       let read_at = Utc::now();
       let prev = self.previous.get(&project.name).cloned();
       let prev_connected = self.previous_connected.get(&project.name).copied().unwrap_or(false);
@@ -167,51 +173,29 @@ impl Poller {
 
   /// すべてのプロジェクトの子プロセスを終了する。
   pub async fn shutdown(&mut self) {
-    for client in self.clients.values_mut() {
-      client.shutdown().await;
-    }
-    self.clients.clear();
+    self.registry.shutdown_all().await;
   }
 
-  /// 設定を再読み込みし、プロジェクトのクライアントを設定に追随させる。
-  ///
-  /// 設定から消えたプロジェクトのクライアントを破棄し、起動設定（`command`・`args`・`env`・
-  /// `cwd`）が変わったプロジェクトのクライアントは旧プロセスを終了して作り直します。設定が
-  /// 変わっていないプロジェクトのクライアントは子プロセスを保ったまま再利用します。作り直した
-  /// プロジェクト名を返し、呼び出し側が旧接続先の差分基準をリセットできるようにします。
-  async fn sync_clients(&mut self, config: &Config) -> Vec<String> {
-    let wanted: Vec<&str> = config.projects.iter().map(|project| project.name.as_str()).collect();
-    self.clients.retain(|project, _| wanted.contains(&project.as_str()));
-    let mut rebuilt = Vec::new();
+  fn sync_clients(&self, config: &Config) {
+    let wanted: Vec<(String, String)> =
+      config.projects.iter().map(|project| (project.server.clone(), project.name.clone())).collect();
+    self.registry.retain(&wanted);
     for project in &config.projects {
       let Some(server) = config.servers.get(&project.server) else {
         continue;
       };
-      let wanted_config = client_config(server, &project.cwd);
-      if let Some(client) = self.clients.get(&project.name) {
-        if client.config() == &wanted_config {
-          continue;
-        }
-        if let Some(mut client) = self.clients.remove(&project.name) {
-          client.shutdown().await;
-        }
-        rebuilt.push(project.name.clone());
-      }
-      self.clients.insert(project.name.clone(), McpClient::new(wanted_config));
+      self.registry.client(&project.server, &project.name, || client_config(server, &project.cwd));
     }
-    rebuilt
   }
 
   /// クライアントを作り直したプロジェクトの差分基準と状態をリセットする。
   ///
   /// 旧接続先の snapshot と接続状態を新接続先の所属で投影しないよう、スロットを未読へ戻し、
   /// 前サイクルの差分基準も捨てます。新接続先の初回読み取りは基準化のみになります。
-  fn reset_rebuilt_projects(&mut self, rebuilt: &[String]) {
-    for project in rebuilt {
-      self.previous.remove(project);
-      self.previous_connected.remove(project);
-      self.store.reset_project(project);
-    }
+  fn reset_project_baseline(&mut self, project: &str) {
+    self.previous.remove(project);
+    self.previous_connected.remove(project);
+    self.store.reset_project(project);
   }
 
   /// 1 プロジェクトを読み取る。補助読み取り（run・ゴール質問・通知・ゴールに属さない
@@ -222,10 +206,11 @@ impl Poller {
     project: &Project,
     prev: Option<&ProjectSnapshot>,
   ) -> Result<ProjectSnapshot, ToolError> {
-    let Some(client) = self.clients.get_mut(&project.name) else {
+    let Some(client) = self.registry.get(&project.server, &project.name) else {
       return Err(ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name)));
     };
-    ToolSet::new(client, project.cwd.clone()).read_snapshot(prev).await
+    let mut client = client.lock().await;
+    ToolSet::new(&mut client, project.cwd.clone()).read_snapshot(prev).await
   }
 }
 

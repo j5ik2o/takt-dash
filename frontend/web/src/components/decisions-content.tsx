@@ -1,9 +1,21 @@
-import type { ReactElement } from "react";
-import type { DashboardState, InquiryKind } from "../proto/taktdash";
-import { INQUIRY_KIND, PENDING_DECISION_TYPE } from "../state/proto-values";
-import { sortPendingDecisions, resolveThresholds, type PendingDecisionView } from "../state/dashboard";
+"use client";
+
+// 判断待ちページの一覧。各項目に種別ごとの操作 UI を埋め込み、操作結果は一覧の上に出す。
+// 結果は decisionKey で項目に紐づけて保持するため、SSE の再描画で並び順が変わっても
+// 同じ項目の結果として残る。
+import { useCallback, useState, type ReactElement } from "react";
+import type { DashboardState } from "../proto/taktdash";
+import {
+  decisionKey,
+  decisionTypeLabel,
+  upsertDecisionResult,
+  type DecisionResult,
+} from "../state/decision-actions";
+import { resolveThresholds, sortPendingDecisions } from "../state/dashboard";
 import { formatDuration } from "../state/format";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
+import { DecisionActions } from "./decision-actions";
+import { DecisionResults } from "./decision-results";
 
 type DecisionsContentProps = {
   state: DashboardState;
@@ -11,24 +23,18 @@ type DecisionsContentProps = {
   disconnected: boolean;
 };
 
-const inquiryKindLabel = (kind: InquiryKind): string => {
-  switch (kind) {
-    case INQUIRY_KIND.OPERATION_REQUEST:
-      return "作業の依頼";
-    case INQUIRY_KIND.QUESTION:
-    default:
-      return "質問";
-  }
-};
+const waitSeconds = (waitMinutes: number): number => Math.round(waitMinutes * 60);
 
-const waitSeconds = (decision: PendingDecisionView): number => Math.round(decision.waitMinutes * 60);
-
-// 判断待ちは表示のみとする（order.md:25, :51）。回答・承認・却下の操作要素を持たない。
 export function DecisionsContent({ state, now, disconnected }: DecisionsContentProps): ReactElement {
   const thresholds = resolveThresholds(state.thresholds);
   const decisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
   });
+  const [results, setResults] = useState<DecisionResult[]>([]);
+
+  const handleResult = useCallback((next: DecisionResult) => {
+    setResults((previous) => upsertDecisionResult(previous, next));
+  }, []);
 
   return (
     <main className="page">
@@ -43,34 +49,32 @@ export function DecisionsContent({ state, now, disconnected }: DecisionsContentP
       </header>
 
       <section className="tray" aria-label="判断待ちの一覧">
+        <DecisionResults results={results} />
         {decisions.length === 0 ? (
           <p className="note">判断待ちはありません。</p>
         ) : (
           <ul className="tray-list">
-            {decisions.map((decision, index) => (
-              <li className={`tray-item ${decision.stale ? "stale" : ""}`} key={`${decision.serverId}-${decision.project}-${index}`}>
+            {decisions.map((decision) => (
+              <li className={`tray-item${decision.stale ? " stale" : ""}`} key={decisionKey(decision)}>
                 <div className="proj">
                   <span>{decision.project}</span>
                   <span className="srv">{decision.serverId}</span>
-                  <span className="kind">
-                    {decision.type === PENDING_DECISION_TYPE.AWAITING_MERGE
-                      ? "人のマージ待ち"
-                      : `問い合わせ（${inquiryKindLabel(decision.inquiryKind)}）`}
-                  </span>
+                  <span className="kind">{decisionTypeLabel(decision)}</span>
                 </div>
                 <p className="desc">{decision.body}</p>
                 {decision.options.length > 0 ? <p className="opts">選択肢は {decision.options.join(" と ")} です。</p> : null}
                 <div className="wait">
-                  <b>{formatDuration(waitSeconds(decision))} 待ち</b>
+                  <b>{formatDuration(waitSeconds(decision.waitMinutes))} 待ち</b>
                   {decision.stale ? <span className="stale-label">滞留しています。</span> : null}
                 </div>
+                <DecisionActions decision={decision} onResult={handleResult} />
               </li>
             ))}
           </ul>
         )}
         <div className="foot-notes">
           <p>
-            判断待ちは、未回答の問い合わせと、人のマージ待ちのゴールの合計です。滞留は
+            判断待ちは、未回答の問い合わせ、人のマージ待ちのゴール、ゴール登録の承認待ちの合計です。滞留は
             {thresholds.pendingDecisionStaleMinutes}分を超えたものを示します。
           </p>
         </div>

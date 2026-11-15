@@ -39,9 +39,16 @@ export const INQUIRY_KIND = {
   OPERATION_REQUEST: 2,
 } as const;
 
+// operation_request への回答。画面の「実施した」「対応できない」が送る値。
+export const OPERATION_ANSWER_REPORT = {
+  COMPLETED: 1,
+  UNABLE: 2,
+} as const;
+
 export const PENDING_DECISION_TYPE = {
   INQUIRY: 1,
   AWAITING_MERGE: 2,
+  GOAL_REGISTRATION: 3,
 } as const;
 
 export const CONVERSATION_SPEAKER = {
@@ -96,6 +103,7 @@ const ENUM_NAME_TO_NUMBER: Record<string, Record<string, number>> = {
     PENDING_DECISION_TYPE_UNSPECIFIED: 0,
     PENDING_DECISION_TYPE_INQUIRY: 1,
     PENDING_DECISION_TYPE_AWAITING_MERGE: 2,
+    PENDING_DECISION_TYPE_GOAL_REGISTRATION: 3,
     UNRECOGNIZED: -1,
   },
   ConversationSpeaker: {

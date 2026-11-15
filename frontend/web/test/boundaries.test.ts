@@ -60,6 +60,22 @@ test("globals.css は狭い幅で1列化するメディアクエリを持つ", a
   assert.match(css, /grid-template-columns:\s*1fr/);
 });
 
+test("画面のコードは dangerouslySetInnerHTML を使わない", async () => {
+  const files = [
+    ...(await listFiles(join(webRoot, "app"), [".tsx", ".ts"])),
+    ...(await listFiles(join(webRoot, "src"), [".tsx", ".ts"])),
+  ].filter((path) => !path.endsWith(".test.ts") && !path.endsWith(".test.mts"));
+
+  const offenders: string[] = [];
+  for (const path of files) {
+    const source = await read(path);
+    if (/dangerouslySetInnerHTML/.test(source)) {
+      offenders.push(path.replace(webRoot, ""));
+    }
+  }
+  assert.deepEqual(offenders, [], "dangerouslySetInnerHTML を使わない");
+});
+
 test("frontend/web のコードは .takt や SQLite を直接読まない", async () => {
   const files = [
     ...(await listFiles(join(webRoot, "app"), [".tsx", ".ts"])),

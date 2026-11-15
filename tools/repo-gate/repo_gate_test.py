@@ -169,6 +169,8 @@ jobs:
         with:
           node-version: 22
       - run: make done
+      - run: npm ci
+      - run: node scripts/aislop-check-bootstrap.mjs check
 """
 
 WORKFLOW = """\
@@ -195,9 +197,22 @@ steps:
         timeout_ms: 1800000
     rules:
       - condition: when(context.machine_gate.result.exit_code == 0)
-        next: COMPLETE
+        next: aislop_gate
       - condition: when(true)
         next: fix_machine_gate
+  - name: aislop_gate
+    description: aislop で警告以上の指摘を検査する
+    mode: system
+    system_inputs:
+      - type: command
+        as: result
+        command: npm ci && node scripts/aislop-check-bootstrap.mjs check
+        timeout_ms: 900000
+    rules:
+      - condition: when(context.aislop_gate.result.exit_code == 0)
+        next: COMPLETE
+      - condition: when(true)
+        next: fix_aislop_gate
   - name: fix_machine_gate
     description: make done の失敗を修正する
     capabilities: edit
@@ -209,6 +224,20 @@ steps:
         {context:machine_gate.result.stderr}
     rules:
       - condition: make done の失敗を修正して検証した
+        next: machine_gate
+      - condition: 修正できない
+        next: ABORT
+  - name: fix_aislop_gate
+    description: aislop の警告以上の指摘を修正する
+    capabilities: edit
+    edit: true
+    instruction:
+      - fix-supervisor
+      - |
+        {context:aislop_gate.result.stdout}
+        {context:aislop_gate.result.stderr}
+    rules:
+      - condition: aislop の指摘を修正して検証した
         next: machine_gate
       - condition: 修正できない
         next: ABORT
@@ -475,8 +504,12 @@ def test_workflow_gate_wiring() -> None:
             WORKFLOW.replace("      - condition: COMPLETE\n        next: machine_gate", "      - condition: COMPLETE\n        next: COMPLETE"),
             "develop の COMPLETE",
         ),
+        "make done の成功で aislop ステップへ渡さない": (
+            WORKFLOW.replace("        next: aislop_gate\n      - condition: when(true)\n        next: fix_machine_gate", "        next: COMPLETE\n      - condition: when(true)\n        next: fix_machine_gate"),
+            "aislop",
+        ),
         "成功で完了しない": (
-            WORKFLOW.replace("next: COMPLETE\n      - condition: when(true)", "next: fix_machine_gate\n      - condition: when(true)"),
+            WORKFLOW.replace("next: COMPLETE\n      - condition: when(true)\n        next: fix_aislop_gate", "next: fix_aislop_gate\n      - condition: when(true)\n        next: fix_aislop_gate"),
             "COMPLETE",
         ),
         "修正が make done の出力を参照しない": (
@@ -484,14 +517,278 @@ def test_workflow_gate_wiring() -> None:
             "instruction",
         ),
         "修正から機械ゲートへ戻らない": (
-            WORKFLOW.replace("        next: machine_gate\n      - condition: 修正できない", "        next: COMPLETE\n      - condition: 修正できない"),
+            WORKFLOW.replace(
+                "        {context:machine_gate.result.stderr}\n    rules:\n      - condition: make done の失敗を修正して検証した\n        next: machine_gate",
+                "        {context:machine_gate.result.stderr}\n    rules:\n      - condition: make done の失敗を修正して検証した\n        next: COMPLETE",
+            ),
             "machine_gate",
         ),
         "機械ゲートが system でない": (
-            WORKFLOW.replace("    mode: system\n    system_inputs:", "    capabilities: readonly\n    system_inputs:"),
+            WORKFLOW.replace("    mode: system\n    system_inputs:", "    capabilities: readonly\n    system_inputs:", 1),
             "mode: system",
         ),
     }
+    for label, (workflow, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+
+def test_workflow_requires_aislop_gate_step() -> None:
+    """aislop の機械ゲートが無い、順序が違う、失敗時に戻らない、のそれぞれで失敗する。"""
+    without_step = WORKFLOW.replace(
+        """  - name: aislop_gate
+    description: aislop で警告以上の指摘を検査する
+    mode: system
+    system_inputs:
+      - type: command
+        as: result
+        command: npm ci && node scripts/aislop-check-bootstrap.mjs check
+        timeout_ms: 900000
+    rules:
+      - condition: when(context.aislop_gate.result.exit_code == 0)
+        next: COMPLETE
+      - condition: when(true)
+        next: fix_aislop_gate
+""",
+        "",
+    ).replace(
+        "        next: aislop_gate\n      - condition: when(true)\n        next: fix_machine_gate",
+        "        next: COMPLETE\n      - condition: when(true)\n        next: fix_machine_gate",
+    )
+    cases = {
+        "aislop ステップが無い": (without_step, "aislop"),
+        "aislop ステップが make done より前にある": (
+            WORKFLOW.replace(
+                "      - condition: COMPLETE\n        next: machine_gate",
+                "      - condition: COMPLETE\n        next: aislop_gate",
+            ).replace(
+                "        next: aislop_gate\n      - condition: when(true)\n        next: fix_machine_gate",
+                "        next: COMPLETE\n      - condition: when(true)\n        next: fix_machine_gate",
+            ),
+            "aislop",
+        ),
+        "aislop の失敗で修正へ遷移しない": (
+            WORKFLOW.replace("        next: fix_aislop_gate", "        next: ABORT"),
+            "fix_aislop_gate",
+        ),
+        "aislop の修正から machine_gate へ戻らない": (
+            WORKFLOW.replace(
+                "      - condition: aislop の指摘を修正して検証した\n        next: machine_gate",
+                "      - condition: aislop の指摘を修正して検証した\n        next: aislop_gate",
+            ),
+            "machine_gate",
+        ),
+    }
+    for label, (workflow, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+
+def test_aislop_fix_must_reenter_machine_gate() -> None:
+    """aislop の修正は、make done をやり直す機械ゲートへ戻らなければならない。
+
+    修正後の成果物に make done を再実行せず COMPLETE へ到達できる遷移と、
+    aislop だけを再実行して COMPLETE へ到達できる遷移を拒否する。
+    """
+    cases = {
+        "aislop の修正が COMPLETE へ直接遷移する": (
+            WORKFLOW.replace(
+                "      - condition: aislop の指摘を修正して検証した\n        next: machine_gate",
+                "      - condition: aislop の指摘を修正して検証した\n        next: COMPLETE",
+            ),
+            "machine_gate",
+        ),
+        "aislop の修正が aislop へ直接戻る": (
+            WORKFLOW.replace(
+                "      - condition: aislop の指摘を修正して検証した\n        next: machine_gate",
+                "      - condition: aislop の指摘を修正して検証した\n        next: aislop_gate",
+            ),
+            "machine_gate",
+        ),
+    }
+    for label, (workflow, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+
+def test_aislop_gate_command_detection() -> None:
+    """aislop チェックを実際に起動するコマンドだけを aislop ゲートと判定する。
+
+    echo・引用符内の文字列・コメントは実行扱いせず、mode が system でないステップも
+    対象にしない。
+    """
+    with Sandbox() as sandbox:
+        module = sandbox.module
+
+        def step(command, mode="system"):
+            return {
+                "name": "aislop_gate",
+                "mode": mode,
+                "system_inputs": [{"type": "command", "as": "result", "command": command}],
+            }
+
+        assert module.runs_aislop_gate(step("node scripts/aislop-check-bootstrap.mjs check")), "単独の起動を許可する"
+        assert module.runs_aislop_gate(step("npm ci && node scripts/aislop-check-bootstrap.mjs check")), "前段付きの起動を許可する"
+        assert module.runs_aislop_gate(
+            step("echo 準備 # コメント\nnode scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント行の次の実起動を許可する"
+        assert not module.runs_aislop_gate(step("echo scripts/aislop-check-bootstrap.mjs check")), "echo を実行扱いしない"
+        assert not module.runs_aislop_gate(step('echo "node scripts/aislop-check-bootstrap.mjs check"')), "引用符内を実行扱いしない"
+        assert not module.runs_aislop_gate(step("# node scripts/aislop-check-bootstrap.mjs check")), "コメントを実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("echo skipped # && node scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント内の && の後ろを実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("# 実行例: npm ci || node scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント行内の || の後ろを実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("echo skipped # ; node scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント内の ; の後ろを実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("echo skipped # | node scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント内の | の後ろを実行扱いしない"
+        assert module.runs_aislop_gate(
+            step('echo "参照: # ではない" # コメント\nnode scripts/aislop-check-bootstrap.mjs check')
+        ), "引用符内の # をコメント開始とみなさない"
+        assert not module.runs_aislop_gate(
+            step("node scripts/aislop-check-bootstrap.mjs check", mode="agent")
+        ), "mode が system でないステップを対象にしない"
+
+
+def test_aislop_gate_command_must_invoke_the_check() -> None:
+    """echo やコメント内の文字列を aislop ゲートとして扱わない。"""
+    cases = {
+        "echo で文字列を表示するだけ": "        command: 'echo scripts/aislop-check-bootstrap.mjs check'",
+        "コメント内の演算子の後ろにだけ書く": (
+            "        command: 'echo skipped # && node scripts/aislop-check-bootstrap.mjs check'"
+        ),
+        "コメント行にだけ書く": "        command: '# node scripts/aislop-check-bootstrap.mjs check'",
+    }
+    for label, replacement in cases.items():
+        with Sandbox() as sandbox:
+            workflow = WORKFLOW.replace(
+                "        command: npm ci && node scripts/aislop-check-bootstrap.mjs check",
+                replacement,
+            )
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "aislop-gate を実行する")
+
+
+def test_ci_aislop_gate_command_must_invoke_the_check() -> None:
+    """CI でも、aislop チェックを実際に起動しないコマンドを呼び出しとみなさない。"""
+    cases = {
+        "echo で文字列を表示するだけ": "      - run: echo scripts/aislop-check-bootstrap.mjs check\n",
+        "引用符の中にだけコマンドを書く": '      - run: echo "node scripts/aislop-check-bootstrap.mjs check"\n',
+        "コメント内の演算子の後ろにだけ書く": (
+            "      - run: echo skipped # && node scripts/aislop-check-bootstrap.mjs check\n"
+        ),
+        "コメント行にだけ書く": "      - run: '# node scripts/aislop-check-bootstrap.mjs check'\n",
+    }
+    for label, run in cases.items():
+        with Sandbox() as sandbox:
+            ci = CI.replace("      - run: node scripts/aislop-check-bootstrap.mjs check\n", run)
+            repository(sandbox, ci=ci)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "ci-runs-make-done", "aislop のゲート")
+
+
+def test_ci_aislop_gate_accepts_multiline_run_with_comment() -> None:
+    """コメント行を含む複数行の run でも、実際に起動していれば受理する。"""
+    multi_line = (
+        "      - run: |\n"
+        "          # 依存を導入する\n"
+        "          npm ci\n"
+        "          node scripts/aislop-check-bootstrap.mjs check\n"
+    )
+    with Sandbox() as sandbox:
+        ci = CI.replace("      - run: node scripts/aislop-check-bootstrap.mjs check\n", multi_line)
+        repository(sandbox, ci=ci)
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "コメント行を含む複数行の run")
+
+
+def test_gate_success_condition_must_reference_its_own_gate() -> None:
+    """各ゲートの成功条件は、別ゲートではなくそのゲート自身の exit_code だけを見る。"""
+    success = "      - condition: when(context.aislop_gate.result.exit_code == 0)"
+    cases = {
+        "aislop_gate が machine_gate の exit_code を成功条件にする": (
+            WORKFLOW.replace(
+                "      - condition: when(context.aislop_gate.result.exit_code == 0)",
+                "      - condition: when(context.machine_gate.result.exit_code == 0)",
+            ),
+            "aislop_gate",
+        ),
+        "machine_gate が aislop_gate の exit_code を成功条件にする": (
+            WORKFLOW.replace(
+                "      - condition: when(context.machine_gate.result.exit_code == 0)",
+                "      - condition: when(context.aislop_gate.result.exit_code == 0)",
+            ),
+            "machine_gate",
+        ),
+        "aislop_gate が別ゲートの成功を AND で併記する": (
+            WORKFLOW.replace(
+                success,
+                "      - condition: when(context.aislop_gate.result.exit_code != 0 "
+                "&& context.machine_gate.result.exit_code == 0)",
+            ),
+            "aislop_gate",
+        ),
+        "aislop_gate が別ゲートの成功を OR で併記する": (
+            WORKFLOW.replace(
+                success,
+                "      - condition: when(context.aislop_gate.result.exit_code == 0 "
+                "|| context.machine_gate.result.exit_code == 0)",
+            ),
+            "aislop_gate",
+        ),
+        "aislop_gate が自ゲートの否定とリテラル真を併記する": (
+            WORKFLOW.replace(
+                success,
+                "      - condition: when(context.aislop_gate.result.exit_code != 0 || 0 == 0)",
+            ),
+            "aislop_gate",
+        ),
+    }
+    # 成功条件の規則そのものが正規形でも、別の規則が別ゲートの exit_code == 0 を見ると、
+    # 規則は先に一致したものが選ばれるため、そのゲートの成功で次へ進めてしまう。
+    aislop_success_rule = (
+        "      - condition: when(context.aislop_gate.result.exit_code == 0)\n"
+        "        next: COMPLETE\n"
+    )
+    machine_success_rule = (
+        "      - condition: when(context.machine_gate.result.exit_code == 0)\n"
+        "        next: aislop_gate\n"
+    )
+    other_gate_rules = {
+        "aislop_gate": (
+            aislop_success_rule,
+            "      - condition: when(context.machine_gate.result.exit_code == 0)\n"
+            "        next: COMPLETE\n",
+            "別ゲート machine_gate",
+        ),
+        "machine_gate": (
+            machine_success_rule,
+            "      - condition: when(context.aislop_gate.result.exit_code == 0)\n"
+            "        next: aislop_gate\n",
+            "別ゲート aislop_gate",
+        ),
+    }
+    for gate, (success_rule, extra_rule, snippet) in other_gate_rules.items():
+        for position, replaced in (
+            ("成功条件の規則より前", extra_rule + success_rule),
+            ("成功条件の規則より後", success_rule + extra_rule),
+        ):
+            cases[f"{gate} の別規則が{position}に別ゲートの成功を見る"] = (
+                WORKFLOW.replace(success_rule, replaced),
+                snippet,
+            )
     for label, (workflow, snippet) in cases.items():
         with Sandbox() as sandbox:
             repository(sandbox, workflow=workflow)
@@ -525,6 +822,80 @@ def test_ci_must_run_make_done_with_toolchains() -> None:
         repository(sandbox, ci=None)
         stub_external_tools(sandbox)
         assert_failure(sandbox, "CI の定義が無い", "ci-runs-make-done", ".github/workflows/")
+
+
+def test_ci_must_call_aislop_gate() -> None:
+    """CI から aislop のゲートを呼ぶ。チェックアウトの前に呼ぶ構成も失敗にする。"""
+    aislop_run = "      - run: node scripts/aislop-check-bootstrap.mjs check\n"
+    cases = {
+        "aislop ゲートを呼ばない": (
+            CI.replace(aislop_run, ""),
+            "aislop",
+        ),
+        "チェックアウトの前に aislop を呼ぶ": (
+            CI.replace(aislop_run, "").replace(
+                "      - uses: actions/checkout@v5\n",
+                aislop_run + "      - uses: actions/checkout@v5\n",
+            ),
+            "aislop",
+        ),
+    }
+    for label, (ci, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=ci)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "ci-runs-make-done", snippet)
+
+
+def test_ci_checkout_order_is_per_job() -> None:
+    """チェックアウト順はジョブ単位で判定する。
+
+    先のジョブの checkout が後続ジョブへ累積してはならない。aislop を呼ぶジョブが
+    自身の checkout を持たない場合は、他ジョブに checkout があっても失敗にする。
+    併せて、問題のない複数ジョブ構成と、make done を持たないジョブの混在が
+    判定を変えないことも確かめる。
+    """
+    aislop_only_job = (
+        "  extra:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: node scripts/aislop-check-bootstrap.mjs check\n"
+    )
+    cases = {
+        "aislop を呼ぶジョブに checkout が無い": (
+            # done ジョブが checkout と make done を持ち、extra ジョブが aislop のみを持つ。
+            CI.rstrip("\n") + "\n" + aislop_only_job,
+            "チェックアウトより前に呼んでいます",
+        ),
+        "aislop を呼ぶ別ジョブに自身の checkout がある": (
+            CI.rstrip("\n")
+            + "\n"
+            + "  extra:\n"
+            + "    runs-on: ubuntu-latest\n"
+            + "    steps:\n"
+            + "      - uses: actions/checkout@v5\n"
+            + "      - run: node scripts/aislop-check-bootstrap.mjs check\n",
+            None,
+        ),
+        "make done を持たないジョブが混在しても結果が変わらない": (
+            CI.rstrip("\n")
+            + "\n"
+            + "  unrelated:\n"
+            + "    runs-on: ubuntu-latest\n"
+            + "    steps:\n"
+            + "      - run: echo ok\n",
+            None,
+        ),
+    }
+    for label, (ci, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=ci)
+            stub_external_tools(sandbox)
+            if snippet is None:
+                code, out, err = sandbox.run([])
+                assert code == 0, f"{label}: 成功するはずが失敗しました: {err!r}"
+            else:
+                assert_failure(sandbox, label, "ci-runs-make-done", snippet)
 
 
 def test_gitignore_and_toolchain_rules() -> None:
@@ -585,7 +956,16 @@ def main() -> int:
         test_clippy_must_reject_warnings,
         test_done_must_install_node_dependencies_when_missing,
         test_workflow_gate_wiring,
+        test_workflow_requires_aislop_gate_step,
+        test_aislop_fix_must_reenter_machine_gate,
+        test_aislop_gate_command_detection,
+        test_aislop_gate_command_must_invoke_the_check,
+        test_gate_success_condition_must_reference_its_own_gate,
         test_ci_must_run_make_done_with_toolchains,
+        test_ci_must_call_aislop_gate,
+        test_ci_aislop_gate_command_must_invoke_the_check,
+        test_ci_aislop_gate_accepts_multiline_run_with_comment,
+        test_ci_checkout_order_is_per_job,
         test_gitignore_and_toolchain_rules,
         test_skip_make_omits_the_command_run,
         test_install_guard_detection,

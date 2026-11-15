@@ -51,6 +51,14 @@ pub fn mock_client(config: McpClientConfig) -> McpClient {
   McpClient::new(config)
 }
 
+/// 受け取った道具呼び出しを JSONL で記録する mock サーバの起動設定を作る。
+pub fn mock_config_with_calls(cwd: &Path, state: &Path, calls: &Path) -> McpClientConfig {
+  let mut config = mock_config(cwd, state, None);
+  config.args.push("--calls".to_owned());
+  config.args.push(calls.display().to_string());
+  config
+}
+
 /// プロジェクトの cwd を持つ道具のまとまりを作る。mock は実契約と同じく cwd 必須なので、
 /// テストはプロジェクトの cwd（通常は mock を起動したディレクトリ）を渡します。
 pub fn tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> ToolSet<'a> {
@@ -160,7 +168,7 @@ pub fn snapshot(
   runs: Vec<RunEntry>,
   notifications: Vec<NotificationEntry>,
 ) -> ProjectSnapshot {
-  ProjectSnapshot { goals, tasks, inquiries, runs, notifications }
+  ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals: Vec::new() }
 }
 
 pub fn server_meta() -> ServerMeta {

@@ -13,9 +13,9 @@ use super::client::{CallError, McpClient, McpClientConfig};
 use crate::{
   config::McpServer,
   model::{
-    ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, ReportEntry,
-    RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, RunStatus, RunStepEntry, StepLogEntry, TaskEntry,
-    TaskStatus,
+    ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot,
+    RegistrationProposalEntry, ReportEntry, RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, RunStatus,
+    RunStepEntry, StepLogEntry, TaskEntry, TaskStatus,
   },
 };
 
@@ -86,8 +86,9 @@ impl<'a> ToolSet<'a> {
   ///
   /// `prev` には前回の snapshot を渡します。補助読み取り（run・ゴール質問・通知・ゴールに
   /// 属さない問い合わせ）が道具エラーで失敗したときは、その項目だけ前回値（無ければ空）を
-  /// 保持し、プロジェクト全体を失敗にしません。コア読み取り（ゴール・タスク）の失敗と、
-  /// 補助読み取りの輸送エラー・解析エラーは全体の失敗として伝播します。
+  /// 保持し、プロジェクト全体を失敗にしません。ゴール登録提案も道具エラーと解析エラーの
+  /// ときは前回の提案（無ければ空）へ縮退し、周期を失敗させません。コア読み取り
+  /// （ゴール・タスク）の失敗と、補助読み取りの輸送エラーは全体の失敗として伝播します。
   ///
   /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知から得るため、通知を読んだ後に
   /// ゴールへ起点時刻を反映します。通知が無いゴールは前回 snapshot の同じゴールの起点を
@@ -103,7 +104,14 @@ impl<'a> ToolSet<'a> {
         resolve_awaiting_merge_at(goal, awaiting_merge_at.get(&goal.goal_id).copied(), prev, observed_at);
     }
     let runs = self.get_running_runs(&tasks, prev).await?;
-    Ok(ProjectSnapshot { goals, tasks, inquiries, runs, notifications })
+    let proposals = match self.list_goal_registration_proposals().await {
+      | Ok(entries) => entries,
+      | Err(ToolError::Tool(_)) | Err(ToolError::Parse(_)) => {
+        prev.map(|snapshot| snapshot.proposals.clone()).unwrap_or_default()
+      },
+      | Err(error) => return Err(error),
+    };
+    Ok(ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals })
   }
 
   async fn call_json(&mut self, name: &str, extra: Value) -> Result<Value, ToolError> {
@@ -696,7 +704,10 @@ impl<'a> ToolSet<'a> {
     }
     let mut instructions = Vec::new();
     for instruction in value.get("instructions").and_then(Value::as_array).cloned().unwrap_or_default() {
-      let instruction_id = instruction.get("instructionId").and_then(Value::as_i64).unwrap_or_default() as i32;
+      let instruction_id = match instruction.get("instructionId") {
+        | None => 0,
+        | Some(field) => checked_i32(Some(field), "instructionId")?,
+      };
       let instruction_value =
         self.call_json("takt_get_run", json!({ "runSlug": run_slug, "instructionId": instruction_id })).await?;
       instructions.push(RunInstructionEntry {
@@ -714,6 +725,156 @@ impl<'a> ToolSet<'a> {
     }
     parse_run_detail(&value, run_slug, task.as_ref(), step_logs, reports, instructions)
   }
+
+  /// 問い合わせへ回答する。`answer` は takt の `answer` オブジェクト（例: `{"text": "..."}`）。
+  /// 応答の `questionId` を返します。takt の入力契約では `goalId` は必須（UUID）なので、
+  /// `goal_id` は必須の引数として受け取ります。
+  pub async fn answer_goal_question(
+    &mut self,
+    goal_id: &str,
+    question_id: &str,
+    answer: Value,
+  ) -> Result<String, ToolError> {
+    let value = self
+      .call_json("takt_answer_goal_question", json!({ "goalId": goal_id, "questionId": question_id, "answer": answer }))
+      .await?;
+    optional_string(&value, "questionId")
+      .ok_or_else(|| ToolError::Parse("takt_answer_goal_question の応答に questionId がありません".to_owned()))
+  }
+
+  /// ゴール登録の承認待ちを取得する。提案が無ければ空の並びを返します。
+  pub async fn list_goal_registration_proposals(&mut self) -> Result<Vec<RegistrationProposalEntry>, ToolError> {
+    let value = self.call_json("takt_list_goal_registration_proposals", json!({})).await?;
+    let proposals = value.get("proposals").and_then(Value::as_array).ok_or_else(|| {
+      ToolError::Parse("takt_list_goal_registration_proposals の応答に proposals の配列がありません".to_owned())
+    })?;
+    proposals
+      .iter()
+      .map(|proposal| {
+        Ok(RegistrationProposalEntry {
+          revision:             required_i32(proposal, "revision")?,
+          repository_directory: required_string(proposal, "repositoryDirectory")?,
+          summary:              registration_summary_text(proposal.get("summary"))?,
+        })
+      })
+      .collect()
+  }
+
+  /// ゴール登録の承認待ちを承認する。承認した revision と、登録されたゴールの ID を返します。
+  pub async fn approve_goal_registration(&mut self, revision: i32) -> Result<ApproveGoalRegistrationResult, ToolError> {
+    let value = self.call_json("takt_approve_goal_registration", json!({ "revision": revision })).await?;
+    let goal_id =
+      required_string(value.get("goal").ok_or_else(|| ToolError::Parse("応答に goal がありません".to_owned()))?, "id")?;
+    Ok(ApproveGoalRegistrationResult { revision: required_i32(&value, "revision")?, goal_id })
+  }
+
+  /// ゴール登録の承認待ちを却下する。却下した revision を返します。
+  pub async fn reject_goal_registration(&mut self, revision: i32) -> Result<i32, ToolError> {
+    let value = self.call_json("takt_reject_goal_registration", json!({ "revision": revision })).await?;
+    required_i32(&value, "revision")
+  }
+
+  /// プルリクエストのマージを承認する。依頼したタスク名とワークフローを返します。
+  pub async fn merge_goal_pr(
+    &mut self,
+    goal_id: &str,
+    pr_number: i64,
+    until: &str,
+  ) -> Result<MergeGoalPrResult, ToolError> {
+    let value =
+      self.call_json("takt_merge_goal_pr", json!({ "goalId": goal_id, "prNumber": pr_number, "until": until })).await?;
+    Ok(MergeGoalPrResult {
+      task_name: required_string(&value, "taskName")?,
+      workflow:  required_string(&value, "workflow")?,
+    })
+  }
+}
+
+/// takt_approve_goal_registration の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApproveGoalRegistrationResult {
+  pub revision: i32,
+  pub goal_id:  String,
+}
+
+/// takt_merge_goal_pr の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeGoalPrResult {
+  pub task_name: String,
+  pub workflow:  String,
+}
+
+/// ゴール登録提案の `summary` を表示本文へ変換する。
+///
+/// 文字列はそのまま本文にします。オブジェクトは既知の項目だけを日本語の文として組み立て、
+/// 未知のキーと欠落は無視します。どちらでもない値だけを解析エラーにします。
+fn registration_summary_text(value: Option<&Value>) -> Result<String, ToolError> {
+  match value {
+    | None | Some(Value::Null) => Ok(String::new()),
+    | Some(Value::String(text)) => Ok(text.clone()),
+    | Some(Value::Object(object)) => Ok(compose_registration_summary(object)),
+    | Some(_) => Err(ToolError::Parse("summary が文字列でもオブジェクトでもありません".to_owned())),
+  }
+}
+
+/// `summary` オブジェクトから本文へ含める既知の項目と見出し。
+const REGISTRATION_SUMMARY_FIELDS: [(&str, &str); 6] = [
+  ("objective", "目的"),
+  ("outOfScope", "対象外"),
+  ("acceptanceCriteria", "受入条件"),
+  ("constraints", "制約"),
+  ("startBranch", "開始ブランチ"),
+  ("integrationBranch", "統合ブランチ"),
+];
+
+fn compose_registration_summary(object: &serde_json::Map<String, Value>) -> String {
+  let mut lines = Vec::new();
+  for (key, label) in REGISTRATION_SUMMARY_FIELDS {
+    if let Some(text) = registration_summary_field(object.get(key)) {
+      lines.push(format!("{label}: {text}"));
+    }
+  }
+  lines.join("\n")
+}
+
+/// `summary` オブジェクトの項目値を本文用の文字列にする。文字列と文字列の配列だけを受け付け、
+/// それ以外の型と空の配列は無視します。
+fn registration_summary_field(value: Option<&Value>) -> Option<String> {
+  match value? {
+    | Value::String(text) => Some(text.clone()),
+    | Value::Array(items) => {
+      let texts: Vec<&str> = items.iter().filter_map(Value::as_str).collect();
+      if texts.is_empty() {
+        None
+      } else {
+        Some(texts.join("、"))
+      }
+    },
+    | _ => None,
+  }
+}
+
+/// 応答の必須の整数フィールドを読み取る。欠落は解析エラーにします。
+fn required_i32(value: &Value, key: &str) -> Result<i32, ToolError> {
+  checked_i32(value.get(key), key)
+}
+
+/// 任意の位置の整数を検査する。欠落・数値以外・i32 の範囲外は解析エラーにします。
+///
+/// `as i32` による切り詰めを避け、takt から受け取った値と異なる値を送らないようにします。
+fn checked_i32(value: Option<&Value>, key: &str) -> Result<i32, ToolError> {
+  let value = value.ok_or_else(|| ToolError::Parse(format!("{key} が数値ではありません")))?;
+  let number = value.as_i64().ok_or_else(|| ToolError::Parse(format!("{key} が数値ではありません")))?;
+  i32::try_from(number).map_err(|_| ToolError::Parse(format!("{key} が i32 の範囲外です: {number}")))
+}
+
+/// 応答の必須の文字列フィールドを読み取る。欠落は解析エラーにします。
+fn required_string(value: &Value, key: &str) -> Result<String, ToolError> {
+  value
+    .get(key)
+    .and_then(Value::as_str)
+    .map(str::to_owned)
+    .ok_or_else(|| ToolError::Parse(format!("{key} が文字列ではありません")))
 }
 
 fn parse_run_detail(
