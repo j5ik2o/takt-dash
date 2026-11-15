@@ -263,6 +263,12 @@ a {
   font-size: 14px;
 }
 
+.tray-item .srv,
+.tray-item .kind,
+.tray-item .target {
+  display: block;
+}
+
 .st,
 .big-badge {
   font-size: 13px;
