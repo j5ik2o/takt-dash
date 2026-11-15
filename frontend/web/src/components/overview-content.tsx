@@ -76,6 +76,9 @@ export function OverviewContent({ view }: OverviewContentProps): ReactElement {
               <h3>{project.name}</h3>
               <p className="about">{project.about}</p>
               <p>直近24時間に完了したタスクは {project.completedTasks24h}件です。</p>
+              <a className="view" href={`/goals?project=${encodeURIComponent(project.name)}`}>
+                ゴール一覧を見る
+              </a>
             </li>
           ))}
         </ul>

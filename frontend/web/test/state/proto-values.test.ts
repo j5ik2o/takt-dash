@@ -27,6 +27,7 @@ import {
   INQUIRY_KIND,
   PENDING_DECISION_TYPE,
   RUN_STATUS,
+  TASK_STATUS,
   enumFromWire,
 } from "../../src/state/proto-values.ts";
 
@@ -43,6 +44,13 @@ test("proto-values は生成コードの enum と一致する", () => {
   assert.equal(RUN_STATUS.COMPLETED, RunStatus.RUN_STATUS_COMPLETED);
   assert.equal(RUN_STATUS.ABORTED, RunStatus.RUN_STATUS_ABORTED);
   assert.equal(RUN_STATUS.FAILED, RunStatus.RUN_STATUS_FAILED);
+
+  assert.equal(TASK_STATUS.PENDING, TaskStatus.TASK_STATUS_PENDING);
+  assert.equal(TASK_STATUS.RUNNING, TaskStatus.TASK_STATUS_RUNNING);
+  assert.equal(TASK_STATUS.COMPLETED, TaskStatus.TASK_STATUS_COMPLETED);
+  assert.equal(TASK_STATUS.FAILED, TaskStatus.TASK_STATUS_FAILED);
+  assert.equal(TASK_STATUS.EXCEEDED, TaskStatus.TASK_STATUS_EXCEEDED);
+  assert.equal(TASK_STATUS.PR_FAILED, TaskStatus.TASK_STATUS_PR_FAILED);
 
   assert.equal(ACTIVITY_KIND.GOAL_CREATED, ActivityKind.ACTIVITY_KIND_GOAL_CREATED);
   assert.equal(ACTIVITY_KIND.RUN_STARTED, ActivityKind.ACTIVITY_KIND_RUN_STARTED);

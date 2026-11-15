@@ -4,8 +4,11 @@ import {
   TaktDashServiceClient,
   type DashboardState,
   type GetActivityResponse,
+  type GetGoalDetailResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
+  type GetTaskDetailRequest,
+  type GetTaskDetailResponse,
   type WatchStateRequest,
 } from "../proto/taktdash";
 
@@ -39,6 +42,22 @@ export class RunNotFoundError extends Error {
   }
 }
 
+/** 指定した goalId のゴールが backend に存在しないことを表す。ページは 404 を返す。 */
+export class GoalNotFoundError extends Error {
+  constructor(goalId: string) {
+    super(`ゴール「${goalId}」は見つかりません。`);
+    this.name = "GoalNotFoundError";
+  }
+}
+
+/** 指定したプロジェクトとタスク名のタスクが backend に存在しないことを表す。ページは 404 を返す。 */
+export class TaskNotFoundError extends Error {
+  constructor(project: string, taskName: string) {
+    super(`プロジェクト「${project}」のタスク「${taskName}」は見つかりません。`);
+    this.name = "TaskNotFoundError";
+  }
+}
+
 export type BackendClient = {
   getOverview(): Promise<DashboardState>;
   getProjects(): Promise<GetProjectsResponse>;
@@ -46,6 +65,8 @@ export type BackendClient = {
   getPendingDecisions(): Promise<DashboardState>;
   getActivity(): Promise<GetActivityResponse>;
   getRunDetail(runSlug: string): Promise<GetRunDetailResponse>;
+  getGoalDetail(goalId: string): Promise<GetGoalDetailResponse>;
+  getTaskDetail(project: string, taskName: string, goalId?: string): Promise<GetTaskDetailResponse>;
   watchState(): ClientReadableStream<DashboardState>;
   close(): Promise<void>;
 };
@@ -110,6 +131,47 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       });
       if (detail.runSlug !== runSlug) {
         throw new RunNotFoundError(runSlug);
+      }
+      return detail;
+    },
+    getGoalDetail: async (goalId) => {
+      const detail = await unary<{ goalId: string }, GetGoalDetailResponse>(
+        (request, callback) => client.getGoalDetail(request, callback),
+        { goalId },
+      ).catch((error: unknown) => {
+        if (error instanceof BackendUnavailableError) {
+          throw error;
+        }
+        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
+          throw new GoalNotFoundError(goalId);
+        }
+        throw error;
+      });
+      if (detail.goalId !== goalId) {
+        throw new GoalNotFoundError(goalId);
+      }
+      return detail;
+    },
+    getTaskDetail: async (project, taskName, goalId) => {
+      const request: GetTaskDetailRequest =
+        goalId === undefined ? { project, taskName } : { project, taskName, goalId };
+      const detail = await unary<GetTaskDetailRequest, GetTaskDetailResponse>(
+        (unaryRequest, callback) => client.getTaskDetail(unaryRequest, callback),
+        request,
+      ).catch((error: unknown) => {
+        if (error instanceof BackendUnavailableError) {
+          throw error;
+        }
+        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
+          throw new TaskNotFoundError(project, taskName);
+        }
+        throw error;
+      });
+      if (detail.project !== project || detail.taskName !== taskName) {
+        throw new TaskNotFoundError(project, taskName);
+      }
+      if (goalId !== undefined && detail.goalId !== goalId) {
+        throw new TaskNotFoundError(project, taskName);
       }
       return detail;
     },
