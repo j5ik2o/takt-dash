@@ -137,3 +137,84 @@ test("GetConversation を取得し、project・session_id・after_seq・limit �
     }
   });
 });
+
+// 応答しない unary の待ちを、テスト自身の上限時間で打ち切る。
+// deadline が設定されていない実装では "timeout" が返り、assertion が失敗する。
+const settleWithin = async (promise: Promise<unknown>, ms: number): Promise<string> => {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<string>((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), ms);
+  });
+  try {
+    return await Promise.race([promise.then(() => "resolved", (error: Error) => error.name), timeout]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+};
+
+test("応答を返さない 5 つの unary RPC は有限の deadline で終了する", async () => {
+  await withServer({ hangUnary: true }, async ({ address }) => {
+    // 既定の deadline を待たずに観測できるよう、テストから短い deadline を渡す。
+    const options = { env: { TAKTDASH_BACKEND_ADDR: address }, deadlineMs: 50 };
+    const client = createBackendClient(options);
+    try {
+      const calls = {
+        getOverview: () => client.getOverview(),
+        getProjects: () => client.getProjects(),
+        getPendingDecisions: () => client.getPendingDecisions(),
+        getActivity: () => client.getActivity(),
+        getRunDetail: () => client.getRunDetail("run-aaa"),
+      };
+      for (const [name, call] of Object.entries(calls)) {
+        assert.equal(
+          await settleWithin(call(), 1_000),
+          "BackendUnavailableError",
+          `${name} は deadline の超過を BackendUnavailableError として返す必要があります`,
+        );
+      }
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("deadlineMs を指定しない既定の unary は有限の deadline を送る", async () => {
+  // 既定値の生成そのものを観測するため、サーバー側で受け取った deadline を記録する。
+  // 実時間で 30 秒は待たず、有限で観測時刻より未来かつ 60 秒以内であることだけを確かめる。
+  let observedDeadlineMs: number | undefined;
+  const before = Date.now();
+  await withServer(
+    {
+      overview: createDashboardState(),
+      onOverviewDeadline: (deadline) => {
+        observedDeadlineMs = typeof deadline === "number" ? deadline : deadline.getTime();
+      },
+    },
+    async ({ address }) => {
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+      try {
+        await client.getOverview();
+      } finally {
+        await client.close();
+      }
+    },
+  );
+  const after = Date.now();
+  assert.ok(observedDeadlineMs !== undefined, "既定の unary はサーバーへ deadline を送る必要があります");
+  assert.ok(Number.isFinite(observedDeadlineMs), "既定の deadline は有限値である必要があります");
+  assert.ok(observedDeadlineMs > before, "既定の deadline は観測時刻より未来である必要があります");
+  assert.ok(observedDeadlineMs <= after + 60_000, "既定の deadline は 60 秒以内である必要があります");
+});
+
+test("deadline の超過は BackendUnavailableError として扱う", async () => {
+  await withServer({ overview: { code: grpc.status.DEADLINE_EXCEEDED, details: "期限切れ" } }, async ({ address }) => {
+    const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+    try {
+      await assert.rejects(client.getOverview(), (error: Error) => error.name === "BackendUnavailableError");
+    } finally {
+      await client.close();
+    }
+  });
+});

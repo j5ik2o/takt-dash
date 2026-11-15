@@ -58,8 +58,22 @@ export function createDashboardState(): DashboardState {
       },
     ],
     projects: [
-      { name: "corporate-site", about: "採用ページを管理する", serverId: "mini", completedTasks24h: 3 },
-      { name: "esa", about: "イベントストアの実装", serverId: "mini", completedTasks24h: 1 },
+      {
+        name: "corporate-site",
+        about: "採用ページを管理する",
+        serverId: "mini",
+        completedTasks24h: 3,
+        connected: true,
+        lastReadAt: minutesAgo(1),
+      },
+      {
+        name: "esa",
+        about: "イベントストアの実装",
+        serverId: "mini",
+        completedTasks24h: 1,
+        connected: true,
+        lastReadAt: minutesAgo(1),
+      },
     ],
     goals: [
       {

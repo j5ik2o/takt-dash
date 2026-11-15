@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let server = serve_with_listener(listener, service, stop_rx.clone());
   let poller_stop = stop_rx.clone();
   let poll = async move {
-    run_until_stopped(&mut poller, || *poller_stop.borrow()).await;
+    run_until_stopped(&mut poller, poller_stop).await;
   };
   let (server_result, ()) = tokio::join!(server, poll);
   server_result?;
