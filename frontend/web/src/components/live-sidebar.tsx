@@ -2,17 +2,20 @@
 
 import type { ReactElement } from "react";
 import { usePathname } from "next/navigation";
-import type { Server } from "../proto/taktdash";
 import { Sidebar } from "./sidebar";
+import { useLiveState } from "./state-provider";
 
-type LiveSidebarProps = {
-  servers: Server[];
-  pendingCount: number;
-};
-
-// サイドバーは layout が保持し、ページ遷移でも同じ実体のまま残る。現在のパスを
-// usePathname で受け取り、遷移のたびに現在ページの強調を更新する。
-export function LiveSidebar({ servers, pendingCount }: LiveSidebarProps): ReactElement {
+// 自動更新の状態からサイドバーを描画する。初回は RSC が渡した状態を使い、
+// SSE を受信するたびにサーバー一覧と判断待ち件数を最新の状態へ追従させます。
+// 現在のパスは usePathname で受け取り、遷移のたびに現在ページの強調を更新します。
+export function LiveSidebar(): ReactElement {
+  const { state } = useLiveState();
   const pathname = usePathname();
-  return <Sidebar servers={servers} pendingCount={pendingCount} currentPath={pathname} />;
+  return (
+    <Sidebar
+      servers={state.servers}
+      pendingCount={state.pendingDecisions.length}
+      currentPath={pathname ?? undefined}
+    />
+  );
 }

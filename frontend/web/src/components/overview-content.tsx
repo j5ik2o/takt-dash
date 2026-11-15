@@ -3,10 +3,12 @@ import Link from "next/link";
 import type { OverviewView } from "../state/dashboard";
 import { formatClock, formatDateTime, formatDuration, formatModel } from "../state/format";
 import { projectHref, serverAnchorId } from "../state/anchors";
+import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 
 type OverviewContentProps = {
   view: OverviewView;
   flashingRunSlugs?: ReadonlySet<string>;
+  disconnected: boolean;
 };
 
 const positionText = (stepNumber?: number, totalSteps?: number, iteration?: number): string => {
@@ -19,10 +21,15 @@ const positionText = (stepNumber?: number, totalSteps?: number, iteration?: numb
 
 // 概要は要件 order.md:23 とモック docs/taktdash.html:663-699 に沿う。「24時間のトークン消費」は
 // 対象外のため、タイルもその旨の表示も持たない。
-export function OverviewContent({ view, flashingRunSlugs }: OverviewContentProps): ReactElement {
+export function OverviewContent({
+  view,
+  flashingRunSlugs,
+  disconnected,
+}: OverviewContentProps): ReactElement {
   const { thresholds, pendingCounts } = view;
   return (
     <main className="page">
+      {disconnected ? <BackendUnavailableNotice /> : null}
       <header className="page-head">
         <div>
           <h1>概要</h1>
@@ -54,6 +61,10 @@ export function OverviewContent({ view, flashingRunSlugs }: OverviewContentProps
             <li>
               <span>人のマージ待ち</span>
               <b>{pendingCounts.awaitingMerge}件</b>
+            </li>
+            <li>
+              <span>ゴール登録の承認待ち</span>
+              <b>{pendingCounts.goalRegistration}件</b>
             </li>
           </ul>
         </div>

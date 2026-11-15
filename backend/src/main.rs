@@ -8,7 +8,9 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use takt_dash_backend::{
   activity::ActivityStore,
   config::load_config,
-  grpc::{serve_with_listener, TaktDashServiceImpl},
+  conversation::{ConversationPaths, ConversationReader},
+  grpc::{serve_with_listener, ServiceDeps, TaktDashServiceImpl},
+  mcp::McpClientRegistry,
   poller::{run_until_stopped, Poller},
   store::StateStore,
 };
@@ -64,14 +66,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let store = Arc::new(StateStore::new(config.server_meta.clone(), config.projects.clone(), config.thresholds));
   let (changes, _) = tokio::sync::broadcast::channel(16);
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-  let service = TaktDashServiceImpl::new(
-    store.clone(),
-    activity.clone(),
-    arguments.config_path.clone(),
-    changes.clone(),
-    stop_rx.clone(),
-  );
-  let mut poller = Poller::new(arguments.config_path.clone(), activity, store, changes);
+  let registry = McpClientRegistry::new();
+  let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+  let conversation = Arc::new(ConversationReader::new(ConversationPaths::from_home(home)));
+  let service = TaktDashServiceImpl::new(ServiceDeps {
+    store: store.clone(),
+    activity: activity.clone(),
+    config_path: arguments.config_path.clone(),
+    conversation,
+    changes: changes.clone(),
+    shutdown: stop_rx.clone(),
+    registry: registry.clone(),
+  });
+  let mut poller = Poller::new(arguments.config_path.clone(), activity, store, changes, registry);
   let signal_sender = stop_tx.clone();
   tokio::spawn(async move {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -87,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let server = serve_with_listener(listener, service, stop_rx.clone());
   let poller_stop = stop_rx.clone();
   let poll = async move {
-    run_until_stopped(&mut poller, || *poller_stop.borrow()).await;
+    run_until_stopped(&mut poller, poller_stop).await;
   };
   let (server_result, ()) = tokio::join!(server, poll);
   server_result?;

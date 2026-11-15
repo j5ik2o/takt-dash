@@ -14,6 +14,7 @@ const PAGES = [
   { href: "/decisions", label: "判断待ち" },
   { href: "/projects", label: "プロジェクト" },
   { href: "/activity", label: "アクティビティ" },
+  { href: "/conversations", label: "会話" },
 ] as const;
 
 // 現在のパスと一致するナビだけを現在ページにする。前方一致にすると "/" が

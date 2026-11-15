@@ -47,7 +47,7 @@ const currentLinks = (html: string): NavLink[] => navLinks(html).filter(hasCurre
 test("判断待ちのパスでは判断待ちのリンクだけを現在ページにする", () => {
   const links = navLinks(renderSidebar("/decisions"));
 
-  assert.equal(links.length, 4, "ナビのリンクは4件のまま");
+  assert.equal(links.length, 5, "ナビのリンクは5件（会話ページを含む）");
   const current = links.filter(hasCurrentAttribute);
   assert.equal(current.length, 1, "aria-current=\"page\" を持つリンクは1件だけ");
   assert.equal(current[0]?.href, "/decisions", "現在ページは判断待ちのリンク");

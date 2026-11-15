@@ -164,6 +164,37 @@ fn project_with_relative_cwd_is_rejected() {
 }
 
 #[test]
+fn duplicate_project_name_is_rejected_at_the_config_boundary() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [
+      { "name": "takt-dash", "server": "mini", "cwd": "/abs/takt-dash" },
+      { "name": "takt-dash", "server": "mini", "cwd": "/abs/takt-dash-2" }
+    ]
+  }"#;
+  let error = parse_config(text, Path::new("/base")).expect_err("同名プロジェクトは拒否します");
+  assert!(
+    matches!(&error, ConfigError::Invalid(message) if message.contains("takt-dash")),
+    "重複したプロジェクト名を含む検証エラーになります: {error}"
+  );
+}
+
+#[test]
+fn distinct_project_names_are_accepted_even_when_only_case_differs() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [
+      { "name": "ESA", "server": "mini", "cwd": "/abs/esa-upper" },
+      { "name": "esa", "server": "mini", "cwd": "/abs/esa-lower" }
+    ]
+  }"#;
+  let config =
+    parse_config(text, Path::new("/base")).expect("大小文字だけが異なる名前は別プロジェクトとして読み込めます");
+  let names: Vec<&str> = config.projects.iter().map(|project| project.name.as_str()).collect();
+  assert_eq!(names, vec!["ESA", "esa"], "大小文字を正規化せず2件として読み込みます");
+}
+
+#[test]
 fn empty_mcp_servers_is_rejected() {
   let text = r#"{ "mcpServers": {}, "projects": [] }"#;
   let error = parse_config(text, Path::new("/base")).expect_err("mcpServers が空なら拒否します");

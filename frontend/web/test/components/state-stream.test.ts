@@ -37,12 +37,44 @@ type StreamHandlers = {
   onError?: () => void;
 };
 
-const open = (Ctor: typeof FakeEventSource, handlers: StreamHandlers) =>
+type ScheduledReconnect = {
+  run: () => void;
+  delayMs: number;
+  cancelled: boolean;
+};
+
+type ReconnectScheduler = (run: () => void, delayMs: number) => () => void;
+
+/** 再接続の予約を記録し、テストが任意の時点で実行する。 */
+class FakeScheduler {
+  readonly scheduled: ScheduledReconnect[] = [];
+  readonly schedule: ReconnectScheduler = (run, delayMs) => {
+    const entry: ScheduledReconnect = { run, delayMs, cancelled: false };
+    this.scheduled.push(entry);
+    return () => {
+      entry.cancelled = true;
+    };
+  };
+  latest(): ScheduledReconnect {
+    const entry = this.scheduled[this.scheduled.length - 1];
+    assert.ok(entry, "再接続が予約されています");
+    return entry;
+  }
+  runLatest() {
+    const entry = this.latest();
+    if (!entry.cancelled) {
+      entry.run();
+    }
+  }
+}
+
+const open = (Ctor: typeof FakeEventSource, handlers: StreamHandlers, scheduler?: FakeScheduler) =>
   openStateStream({
     url: "/api/state",
     createEventSource: (url: string) => new Ctor(url),
     onState: handlers.onState ?? (() => {}),
     onError: handlers.onError ?? (() => {}),
+    ...(scheduler === undefined ? {} : { scheduleReconnect: scheduler.schedule }),
   });
 
 test("受信した状態で画面の状態を置き換える", () => {
@@ -77,6 +109,9 @@ test("proto の JSON（時刻は ISO 文字列、列挙型は名称文字列）�
   assert.ok(state.servers[0]!.lastReadAt instanceof Date);
   assert.ok(state.runs[0]!.startedAt instanceof Date);
   assert.ok(state.pendingDecisions[0]!.createdAt instanceof Date);
+  // プロジェクト単位の接続状態と最後に読めた時刻も実送信形式から復元される。
+  assert.equal(state.projects[0]!.connected, true);
+  assert.ok(state.projects[0]!.lastReadAt instanceof Date);
   // 列挙型は名称文字列から数値へ戻る（NaN にならない）。
   assert.equal(state.runs[0]!.status, 1); // RUN_STATUS_RUNNING
   assert.equal(state.pendingDecisions[1]!.type, 2); // PENDING_DECISION_TYPE_AWAITING_MERGE
@@ -90,35 +125,78 @@ test("proto の JSON（時刻は ISO 文字列、列挙型は名称文字列）�
   assert.equal(overview.pendingCounts.awaitingMerge, 1, "人のマージ待ちが1件として数えられる");
 
   // 判断待ち: 種類表示が送信値に対応する（マージ待ちは「人のマージ待ち」）。
-  const decisionsHtml = renderToStaticMarkup(createElement(DecisionsContent, { state, now }));
+  const decisionsHtml = renderToStaticMarkup(createElement(DecisionsContent, { state, now, disconnected: false }));
   assert.match(decisionsHtml, /人のマージ待ち/);
   assert.match(decisionsHtml, /問い合わせ（質問）/);
 
   // 概要: 実行中の run 件数が描画に現れる。
-  const overviewHtml = renderToStaticMarkup(createElement(OverviewContent, { view: overview }));
+  const overviewHtml = renderToStaticMarkup(createElement(OverviewContent, { view: overview, disconnected: false }));
   assert.match(overviewHtml, /1/);
 
   stream.close();
 });
 
-test("切断（エラー）時は接続を捨てて再接続する", () => {
+test("切断（エラー）時は接続を捨て、待機してから同じ URL へ再接続する", () => {
   const Ctor = freshFakes();
+  const scheduler = new FakeScheduler();
   let state = "initial";
-  const stream = open(Ctor, {
-    onState: () => {
-      state = "updated";
+  const stream = open(
+    Ctor,
+    {
+      onState: () => {
+        state = "updated";
+      },
+      onError: () => {
+        state = "disconnected";
+      },
     },
-    onError: () => {
-      state = "disconnected";
-    },
-  });
+    scheduler,
+  );
   const first = Ctor.instances[0]!;
   first.onerror?.({});
   assert.equal(state, "disconnected");
   assert.equal(first.closed, true, "古い接続を閉じる");
-  assert.equal(Ctor.instances.length, 2, "新しい接続を作って再接続する");
+  assert.equal(Ctor.instances.length, 1, "エラーの直後には新しい接続を作らない");
+  assert.equal(scheduler.latest().delayMs, 1000, "最初の再接続は1秒待つ");
+
+  scheduler.runLatest();
+  assert.equal(Ctor.instances.length, 2, "予約した待機の後に新しい接続を作る");
   assert.equal(Ctor.instances[1]!.url, "/api/state");
   stream.close();
+});
+
+test("再接続の待機は連続失敗で倍になり、受信に成功すると初期値へ戻る", () => {
+  const Ctor = freshFakes();
+  const scheduler = new FakeScheduler();
+  const stream = open(Ctor, {}, scheduler);
+
+  Ctor.instances[0]!.onerror?.({});
+  assert.equal(scheduler.latest().delayMs, 1000);
+  scheduler.runLatest();
+
+  Ctor.instances[1]!.onerror?.({});
+  assert.equal(scheduler.latest().delayMs, 2000, "連続失敗では待機を倍にする");
+  scheduler.runLatest();
+
+  Ctor.instances[2]!.onmessage?.({ data: JSON.stringify({ servers: [] }) });
+  Ctor.instances[2]!.onerror?.({});
+  assert.equal(scheduler.latest().delayMs, 1000, "受信に成功したら待機を初期値へ戻す");
+  stream.close();
+});
+
+test("close は予約済みの再接続を取り消す", () => {
+  const Ctor = freshFakes();
+  const scheduler = new FakeScheduler();
+  const stream = open(Ctor, {}, scheduler);
+  Ctor.instances[0]!.onerror?.({});
+  const scheduled = scheduler.latest();
+
+  stream.close();
+  assert.equal(scheduled.cancelled, true, "予約済みの再接続を取り消す");
+
+  // 取り消しの連絡が届く前にタイマーが発火しても、閉じた接続を再開しない。
+  scheduled.run();
+  assert.equal(Ctor.instances.length, 1);
 });
 
 test("受信前の状態は上書きされず、受信後に置き換わる", () => {
@@ -179,4 +257,24 @@ test("位置と反復回数とステップ名を持たない run を復元して
   assert.equal(run.totalSteps, undefined, "未設定は undefined のままにする");
   assert.equal(run.currentIteration, undefined, "未設定は undefined のままにする");
   assert.equal(run.currentStepName, undefined, "未設定は undefined のままにする");
+});
+
+test("受信したプロジェクトの最後に読めた時刻を復元する", () => {
+  // 実送信形式（Project.toJSON）は connected が false のときフィールドを省略する。
+  // 省略された connected を切断として復元し、最後に読めた時刻を Date として保持することを観測する。
+  const restored = restoreDashboardState({
+    projects: [
+      {
+        name: "esa",
+        about: "イベントストアの実装",
+        serverId: "mini",
+        completedTasks24h: 1,
+        lastReadAt: "2026-11-13T07:09:00.000Z",
+      },
+    ],
+  });
+
+  assert.equal(restored.projects[0]?.connected, false);
+  assert.ok(restored.projects[0]?.lastReadAt instanceof Date);
+  assert.equal(restored.projects[0]?.lastReadAt?.toISOString(), "2026-11-13T07:09:00.000Z");
 });

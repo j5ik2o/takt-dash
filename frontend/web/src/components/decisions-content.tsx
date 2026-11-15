@@ -1,28 +1,27 @@
-import type { ReactElement } from "react";
-import type { DashboardState, InquiryKind, PendingDecision } from "../proto/taktdash";
-import { INQUIRY_KIND, PENDING_DECISION_TYPE } from "../state/proto-values";
-import { sortPendingDecisions, resolveThresholds, type PendingDecisionView } from "../state/dashboard";
+"use client";
+
+// 判断待ちページの一覧。各項目に種別ごとの操作 UI を埋め込み、操作結果は一覧の上に出す。
+// 結果は decisionKey で項目に紐づけて保持するため、SSE の再描画で並び順が変わっても
+// 同じ項目の結果として残る。
+import { useCallback, useState, type ReactElement } from "react";
+import type { DashboardState, PendingDecision } from "../proto/taktdash";
+import {
+  decisionKey,
+  decisionTypeLabel,
+  upsertDecisionResult,
+  type DecisionResult,
+} from "../state/decision-actions";
+import { resolveThresholds, sortPendingDecisions, type PendingDecisionView } from "../state/dashboard";
 import { formatDuration } from "../state/format";
+import { BackendUnavailableNotice } from "./backend-unavailable-notice";
+import { DecisionActions } from "./decision-actions";
+import { DecisionResults } from "./decision-results";
 
 type DecisionsContentProps = {
   state: DashboardState;
   now: Date;
+  disconnected: boolean;
 };
-
-const inquiryKindLabel = (kind: InquiryKind): string => {
-  switch (kind) {
-    case INQUIRY_KIND.OPERATION_REQUEST:
-      return "作業の依頼";
-    case INQUIRY_KIND.QUESTION:
-    default:
-      return "質問";
-  }
-};
-
-const decisionKindLabel = (decision: PendingDecision): string =>
-  decision.type === PENDING_DECISION_TYPE.AWAITING_MERGE
-    ? "人のマージ待ち"
-    : `問い合わせ（${inquiryKindLabel(decision.inquiryKind)}）`;
 
 const targetLabel = (decision: PendingDecision): string | undefined => {
   if (decision.pullRequest !== undefined) {
@@ -45,16 +44,22 @@ const splitBodyParagraphs = (body: string): string[] =>
     .map((paragraph) => paragraph.trim())
     .filter((paragraph) => paragraph !== "");
 
-// 判断待ちは表示のみとする（order.md:25, :51）。回答・承認・却下の操作要素を持たない。
-export function DecisionsContent({ state, now }: DecisionsContentProps): ReactElement {
+export function DecisionsContent({ state, now, disconnected }: DecisionsContentProps): ReactElement {
   const thresholds = resolveThresholds(state.thresholds);
   const decisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
   });
+  // サーバー一覧に表示名が無い応答でも、項目を識別できるよう ID を使う。
   const serverNames = new Map(state.servers.map((server) => [server.serverId, server.name]));
+  const [results, setResults] = useState<DecisionResult[]>([]);
+
+  const handleResult = useCallback((next: DecisionResult) => {
+    setResults((previous) => upsertDecisionResult(previous, next));
+  }, []);
 
   return (
     <main className="page">
+      {disconnected ? <BackendUnavailableNotice /> : null}
       <header className="page-head">
         <div>
           <h1>判断待ち</h1>
@@ -65,20 +70,20 @@ export function DecisionsContent({ state, now }: DecisionsContentProps): ReactEl
       </header>
 
       <section className="tray" aria-label="判断待ちの一覧">
+        <DecisionResults results={results} />
         {decisions.length === 0 ? (
           <p className="note">判断待ちはありません。</p>
         ) : (
           <ul className="tray-list">
-            {decisions.map((decision, index) => {
-              // サーバー一覧に表示名が無い応答でも、項目を識別できるよう ID を使う。
+            {decisions.map((decision) => {
               const serverName = serverNames.get(decision.serverId) ?? decision.serverId;
               const target = targetLabel(decision);
               return (
-                <li className={`tray-item ${decision.stale ? "stale" : ""}`} key={`${decision.serverId}-${decision.project}-${index}`}>
+                <li className={`tray-item${decision.stale ? " stale" : ""}`} key={decisionKey(decision)}>
                   <div className="proj">
                     <span>プロジェクト: {decision.project}</span>
                     <span className="srv">サーバー: {serverName}</span>
-                    <span className="kind">種別: {decisionKindLabel(decision)}</span>
+                    <span className="kind">種別: {decisionTypeLabel(decision)}</span>
                     {target !== undefined ? <span className="target">対象: {target}</span> : null}
                   </div>
                   <div className="desc">
@@ -100,6 +105,7 @@ export function DecisionsContent({ state, now }: DecisionsContentProps): ReactEl
                     <b>{formatDuration(waitSeconds(decision))} 待ち</b>
                     {decision.stale ? <span className="stale-label">滞留しています。</span> : null}
                   </div>
+                  <DecisionActions decision={decision} onResult={handleResult} />
                 </li>
               );
             })}
@@ -107,7 +113,7 @@ export function DecisionsContent({ state, now }: DecisionsContentProps): ReactEl
         )}
         <div className="foot-notes">
           <p>
-            判断待ちは、未回答の問い合わせと、人のマージ待ちのゴールの合計です。滞留は
+            判断待ちは、未回答の問い合わせ、人のマージ待ちのゴール、ゴール登録の承認待ちの合計です。滞留は
             {thresholds.pendingDecisionStaleMinutes}分を超えたものを示します。
           </p>
         </div>

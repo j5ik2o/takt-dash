@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use common::*;
 use takt_dash_backend::{
+  config::ServerMeta,
   model::{
     ConnectionState, EventKind, ExecutionStatus, GoalStatus, PendingDecisionFilter, PendingDecisionType,
     ProjectSnapshot, TaskStatus,
@@ -192,6 +193,29 @@ fn awaiting_merge_uses_notification_recorded_at_for_wait_start() {
 
   assert_eq!(decisions[0].created_at, recorded);
   assert!(decisions[0].stale, "通知の recordedAt から240分を超えた待ちは滞留です");
+}
+
+#[test]
+fn awaiting_merge_wait_start_stays_fixed_and_becomes_stale_as_time_passes() {
+  // 起点が決まった後は、同じ snapshot を同じ store に保持したまま投影時刻だけが進んでも、
+  // created_at は起点のまま固定され、閾値を超えた時点で stale になる。
+  let start = minutes_before(now(), 100);
+  let mut goal = merge_goal("g-merge", 7);
+  goal.awaiting_merge_at = Some(start);
+  let store = store_with(240, 10);
+  store.record_success(
+    "takt-dash",
+    snapshot(vec![goal], vec![task_for_goal("merge", "g-merge", TaskStatus::Completed, true)], vec![], vec![], vec![]),
+    now(),
+  );
+
+  let early = store.pending_decisions(now(), PendingDecisionFilter::AwaitingMerge);
+  assert_eq!(early[0].created_at, start, "投影しても起点は変わりません");
+  assert!(!early[0].stale, "240分以内は滞留ではありません");
+
+  let later = store.pending_decisions(now() + chrono::Duration::minutes(200), PendingDecisionFilter::AwaitingMerge);
+  assert_eq!(later[0].created_at, start, "時刻が進んでも起点は固定されたままです");
+  assert!(later[0].stale, "起点から240分を超えた待ちは滞留です");
 }
 
 #[test]
@@ -427,6 +451,62 @@ fn set_projects_projects_added_projects_as_unread_and_removes_deleted_ones() {
 }
 
 #[test]
+fn set_servers_replaces_adds_and_removes_server_metadata() {
+  let mut servers = BTreeMap::new();
+  servers.insert("mac-mini".to_owned(), ServerMeta {
+    name:        "j5ik2o-mac-mini".to_owned(),
+    kind:        "Mac mini".to_owned(),
+    concurrency: 4,
+  });
+  let store =
+    StateStore::new(servers, vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))], thresholds());
+
+  // 稼働中の再読み込みで、既存サーバーの表示情報を変え、新規サーバーを追加し、旧サーバーを消す。
+  let mut refreshed = BTreeMap::new();
+  refreshed.insert("mac-mini".to_owned(), ServerMeta {
+    name:        "mini-renamed".to_owned(),
+    kind:        "Mac mini (改称)".to_owned(),
+    concurrency: 8,
+  });
+  refreshed.insert("mac-studio".to_owned(), ServerMeta {
+    name:        "j5ik2o-mac-studio".to_owned(),
+    kind:        "Mac Studio".to_owned(),
+    concurrency: 2,
+  });
+  store.set_servers(refreshed);
+
+  let after = store.servers();
+  assert_eq!(after.len(), 2, "追加したサーバーが投影に載り、削除したサーバーは消えます: {after:?}");
+  let mini = after.get("mac-mini").expect("既存サーバーは残ります");
+  assert_eq!(mini.name, "mini-renamed", "既存サーバーの表示情報を新しい設定で置き換えます");
+  assert_eq!(mini.kind, "Mac mini (改称)");
+  assert_eq!(mini.concurrency, 8, "並列度の変更も反映します");
+  assert_eq!(after.get("mac-studio").expect("追加サーバーがあります").name, "j5ik2o-mac-studio");
+}
+
+#[test]
+fn set_servers_does_not_disturb_project_slots() {
+  let mut servers = BTreeMap::new();
+  servers.insert("mac-mini".to_owned(), server_meta());
+  let store =
+    StateStore::new(servers, vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))], thresholds());
+  let read_at = time("2026-11-13T11:00:00Z");
+  store.record_success(
+    "takt-dash",
+    snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]),
+    read_at,
+  );
+
+  let mut refreshed = BTreeMap::new();
+  refreshed.insert("mac-mini".to_owned(), server_meta());
+  store.set_servers(refreshed);
+
+  let view = &store.project_views()[0];
+  assert!(view.connected, "サーバー情報の反映はプロジェクトの接続状態を変えません");
+  assert_eq!(view.last_read_at, Some(read_at), "サーバー情報の反映は読めた時刻を変えません");
+}
+
+#[test]
 fn set_projects_keeps_existing_project_slot() {
   let mut servers = BTreeMap::new();
   servers.insert("mac-mini".to_owned(), server_meta());
@@ -449,6 +529,44 @@ fn set_projects_keeps_existing_project_slot() {
   assert!(takt_dash.connected, "既存プロジェクトの接続状態を保持します");
   assert_eq!(takt_dash.last_read_at, Some(read_at), "既存プロジェクトの読めた時刻を保持します");
   assert_eq!(takt_dash.snapshot.as_ref().expect("既存の状態を保持します").goals[0].goal_id, "g1");
+}
+
+#[test]
+fn set_servers_replaces_server_meta_on_the_same_store() {
+  let mut servers = BTreeMap::new();
+  servers.insert("mac-mini".to_owned(), server_meta());
+  let store =
+    StateStore::new(servers, vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))], thresholds());
+  assert_eq!(store.servers().len(), 1);
+
+  // 稼働中の再読み込みで、既存サーバーの表示情報を変え、新しいサーバーを追加する。
+  let mut changed = BTreeMap::new();
+  changed.insert("mac-mini".to_owned(), ServerMeta {
+    name:        "renamed-mini".to_owned(),
+    kind:        "Mac Studio".to_owned(),
+    concurrency: 8,
+  });
+  changed.insert("mac-studio".to_owned(), ServerMeta {
+    name:        "j5ik2o-mac-studio".to_owned(),
+    kind:        "Mac Studio".to_owned(),
+    concurrency: 2,
+  });
+  store.set_servers(changed);
+
+  let after = store.servers();
+  assert_eq!(after.len(), 2, "追加したサーバーを投影に載せます");
+  assert_eq!(after["mac-mini"].name, "renamed-mini", "改名を同じストアへ反映します");
+  assert_eq!(after["mac-mini"].kind, "Mac Studio", "種類の変更も反映します");
+  assert_eq!(after["mac-mini"].concurrency, 8, "同時実行数の変更も反映します");
+  assert_eq!(after["mac-studio"].name, "j5ik2o-mac-studio");
+
+  // 設定から消えたサーバーは投影に残さない。
+  let mut removed = BTreeMap::new();
+  removed.insert("mac-mini".to_owned(), after["mac-mini"].clone());
+  store.set_servers(removed);
+
+  assert_eq!(store.servers().len(), 1, "設定から消えたサーバーは投影から消えます");
+  assert!(!store.servers().contains_key("mac-studio"));
 }
 
 #[test]

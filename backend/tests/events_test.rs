@@ -119,6 +119,129 @@ fn goal_transition_to_awaiting_merge_is_detected() {
 }
 
 #[test]
+fn awaiting_merge_with_running_finish_task_is_not_a_human_merge_wait_event() {
+  // ゴールの status が awaiting_merge でも、仕上げタスクが running の間は人待ちではありません。
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(
+    vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Pending, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+  let next = snapshot(
+    vec![merge_goal("g1", 42)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Running, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
+
+  assert!(
+    !ids(&events).contains(&EventKind::AwaitingMerge),
+    "仕上げタスクの実行中は人のマージ待ちを記録しません: {:?}",
+    ids(&events)
+  );
+}
+
+#[test]
+fn awaiting_merge_becomes_a_human_merge_wait_event_when_the_finish_task_completes() {
+  // 仕上げタスクが完了して人待ちに変わった回だけ、人のマージ待ちを1回記録します。
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(
+    vec![merge_goal("g1", 42)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Running, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+  let next = snapshot(
+    vec![merge_goal("g1", 42)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Completed, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
+
+  assert_eq!(
+    ids(&events).iter().filter(|kind| **kind == EventKind::AwaitingMerge).count(),
+    1,
+    "仕上げタスクの完了で人のマージ待ちを1回記録します: {:?}",
+    ids(&events)
+  );
+}
+
+#[test]
+fn awaiting_merge_with_completed_finish_task_and_unrelated_running_task_is_a_human_merge_wait_event() {
+  // 仕上げタスクが完了していれば人待ちです。同じ snapshot に仕上げタスクでない running の
+  // タスクが併存しても、人のマージ待ちを1回記録します。全タスクを判定へ渡す実装では、
+  // 無関係な running タスクを仕上げタスクの実行中と誤認し、記録を取りこぼします。
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(
+    vec![merge_goal("g1", 42)],
+    vec![
+      task_for_goal("merge", "g1", TaskStatus::Running, true),
+      task_for_goal("implement", "g1", TaskStatus::Running, false),
+    ],
+    vec![],
+    vec![],
+    vec![],
+  );
+  let next = snapshot(
+    vec![merge_goal("g1", 42)],
+    vec![
+      task_for_goal("merge", "g1", TaskStatus::Completed, true),
+      task_for_goal("implement", "g1", TaskStatus::Running, false),
+    ],
+    vec![],
+    vec![],
+    vec![],
+  );
+
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
+
+  assert_eq!(
+    ids(&events).iter().filter(|kind| **kind == EventKind::AwaitingMerge).count(),
+    1,
+    "仕上げタスクの完了で、無関係な running タスクが併存しても人のマージ待ちを1回記録します: {:?}",
+    ids(&events)
+  );
+}
+
+#[test]
+fn awaiting_merge_with_failed_finish_task_is_not_a_human_merge_wait_event() {
+  // 仕上げタスクが failed で終わったゴールは人待ちではありません。前回が人待ちでなく、
+  // 今回も人待ちでないので、人のマージ待ちは記録しません。
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(
+    vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Running, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+  let next = snapshot(
+    vec![merge_goal("g1", 42)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Failed, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
+
+  assert!(
+    !ids(&events).contains(&EventKind::AwaitingMerge),
+    "仕上げタスクが失敗で終わったゴールは人のマージ待ちを記録しません: {:?}",
+    ids(&events)
+  );
+}
+
+#[test]
 fn already_awaiting_merge_goal_does_not_repeat_the_event() {
   let now = time("2026-11-13T10:00:00Z");
   let prev = snapshot(vec![merge_goal("g1", 42)], vec![], vec![], vec![], vec![]);

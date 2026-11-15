@@ -5,8 +5,9 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::model::{
-  ActivityEvent, ConnectionState, ConnectionTransition, EventKind, GoalStatus, ProjectSnapshot, TaskStatus,
+use crate::{
+  model::{ActivityEvent, ConnectionState, ConnectionTransition, EventKind, ProjectSnapshot, TaskStatus},
+  store::is_human_merge_wait,
 };
 
 /// 1プロジェクトの前回状態と今回状態から、検出した出来事を返す。
@@ -85,7 +86,14 @@ fn detect_goals(
         None,
       )),
       | Some(previous) => {
-        if previous.status != GoalStatus::AwaitingMerge && goal.status == GoalStatus::AwaitingMerge {
+        // 人のマージ待ちは、判断待ち一覧と同じ規則（仕上げタスクを見る）を前回と今回の両方へ
+        // 適用し、人待ちでない状態から人待ちへ変わった回だけ記録します。判断待ち一覧と同じく、
+        // 対象を仕上げタスクに絞ってから判定します。
+        let prev_tasks: Vec<&crate::model::TaskEntry> = prev.tasks.iter().filter(|task| task.merge_task).collect();
+        let next_tasks: Vec<&crate::model::TaskEntry> = next.tasks.iter().filter(|task| task.merge_task).collect();
+        let previous_wait = is_human_merge_wait(previous.status, &goal.goal_id, &prev_tasks);
+        let current_wait = is_human_merge_wait(goal.status, &goal.goal_id, &next_tasks);
+        if !previous_wait && current_wait {
           events.push(event(
             now,
             server_id,

@@ -11,7 +11,7 @@ use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
-  model::{ExecutionStatus, GoalStatus, ProjectSnapshot},
+  model::{ExecutionStatus, GoalStatus, ProjectSnapshot, TaskEntry, TaskStatus},
   takt_dash::v1::{GetRunDetailRequest, RunStatus},
 };
 
@@ -36,16 +36,22 @@ fn seeded_harness(state: serde_json::Value) -> GrpcHarness {
     inquiries:     vec![],
     runs:          vec![run("run-1", "implement", time("2026-11-13T09:06:00Z"))],
     notifications: vec![],
+    proposals:     vec![],
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   harness
 }
 
-/// `run_state()` の `runs.run-1.lastLogAt` だけを差し替えた状態を作る。log_silent
-/// の判定を観測するために使う。
+/// `run_state()` の `runs.run-1.lastLogAt` と末尾の stepLog の timestamp を同じ値へ差し替えた
+/// 状態を作る。詳細の `last_log_at` は応答の `lastLogAt` を最優先するため、末尾 stepLog も
+/// 揃えて log_silent の閾値判定だけを観測できるようにする。
 fn run_state_with_last_log_at(last_log_at: &str) -> serde_json::Value {
   let mut state = run_state();
   state["runs"]["run-1"]["lastLogAt"] = serde_json::Value::String(last_log_at.to_owned());
+  let step_logs = state["runs"]["run-1"]["stepLogs"].as_array_mut().expect("stepLogs は配列です");
+  if let Some(last) = step_logs.last_mut() {
+    last["timestamp"] = serde_json::Value::String(last_log_at.to_owned());
+  }
   state
 }
 
@@ -102,7 +108,7 @@ fn run_state_with_start_time_only(start_time: &str) -> serde_json::Value {
 }
 
 /// `run_state()` の `runs.run-1` から開始時刻のフィールド（`startedAt`/`startTime`）をすべて
-/// 消し、`lastLogAt` も消す。開始時刻も最後のログの時刻も無い run を表します。
+/// 消し、`lastLogAt` と stepLogs の時刻も消す。開始時刻も最後のログの時刻も無い run を表します。
 fn run_state_without_any_start_or_log_time() -> serde_json::Value {
   let mut state = run_state_with_start_time_only("2026-11-13T09:00:00Z");
   let mut run = state["runs"]["run-1"].clone();
@@ -110,6 +116,9 @@ fn run_state_without_any_start_or_log_time() -> serde_json::Value {
   run.remove("startTime");
   run.remove("lastLogAt");
   run.remove("currentStepStartedAt");
+  for step_log in run["stepLogs"].as_array_mut().expect("stepLogs は配列です") {
+    step_log.as_object_mut().expect("stepLog はオブジェクトです").remove("timestamp");
+  }
   state["runs"]["run-1"] = serde_json::Value::Object(run.clone());
   state
 }
@@ -419,6 +428,293 @@ async fn get_run_detail_marks_log_silent_true_when_the_last_log_exceeds_the_thre
     .into_inner();
 
   assert!(detail.log_silent, "閾値外側の最後のログは無音です");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn 完了した実行の詳細は実行中一覧になくても取得できる() {
+  // 状態ストアの runs が空でも、完了タスクの runSlug からプロジェクトを解決して
+  // 詳細を返します。mock の応答とタスク一覧にゴールとタスク名がないため、状態ストアの
+  // 完了タスクからそれらを補うことも観測します。
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", project_dir()),
+      server_meta(),
+      json!({
+        "runs": { "run-1": {
+          "runSlug": "run-1",
+          "sessionId": "sess-1",
+          "summary": "完了した run",
+          "status": "completed",
+          "startedAt": "2026-11-13T09:00:00Z",
+          "currentStep": "review",
+          "lastLogAt": "2026-11-13T09:30:00Z",
+          "stepLogs": []
+        } }
+      }),
+    )
+    .build();
+  let snapshot = ProjectSnapshot {
+    goals:         vec![],
+    tasks:         vec![TaskEntry {
+      name:         "implement".to_owned(),
+      goal_id:      Some("g1".to_owned()),
+      status:       TaskStatus::Completed,
+      started_at:   Some(time("2026-11-13T09:00:00Z")),
+      run_slug:     Some("run-1".to_owned()),
+      current_step: Some("review".to_owned()),
+      merge_task:   false,
+    }],
+    inquiries:     vec![],
+    runs:          vec![],
+    notifications: vec![],
+    proposals:     vec![],
+  };
+  harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("完了後も同じ runSlug で詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(detail.run_slug, "run-1");
+  assert_eq!(detail.project, "takt-dash", "完了タスクの runSlug からプロジェクトを解決します");
+  assert_eq!(detail.goal_id, "g1", "状態ストアの完了タスクからゴールを補います");
+  assert_eq!(detail.task_name, "implement", "状態ストアの完了タスクからタスク名を補います");
+  assert_eq!(detail.status, RunStatus::Completed as i32);
+
+  server.stop().await;
+}
+
+/// 51 件の stepLogs を持つ状態を作る。先頭ページは 50 件で、51 件目（2 ページ目）の
+/// timestamp を `latest_step_at` にする。`last_log_at` を `null` にすると応答の `lastLogAt` を
+/// 持たない状態を作れる。
+fn run_state_with_latest_step_on_the_second_page(
+  last_log_at: serde_json::Value,
+  latest_step_at: &str,
+) -> serde_json::Value {
+  let mut step_logs = Vec::new();
+  for index in 0..50 {
+    step_logs.push(json!({
+      "step": format!("step{index}"),
+      "persona": "coder",
+      "status": "completed",
+      "content": format!("本文 {index}"),
+      "timestamp": format!("2026-11-13T08:{index:02}:00Z"),
+      "iteration": 1
+    }));
+  }
+  step_logs.push(json!({
+    "step": "step50",
+    "persona": "coder",
+    "status": "running",
+    "content": "本文 50",
+    "timestamp": latest_step_at,
+    "iteration": 2
+  }));
+  json!({
+    "tasks": [
+      { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T09:00:00Z", "runSlug": "run-1", "currentStep": "step50" }
+    ],
+    "runs": {
+      "run-1": {
+        "runSlug": "run-1",
+        "sessionId": "sess-1",
+        "summary": "実装の run",
+        "workflow": "development-core",
+        "status": "running",
+        "startedAt": "2026-11-13T09:00:00Z",
+        "currentStep": "step50",
+        "currentIteration": 2,
+        "currentStepStartedAt": "2026-11-13T09:05:00Z",
+        "currentStepExecutionCount": 2,
+        "phase": 1,
+        "logTail": "最後のログの行です。",
+        "lastLogAt": last_log_at,
+        "taskText": "タスクの本文です。",
+        "stepLogs": step_logs,
+        "reports": [],
+        "instructions": []
+      }
+    }
+  })
+}
+
+#[tokio::test]
+async fn get_run_detail_last_log_at_prefers_the_response_last_log_at_over_a_newer_step_log() {
+  // 応答の lastLogAt が 2 ページ目の stepLog より古くても、詳細の last_log_at は lastLogAt を
+  // 採る。stepLog を優先する実装はここで新しい stepLog の時刻を返して落ちる。
+  let harness = seeded_harness(run_state_with_latest_step_on_the_second_page(
+    json!("2026-11-13T09:10:00Z"),
+    "2026-11-13T09:40:00Z",
+  ));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("run 詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(
+    detail.last_log_at,
+    Some(timestamp("2026-11-13T09:10:00Z")),
+    "詳細の最終ログ時刻は応答の lastLogAt を最優先します"
+  );
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_log_silent_follows_the_response_last_log_at_over_a_recent_step_log() {
+  // lastLogAt は無音の閾値（既定 10 分）を超える過去だが、2 ページ目の stepLog が今（1 分前）に
+  // ある。詳細の log_silent は lastLogAt に従って真になる。stepLog
+  // を優先する実装は偽を返して落ちる。
+  let recent = (Utc::now() - Duration::minutes(1)).to_rfc3339();
+  let stale_last_log_at = (Utc::now() - Duration::minutes(30)).to_rfc3339();
+  let harness = seeded_harness(run_state_with_latest_step_on_the_second_page(json!(stale_last_log_at), &recent));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("run 詳細を取得できます")
+    .into_inner();
+
+  assert!(detail.log_silent, "lastLogAt が閾値外側なら stepLog の新しさに関わらず無音です");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_last_log_at_follows_the_newest_step_log_on_the_second_page_without_last_log_at() {
+  // 応答の lastLogAt が無いとき、先頭ページだけでなく 2 ページ目（51 件目）の stepLog の時刻を
+  // 最終ログ時刻に採る。先頭ページの末尾だけを見る実装は 08:49 を返して落ちる。
+  let harness =
+    seeded_harness(run_state_with_latest_step_on_the_second_page(serde_json::Value::Null, "2026-11-13T09:40:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("run 詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(
+    detail.last_log_at,
+    Some(timestamp("2026-11-13T09:40:00Z")),
+    "lastLogAt が無ければ全ページの stepLogs の最新時刻を採ります"
+  );
+  assert_eq!(detail.step_logs.len(), 51, "2 ページ目の stepLogs を重複させず全 51 件を返します");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_last_log_at_ignores_a_step_log_without_timestamp() {
+  // 2 ページ目に timestamp を持たない stepLog があっても、欠落時刻（UNIX_EPOCH）を最新として
+  // 採らない。末尾の stepLog をそのまま最新とみなす実装は UNIX_EPOCH を返して落ちる。
+  let mut state = run_state_with_latest_step_on_the_second_page(serde_json::Value::Null, "2026-11-13T09:40:00Z");
+  let step_logs = state["runs"]["run-1"]["stepLogs"].as_array_mut().expect("stepLogs は配列です");
+  step_logs.push(json!({ "step": "step51", "persona": "coder", "status": "running", "content": "時刻なし" }));
+  let harness = seeded_harness(state);
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("run 詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(
+    detail.last_log_at,
+    Some(timestamp("2026-11-13T09:40:00Z")),
+    "timestamp の無い stepLog は最新時刻の候補にしません"
+  );
+
+  server.stop().await;
+}
+
+/// 3 件の stepLogs がすべて timestamp を持たない状態を作る。`current_step_started_at` が
+/// `Some` なら `currentStepStartedAt` を、`None` なら応答から当該キーを省く。
+fn run_state_with_all_step_logs_missing_timestamp(current_step_started_at: Option<&str>) -> serde_json::Value {
+  let mut run = json!({
+    "runSlug": "run-1",
+    "sessionId": "sess-1",
+    "summary": "実装の run",
+    "workflow": "development-core",
+    "status": "running",
+    "startedAt": "2026-11-13T09:00:00Z",
+    "currentStep": "implement",
+    "stepLogs": [
+      { "step": "plan", "persona": "architect", "status": "completed", "content": "計画の本文", "iteration": 1 },
+      { "step": "implement", "persona": "coder", "status": "running", "content": "実装の本文", "iteration": 2 },
+      { "step": "implement", "persona": "coder", "status": "running", "content": "実装の続き", "iteration": 2 }
+    ],
+    "reports": [],
+    "instructions": []
+  });
+  if let Some(started_at) = current_step_started_at {
+    run["currentStepStartedAt"] = serde_json::Value::String(started_at.to_owned());
+  }
+  json!({
+    "tasks": [
+      { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T09:00:00Z", "runSlug": "run-1", "currentStep": "implement" }
+    ],
+    "runs": { "run-1": run }
+  })
+}
+
+#[tokio::test]
+async fn get_run_detail_last_log_at_uses_current_step_started_at_when_no_step_log_has_a_timestamp() {
+  // 全 stepLog が timestamp 欠落、lastLogAt 無し、currentStepStartedAt 有り。欠落時刻を最新と
+  // みなす実装はここで UNIX_EPOCH を採るが、第 2 候補は currentStepStartedAt でなければならない。
+  let harness = seeded_harness(run_state_with_all_step_logs_missing_timestamp(Some("2026-11-13T09:05:00Z")));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("run 詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(
+    detail.last_log_at,
+    Some(timestamp("2026-11-13T09:05:00Z")),
+    "時刻付き stepLog が無いときは currentStepStartedAt を採り、欠落時刻は採りません"
+  );
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_last_log_at_ignores_missing_timestamps_and_falls_back_to_started_at() {
+  // 全 stepLog が timestamp 欠落、lastLogAt も currentStepStartedAt も無し。除外を落とした実装は
+  // 欠落時刻（UNIX_EPOCH）を最新として採るが、run の開始時刻に落ちなければならない。
+  let harness = seeded_harness(run_state_with_all_step_logs_missing_timestamp(None));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("run 詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(
+    detail.last_log_at,
+    Some(timestamp("2026-11-13T09:00:00Z")),
+    "時刻付き stepLog も currentStepStartedAt も無いときは startedAt を採ります"
+  );
 
   server.stop().await;
 }

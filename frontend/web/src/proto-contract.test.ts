@@ -20,4 +20,5 @@ export const pendingDecisionTypes: PendingDecisionType[] = [
   PendingDecisionType.PENDING_DECISION_TYPE_UNSPECIFIED,
   PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY,
   PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE,
+  PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION,
 ];
