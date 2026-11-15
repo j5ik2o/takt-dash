@@ -73,6 +73,15 @@ enum ActivityKind {
   ACTIVITY_KIND_PAUSED = 6;
   ACTIVITY_KIND_BLOCKED = 7;
   ACTIVITY_KIND_CONNECTION_LOST = 8;
+  ACTIVITY_KIND_CONNECTION_RESTORED = 9;
+}
+
+// プロジェクトの接続状態を表す。
+enum ConnectionState {
+  CONNECTION_STATE_UNSPECIFIED = 0;  // まだ一度も読めていない
+  CONNECTION_STATE_CONNECTED = 1;    // 接続中
+  CONNECTION_STATE_DELAYED = 2;      // 接続中だが直近の読み取りが失敗している（遅延中）
+  CONNECTION_STATE_UNRESPONSIVE = 3; // しきい値を超えて応答がない
 }
 
 // 判断待ちの問い合わせの種類を表す。
@@ -106,6 +115,8 @@ message Project {
   string about = 2;                 // 説明
   string server_id = 3;             // 集約設定上のサーバー
   int32 completed_tasks_24h = 4;    // 直近24時間に完了したタスクの件数
+  ConnectionState connection_state = 5;  // 接続状態（未読は UNSPECIFIED）
+  google.protobuf.Timestamp last_read_at = 6;  // 最後に読めた時刻（未読は未設定）
 }
 
 // タスクの状態ごとの件数を表す。

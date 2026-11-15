@@ -56,6 +56,8 @@ impl Harness {
     let store = Arc::new(StateStore::new(servers, vec![project("takt-dash", &project_dir)], Thresholds {
       pending_decision_stale_minutes: 240,
       run_log_silent_minutes:         10,
+      connection_failure_count:       3,
+      connection_delay_seconds:       120,
     }));
     let activity = Arc::new(ActivityStore::open_in_memory().expect("メモリ上の SQLite を開けます"));
     let (changes, _) = tokio::sync::broadcast::channel(16);
@@ -69,6 +71,14 @@ impl Harness {
   fn rewrite_state(&self, state: Value) {
     write_json(&self.state_path, &state);
   }
+
+  fn rewrite_connection_thresholds(&self, failure_count: u32, delay_seconds: u32) {
+    let current = std::fs::read_to_string(&self.config_path).expect("設定を読めます");
+    let mut value: Value = serde_json::from_str(&current).expect("設定を解析できます");
+    value["thresholds"]["connectionFailureCount"] = json!(failure_count);
+    value["thresholds"]["connectionDelaySeconds"] = json!(delay_seconds);
+    write_json(&self.config_path, &value);
+  }
 }
 
 #[tokio::test]
@@ -81,7 +91,8 @@ async fn first_cycle_reads_state_without_events_and_sets_read_time() {
   assert_eq!(report.projects_read, 1);
   assert_eq!(report.events_recorded, 0, "初回は基準化のみで出来事を出しません");
   let slot = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert!(slot.connected);
+  assert!(slot.is_connected());
+  assert_eq!(slot.connection_state, Some(takt_dash_backend::model::ConnectionState::Connected));
   assert!(slot.last_read_at.is_some(), "読めた時刻を更新します");
   poller.shutdown().await;
 }
@@ -104,7 +115,7 @@ async fn state_change_between_cycles_emits_and_records_events() {
 }
 
 #[tokio::test]
-async fn unreachable_project_keeps_last_state_and_read_time_then_recovers() {
+async fn single_failure_keeps_last_state_as_delayed_without_connection_event() {
   let harness = Harness::new(state_with_goal("g1"));
   let mut poller = harness.poller();
   poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
@@ -115,17 +126,73 @@ async fn unreachable_project_keeps_last_state_and_read_time_then_recovers() {
   let failed = poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
 
   assert_eq!(failed.projects_failed, 1);
-  let down = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert!(!down.connected, "応答がない間は connected 偽です");
-  assert_eq!(down.last_read_at, Some(first_read_at), "最後に読めた時刻を保持します");
-  assert_eq!(down.snapshot.expect("状態を保持します").goals[0].goal_id, "g1", "最後に読めた状態を保持します");
-  let lost: Vec<EventKind> = harness.activity.recent_events(10).unwrap().into_iter().map(|event| event.kind).collect();
-  assert_eq!(lost, vec![EventKind::ConnectionLost], "接続断を1回だけ記録します");
+  let delayed = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert_eq!(
+    delayed.connection_state,
+    Some(takt_dash_backend::model::ConnectionState::Delayed),
+    "1回の失敗は遅延中です"
+  );
+  assert!(delayed.is_connected(), "遅延中は接続中として扱います");
+  assert_eq!(delayed.last_read_at, Some(first_read_at), "最後に読めた時刻を保持します");
+  assert_eq!(delayed.snapshot.expect("状態を保持します").goals[0].goal_id, "g1", "最後に読めた状態を保持します");
+  let events: Vec<EventKind> =
+    harness.activity.recent_events(10).unwrap().into_iter().map(|event| event.kind).collect();
+  assert!(events.is_empty(), "1回の失敗では接続断を記録しません: {events:?}");
 
   harness.rewrite_state(state_with_goal("g1"));
   poller.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
   let recovered = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert!(recovered.connected, "復旧すれば connected 真です");
+  assert_eq!(recovered.connection_state, Some(takt_dash_backend::model::ConnectionState::Connected));
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn threshold_breach_records_connection_lost_once_and_restore_records_restored() {
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(1, 1);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  // 最後に読めてから1秒以上待ってから失敗させ、回数と時間の両方のしきい値を超えさせる。
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+
+  let unresponsive = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert_eq!(
+    unresponsive.connection_state,
+    Some(takt_dash_backend::model::ConnectionState::Unresponsive),
+    "しきい値を超えた失敗で応答なしになります"
+  );
+  assert!(!unresponsive.is_connected(), "応答なしは接続中ではありません");
+
+  // 応答なしが続いても切断イベントを重ねない。
+  poller.read_cycle_once().await.expect("2回目の失敗でもサイクルは完了します");
+  let lost: Vec<_> = harness
+    .activity
+    .recent_events(10)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .collect();
+  assert_eq!(lost.len(), 1, "接続断は応答なしへ移ったときの1件だけです");
+
+  // 復旧させ、同じ Poller の次のサイクルで復帰イベントと切断時間を記録する。
+  harness.rewrite_state(state_with_goal("g1"));
+  poller.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
+  let restored: Vec<_> = harness
+    .activity
+    .recent_events(20)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .collect();
+  assert_eq!(restored.len(), 1, "復帰イベントを1件だけ記録します");
+  assert!(
+    restored[0].body.contains("切断していた時間は") && restored[0].body.contains("秒です。"),
+    "復帰イベントの本文に切断していた時間を入れます: {}",
+    restored[0].body
+  );
   poller.shutdown().await;
 }
 
@@ -207,9 +274,14 @@ async fn two_projects_read_independently_and_one_failure_does_not_stop_the_other
   assert_eq!(report.projects_read, 1, "健常なプロジェクトだけを読めた件数に数えます");
   assert_eq!(report.projects_failed, 1, "失敗したプロジェクトを失敗件数に数えます");
   let healthy = harness.store.slot("takt-dash").expect("健常側のスロットがあります");
-  assert!(healthy.connected, "健常なプロジェクトは connected 真のままです");
+  assert!(healthy.is_connected(), "健常なプロジェクトは接続中のままです");
   let failed = harness.store.slot("other").expect("失敗側のスロットがあります");
-  assert!(!failed.connected, "失敗したプロジェクトは connected 偽になります");
+  assert_eq!(
+    failed.connection_state,
+    Some(takt_dash_backend::model::ConnectionState::Delayed),
+    "1回失敗したプロジェクトは遅延中です"
+  );
+  assert!(failed.is_connected(), "遅延中は失敗したプロジェクトも接続中として扱います");
   poller.shutdown().await;
 }
 
@@ -243,7 +315,11 @@ async fn goal_read_failure_is_not_recorded_as_a_successful_partial_snapshot() {
   assert_eq!(report.projects_read, 0, "ゴールの読み取り失敗は成功件数に数えません");
   assert_eq!(report.projects_failed, 1, "ゴールの読み取り失敗は失敗件数に数えます");
   let slot = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert!(!slot.connected, "読み取りに失敗したプロジェクトは connected 偽です");
+  assert_eq!(
+    slot.connection_state,
+    Some(takt_dash_backend::model::ConnectionState::Delayed),
+    "1回の読み取り失敗は遅延中です"
+  );
   assert!(slot.snapshot.is_none(), "部分 snapshot を成功として記録しません");
   poller.shutdown().await;
 }
@@ -268,7 +344,7 @@ async fn goal_question_tool_error_keeps_previous_inquiries_without_duplicate_eve
   let during = poller.read_cycle_once().await.expect("道具エラーでもサイクルは完了します");
   assert_eq!(during.projects_read, 1, "ゴール質問の道具エラーは読み取り成功です");
   let slot = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert!(slot.connected, "ゴール質問の道具エラーは connected を偽にしません");
+  assert!(slot.is_connected(), "ゴール質問の道具エラーは connected を偽にしません");
   let snapshot = slot.snapshot.expect("状態があります");
   assert!(
     snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id == "q1"),
@@ -357,7 +433,7 @@ async fn standalone_inquiry_tool_error_keeps_connected_and_previous_inquiry() {
 
   assert_eq!(report.projects_read, 1, "standalone inquiries の道具エラーは読み取り成功です");
   let slot = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert!(slot.connected, "道具エラーは connected を偽にしません");
+  assert!(slot.is_connected(), "道具エラーは connected を偽にしません");
   let events: Vec<EventKind> =
     harness.activity.recent_events(10).unwrap().into_iter().map(|event| event.kind).collect();
   assert!(!events.contains(&EventKind::ConnectionLost), "偽の ConnectionLost を記録しません: {events:?}");
@@ -398,7 +474,7 @@ async fn get_run_tool_error_keeps_connected_and_records_no_connection_lost() {
   assert_eq!(report.projects_read, 1, "get_run の道具エラーではプロジェクトは読み取り成功です");
   assert_eq!(report.projects_failed, 0);
   let slot = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert!(slot.connected, "補助読み取りの道具エラーは connected を偽にしません");
+  assert!(slot.is_connected(), "補助読み取りの道具エラーは connected を偽にしません");
   let events: Vec<EventKind> =
     harness.activity.recent_events(10).unwrap().into_iter().map(|event| event.kind).collect();
   assert!(!events.contains(&EventKind::ConnectionLost), "偽の ConnectionLost を記録しません: {events:?}");
@@ -450,17 +526,17 @@ async fn change_notification_is_sent_once_when_the_state_changes_between_cycles(
 }
 
 #[tokio::test]
-async fn change_notification_is_sent_when_a_project_becomes_unreachable() {
+async fn change_notification_is_sent_when_a_project_becomes_delayed() {
   let harness = Harness::new(state_with_goal("g1"));
   let mut changes = harness.changes.subscribe();
   let mut poller = harness.poller();
   poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
   let _ = changes.try_recv();
 
-  // 状態ファイルを壊して、子プロセスを不正な応答に変える。接続断も状態の変化として通知します。
+  // 状態ファイルを壊して、子プロセスを不正な応答に変える。遅延中への変化も通知します。
   std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
   poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
 
-  assert!(changes.try_recv().is_ok(), "接続断への変化も通知します");
+  assert!(changes.try_recv().is_ok(), "遅延中への変化も通知します");
   poller.shutdown().await;
 }

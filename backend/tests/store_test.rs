@@ -8,17 +8,31 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use common::*;
 use takt_dash_backend::{
-  model::{EventKind, ExecutionStatus, GoalStatus, PendingDecisionFilter, PendingDecisionType, TaskStatus},
+  model::{
+    ConnectionState, EventKind, ExecutionStatus, GoalStatus, PendingDecisionFilter, PendingDecisionType,
+    ProjectSnapshot, TaskStatus,
+  },
   store::{is_human_merge_wait, StateStore},
 };
 
 fn store_with(threshold_minutes: i64, silent_minutes: i64) -> StateStore {
+  store_with_connection(threshold_minutes, silent_minutes, 3, 120)
+}
+
+fn store_with_connection(
+  threshold_minutes: i64,
+  silent_minutes: i64,
+  failure_count: u32,
+  delay_seconds: u32,
+) -> StateStore {
   let mut servers = BTreeMap::new();
   servers.insert("mac-mini".to_owned(), server_meta());
   let projects = vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))];
   let thresholds = takt_dash_backend::config::Thresholds {
     pending_decision_stale_minutes: threshold_minutes as u32,
     run_log_silent_minutes:         silent_minutes as u32,
+    connection_failure_count:       failure_count,
+    connection_delay_seconds:       delay_seconds,
   };
   StateStore::new(servers, projects, thresholds)
 }
@@ -200,19 +214,24 @@ fn log_silent_at_treats_an_unknown_last_log_time_as_not_silent() {
 }
 
 #[test]
-fn failure_keeps_snapshot_and_last_read_at_but_marks_disconnected() {
+fn single_failure_marks_project_delayed_without_losing_snapshot() {
   let store = store_with(240, 10);
   let read_at = time("2026-11-13T11:00:00Z");
   let snapshot =
     snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]);
   store.record_success("takt-dash", snapshot.clone(), read_at);
 
-  store.record_failure("takt-dash");
+  let transition = store.record_failure("takt-dash", time("2026-11-13T11:00:30Z")).expect("スロットがあります");
 
+  assert_eq!(transition.previous, Some(ConnectionState::Connected));
+  assert_eq!(transition.next, Some(ConnectionState::Delayed), "1回の失敗は遅延中です");
+  assert_eq!(transition.outage, None);
   let slot = store.slot("takt-dash").expect("スロットがあります");
-  assert!(!slot.connected, "応答がない間は connected 偽です");
+  assert_eq!(slot.connection_state, Some(ConnectionState::Delayed));
+  assert!(slot.is_connected(), "遅延中は接続中として扱います");
   assert_eq!(slot.last_read_at, Some(read_at), "最後に読めた時刻を保持します");
   assert_eq!(slot.snapshot, Some(snapshot), "最後に読めた状態を保持します");
+  assert!(store.project_views()[0].connected, "遅延中でもサーバーは接続中です");
 }
 
 #[test]
@@ -224,19 +243,119 @@ fn recovery_updates_state_on_next_success() {
     snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]),
     first,
   );
-  store.record_failure("takt-dash");
+  store.record_failure("takt-dash", time("2026-11-13T11:00:30Z"));
 
   let second = time("2026-11-13T11:30:00Z");
-  store.record_success(
-    "takt-dash",
-    snapshot(vec![goal("g2", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]),
-    second,
-  );
+  let transition = store
+    .record_success(
+      "takt-dash",
+      snapshot(vec![goal("g2", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]),
+      second,
+    )
+    .expect("スロットがあります");
 
+  assert_eq!(transition.previous, Some(ConnectionState::Delayed));
+  assert_eq!(transition.next, Some(ConnectionState::Connected));
+  assert_eq!(transition.outage, None, "応答なしへ移っていないので切断時間はありません");
   let slot = store.slot("takt-dash").expect("スロットがあります");
-  assert!(slot.connected);
+  assert_eq!(slot.connection_state, Some(ConnectionState::Connected));
+  assert!(slot.is_connected());
   assert_eq!(slot.last_read_at, Some(second), "復旧後の読み取りで時刻を更新します");
   assert_eq!(slot.snapshot.expect("状態があります").goals[0].goal_id, "g2");
+}
+
+#[test]
+fn failure_below_configured_count_stays_delayed_even_after_the_delay() {
+  let store = store_with_connection(240, 10, 3, 120);
+  store.record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T11:00:00Z"));
+
+  let transition = store.record_failure("takt-dash", time("2026-11-13T12:00:00Z")).expect("スロットがあります");
+
+  assert_eq!(transition.next, Some(ConnectionState::Delayed), "連続回数が足りなければ応答なしにしません");
+}
+
+#[test]
+fn count_reached_but_delay_not_elapsed_stays_delayed() {
+  let store = store_with_connection(240, 10, 3, 120);
+  store.record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T11:00:00Z"));
+
+  for offset in [1, 2, 3] {
+    let transition =
+      store.record_failure("takt-dash", time(&format!("2026-11-13T11:00:0{offset}Z"))).expect("スロットがあります");
+    assert_eq!(
+      transition.next,
+      Some(ConnectionState::Delayed),
+      "{offset}回目でも最後に読めてから120秒未満なら応答なしにしません"
+    );
+  }
+}
+
+#[test]
+fn thresholds_reached_moves_to_unresponsive_only_once() {
+  let store = store_with_connection(240, 10, 3, 120);
+  store.record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T11:00:00Z"));
+
+  let first = store.record_failure("takt-dash", time("2026-11-13T11:02:01Z")).expect("スロットがあります");
+  let second = store.record_failure("takt-dash", time("2026-11-13T11:02:02Z")).expect("スロットがあります");
+  let third = store.record_failure("takt-dash", time("2026-11-13T11:02:03Z")).expect("スロットがあります");
+
+  assert_eq!(first.next, Some(ConnectionState::Delayed));
+  assert_eq!(second.next, Some(ConnectionState::Delayed));
+  assert_eq!(third.previous, Some(ConnectionState::Delayed));
+  assert_eq!(third.next, Some(ConnectionState::Unresponsive), "3回かつ120秒を超えたときに応答なしへ移ります");
+  let since = store.slot("takt-dash").expect("スロットがあります").unresponsive_since;
+  assert_eq!(since, Some(time("2026-11-13T11:02:03Z")), "応答なしへ移った時刻を起点にします");
+
+  let still = store.record_failure("takt-dash", time("2026-11-13T11:03:00Z")).expect("スロットがあります");
+  assert_eq!(still.previous, Some(ConnectionState::Unresponsive));
+  assert_eq!(still.next, Some(ConnectionState::Unresponsive));
+  assert_eq!(
+    store.slot("takt-dash").expect("スロットがあります").unresponsive_since,
+    since,
+    "応答なしが続いても起点を更新しません"
+  );
+}
+
+#[test]
+fn unread_project_becomes_unresponsive_when_count_reached() {
+  let store = store_with_connection(240, 10, 3, 120);
+
+  let first = store.record_failure("takt-dash", time("2026-11-13T11:00:01Z")).expect("スロットがあります");
+  let second = store.record_failure("takt-dash", time("2026-11-13T11:00:02Z")).expect("スロットがあります");
+  let third = store.record_failure("takt-dash", time("2026-11-13T11:00:03Z")).expect("スロットがあります");
+
+  assert_eq!(first.next, Some(ConnectionState::Delayed));
+  assert_eq!(second.next, Some(ConnectionState::Delayed));
+  assert_eq!(
+    third.next,
+    Some(ConnectionState::Unresponsive),
+    "一度も読めていないプロジェクトは回数だけで応答なしにします"
+  );
+  assert_eq!(
+    store.slot("takt-dash").expect("スロットがあります").unresponsive_since,
+    Some(time("2026-11-13T11:00:03Z"))
+  );
+}
+
+#[test]
+fn success_after_unresponsive_returns_outage_since_unresponsive() {
+  let store = store_with_connection(240, 10, 3, 120);
+  for at in ["2026-11-13T11:00:01Z", "2026-11-13T11:00:02Z", "2026-11-13T11:02:03Z"] {
+    store.record_failure("takt-dash", time(at));
+  }
+
+  let transition = store
+    .record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T11:05:03Z"))
+    .expect("スロットがあります");
+
+  assert_eq!(transition.previous, Some(ConnectionState::Unresponsive));
+  assert_eq!(transition.next, Some(ConnectionState::Connected));
+  assert_eq!(
+    transition.outage,
+    Some(chrono::Duration::seconds(180)),
+    "応答なしへ移った時刻から復帰までを切断時間にします"
+  );
+  assert_eq!(store.slot("takt-dash").expect("スロットがあります").unresponsive_since, None, "復帰で起点を消します");
 }
 
 #[test]
@@ -245,6 +364,7 @@ fn project_not_yet_read_reports_no_state() {
   let views = store.project_views();
   assert_eq!(views.len(), 1);
   assert!(!views[0].connected);
+  assert_eq!(views[0].connection_state, None, "未読は接続状態を持ちません");
   assert!(views[0].last_read_at.is_none());
   assert!(views[0].goals.is_empty());
   assert!(views[0].snapshot.is_none());

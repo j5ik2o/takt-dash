@@ -12,6 +12,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   createActivityResponse,
   createDashboardState,
+  createDashboardStateWithProjectConnection,
   createNestedStepDashboardState,
   createProjectsResponse,
   NOW,
@@ -20,7 +21,7 @@ import { startTaktDashServer } from "../support/grpc-server.ts";
 import { createBackendClient } from "../../src/grpc/client.ts";
 import { buildOverviewView, type OverviewView } from "../../src/state/dashboard.ts";
 import { OverviewContent } from "../../src/components/overview-content.tsx";
-import { DashboardState, InquiryKind, PendingDecisionType } from "../../src/proto/taktdash.ts";
+import { ActivityKind, ConnectionState, DashboardState, InquiryKind, PendingDecisionType } from "../../src/proto/taktdash.ts";
 import OverviewPage from "../../app/page.tsx";
 import ProjectsPage from "../../app/projects/page.tsx";
 import DecisionsPage from "../../app/decisions/page.tsx";
@@ -652,4 +653,74 @@ test("新着ログで発光する run 行だけが flash クラスを持ち、�
 
   const css = await readFile(`${webRoot}app/globals.css`, "utf8");
   assert.match(css, /\.run-row\.flash\s*\{[^}]*animation:\s*flash\s+1s/, "基本規則は1秒の flash アニメーション");
+});
+
+test("遅延中の run 行は idle にせず遅延の点と注記を描画する", () => {
+  const state = createDashboardStateWithProjectConnection(
+    "corporate-site",
+    ConnectionState.CONNECTION_STATE_DELAYED,
+    new Date(NOW.getTime() - 300 * 1_000),
+  );
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+
+  assert.match(html, /class="st delayed"/, "状態のラベルを遅延の見た目で出す");
+  assert.match(html, /class="dot delayed"/, "状態の点を遅延の見た目で出す");
+  assert.match(html, /class="run-note delayed"/, "遅延の注記を専用の見た目で出す");
+  assert.match(html, /読み取りが遅れています（最後に読めたのは 300 秒前）/);
+  assert.doesNotMatch(html, /class="st idle"/, "遅延中の run 行を応答なしの見た目にしない");
+});
+
+test("アクティビティページは同一プロジェクトの隣接する接続イベントを件数と期間の1行にまとめる", () => {
+  const base = createActivityResponse();
+  const response = {
+    ...base,
+    events: [
+      {
+        occurredAt: new Date(NOW.getTime() - 5 * 60_000),
+        serverId: "mini",
+        project: "esa",
+        kind: ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED,
+        body: "接続が復帰しました。",
+      },
+      {
+        occurredAt: new Date(NOW.getTime() - 10 * 60_000),
+        serverId: "mini",
+        project: "esa",
+        kind: ActivityKind.ACTIVITY_KIND_CONNECTION_LOST,
+        body: "接続が切れました。",
+      },
+    ],
+  };
+
+  const html = renderPage(ActivityPage, { response, now: NOW });
+  const rows = html.match(/<li class="ev[\s\S]*?<\/li>/g) ?? [];
+
+  assert.equal(rows.length, 1, "隣接する同一プロジェクトの接続イベントは1行になる");
+  const row = rows[0]!;
+  assert.match(row, /esa/, "まとめた行にプロジェクト名を出す");
+  assert.match(row, /2件/, "まとめた件数を出す");
+  assert.match(row, /16:20/, "期間の始まりを出す");
+  assert.match(row, /16:25/, "期間の終わりを出す");
+  assert.ok(row.indexOf("16:20") < row.indexOf("16:25"), "期間を最古から最新の順に出す");
+});
+
+test("アクティビティページは接続の復帰イベントを種類と切断時間つきで描画する", () => {
+  const base = createActivityResponse();
+  const response = {
+    ...base,
+    events: [
+      {
+        occurredAt: new Date(NOW.getTime() - 5 * 60_000),
+        serverId: "mini",
+        project: "esa",
+        kind: ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED,
+        body: "接続が復帰しました。切断していた時間は 150 秒です。",
+      },
+    ],
+  };
+
+  const html = renderPage(ActivityPage, { response, now: NOW });
+
+  assert.match(html, /接続の復帰/, "復帰イベントの種類を表示する");
+  assert.match(html, /切断していた時間は 150 秒です。/, "本文の切断時間をそのまま表示する");
 });

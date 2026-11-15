@@ -32,6 +32,28 @@ pub enum TaskStatus {
   PrFailed,
 }
 
+/// プロジェクトの接続状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+  /// 最後の読み取りに成功している。
+  Connected,
+  /// 直近の読み取りに失敗したが、遅延のしきい値には達していない。
+  Delayed,
+  /// 連続失敗と経過時間のしきい値を超えて応答がない。
+  Unresponsive,
+}
+
+/// 接続状態の遷移。出来事の検出と投影に使います。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionTransition {
+  /// 遷移前の状態。まだ一度も読めていない場合は None。
+  pub previous: Option<ConnectionState>,
+  /// 遷移後の状態。スロットが無い場合は None。
+  pub next:     Option<ConnectionState>,
+  /// 応答なしから接続中へ戻ったときの、応答なしだった時間。
+  pub outage:   Option<chrono::Duration>,
+}
+
 /// アクティビティの出来事の種類。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
@@ -43,6 +65,7 @@ pub enum EventKind {
   Paused,
   Blocked,
   ConnectionLost,
+  ConnectionRestored,
 }
 
 impl EventKind {
@@ -57,6 +80,7 @@ impl EventKind {
       | EventKind::Paused => "paused",
       | EventKind::Blocked => "blocked",
       | EventKind::ConnectionLost => "connection_lost",
+      | EventKind::ConnectionRestored => "connection_restored",
     }
   }
 
@@ -71,6 +95,7 @@ impl EventKind {
       | "paused" => Some(EventKind::Paused),
       | "blocked" => Some(EventKind::Blocked),
       | "connection_lost" => Some(EventKind::ConnectionLost),
+      | "connection_restored" => Some(EventKind::ConnectionRestored),
       | _ => None,
     }
   }
@@ -301,15 +326,17 @@ pub enum PendingDecisionFilter {
 /// 状態ストアが返す、1プロジェクト分の投影。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectView {
-  pub name:         String,
-  pub about:        String,
-  pub server_id:    String,
-  pub connected:    bool,
+  pub name:             String,
+  pub about:            String,
+  pub server_id:        String,
+  pub connected:        bool,
+  /// 接続状態。まだ一度も読めていない場合は None。
+  pub connection_state: Option<ConnectionState>,
   /// 最後に読めた時刻。応答がない間も保持します。
-  pub last_read_at: Option<DateTime<Utc>>,
-  pub goals:        Vec<GoalEntry>,
-  pub tasks:        Vec<TaskEntry>,
-  pub runs:         Vec<RunEntry>,
+  pub last_read_at:     Option<DateTime<Utc>>,
+  pub goals:            Vec<GoalEntry>,
+  pub tasks:            Vec<TaskEntry>,
+  pub runs:             Vec<RunEntry>,
   /// 状態の元になった snapshot。プロジェクトがまだ一度も読めていない場合は None。
-  pub snapshot:     Option<ProjectSnapshot>,
+  pub snapshot:         Option<ProjectSnapshot>,
 }

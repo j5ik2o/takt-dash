@@ -1,8 +1,9 @@
 //! 集約した状態の保持と投影。
 //!
 //! プロジェクトごとに、直近に読めた状態（snapshot）と読めた時刻（last_read_at）を保持します。
-//! 応答がない間は snapshot と last_read_at を保持し、connected だけを偽にします。
-//! 判断待ち・滞留・ログの無音は正規状態から都度計算します。
+//! 1回の読み取り失敗は Delayed（接続中）とし、連続失敗回数と遅延時間の両方を満たす最初の失敗で
+//! Unresponsive（応答なし）へ移します。Unresponsive が続く間は snapshot と last_read_at を保持し、
+//! 起点も更新しません。判断待ち・滞留・ログの無音は正規状態から都度計算します。
 
 use std::{
   collections::BTreeMap,
@@ -14,23 +15,39 @@ use chrono::{DateTime, Duration, Utc};
 use crate::{
   config::{Project, ServerMeta, Thresholds},
   model::{
-    GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot, ProjectView, RunEntry,
-    TaskEntry, TaskStatus,
+    ConnectionState, ConnectionTransition, GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType,
+    ProjectSnapshot, ProjectView, RunEntry, TaskEntry, TaskStatus,
   },
 };
 
-/// 1プロジェクト分の保持スロット。読み取り成功で更新し、失敗では connected だけを変えます。
+/// 1プロジェクト分の保持スロット。読み取り成功で更新し、失敗では接続状態だけを変えます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSlot {
-  pub connected:    bool,
-  pub last_read_at: Option<DateTime<Utc>>,
-  pub snapshot:     Option<ProjectSnapshot>,
+  /// まだ一度も読めていない場合は None。
+  pub connection_state:     Option<ConnectionState>,
+  /// 直近の読み取りに連続して失敗した回数。
+  pub consecutive_failures: u32,
+  /// 応答なしへ移った時刻。応答なしが続く間は更新しません。
+  pub unresponsive_since:   Option<DateTime<Utc>>,
+  pub last_read_at:         Option<DateTime<Utc>>,
+  pub snapshot:             Option<ProjectSnapshot>,
 }
 
 impl ProjectSlot {
   /// まだ一度も読めていないスロット。
   pub fn unread() -> Self {
-    ProjectSlot { connected: false, last_read_at: None, snapshot: None }
+    ProjectSlot {
+      connection_state:     None,
+      consecutive_failures: 0,
+      unresponsive_since:   None,
+      last_read_at:         None,
+      snapshot:             None,
+    }
+  }
+
+  /// 接続中または遅延中なら真。応答なしと未読は偽です。
+  pub fn is_connected(&self) -> bool {
+    matches!(self.connection_state, Some(ConnectionState::Connected) | Some(ConnectionState::Delayed))
   }
 }
 
@@ -59,13 +76,28 @@ impl StateStore {
   }
 
   /// 読み取りが成功したプロジェクトの状態を新しい snapshot と読めた時刻で置き換える。
-  pub fn record_success(&self, project: &str, snapshot: ProjectSnapshot, read_at: DateTime<Utc>) {
+  ///
+  /// 応答なしから戻った場合は、応答なしだった時間を `outage` に入れた遷移を返します。
+  pub fn record_success(
+    &self,
+    project: &str,
+    snapshot: ProjectSnapshot,
+    read_at: DateTime<Utc>,
+  ) -> Option<ConnectionTransition> {
     let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
-    if let Some(slot) = inner.slots.get_mut(project) {
-      slot.connected = true;
-      slot.last_read_at = Some(read_at);
-      slot.snapshot = Some(snapshot);
-    }
+    let slot = inner.slots.get_mut(project)?;
+    let previous = slot.connection_state;
+    let outage = if previous == Some(ConnectionState::Unresponsive) {
+      slot.unresponsive_since.map(|since| read_at.signed_duration_since(since))
+    } else {
+      None
+    };
+    slot.connection_state = Some(ConnectionState::Connected);
+    slot.consecutive_failures = 0;
+    slot.unresponsive_since = None;
+    slot.last_read_at = Some(read_at);
+    slot.snapshot = Some(snapshot);
+    Some(ConnectionTransition { previous, next: Some(ConnectionState::Connected), outage })
   }
 
   /// 稼働中に再読み込みした設定の閾値を反映する。次の投影から新しい閾値に従う。
@@ -88,12 +120,31 @@ impl StateStore {
     inner.projects = projects;
   }
 
-  /// 読み取りが失敗したプロジェクトを接続断として扱う。snapshot と last_read_at は保持する。
-  pub fn record_failure(&self, project: &str) {
+  /// 読み取りが失敗したプロジェクトの接続状態を進める。snapshot と last_read_at は保持する。
+  ///
+  /// 連続失敗回数がしきい値以上で、最後に読めてから遅延の秒数以上経過したとき（未読なら回数だけ）に
+  /// 応答なしへ移ります。応答なしが続く間は起点を更新しません。
+  pub fn record_failure(&self, project: &str, now: DateTime<Utc>) -> Option<ConnectionTransition> {
     let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
-    if let Some(slot) = inner.slots.get_mut(project) {
-      slot.connected = false;
-    }
+    let thresholds = inner.thresholds;
+    let slot = inner.slots.get_mut(project)?;
+    let previous = slot.connection_state;
+    slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
+    let next = if previous == Some(ConnectionState::Unresponsive) {
+      ConnectionState::Unresponsive
+    } else {
+      let count_reached = slot.consecutive_failures >= thresholds.connection_failure_count;
+      let delay = Duration::seconds(i64::from(thresholds.connection_delay_seconds));
+      let delay_elapsed = slot.last_read_at.is_none_or(|last_read_at| now.signed_duration_since(last_read_at) >= delay);
+      if count_reached && delay_elapsed {
+        slot.unresponsive_since = Some(now);
+        ConnectionState::Unresponsive
+      } else {
+        ConnectionState::Delayed
+      }
+    };
+    slot.connection_state = Some(next);
+    Some(ConnectionTransition { previous, next: Some(next), outage: None })
   }
 
   /// 指定したプロジェクトのスロットを返す。
@@ -117,7 +168,8 @@ impl StateStore {
           name: project.name.clone(),
           about: project.about.clone(),
           server_id: project.server.clone(),
-          connected: slot.connected,
+          connected: slot.is_connected(),
+          connection_state: slot.connection_state,
           last_read_at: slot.last_read_at,
           goals,
           tasks,

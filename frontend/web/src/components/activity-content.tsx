@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import type { ActivityEvent, ActivityKind, DailySummary, GetActivityResponse } from "../proto/taktdash";
+import { groupActivityEvents } from "../state/activity";
 import { ACTIVITY_KIND } from "../state/proto-values";
 import { formatClock } from "../state/format";
 
@@ -26,6 +27,8 @@ const kindLabel = (kind: ActivityKind): string => {
       return "blocked 通知";
     case ACTIVITY_KIND.CONNECTION_LOST:
       return "接続の切断";
+    case ACTIVITY_KIND.CONNECTION_RESTORED:
+      return "接続の復帰";
     default:
       return "その他";
   }
@@ -51,6 +54,7 @@ export function ActivityContent({ response, now }: ActivityContentProps): ReactE
   const state = response.state;
   const serverNames = new Map((state?.servers ?? []).map((server) => [server.serverId, server.name]));
   const events = toNewestFirst(response.events);
+  const groups = groupActivityEvents(events);
   const dailySummaries = toNewestDayFirst(response.dailySummaries);
 
   return (
@@ -63,21 +67,31 @@ export function ActivityContent({ response, now }: ActivityContentProps): ReactE
       </header>
 
       <section aria-label="出来事の一覧">
-        {events.length === 0 ? (
+        {groups.length === 0 ? (
           <p className="note">出来事はありません。</p>
         ) : (
           <ul className="events">
-            {events.map((event, index) => (
-              <li className={`ev ${isAttention(event.kind) ? "warn" : ""}`} key={`${event.serverId}-${index}`}>
-                <time>{event.occurredAt ? formatClock(event.occurredAt) : "—"}</time>
-                <span className="kind">{kindLabel(event.kind)}</span>
-                <span className="msg">
-                  {event.project ? <b>{event.project}：</b> : null}
-                  {event.body}
-                </span>
-                <span className="sv">{serverNames.get(event.serverId) ?? event.serverId}</span>
-              </li>
-            ))}
+            {groups.map((group, index) => {
+              const newest = group.newest;
+              const single = group.count === 1;
+              const attention = group.events.some((event) => isAttention(event.kind));
+              const clockOf = (event: ActivityEvent): string =>
+                event.occurredAt ? formatClock(event.occurredAt) : "—";
+              const timeText = single ? clockOf(newest) : `${clockOf(group.oldest)} 〜 ${clockOf(newest)}`;
+              return (
+                <li className={`ev ${attention ? "warn" : ""}`} key={`${newest.serverId}-${index}`}>
+                  <time>{timeText}</time>
+                  <span className="kind">
+                    {single ? kindLabel(newest.kind) : `${kindLabel(newest.kind)}（${group.count}件）`}
+                  </span>
+                  <span className="msg">
+                    {newest.project ? <b>{newest.project}：</b> : null}
+                    {single ? newest.body : "接続の状態が変わりました。"}
+                  </span>
+                  <span className="sv">{serverNames.get(newest.serverId) ?? newest.serverId}</span>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

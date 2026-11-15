@@ -10,7 +10,7 @@ import type {
   Server,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
-import { EXECUTION_STATUS, GOAL_STATUS, PENDING_DECISION_TYPE, RUN_STATUS } from "./proto-values";
+import { CONNECTION_STATE, EXECUTION_STATUS, GOAL_STATUS, PENDING_DECISION_TYPE, RUN_STATUS } from "./proto-values";
 
 // 判断待ちの滞留とログの無音の既定値。要件定義 2.7 節の値で、backend が proto の
 // AnomalyThresholds を返さないときだけ使う。値を決める場所はここ1か所に閉じる。
@@ -34,7 +34,7 @@ type RunView = {
   run: Run;
   server: Server | undefined;
   connected: boolean;
-  state: "live" | "warn" | "idle";
+  state: "live" | "warn" | "delayed" | "idle";
   label: string;
   note: string;
   goalName?: string;
@@ -102,12 +102,15 @@ export function summarizePendingDecisions(decisions: readonly PendingDecisionVie
   return { total: decisions.length, inquiries, awaitingMerge };
 }
 
+export const projectKey = (serverId: string, name: string): string => `${serverId}\u0000${name}`;
+
 export function toRunView(
   run: Run,
   serverById: ReadonlyMap<string, Server>,
   thresholds: AnomalyThresholds,
   now: Date,
   goalsById?: ReadonlyMap<string, Goal>,
+  projectByKey?: ReadonlyMap<string, Project>,
 ): RunView {
   const server = serverById.get(run.serverId);
   const lastStep = run.steps.at(-1);
@@ -127,14 +130,30 @@ export function toRunView(
     iteration: run.currentIteration,
     elapsedSeconds,
   };
-  if (server !== undefined && !server.connected) {
-    const at = server.lastReadAt ? formatClock(server.lastReadAt) : "不明";
+  const project = projectByKey?.get(projectKey(run.serverId, run.project));
+  if (server !== undefined && (!server.connected || project?.connectionState === CONNECTION_STATE.UNRESPONSIVE)) {
+    const lastReadAt = project?.lastReadAt ?? server.lastReadAt;
+    const at = lastReadAt ? formatClock(lastReadAt) : "不明";
     return {
       ...derived,
       connected: false,
       state: "idle",
       label: `実行中（${at} 時点）`,
       note: "サーバーから応答がないため、最後に読めた時点の状態です。",
+    };
+  }
+  if (project?.connectionState === CONNECTION_STATE.DELAYED) {
+    const lastReadAt = project.lastReadAt ?? server?.lastReadAt;
+    const seconds = lastReadAt ? Math.max(0, Math.floor((now.getTime() - lastReadAt.getTime()) / 1_000)) : undefined;
+    return {
+      ...derived,
+      connected: true,
+      state: "delayed",
+      label: "実行中（読み取り遅延）",
+      note:
+        seconds !== undefined
+          ? `読み取りが遅れています（最後に読めたのは ${seconds} 秒前）`
+          : "読み取りが遅れています（最後に読めた時刻は不明です）",
     };
   }
   const silentMinutes = run.lastLogAt
@@ -178,10 +197,15 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
   const thresholds = resolveThresholds(state.thresholds);
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
   const goalsById = new Map(state.goals.map((goal) => [goal.goalId, goal]));
+  const projectByKey = new Map(
+    state.projects.map((project) => [projectKey(project.serverId, project.name), project]),
+  );
   const pendingDecisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
   });
-  const runs = state.runs.map((run) => toRunView(run, serverById, thresholds, now, goalsById));
+  const runs = state.runs.map((run) =>
+    toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
+  );
   const servers = state.servers.map((server) => {
     const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);
     const status = serverState(server, serverRuns);
@@ -189,7 +213,9 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
       server,
       state: status,
       stateLabel: serverStateLabel(status),
-      runs: serverRuns.map((run) => toRunView(run, serverById, thresholds, now, goalsById)),
+      runs: serverRuns.map((run) =>
+        toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
+      ),
     };
   });
   return {

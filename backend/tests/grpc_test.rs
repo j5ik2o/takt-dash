@@ -17,9 +17,10 @@ use takt_dash_backend::{
     TaskEntry, TaskStatus,
   },
   takt_dash::v1::{
-    ActivityKind, AnomalyThresholds, ExecutionStatus as ProtoExecutionStatus, GetActivityRequest, GetOverviewRequest,
-    GetPendingDecisionsRequest, GetProjectsRequest, GoalStatus as ProtoGoalStatus, InquiryKind as ProtoInquiryKind,
-    PendingDecisionType as ProtoPendingDecisionType, RunStatus, TaskStatus as ProtoTaskStatus,
+    ActivityKind, AnomalyThresholds, ConnectionState as ProtoConnectionState, ExecutionStatus as ProtoExecutionStatus,
+    GetActivityRequest, GetOverviewRequest, GetPendingDecisionsRequest, GetProjectsRequest,
+    GoalStatus as ProtoGoalStatus, InquiryKind as ProtoInquiryKind, PendingDecisionType as ProtoPendingDecisionType,
+    RunStatus, TaskStatus as ProtoTaskStatus,
   },
 };
 
@@ -147,6 +148,16 @@ async fn get_overview_assembles_the_dashboard_state_from_the_store() {
   assert_eq!(state.projects[0].name, "takt-dash");
   assert_eq!(state.projects[0].server_id, "mac-mini");
   assert_eq!(state.projects[0].about, "takt-dash の説明");
+  assert_eq!(
+    state.projects[0].connection_state,
+    ProtoConnectionState::Connected as i32,
+    "読めているプロジェクトの接続状態を写します"
+  );
+  assert_eq!(
+    state.projects[0].last_read_at,
+    Some(timestamp("2026-11-13T12:00:00Z")),
+    "読めているプロジェクトの最後に読めた時刻を写します"
+  );
 
   assert_eq!(state.goals.len(), 4);
   let paused = state.goals.iter().find(|goal| goal.goal_id == "g-pause").expect("一時停止のゴール");
@@ -234,17 +245,50 @@ async fn get_overview_marks_a_run_silent_beyond_the_configured_threshold() {
 }
 
 #[tokio::test]
-async fn get_overview_marks_a_disconnected_project_and_keeps_its_last_read_at() {
-  // 応答がない間は connected が偽になり、read_at は最後に読めた時刻のままです。
+async fn get_overview_keeps_server_connected_when_every_project_is_delayed() {
+  // 1回の失敗は遅延中で、サーバーは接続中のままです。
   let harness = seeded_harness();
-  harness.store.record_failure("takt-dash");
+  harness.store.record_failure("takt-dash", time("2026-11-13T12:00:30Z"));
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
   let state = client.get_overview(GetOverviewRequest {}).await.expect("概要を取得できます").into_inner();
 
-  assert!(!state.servers[0].connected, "読み取りに失敗していれば接続なしです");
+  assert!(state.servers[0].connected, "全プロジェクトが遅延中でもサーバーは応答なしにしません");
+  assert_eq!(
+    state.projects[0].connection_state,
+    ProtoConnectionState::Delayed as i32,
+    "プロジェクトの状態は遅延中です"
+  );
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_overview_marks_a_disconnected_project_and_keeps_its_last_read_at() {
+  // 応答がない間は connected が偽になり、read_at は最後に読めた時刻のままです。
+  let harness = seeded_harness();
+  let failed_at = time("2026-11-13T12:02:00Z");
+  for _ in 0..3 {
+    harness.store.record_failure("takt-dash", failed_at);
+  }
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let state = client.get_overview(GetOverviewRequest {}).await.expect("概要を取得できます").into_inner();
+
+  assert!(!state.servers[0].connected, "しきい値を超えた失敗では接続なしです");
   assert_eq!(state.read_at, Some(timestamp("2026-11-13T12:00:00Z")), "応答がない間も最後に読めた時刻を返します");
+  assert_eq!(
+    state.projects[0].connection_state,
+    ProtoConnectionState::Unresponsive as i32,
+    "プロジェクトの状態は応答なしです"
+  );
+  assert_eq!(
+    state.projects[0].last_read_at,
+    Some(timestamp("2026-11-13T12:00:00Z")),
+    "応答がない間もプロジェクトの最後に読めた時刻を保持します"
+  );
 
   server.stop().await;
 }
@@ -331,13 +375,23 @@ async fn get_projects_returns_the_state_and_recent_events_newest_first() {
 #[tokio::test]
 async fn get_activity_returns_events_daily_summaries_and_today_counts() {
   let harness = seeded_harness();
-  // 当日（JST の今日）に 2 件、24 時間前（JST の前日）に 1 件を記録する。当日判定は
-  // JST の日付境界で行われるため、種の時刻を Utc::now() からの相対で作り、今日に確実に入れる。
+  // 当日（JST）に 2 件、前日（JST）に 1 件を記録する。当日判定は JST の
+  // 日付境界で行われるため、Utc::now() から数分遡る形にすると実行時刻が 0 時直後のときに
+  // 前日へはみ出す。JST の当日 0 時を起点に固定し、日付をまたがない時刻を作る。
   let now = Utc::now();
+  let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("JST のオフセットは固定です");
+  let today_start = now
+    .with_timezone(&jst)
+    .date_naive()
+    .and_hms_opt(0, 0, 0)
+    .expect("0 時 0 分 0 秒は有効です")
+    .and_local_timezone(jst)
+    .single()
+    .expect("JST には夏時間がないため一意に定まります");
   harness
     .activity
     .record(&event(
-      &(now - Duration::minutes(5)).to_rfc3339(),
+      &(today_start + Duration::minutes(10)).to_rfc3339(),
       "mac-mini",
       Some("takt-dash"),
       EventKind::GoalCreated,
@@ -347,7 +401,7 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
   harness
     .activity
     .record(&event(
-      &(now - Duration::minutes(10)).to_rfc3339(),
+      &(today_start + Duration::minutes(5)).to_rfc3339(),
       "mac-mini",
       Some("takt-dash"),
       EventKind::Inquiry,
@@ -356,7 +410,13 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
     .expect("出来事を記録できます");
   harness
     .activity
-    .record(&event(&(now - Duration::hours(24)).to_rfc3339(), "mac-studio", Some("ddd"), EventKind::RunStarted, "開始"))
+    .record(&event(
+      &(today_start - Duration::hours(24)).to_rfc3339(),
+      "mac-studio",
+      Some("ddd"),
+      EventKind::RunStarted,
+      "開始",
+    ))
     .expect("出来事を記録できます");
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
@@ -376,11 +436,34 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
 
   assert_eq!(response.daily_summaries.len(), 7, "7日分の日次集計を返します");
   let dates: Vec<&str> = response.daily_summaries.iter().map(|summary| summary.date.as_str()).collect();
-  let today = now.with_timezone(&chrono::FixedOffset::east_opt(9 * 3600).unwrap()).date_naive();
+  let today = now.with_timezone(&jst).date_naive();
   let oldest = (today - Duration::days(6)).format("%Y-%m-%d").to_string();
   let newest = today.format("%Y-%m-%d").to_string();
   assert_eq!(dates.first().copied(), Some(oldest.as_str()), "古い日から並べます");
   assert_eq!(dates.last().copied(), Some(newest.as_str()), "最後が今日です");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_activity_maps_connection_restored_to_its_activity_kind() {
+  // 復帰の出来事が GetActivity で切断と取り違えられず、ConnectionRestored として返る。
+  let harness = seeded_harness();
+  harness
+    .activity
+    .record(&event("2026-11-13T12:05:00Z", "mac-mini", Some("takt-dash"), EventKind::ConnectionRestored, "接続の復帰"))
+    .expect("出来事を記録できます");
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let response = client.get_activity(GetActivityRequest {}).await.expect("アクティビティを取得できます").into_inner();
+
+  assert_eq!(response.events.len(), 1);
+  assert_eq!(
+    response.events[0].kind,
+    ActivityKind::ConnectionRestored as i32,
+    "復帰の出来事を ConnectionRestored として返します"
+  );
 
   server.stop().await;
 }

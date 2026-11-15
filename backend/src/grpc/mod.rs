@@ -11,8 +11,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use mapping::{
-  activity_kind, execution_status, goal_status, inquiry_kind, optional_timestamp, pending_decision_type, run_status,
-  step_log, task_status, timestamp,
+  activity_kind, connection_state, execution_status, goal_status, inquiry_kind, optional_timestamp,
+  pending_decision_type, run_status, step_log, task_status, timestamp,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
@@ -112,6 +112,8 @@ fn assemble_projects(views: &[model::ProjectView], activity: &ActivityStore, now
         about: view.about.clone(),
         server_id: view.server_id.clone(),
         completed_tasks_24h,
+        connection_state: connection_state(view.connection_state) as i32,
+        last_read_at: optional_timestamp(view.last_read_at),
       }
     })
     .collect()

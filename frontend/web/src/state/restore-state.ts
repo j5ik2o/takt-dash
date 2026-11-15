@@ -50,6 +50,11 @@ const toProject = (raw: Record<string, unknown>): Project => ({
   about: String(raw.about ?? ""),
   serverId: String(raw.serverId ?? ""),
   completedTasks24h: asNumber(raw.completedTasks24h),
+  connectionState:
+    raw.connectionState === undefined || raw.connectionState === null
+      ? 0
+      : enumFromWire("ConnectionState", raw.connectionState),
+  lastReadAt: toDate(raw.lastReadAt),
 });
 
 const toTaskCounts = (raw: unknown): TaskStatusCounts | undefined => {

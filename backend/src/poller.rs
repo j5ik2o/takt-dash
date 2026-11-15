@@ -1,9 +1,11 @@
 //! 定期読み取りの調整。
 //!
 //! 各サイクルの前に設定ファイルを再読み込みし、変更後の間隔・閾値・プロジェクト一覧に従います。
-//! 1プロジェクトの読み取り失敗はそのプロジェクトだけ connected
-//! 偽とし、他のプロジェクトを止めません。 読み取りのたびに前回の状態との差分から出来事を検出し、
-//! SQLite へ記録します。
+//! 1プロジェクトの読み取り失敗はそのプロジェクトだけ遅延中（Delayed、接続中）とし、
+//! 他のプロジェクトは止めません。
+//! 連続失敗回数と遅延時間の両方を満たす最初の失敗で応答なし（Unresponsive）へ移し、
+//! その間は起点を更新しません。 読み取りのたびに前回の状態との差分から出来事を検出し、SQLite
+//! へ記録します。
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
@@ -21,13 +23,12 @@ use crate::{
 
 /// 定期読み取りを1サイクル実行するための調整役。
 pub struct Poller {
-  config_path:        PathBuf,
-  activity:           Arc<ActivityStore>,
-  store:              Arc<StateStore>,
-  clients:            BTreeMap<String, McpClient>,
-  previous:           BTreeMap<String, ProjectSnapshot>,
-  previous_connected: BTreeMap<String, bool>,
-  changes:            broadcast::Sender<()>,
+  config_path: PathBuf,
+  activity:    Arc<ActivityStore>,
+  store:       Arc<StateStore>,
+  clients:     BTreeMap<String, McpClient>,
+  previous:    BTreeMap<String, ProjectSnapshot>,
+  changes:     broadcast::Sender<()>,
 }
 
 /// 1サイクルで読み取った件数と、記録した出来事の件数、次の待機に使う間隔。
@@ -51,15 +52,7 @@ impl Poller {
     store: Arc<StateStore>,
     changes: broadcast::Sender<()>,
   ) -> Self {
-    Poller {
-      config_path,
-      activity,
-      store,
-      clients: BTreeMap::new(),
-      previous: BTreeMap::new(),
-      previous_connected: BTreeMap::new(),
-      changes,
-    }
+    Poller { config_path, activity, store, clients: BTreeMap::new(), previous: BTreeMap::new(), changes }
   }
 
   /// 1サイクル分、全プロジェクトの状態を読み取って差し替え、出来事を記録する。
@@ -81,25 +74,22 @@ impl Poller {
     for project in &config.projects {
       let read_at = Utc::now();
       let prev = self.previous.get(&project.name).cloned();
-      let prev_connected = self.previous_connected.get(&project.name).copied().unwrap_or(false);
       match self.read_one(project, prev.as_ref()).await {
         | Ok(snapshot) => {
-          let events = detect(&project.server, &project.name, prev.as_ref(), prev_connected, true, &snapshot, read_at);
-          self.store.record_success(&project.name, snapshot.clone(), read_at);
+          let transition = self.store.record_success(&project.name, snapshot.clone(), read_at);
+          let events = detect(&project.server, &project.name, prev.as_ref(), &snapshot, transition, read_at);
           self.previous.insert(project.name.clone(), snapshot);
-          self.previous_connected.insert(project.name.clone(), true);
           self.record_events(&events)?;
           report.projects_read += 1;
           report.events_recorded += events.len();
         },
         | Err(error) => {
-          if let Some(prev) = prev.as_ref() {
-            let events = detect(&project.server, &project.name, Some(prev), prev_connected, false, prev, read_at);
-            self.record_events(&events)?;
-            report.events_recorded += events.len();
-          }
-          self.store.record_failure(&project.name);
-          self.previous_connected.insert(project.name.clone(), false);
+          let transition = self.store.record_failure(&project.name, read_at);
+          let empty = ProjectSnapshot::empty();
+          let next = prev.as_ref().unwrap_or(&empty);
+          let events = detect(&project.server, &project.name, prev.as_ref(), next, transition, read_at);
+          self.record_events(&events)?;
+          report.events_recorded += events.len();
           report.projects_failed += 1;
           tracing::warn!(project = %project.name, error = %error, "プロジェクトの読み取りに失敗しました。");
         },
@@ -164,12 +154,13 @@ impl Poller {
 #[derive(Debug, PartialEq, Eq)]
 struct StoreSignature {
   thresholds: Thresholds,
-  projects:   Vec<(String, bool, Option<ProjectSnapshot>)>,
+  projects:   Vec<(String, Option<crate::model::ConnectionState>, Option<ProjectSnapshot>)>,
 }
 
 impl StoreSignature {
   fn capture(store: &StateStore) -> Self {
-    let projects = store.project_views().into_iter().map(|view| (view.name, view.connected, view.snapshot)).collect();
+    let projects =
+      store.project_views().into_iter().map(|view| (view.name, view.connection_state, view.snapshot)).collect();
     StoreSignature { thresholds: store.thresholds(), projects }
   }
 }

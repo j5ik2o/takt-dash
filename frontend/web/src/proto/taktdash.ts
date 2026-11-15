@@ -242,6 +242,7 @@ export enum ActivityKind {
   ACTIVITY_KIND_PAUSED = 6,
   ACTIVITY_KIND_BLOCKED = 7,
   ACTIVITY_KIND_CONNECTION_LOST = 8,
+  ACTIVITY_KIND_CONNECTION_RESTORED = 9,
   UNRECOGNIZED = -1,
 }
 
@@ -274,6 +275,9 @@ export function activityKindFromJSON(object: any): ActivityKind {
     case 8:
     case "ACTIVITY_KIND_CONNECTION_LOST":
       return ActivityKind.ACTIVITY_KIND_CONNECTION_LOST;
+    case 9:
+    case "ACTIVITY_KIND_CONNECTION_RESTORED":
+      return ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -301,7 +305,59 @@ export function activityKindToJSON(object: ActivityKind): string {
       return "ACTIVITY_KIND_BLOCKED";
     case ActivityKind.ACTIVITY_KIND_CONNECTION_LOST:
       return "ACTIVITY_KIND_CONNECTION_LOST";
+    case ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED:
+      return "ACTIVITY_KIND_CONNECTION_RESTORED";
     case ActivityKind.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+/** プロジェクトの接続状態を表す。 */
+export enum ConnectionState {
+  /** CONNECTION_STATE_UNSPECIFIED - まだ一度も読めていない */
+  CONNECTION_STATE_UNSPECIFIED = 0,
+  /** CONNECTION_STATE_CONNECTED - 接続中 */
+  CONNECTION_STATE_CONNECTED = 1,
+  /** CONNECTION_STATE_DELAYED - 接続中だが直近の読み取りが失敗している（遅延中） */
+  CONNECTION_STATE_DELAYED = 2,
+  /** CONNECTION_STATE_UNRESPONSIVE - しきい値を超えて応答がない */
+  CONNECTION_STATE_UNRESPONSIVE = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function connectionStateFromJSON(object: any): ConnectionState {
+  switch (object) {
+    case 0:
+    case "CONNECTION_STATE_UNSPECIFIED":
+      return ConnectionState.CONNECTION_STATE_UNSPECIFIED;
+    case 1:
+    case "CONNECTION_STATE_CONNECTED":
+      return ConnectionState.CONNECTION_STATE_CONNECTED;
+    case 2:
+    case "CONNECTION_STATE_DELAYED":
+      return ConnectionState.CONNECTION_STATE_DELAYED;
+    case 3:
+    case "CONNECTION_STATE_UNRESPONSIVE":
+      return ConnectionState.CONNECTION_STATE_UNRESPONSIVE;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ConnectionState.UNRECOGNIZED;
+  }
+}
+
+export function connectionStateToJSON(object: ConnectionState): string {
+  switch (object) {
+    case ConnectionState.CONNECTION_STATE_UNSPECIFIED:
+      return "CONNECTION_STATE_UNSPECIFIED";
+    case ConnectionState.CONNECTION_STATE_CONNECTED:
+      return "CONNECTION_STATE_CONNECTED";
+    case ConnectionState.CONNECTION_STATE_DELAYED:
+      return "CONNECTION_STATE_DELAYED";
+    case ConnectionState.CONNECTION_STATE_UNRESPONSIVE:
+      return "CONNECTION_STATE_UNRESPONSIVE";
+    case ConnectionState.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
   }
@@ -418,6 +474,10 @@ export interface Project {
   serverId: string;
   /** 直近24時間に完了したタスクの件数 */
   completedTasks24h: number;
+  /** 接続状態（未読は UNSPECIFIED） */
+  connectionState: ConnectionState;
+  /** 最後に読めた時刻（未読は未設定） */
+  lastReadAt: Date | undefined;
 }
 
 /** タスクの状態ごとの件数を表す。 */
@@ -967,7 +1027,7 @@ export const Server: MessageFns<Server> = {
 };
 
 function createBaseProject(): Project {
-  return { name: "", about: "", serverId: "", completedTasks24h: 0 };
+  return { name: "", about: "", serverId: "", completedTasks24h: 0, connectionState: 0, lastReadAt: undefined };
 }
 
 export const Project: MessageFns<Project> = {
@@ -983,6 +1043,12 @@ export const Project: MessageFns<Project> = {
     }
     if (message.completedTasks24h !== 0) {
       writer.uint32(32).int32(message.completedTasks24h);
+    }
+    if (message.connectionState !== 0) {
+      writer.uint32(40).int32(message.connectionState);
+    }
+    if (message.lastReadAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.lastReadAt), writer.uint32(50).fork()).join();
     }
     return writer;
   },
@@ -1032,6 +1098,22 @@ export const Project: MessageFns<Project> = {
             message.completedTasks24h = reader.int32();
             continue;
           }
+          case 5: {
+            if (tag !== 40) {
+              break;
+            }
+
+            message.connectionState = reader.int32() as any;
+            continue;
+          }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.lastReadAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -1058,6 +1140,16 @@ export const Project: MessageFns<Project> = {
         : isSet(object.completed_tasks_24h)
         ? globalThis.Number(object.completed_tasks_24h)
         : 0,
+      connectionState: isSet(object.connectionState)
+        ? connectionStateFromJSON(object.connectionState)
+        : isSet(object.connection_state)
+        ? connectionStateFromJSON(object.connection_state)
+        : 0,
+      lastReadAt: isSet(object.lastReadAt)
+        ? fromJsonTimestamp(object.lastReadAt)
+        : isSet(object.last_read_at)
+        ? fromJsonTimestamp(object.last_read_at)
+        : undefined,
     };
   },
 
@@ -1075,6 +1167,12 @@ export const Project: MessageFns<Project> = {
     if (message.completedTasks24h !== 0) {
       obj.completedTasks24h = Math.round(message.completedTasks24h);
     }
+    if (message.connectionState !== 0) {
+      obj.connectionState = connectionStateToJSON(message.connectionState);
+    }
+    if (message.lastReadAt !== undefined) {
+      obj.lastReadAt = message.lastReadAt.toISOString();
+    }
     return obj;
   },
 
@@ -1087,6 +1185,8 @@ export const Project: MessageFns<Project> = {
     message.about = object.about ?? "";
     message.serverId = object.serverId ?? "";
     message.completedTasks24h = object.completedTasks24h ?? 0;
+    message.connectionState = object.connectionState ?? 0;
+    message.lastReadAt = object.lastReadAt ?? undefined;
     return message;
   },
 };
