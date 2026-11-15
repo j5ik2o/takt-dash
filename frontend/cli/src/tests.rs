@@ -18,7 +18,8 @@ use tonic::{transport::Server, Code, Request, Response, Status};
 
 use super::{
   is_connection_failure, parse_arguments, proto, render_overview, resolve_backend_addr, run_with, AddrError,
-  AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
+  AddrSources, Answer, Invocation, OverviewOptions, UsageError, WriteCommand, WriteInvocation, ANSWER_COMMAND,
+  DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, UNTIL_MERGE,
 };
 
 // proto の列挙値は生成コードの数値をそのまま使う。
@@ -530,21 +531,23 @@ fn connection_failure_classification_covers_cancelled_and_unknown() {
 }
 
 // ----------------------------------------------------------------------------
-// CLI-NO-WRITE: 書き込み操作のコマンドを持たない（要件 9）
+// CLI-USAGE: 書き込みコマンドの必須引数が欠けたときの使い方エラー
 // ----------------------------------------------------------------------------
 
 #[test]
-fn write_command_is_rejected_with_usage() {
+fn write_command_missing_required_flag_is_rejected_with_usage() {
   let mut stdout = Vec::new();
   let mut stderr = Vec::new();
 
-  let code = run_with(&["answer".to_owned()], Ok(DEFAULT_BACKEND_ADDR.to_owned()), &mut stdout, &mut stderr);
+  // answer は --server/--project/--question と --text か --report が必須。欠けたら backend
+  // を呼ばず使い方を出す。
+  let code = run_with(&[ANSWER_COMMAND.to_owned()], Ok(DEFAULT_BACKEND_ADDR.to_owned()), &mut stdout, &mut stderr);
 
   let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
   let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-  assert_eq!(code, EXIT_USAGE, "未知のコマンドは使い方を出して異常終了する必要があります");
-  assert!(stderr.contains("未知のコマンドです: answer"), "未知のコマンドであることを示す必要があります: {stderr}");
-  assert!(stderr.contains("使い方: takt-dash-cli overview"), "使い方を示す必要があります: {stderr}");
+  assert_eq!(code, EXIT_USAGE, "必須引数が欠けた書き込みコマンドは使い方を出して異常終了する必要があります");
+  assert!(stderr.contains("answer には"), "欠けた引数を示す必要があります: {stderr}");
+  assert!(stderr.contains("使い方: takt-dash-cli"), "使い方を示す必要があります: {stderr}");
   assert!(stdout.is_empty(), "使い方の誤りで標準出力へ出してはいけません: {stdout}");
 }
 
@@ -710,6 +713,127 @@ fn parse_arguments_reports_help() {
 #[test]
 fn parse_arguments_requires_flag_value() {
   assert_eq!(parse_arguments(&["--addr".to_owned()]), Err(UsageError("--addr には値が必要です。".to_owned())));
+}
+
+// ----------------------------------------------------------------------------
+// 書き込みコマンドの引数解釈
+// ----------------------------------------------------------------------------
+
+/// 書き込みコマンドの引数を組み立てるヘルパー。
+fn write_args(parts: &[&str]) -> Vec<String> {
+  parts.iter().map(|part| (*part).to_owned()).collect()
+}
+
+#[test]
+fn parse_arguments_builds_answer_with_text() {
+  let args = write_args(&[
+    "answer",
+    "--server",
+    "mac-mini",
+    "--project",
+    "takt-dash",
+    "--goal",
+    "g-1",
+    "--question",
+    "q-1",
+    "--text",
+    "はい",
+  ]);
+  assert_eq!(
+    parse_arguments(&args),
+    Ok(Invocation::Write(WriteInvocation {
+      command: WriteCommand::Answer {
+        server_id:  "mac-mini".to_owned(),
+        project:    "takt-dash".to_owned(),
+        goal_id:    Some("g-1".to_owned()),
+        inquiry_id: "q-1".to_owned(),
+        answer:     Answer::Text("はい".to_owned()),
+      },
+      addr:    None,
+      config:  None,
+    }))
+  );
+}
+
+#[test]
+fn parse_arguments_rejects_answer_with_text_and_report() {
+  let args = write_args(&[
+    "answer",
+    "--server",
+    "mac-mini",
+    "--project",
+    "takt-dash",
+    "--question",
+    "q-1",
+    "--text",
+    "はい",
+    "--report",
+    "completed",
+  ]);
+  assert!(parse_arguments(&args).is_err(), "--text と --report の同時指定は誤りです");
+}
+
+#[test]
+fn parse_arguments_rejects_unknown_report_value() {
+  let args =
+    write_args(&["answer", "--server", "mac-mini", "--project", "takt-dash", "--question", "q-1", "--report", "done"]);
+  assert!(parse_arguments(&args).is_err(), "--report は completed か unable だけを許します");
+}
+
+#[test]
+fn parse_arguments_builds_merge_with_until() {
+  let args = write_args(&[
+    "merge",
+    "--server",
+    "mac-mini",
+    "--project",
+    "takt-dash",
+    "--goal",
+    "g-1",
+    "--pr",
+    "42",
+    "--until",
+    "merge",
+  ]);
+  assert_eq!(
+    parse_arguments(&args),
+    Ok(Invocation::Write(WriteInvocation {
+      command: WriteCommand::Merge {
+        server_id: "mac-mini".to_owned(),
+        project:   "takt-dash".to_owned(),
+        goal_id:   "g-1".to_owned(),
+        pr_number: 42,
+        until:     UNTIL_MERGE.to_owned(),
+      },
+      addr:    None,
+      config:  None,
+    }))
+  );
+}
+
+#[test]
+fn parse_arguments_rejects_merge_with_unknown_until() {
+  let args = write_args(&[
+    "merge",
+    "--server",
+    "mac-mini",
+    "--project",
+    "takt-dash",
+    "--goal",
+    "g-1",
+    "--pr",
+    "42",
+    "--until",
+    "later",
+  ]);
+  assert!(parse_arguments(&args).is_err(), "--until は prepare か merge だけを許します");
+}
+
+#[test]
+fn parse_arguments_rejects_a_flag_for_another_command() {
+  // --pr は merge 専用。answer に付けたら未知の引数として拒否する。
+  let args = write_args(&["answer", "--server", "mac-mini", "--project", "takt-dash", "--pr", "42"]);
+  assert_eq!(parse_arguments(&args), Err(UsageError("未知の引数です: --pr".to_owned())));
 }
 
 #[test]
