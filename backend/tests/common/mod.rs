@@ -46,9 +46,30 @@ pub fn mock_config_with_timeout(
   }
 }
 
+/// 道具呼び出しの記録先を指定して mock サーバの起動設定を作る。
+pub fn mock_config_with_call_log(cwd: &Path, state: &Path, call_log: &Path) -> McpClientConfig {
+  let mut config = mock_config(cwd, state, None);
+  config.args.push("--call-log".to_owned());
+  config.args.push(call_log.display().to_string());
+  config
+}
+
 /// mock サーバへ接続するクライアントを作る。
 pub fn mock_client(config: McpClientConfig) -> McpClient {
   McpClient::new(config)
+}
+
+/// mock サーバが記録した道具名の一覧を読む。
+pub fn recorded_calls(path: &Path) -> Vec<String> {
+  match std::fs::read_to_string(path) {
+    | Ok(text) => text.lines().filter(|line| !line.is_empty()).map(str::to_owned).collect(),
+    | Err(_) => Vec::new(),
+  }
+}
+
+/// 道具呼び出しの記録を空にする。
+pub fn clear_recorded_calls(path: &Path) {
+  std::fs::write(path, "").expect("道具呼び出しの記録を空にできます");
 }
 
 /// プロジェクトの cwd を持つ道具のまとまりを作る。mock は実契約と同じく cwd 必須なので、

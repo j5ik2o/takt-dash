@@ -20,10 +20,12 @@
 //                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
 //                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
-//     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
+//     "isError": ["takt_list_tasks", "takt_get_run:r1"], // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
+//     "hang": ["takt_list_goal_questions:g1", "takt_get_run:r1@120"], // 指定した呼び出しだけ応答しない。
+//     "delayMs": { "takt_list_goals": 1000 }             // 道具ごとに応答を遅らせる。
 //   }
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isAbsolute } from "node:path";
 
@@ -35,6 +37,7 @@ const option = (name) => {
 
 const behavior = option("--behavior") ?? "ok";
 const statePath = option("--state");
+const callLogPath = option("--call-log");
 // 実 takt-mcp と同じページサイズ（limit 既定 50）。
 const PAGE_SIZE = 50;
 
@@ -146,8 +149,26 @@ const runResponse = (state, args) => {
   };
 };
 
-const handleToolCall = (name, args) => {
-  const state = loadState();
+const scopeOf = (args) => args.goalId ?? args.runSlug;
+
+// "hang" の項目は "<道具名>"、"<道具名>:<goalId または runSlug>"、
+// "<道具名>:<goalId または runSlug>@<offset>" の順で照合する。
+const isHung = (state, name, args) => {
+  const hang = state.hang ?? [];
+  if (hang.includes(name)) {
+    return true;
+  }
+  const scope = scopeOf(args);
+  if (scope === undefined) {
+    return false;
+  }
+  if (hang.includes(`${name}:${scope}`)) {
+    return true;
+  }
+  return args.offset !== undefined && hang.includes(`${name}:${scope}@${Number(args.offset)}`);
+};
+
+const handleToolCall = (state, name, args) => {
   const isError = new Set(state.isError ?? []);
   // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug>" の限定キーで対象を絞れる。
   const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? ""}`;
@@ -175,7 +196,7 @@ const handleToolCall = (name, args) => {
   }
 };
 
-const onLine = (line) => {
+const onLine = async (line) => {
   let message;
   try {
     message = JSON.parse(line);
@@ -208,12 +229,23 @@ const onLine = (line) => {
       return;
     }
     const { name, arguments: args } = message.params ?? {};
+    if (callLogPath) {
+      appendFileSync(callLogPath, `${name}\n`);
+    }
     const invalid = validateArguments(name, args);
     if (invalid !== undefined) {
       reply({ jsonrpc: "2.0", id: message.id, error: { code: -32602, message: invalid } });
       return;
     }
-    reply({ jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) });
+    const state = loadState();
+    if (isHung(state, name, args)) {
+      return;
+    }
+    const delayMs = state.delayMs?.[name] ?? 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    reply({ jsonrpc: "2.0", id: message.id, result: handleToolCall(state, name, args) });
     return;
   }
   if (message.id !== undefined) {
@@ -222,5 +254,9 @@ const onLine = (line) => {
 };
 
 const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });
-reader.on("line", onLine);
+// 応答の遅延中も受信順を保つため、1 行ずつ直列に処理する。
+let queue = Promise.resolve();
+reader.on("line", (line) => {
+  queue = queue.then(() => onLine(line)).catch(() => process.exit(3));
+});
 reader.on("close", () => process.exit(0));

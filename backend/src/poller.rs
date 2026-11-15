@@ -85,30 +85,48 @@ impl Poller {
       interval:        Duration::from_secs(config.interval_seconds),
     };
     let mut metrics = ToolCallMetrics::default();
+    let mut handles = Vec::with_capacity(config.projects.len());
     for project in &config.projects {
-      let read_at = Utc::now();
+      match self.clients.remove(&project.name) {
+        | Some(mut client) => {
+          let project = project.clone();
+          let prev = self.previous.get(&project.name).cloned();
+          handles.push(Some(tokio::spawn(async move {
+            let read_at = Utc::now();
+            let mut tools = ToolSet::new(&mut client, project.cwd.clone());
+            let result = tools.read_snapshot(prev.as_ref()).await;
+            let metrics = tools.take_metrics();
+            (client, read_at, result, metrics)
+          })));
+        },
+        | None => handles.push(None),
+      }
+    }
+    for (project, handle) in config.projects.iter().zip(handles) {
       let prev = self.previous.get(&project.name).cloned();
       let prev_connected = self.previous_connected.get(&project.name).copied().unwrap_or(false);
-      match self.read_one(project, prev.as_ref(), &mut metrics).await {
-        | Ok(snapshot) => {
-          let events = detect(&project.server, &project.name, prev.as_ref(), prev_connected, true, &snapshot, read_at);
-          self.store.record_success(&project.name, snapshot.clone(), read_at);
-          self.previous.insert(project.name.clone(), snapshot);
-          self.previous_connected.insert(project.name.clone(), true);
-          self.record_events(&events)?;
-          report.projects_read += 1;
-          report.events_recorded += events.len();
+      let Some(handle) = handle else {
+        let error = ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name));
+        self.record_failure(project, &error, prev.as_ref(), prev_connected, Utc::now(), &mut report)?;
+        continue;
+      };
+      match handle.await {
+        | Ok((client, read_at, result, project_metrics)) => {
+          self.clients.insert(project.name.clone(), client);
+          metrics.merge(project_metrics);
+          match result {
+            | Ok(snapshot) => {
+              self.record_success(project, prev.as_ref(), prev_connected, read_at, snapshot, &mut report)?;
+            },
+            | Err(error) => {
+              self.record_failure(project, &error, prev.as_ref(), prev_connected, read_at, &mut report)?;
+            },
+          }
         },
         | Err(error) => {
-          if let Some(prev) = prev.as_ref() {
-            let events = detect(&project.server, &project.name, Some(prev), prev_connected, false, prev, read_at);
-            self.record_events(&events)?;
-            report.events_recorded += events.len();
-          }
-          self.store.record_failure(&project.name);
-          self.previous_connected.insert(project.name.clone(), false);
-          report.projects_failed += 1;
-          tracing::warn!(project = %project.name, error = %error, "プロジェクトの読み取りに失敗しました。");
+          let error =
+            ToolError::Parse(format!("プロジェクト {} の読み取りタスクが異常終了しました: {error}", project.name));
+          self.record_failure(project, &error, prev.as_ref(), prev_connected, Utc::now(), &mut report)?;
         },
       }
     }
@@ -159,22 +177,46 @@ impl Poller {
     }
   }
 
-  /// 1 プロジェクトを読み取る。補助読み取り（run・ゴール質問・通知・ゴールに属さない
-  /// 問い合わせ）の道具エラーは read_snapshot 内で前回値に縮退するため、ここで返る失敗は
-  /// コア読み取り（ゴール・タスク）の失敗と、補助読み取りの輸送エラー・解析エラーだけです。
-  async fn read_one(
+  /// 1 プロジェクトの読み取り成功を、設定順でストア・前回値・出来事へ反映する。
+  fn record_success(
     &mut self,
     project: &Project,
     prev: Option<&ProjectSnapshot>,
-    metrics: &mut ToolCallMetrics,
-  ) -> Result<ProjectSnapshot, ToolError> {
-    let Some(client) = self.clients.get_mut(&project.name) else {
-      return Err(ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name)));
-    };
-    let mut tools = ToolSet::new(client, project.cwd.clone());
-    let snapshot = tools.read_snapshot(prev).await;
-    metrics.merge(tools.take_metrics());
-    snapshot
+    prev_connected: bool,
+    read_at: DateTime<Utc>,
+    snapshot: ProjectSnapshot,
+    report: &mut CycleReport,
+  ) -> Result<(), crate::config::ConfigError> {
+    let events = detect(&project.server, &project.name, prev, prev_connected, true, &snapshot, read_at);
+    self.store.record_success(&project.name, snapshot.clone(), read_at);
+    self.previous.insert(project.name.clone(), snapshot);
+    self.previous_connected.insert(project.name.clone(), true);
+    self.record_events(&events)?;
+    report.projects_read += 1;
+    report.events_recorded += events.len();
+    Ok(())
+  }
+
+  /// 1 プロジェクトの読み取り失敗を、設定順でストア・前回値・出来事へ反映する。
+  fn record_failure(
+    &mut self,
+    project: &Project,
+    error: &ToolError,
+    prev: Option<&ProjectSnapshot>,
+    prev_connected: bool,
+    read_at: DateTime<Utc>,
+    report: &mut CycleReport,
+  ) -> Result<(), crate::config::ConfigError> {
+    if let Some(prev) = prev {
+      let events = detect(&project.server, &project.name, Some(prev), prev_connected, false, prev, read_at);
+      self.record_events(&events)?;
+      report.events_recorded += events.len();
+    }
+    self.store.record_failure(&project.name);
+    self.previous_connected.insert(project.name.clone(), false);
+    report.projects_failed += 1;
+    tracing::warn!(project = %project.name, error = %error, "プロジェクトの読み取りに失敗しました。");
+    Ok(())
   }
 }
 

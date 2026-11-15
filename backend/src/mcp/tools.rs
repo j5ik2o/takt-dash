@@ -98,9 +98,9 @@ impl<'a> ToolSet<'a> {
   /// ゴール・タスク・問い合わせ・run を読み取り、1プロジェクト分の snapshot を組み立てる。
   ///
   /// `prev` には前回の snapshot を渡します。補助読み取り（run・ゴール質問・通知・ゴールに
-  /// 属さない問い合わせ）が道具エラーで失敗したときは、その項目だけ前回値（無ければ空）を
-  /// 保持し、プロジェクト全体を失敗にしません。コア読み取り（ゴール・タスク）の失敗と、
-  /// 補助読み取りの輸送エラー・解析エラーは全体の失敗として伝播します。
+  /// 属さない問い合わせ）が道具エラーまたはタイムアウトで失敗したときは、その項目だけ前回値
+  /// （無ければ空）を保持し、プロジェクト全体を失敗にしません。コア読み取り（ゴール・タスク）の
+  /// 失敗と、補助読み取りのその他の輸送エラー・解析エラーは全体の失敗として伝播します。
   ///
   /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知から得るため、通知を読んだ後に
   /// ゴールへ起点時刻を反映します。
@@ -167,9 +167,9 @@ impl<'a> ToolSet<'a> {
   /// ゴールに属する問い合わせと、ゴールに属さない問い合わせをまとめて集める。
   ///
   /// ゴール質問の取得は行使済みの goals を再利用します（ゴール一覧の再取得はしません）。
-  /// 道具エラー（そのゴールの質問だけ取得できない、またはゴールに属さない問い合わせだけ
-  /// 取得できない）は、該当項目だけ前回 snapshot の同じゴールの問い合わせを引き継ぎます
-  /// （初回観測時は空）。輸送エラーと解析エラーは全体の失敗として伝播します。
+  /// 道具エラーまたはタイムアウト（そのゴールの質問だけ取得できない、またはゴールに属さない
+  /// 問い合わせだけ取得できない）は、該当項目だけ前回 snapshot の同じゴールの問い合わせを
+  /// 引き継ぎます（初回観測時は空）。その他の輸送エラーと解析エラーは全体の失敗として伝播します。
   async fn list_all_inquiries(
     &mut self,
     goals: &[GoalEntry],
@@ -178,13 +178,17 @@ impl<'a> ToolSet<'a> {
   ) -> Result<Vec<InquiryEntry>, ToolError> {
     let mut inquiries = match self.list_standalone_inquiries().await {
       | Ok(entries) => entries,
-      | Err(ToolError::Tool(_)) => prev_inquiries(prev, |goal_id| goal_id.is_none()),
+      | Err(error) if is_degradable_auxiliary_error(&error) => prev_inquiries(prev, |goal_id| goal_id.is_none()),
       | Err(error) => return Err(error),
     };
     for goal in goals {
+      if is_unchanged_terminal_goal(goal, prev) {
+        inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(goal.goal_id.as_str())));
+        continue;
+      }
       match self.list_goal_questions(&goal.goal_id).await {
         | Ok(mut entries) => inquiries.append(&mut entries),
-        | Err(ToolError::Tool(_)) => {
+        | Err(error) if is_degradable_auxiliary_error(&error) => {
           inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(goal.goal_id.as_str())))
         },
         | Err(error) => return Err(error),
@@ -231,9 +235,9 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_list_standalone_inquiries のページ追従が上限に達しました".to_owned()))
   }
 
-  /// running なタスクの run を集める。`takt_get_run` が道具エラーを返した run だけ、前回
-  /// snapshot の同じ runSlug を引き継ぎ（無ければ欠落）、健常な run は今回の値を採ります。
-  /// 輸送エラーと解析エラーは全体の失敗として伝播します。
+  /// running なタスクの run を集める。`takt_get_run` が道具エラーまたはタイムアウトを返した
+  /// run だけ、前回 snapshot の同じ runSlug を引き継ぎ（無ければ欠落）、健常な run は今回の
+  /// 値を採ります。その他の輸送エラーと解析エラーは全体の失敗として伝播します。
   async fn get_running_runs(
     &mut self,
     tasks: &[TaskEntry],
@@ -244,9 +248,9 @@ impl<'a> ToolSet<'a> {
       let Some(run_slug) = task.run_slug.clone() else {
         continue;
       };
-      match self.read_run(&run_slug, task).await {
+      match self.read_run(&run_slug, task, prev).await {
         | Ok(run) => runs.push(run),
-        | Err(ToolError::Tool(_)) => {
+        | Err(error) if is_degradable_auxiliary_error(&error) => {
           if let Some(previous) =
             prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug))
           {
@@ -259,17 +263,67 @@ impl<'a> ToolSet<'a> {
     Ok(runs)
   }
 
-  async fn read_run(&mut self, run_slug: &str, task: &TaskEntry) -> Result<RunEntry, ToolError> {
+  async fn read_run(
+    &mut self,
+    run_slug: &str,
+    task: &TaskEntry,
+    prev: Option<&ProjectSnapshot>,
+  ) -> Result<RunEntry, ToolError> {
     let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug })).await?;
-    self.parse_run_with_pages(&value, task).await
+    let prev_run = prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug));
+    self.parse_run_with_pages(&value, task, prev_run).await
   }
 
   /// takt_get_run の応答を解析する。stepLogs は先頭 50 件のウィンドウで返るため、
   /// stepLogPage.nextOffset が残っていれば追加ページを取得して末尾のログの時刻を求める。
-  async fn parse_run_with_pages(&mut self, value: &Value, task: &TaskEntry) -> Result<RunEntry, ToolError> {
-    let mut latest_seen = last_step_timestamp(value);
-    let mut steps = step_entries(value);
-    let mut next_offset = step_log_next_offset(value);
+  ///
+  /// 前回の run に同じ stepLog の並びが残っていれば、先頭ページの同一性と総件数を確かめ、
+  /// 前回の steps の既知部分を応答値で置き換えて、新しい分だけを追記します。前回が無い、
+  /// 件数が減った（リセット）、 先頭の step が変わった、総件数が読めない場合は、
+  /// 従来どおり全ページを読み直します。
+  async fn parse_run_with_pages(
+    &mut self,
+    value: &Value,
+    task: &TaskEntry,
+    prev_run: Option<&RunEntry>,
+  ) -> Result<RunEntry, ToolError> {
+    let first_page_steps = step_entries(value);
+    let total = step_log_total_count(value);
+    let differential = prev_run.filter(|previous| {
+      !previous.steps.is_empty()
+        && total.is_some_and(|total| total >= previous.steps.len())
+        && first_step_matches(&previous.steps, &first_page_steps)
+    });
+    let (mut latest_seen, mut steps, mut next_offset) = match differential {
+      | Some(previous) => {
+        let known = previous.steps.len();
+        let overlap = known.min(first_page_steps.len());
+        let mut steps = previous.steps.clone();
+        // 既知の step も応答値で置き換える。継続中だった step が同じ位置で終了すると
+        // endedAt や model が付くため、前回値の追記だけでは古い値が残る。
+        steps[..overlap].clone_from_slice(&first_page_steps[..overlap]);
+        let mut latest_seen = Some(previous.last_log_at);
+        if known < first_page_steps.len() {
+          steps.extend(first_page_steps[known..].iter().cloned());
+          if let Some(timestamp) = last_step_timestamp(value) {
+            latest_seen = Some(timestamp);
+          }
+        }
+        let next_offset = if known > first_page_steps.len() {
+          // 既知の末尾 step は先頭ページに含まれない。その step が同じ位置で完了すると
+          // endedAt や model が付くため、末尾 step を含むページを 1 回だけ取得して置換する。
+          Some(known - 1)
+        } else if total.is_some_and(|total| known >= total) {
+          None
+        } else if known < first_page_steps.len() {
+          step_log_next_offset(value)
+        } else {
+          Some(known)
+        };
+        (latest_seen, steps, next_offset)
+      },
+      | None => (last_step_timestamp(value), first_page_steps, step_log_next_offset(value)),
+    };
     let run_slug = string_field(value, "runSlug")?;
     let mut pages_taken = 0;
     while let Some(offset) = next_offset {
@@ -281,7 +335,14 @@ impl<'a> ToolSet<'a> {
       if let Some(timestamp) = last_step_timestamp(&page_value) {
         latest_seen = Some(timestamp);
       }
-      steps.extend(step_entries(&page_value));
+      for (index, entry) in step_entries(&page_value).into_iter().enumerate() {
+        let absolute = offset + index;
+        if absolute < steps.len() {
+          steps[absolute] = entry;
+        } else {
+          steps.push(entry);
+        }
+      }
       next_offset = step_log_next_offset(&page_value);
     }
     parse_run(value, task, latest_seen, steps)
@@ -295,6 +356,10 @@ impl<'a> ToolSet<'a> {
     let mut notifications = Vec::new();
     let mut awaiting_merge_at = BTreeMap::new();
     for goal in goals {
+      if is_unchanged_terminal_goal(goal, prev) {
+        inherit_previous_notifications(&mut notifications, &mut awaiting_merge_at, goal, prev);
+        continue;
+      }
       match self.list_goal_notifications(&goal.goal_id).await {
         | Ok((goal_notifications, goal_awaiting_merge_at)) => {
           if let Some(recorded_at) = goal_awaiting_merge_at {
@@ -302,16 +367,8 @@ impl<'a> ToolSet<'a> {
           }
           notifications.extend(goal_notifications);
         },
-        | Err(ToolError::Tool(_)) => {
-          let goal_id = goal.goal_id.as_str();
-          if let Some(prev) = prev {
-            notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal_id).cloned());
-            if let Some(recorded_at) =
-              prev.goals.iter().find(|entry| entry.goal_id == goal_id).and_then(|entry| entry.awaiting_merge_at)
-            {
-              awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
-            }
-          }
+        | Err(error) if is_degradable_auxiliary_error(&error) => {
+          inherit_previous_notifications(&mut notifications, &mut awaiting_merge_at, goal, prev);
         },
         | Err(error) => return Err(error),
       }
@@ -359,6 +416,45 @@ fn call_outcome(result: &Result<String, CallError>) -> ToolCallOutcome {
     | Err(CallError::Tool(_)) => ToolCallOutcome::Failed,
     | Err(CallError::Transport(TransportError::Timeout(_))) => ToolCallOutcome::TimedOut,
     | Err(CallError::Transport(_)) => ToolCallOutcome::Failed,
+  }
+}
+
+/// 前回と同じ状態の終端ゴールかを判定する。終端は `status == Completed` または
+/// `execution_status == Aborted` で、前回の同じゴールが同じ状態なら補助読み取りを省けます。
+/// 初回観測、状態変化、`AwaitingMerge` などの非終端は読み取り対象のままです。
+fn is_unchanged_terminal_goal(goal: &GoalEntry, prev: Option<&ProjectSnapshot>) -> bool {
+  let Some(previous) = prev.and_then(|snapshot| snapshot.goals.iter().find(|entry| entry.goal_id == goal.goal_id))
+  else {
+    return false;
+  };
+  previous.status == goal.status
+    && previous.execution_status == goal.execution_status
+    && (goal.status == GoalStatus::Completed || goal.execution_status == ExecutionStatus::Aborted)
+}
+
+/// 補助読み取りの失敗を、その項目だけ前回値へ縮退できるか判定する。道具エラーと
+/// タイムアウトだけを縮退し、解析エラーや接続断などの輸送エラーはプロジェクトの失敗として
+/// 伝播させます。
+fn is_degradable_auxiliary_error(error: &ToolError) -> bool {
+  matches!(error, |ToolError::Tool(_)| ToolError::Transport(TransportError::Timeout(_)))
+}
+
+/// 前回 snapshot の同じゴールの通知と、マージ待ちの起点時刻を引き継ぐ。前回が無ければ何もしません。
+fn inherit_previous_notifications(
+  notifications: &mut Vec<NotificationEntry>,
+  awaiting_merge_at: &mut BTreeMap<String, DateTime<Utc>>,
+  goal: &GoalEntry,
+  prev: Option<&ProjectSnapshot>,
+) {
+  let Some(prev) = prev else {
+    return;
+  };
+  let goal_id = goal.goal_id.as_str();
+  notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal_id).cloned());
+  if let Some(recorded_at) =
+    prev.goals.iter().find(|entry| entry.goal_id == goal_id).and_then(|entry| entry.awaiting_merge_at)
+  {
+    awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
   }
 }
 
@@ -648,6 +744,24 @@ fn report_summaries(value: &Value) -> Vec<ReportEntry> {
 /// stepLogPage.nextOffset を取り出す。null または欠落なら None（追従終端）。
 fn step_log_next_offset(value: &Value) -> Option<usize> {
   value.get("stepLogPage").and_then(|page| page.get("nextOffset")).and_then(Value::as_u64).map(|offset| offset as usize)
+}
+
+/// stepLogPage.totalCount を取り出す。欠落していれば差分読みをせず全読みに落とします。
+fn step_log_total_count(value: &Value) -> Option<usize> {
+  value.get("stepLogPage").and_then(|page| page.get("totalCount")).and_then(Value::as_u64).map(|total| total as usize)
+}
+
+/// 前回の先頭 step と今回の先頭ページの先頭 step が同じかを判定する。stepLog がリセットされたり
+/// 別の run の応答が混ざったりした場合は差分読みをせず、全読みで置き換えます。`UNIX_EPOCH` は
+/// 時刻が欠けた step を表すため比較対象から除外します。
+fn first_step_matches(previous: &[RunStepEntry], first_page: &[RunStepEntry]) -> bool {
+  let (Some(previous), Some(first)) = (previous.first(), first_page.first()) else {
+    return false;
+  };
+  previous.step_name == first.step_name
+    && (previous.started_at == first.started_at
+      || previous.started_at == DateTime::<Utc>::UNIX_EPOCH
+      || first.started_at == DateTime::<Utc>::UNIX_EPOCH)
 }
 
 impl<'a> ToolSet<'a> {
