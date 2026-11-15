@@ -163,12 +163,16 @@ message Run {
   string task_name = 6;                             // タスク名
   string summary = 7;                               // 要約
   optional google.protobuf.Timestamp started_at = 8;  // 開始時刻（実行中の run は未設定があり得る）
-  repeated RunStep steps = 9;                       // ステップの並び（最後が今のステップ）
+  repeated RunStep steps = 9;                       // ステップの履歴（入れ子 workflow の内側の step を含み、末尾が今のステップとは限らない）
   optional google.protobuf.Timestamp current_step_started_at = 10;  // 今のステップの開始時刻
   optional google.protobuf.Timestamp last_log_at = 11;  // 最後のログの時刻（実行中の run は未設定があり得る）
   repeated ReportSummary reports = 12;              // レポートの一覧
   RunStatus status = 13;                            // 状態
   bool log_silent = 14;                             // ログの無音の判定済みフラグ
+  optional int32 current_step_number = 15;          // 現在のステップの位置（1 始まり。不明なら省略）
+  optional int32 total_steps = 16;                   // workflow の全ステップ数（不明なら省略）
+  optional int32 current_iteration = 17;             // 現在の反復回数（不明なら省略）
+  optional string current_step_name = 18;            // 今のステップ名（current_step_number と同じ step 集合。不明なら省略）
 }
 
 // 判断待ちの項目を表す。

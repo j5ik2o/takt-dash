@@ -43,6 +43,9 @@ fn run_entry(run_slug: &str) -> RunEntry {
     summary:                 "実装の run".to_owned(),
     status:                  takt_dash_backend::model::RunStatus::Running,
     current_step:            Some("implement".to_owned()),
+    current_iteration:       Some(2),
+    current_step_number:     Some(2),
+    total_steps:             Some(5),
     started_at:              Some(time("2026-11-13T09:00:00Z")),
     current_step_started_at: Some(time("2026-11-13T09:05:00Z")),
     last_log_at:             Some(time("2026-11-13T09:06:00Z")),
@@ -187,6 +190,10 @@ async fn get_overview_assembles_the_dashboard_state_from_the_store() {
   assert_eq!(run.steps[1].ended_at, None, "継続中のステップは終了時刻を持ちません");
   assert_eq!(run.steps[1].started_at, Some(timestamp("2026-11-13T09:05:00Z")));
   assert_eq!(run.current_step_started_at, Some(timestamp("2026-11-13T09:05:00Z")));
+  assert_eq!(run.current_step_name.as_deref(), Some("implement"), "今のステップ名を proto へ写します");
+  assert_eq!(run.current_step_number, Some(2), "現在ステップの位置を proto へ写します");
+  assert_eq!(run.total_steps, Some(5), "全ステップ数を proto へ写します");
+  assert_eq!(run.current_iteration, Some(2), "反復回数を proto へ写します");
   assert_eq!(run.reports.len(), 1);
   assert_eq!(run.reports[0].filename, "plan.md");
   assert_eq!(run.reports[0].size_bytes, 1234);

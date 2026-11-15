@@ -12,12 +12,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   createActivityResponse,
   createDashboardState,
+  createNestedStepDashboardState,
   createProjectsResponse,
   NOW,
 } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
 import { createBackendClient } from "../../src/grpc/client.ts";
 import { buildOverviewView, type OverviewView } from "../../src/state/dashboard.ts";
+import { OverviewContent } from "../../src/components/overview-content.tsx";
 import { DashboardState, InquiryKind, PendingDecisionType } from "../../src/proto/taktdash.ts";
 import OverviewPage from "../../app/page.tsx";
 import ProjectsPage from "../../app/projects/page.tsx";
@@ -58,6 +60,40 @@ const elementsByClass = (html: string, className: string): string[] =>
   html.match(new RegExp(`<[a-z]+[^>]*class="(?:[^"]*\\s)?${className}(?:\\s[^"]*)?"[^>]*>`, "g")) ?? [];
 
 const occurrences = (html: string, needle: string): number => html.split(needle).length - 1;
+
+// 進捗バーの開始タグから閉じタグまでを取り出す。run 行に1つだけ描画される前提で、
+// バー自身の属性と内側の幅指定を、他の要素の一致に紛れずに観測するために使う。
+const barMarkup = (html: string): string => {
+  const match = /<div[^>]*class="[^"]*\bbar\b[^"]*"[^>]*>[\s\S]*?<\/div>/.exec(html);
+  if (match === null) {
+    assert.fail("進捗バーが描画されていない");
+  }
+  return match[0];
+};
+
+// 指定したメディアクエリの本体を波括弧の対応で切り出す。
+const mediaBlock = (css: string, query: string): string | undefined => {
+  const start = css.indexOf(query);
+  if (start < 0) {
+    return undefined;
+  }
+  const open = css.indexOf("{", start);
+  if (open < 0) {
+    return undefined;
+  }
+  let depth = 0;
+  for (let index = open; index < css.length; index += 1) {
+    if (css[index] === "{") {
+      depth += 1;
+    } else if (css[index] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return css.slice(open + 1, index);
+      }
+    }
+  }
+  return undefined;
+};
 
 const withServerEnv = async <T>(
   address: string,
@@ -501,4 +537,119 @@ test("アクティビティページは日ごとの出来事を新しい日か�
       assert.ok(positions[index - 1] < position, `${orderedDates[index - 1]} が ${orderedDates[index]} より先に現れる`);
     }
   }
+});
+
+test("概要の run 行はステップ名・位置・反復・進捗バー・モデル・ゴールの目的・要約・経過を描画する", () => {
+  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), NOW) });
+
+  assert.match(html, /class="st live"/, "状態のラベルを実行中の見た目で出す");
+  assert.match(html, /class="dot live"/, "状態の点を実行中の見た目で出す");
+  assert.match(html, /ステップ\s*<b>implement<\/b>/, "今のステップ名を出す");
+  assert.match(html, /5 ステップ中 2 つ目/, "何ステップ中の何番目かを出す");
+  assert.match(html, /反復 2 回目/, "反復回数を出す");
+  assert.match(html, /モデルは GLM 5\.3 です。/, "モデルの表示名を出す");
+  assert.match(html, /最後のログは 1分前/, "最後のログからの経過を出す");
+  assert.match(html, /採用ページのレイアウトを直す/, "ゴールの目的を出す");
+  assert.match(html, /レイアウトを直しています。/, "タスクの要約を出す");
+
+  const bar = barMarkup(html);
+  assert.match(bar, /role="img"/, "進捗バーは意味を持つ画像として扱う");
+  assert.match(bar, /aria-label="5 ステップ中 2 つ目"/, "進捗バーの読み上げ名に位置を出す");
+  assert.match(bar, /style="width:40%"/, "2/5 の進み具合をバーの幅に反映する");
+});
+
+test("入れ子 workflow の内側ログがある run 行は名前と位置を同じ currentStep から描画する", () => {
+  const html = renderPage(OverviewPage, { view: buildOverviewView(createNestedStepDashboardState(), NOW) });
+
+  assert.match(html, /ステップ\s*<b>develop<\/b>/, "今のトップレベル step 名を出す");
+  assert.doesNotMatch(html, /<b>write_tests<\/b>/, "入れ子 workflow の内側の step 名を現在ステップとして出さない");
+  assert.match(html, /1 ステップ中 1 つ目/, "位置は同じ currentStep 由来の 1 つ目を出す");
+  assert.match(html, /反復 3 回目/, "反復回数を出す");
+  const bar = barMarkup(html);
+  assert.match(bar, /aria-label="1 ステップ中 1 つ目"/, "バーの読み上げ名も同じ step 集合の位置にする");
+  assert.match(bar, /style="width:100%"/, "1/1 の進み具合をバーの幅に反映する");
+});
+
+test("同じ状態でも時刻が進めば run 行の経過表示が進む", () => {
+  const state = createDashboardState();
+  const atNow = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const oneMinuteLater = renderPage(OverviewPage, {
+    view: buildOverviewView(state, new Date(NOW.getTime() + 60_000)),
+  });
+
+  assert.match(atNow, /最後のログは 1分前/);
+  assert.match(oneMinuteLater, /最後のログは 2分前/, "状態の再配信が無くても表示だけが進む");
+});
+
+test("ログが止まった run 行は警告の点とバーになり、無音の注記を出す", () => {
+  const tenMinutesLater = new Date(NOW.getTime() + 10 * 60_000);
+  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), tenMinutesLater) });
+
+  assert.match(html, /ログが止まっています/, "警告の状態ラベルを出す");
+  assert.match(html, /class="dot warn"/, "点を警告の見た目にする");
+  assert.match(html, /ログが 11分 出ていません。/, "無音の分数を注記に出す");
+
+  const bar = barMarkup(html);
+  assert.match(bar, /class="[^"]*\bbar\b[^"]*\bwarn\b/, "バーを警告の見た目にする");
+  assert.doesNotMatch(bar, /\blive\b/, "警告のバーは実行中の見た目にしない");
+});
+
+test("タスクの要約が空の run 行はタスク名を出す", () => {
+  const base = createDashboardState();
+  const state = { ...base, runs: base.runs.map((run) => ({ ...run, summary: "" })) };
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+
+  const task = /<div class="task">([\s\S]*?)<\/div>/.exec(html)?.[1];
+  assert.ok(task !== undefined, "タスクの表示がある");
+  assert.match(task, /採用ページのレイアウトを直す/, "要約が無ければタスク名を出す");
+  assert.doesNotMatch(task, /タスク「」/, "空の要約をそのまま出さない");
+});
+
+test("ステップ位置が分からない run 行は進捗バーを出さない", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    runs: base.runs.map((run) => ({ ...run, currentStepNumber: undefined, totalSteps: undefined })),
+  };
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+
+  assert.match(html, /implement/, "ステップ名は出す");
+  assert.equal(elementsByClass(html, "bar").length, 0, "位置と総数が無ければバーを捏造しない");
+});
+
+test("実行中の run の点とバーは動き、prefers-reduced-motion で止まる", async () => {
+  const css = await readFile(`${webRoot}app/globals.css`, "utf8");
+
+  assert.match(css, /\.run-row\s+\.dot\.live\s*\{[^}]*animation:\s*pulse/, "実行中の点は脈打つ");
+  assert.match(css, /\.run-row\s+\.bar\.live\s*>\s*i\s*\{[^}]*animation:\s*flow/, "実行中のバーは流れる");
+  assert.match(css, /\.run-row\s+\.dot\.warn\s*\{[^}]*background:\s*var\(--warn\)/, "警告の点は警告色になる");
+  assert.match(css, /\.bar\.warn\s*>\s*i\s*\{[^}]*background:\s*var\(--warn\)/, "警告のバーは警告色になる");
+  assert.doesNotMatch(css, /\.bar\.warn\s*>\s*i\s*\{[^}]*animation/, "警告のバーは流れ続けない");
+
+  const reduced = mediaBlock(css, "@media (prefers-reduced-motion: reduce)");
+  assert.ok(reduced !== undefined, "prefers-reduced-motion の指定がある");
+  for (const selector of [".run-row .dot.live", ".run-row .bar.live > i", ".run-row.flash"]) {
+    assert.ok(reduced.includes(selector), `${selector} を reduced motion の対象にする`);
+  }
+  assert.match(reduced, /animation:\s*none/, "reduced motion ではアニメーションを止める");
+});
+
+test("新着ログで発光する run 行だけが flash クラスを持ち、基本規則は1秒のアニメーションになる", async () => {
+  const base = createDashboardState();
+  const otherRun = { ...base.runs[0]!, runSlug: "run-bbb", sessionId: "session-bbb" };
+  const state = DashboardState.create({ ...base, runs: [...base.runs, otherRun] });
+  const view = buildOverviewView(state, NOW);
+
+  const html = renderToStaticMarkup(
+    createElement(OverviewContent, { view, flashingRunSlugs: new Set(["run-aaa"]) }),
+  );
+
+  assert.equal(elementsByClass(html, "flash").length, 1, "発光するのは flashingRunSlugs に入った行だけ");
+  const flashRow = /<li class="run-row flash">([\s\S]*?)<\/li>/.exec(html)?.[1];
+  assert.ok(flashRow?.includes("/runs/run-aaa"), "発光する行は対象 slug の run 行になる");
+  const plainRow = /<li class="run-row">([\s\S]*?)<\/li>/.exec(html)?.[1];
+  assert.ok(plainRow?.includes("/runs/run-bbb"), "flash を持たない行は対象外の slug の run 行になる");
+
+  const css = await readFile(`${webRoot}app/globals.css`, "utf8");
+  assert.match(css, /\.run-row\.flash\s*\{[^}]*animation:\s*flash\s+1s/, "基本規則は1秒の flash アニメーション");
 });

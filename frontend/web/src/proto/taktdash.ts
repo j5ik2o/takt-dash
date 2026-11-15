@@ -514,7 +514,7 @@ export interface Run {
   startedAt?:
     | Date
     | undefined;
-  /** ステップの並び（最後が今のステップ） */
+  /** ステップの履歴（入れ子 workflow の内側の step を含み、末尾が今のステップとは限らない） */
   steps: RunStep[];
   /** 今のステップの開始時刻 */
   currentStepStartedAt?:
@@ -530,6 +530,20 @@ export interface Run {
   status: RunStatus;
   /** ログの無音の判定済みフラグ */
   logSilent: boolean;
+  /** 現在のステップの位置（1 始まり。不明なら省略） */
+  currentStepNumber?:
+    | number
+    | undefined;
+  /** workflow の全ステップ数（不明なら省略） */
+  totalSteps?:
+    | number
+    | undefined;
+  /** 現在の反復回数（不明なら省略） */
+  currentIteration?:
+    | number
+    | undefined;
+  /** 今のステップ名（current_step_number と同じ step 集合。不明なら省略） */
+  currentStepName?: string | undefined;
 }
 
 /** 判断待ちの項目を表す。 */
@@ -1826,6 +1840,10 @@ function createBaseRun(): Run {
     reports: [],
     status: 0,
     logSilent: false,
+    currentStepNumber: undefined,
+    totalSteps: undefined,
+    currentIteration: undefined,
+    currentStepName: undefined,
   };
 }
 
@@ -1872,6 +1890,18 @@ export const Run: MessageFns<Run> = {
     }
     if (message.logSilent !== false) {
       writer.uint32(112).bool(message.logSilent);
+    }
+    if (message.currentStepNumber !== undefined) {
+      writer.uint32(120).int32(message.currentStepNumber);
+    }
+    if (message.totalSteps !== undefined) {
+      writer.uint32(128).int32(message.totalSteps);
+    }
+    if (message.currentIteration !== undefined) {
+      writer.uint32(136).int32(message.currentIteration);
+    }
+    if (message.currentStepName !== undefined) {
+      writer.uint32(146).string(message.currentStepName);
     }
     return writer;
   },
@@ -2001,6 +2031,38 @@ export const Run: MessageFns<Run> = {
             message.logSilent = reader.bool();
             continue;
           }
+          case 15: {
+            if (tag !== 120) {
+              break;
+            }
+
+            message.currentStepNumber = reader.int32();
+            continue;
+          }
+          case 16: {
+            if (tag !== 128) {
+              break;
+            }
+
+            message.totalSteps = reader.int32();
+            continue;
+          }
+          case 17: {
+            if (tag !== 136) {
+              break;
+            }
+
+            message.currentIteration = reader.int32();
+            continue;
+          }
+          case 18: {
+            if (tag !== 146) {
+              break;
+            }
+
+            message.currentStepName = reader.string();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -2069,6 +2131,26 @@ export const Run: MessageFns<Run> = {
         : isSet(object.log_silent)
         ? globalThis.Boolean(object.log_silent)
         : false,
+      currentStepNumber: isSet(object.currentStepNumber)
+        ? globalThis.Number(object.currentStepNumber)
+        : isSet(object.current_step_number)
+        ? globalThis.Number(object.current_step_number)
+        : undefined,
+      totalSteps: isSet(object.totalSteps)
+        ? globalThis.Number(object.totalSteps)
+        : isSet(object.total_steps)
+        ? globalThis.Number(object.total_steps)
+        : undefined,
+      currentIteration: isSet(object.currentIteration)
+        ? globalThis.Number(object.currentIteration)
+        : isSet(object.current_iteration)
+        ? globalThis.Number(object.current_iteration)
+        : undefined,
+      currentStepName: isSet(object.currentStepName)
+        ? globalThis.String(object.currentStepName)
+        : isSet(object.current_step_name)
+        ? globalThis.String(object.current_step_name)
+        : undefined,
     };
   },
 
@@ -2116,6 +2198,18 @@ export const Run: MessageFns<Run> = {
     if (message.logSilent !== false) {
       obj.logSilent = message.logSilent;
     }
+    if (message.currentStepNumber !== undefined) {
+      obj.currentStepNumber = Math.round(message.currentStepNumber);
+    }
+    if (message.totalSteps !== undefined) {
+      obj.totalSteps = Math.round(message.totalSteps);
+    }
+    if (message.currentIteration !== undefined) {
+      obj.currentIteration = Math.round(message.currentIteration);
+    }
+    if (message.currentStepName !== undefined) {
+      obj.currentStepName = message.currentStepName;
+    }
     return obj;
   },
 
@@ -2138,6 +2232,10 @@ export const Run: MessageFns<Run> = {
     message.reports = object.reports?.map((e) => ReportSummary.fromPartial(e)) || [];
     message.status = object.status ?? 0;
     message.logSilent = object.logSilent ?? false;
+    message.currentStepNumber = object.currentStepNumber ?? undefined;
+    message.totalSteps = object.totalSteps ?? undefined;
+    message.currentIteration = object.currentIteration ?? undefined;
+    message.currentStepName = object.currentStepName ?? undefined;
     return message;
   },
 };
