@@ -6,6 +6,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
+  conversation::ConversationSpeaker,
   model::{self, ExecutionStatus, GoalStatus, InquiryKind, PendingDecisionType, RunStatus, StepLogEntry, TaskStatus},
   takt_dash::v1,
 };
@@ -90,6 +91,15 @@ pub fn inquiry_kind(kind: Option<InquiryKind>) -> v1::InquiryKind {
     | Some(InquiryKind::Question) => v1::InquiryKind::Question,
     | Some(InquiryKind::OperationRequest) => v1::InquiryKind::OperationRequest,
     | None => v1::InquiryKind::Unspecified,
+  }
+}
+
+/// 会話の発話者を proto の列挙値へ変換する。
+pub fn conversation_speaker(speaker: ConversationSpeaker) -> v1::ConversationSpeaker {
+  match speaker {
+    | ConversationSpeaker::User => v1::ConversationSpeaker::User,
+    | ConversationSpeaker::Manager => v1::ConversationSpeaker::Manager,
+    | ConversationSpeaker::System => v1::ConversationSpeaker::System,
   }
 }
 

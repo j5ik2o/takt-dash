@@ -22,6 +22,9 @@ service TaktDashService {
   // 1つの run について、takt_get_run で取得できる範囲を返す。
   rpc GetRunDetail(GetRunDetailRequest) returns (GetRunDetailResponse);
 
+  // manager の会話を時系列で返す。after_seq で増分取得できる。
+  rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);
+
   // 接続時に即時に全件を返し、その後は状態が変わるたびに送る。
   rpc WatchState(WatchStateRequest) returns (stream DashboardState);
 }
@@ -88,6 +91,14 @@ enum PendingDecisionType {
   PENDING_DECISION_TYPE_UNSPECIFIED = 0;
   PENDING_DECISION_TYPE_INQUIRY = 1;
   PENDING_DECISION_TYPE_AWAITING_MERGE = 2;
+}
+
+// 会話の発話者を表す。
+enum ConversationSpeaker {
+  CONVERSATION_SPEAKER_UNSPECIFIED = 0;
+  CONVERSATION_SPEAKER_USER = 1;
+  CONVERSATION_SPEAKER_MANAGER = 2;
+  CONVERSATION_SPEAKER_SYSTEM = 3;
 }
 
 // 集約対象のサーバーを表す。
@@ -313,6 +324,40 @@ message GetRunDetailResponse {
   bool log_silent = 22;                         // ログの無音の判定済みフラグ
   bool server_connected = 23;                   // 読み先の応答の有無
   google.protobuf.Timestamp server_last_read_at = 24;  // 読み先から最後に読めた時刻
+}
+
+// 会話の取得を要求する。
+message GetConversationRequest {
+  string project = 1;              // プロジェクト名
+  optional string session_id = 2;  // セッション（省略時は最新の manager のセッション）
+  int64 after_seq = 3;             // この seq より後の行を返す
+  int32 limit = 4;                 // 調べる行数の上限
+}
+
+// 会話の1件を表す。
+message ConversationMessage {
+  int64 seq = 1;                              // セッション内の順序
+  google.protobuf.Timestamp occurred_at = 2;  // 発言の時刻
+  ConversationSpeaker speaker = 3;            // 発話者
+  string text = 4;                            // 本文
+}
+
+// 解釈できずスキップした行の理由と件数を表す。
+message ConversationSkipped {
+  string reason = 1;  // スキップした理由
+  int32 count = 2;    // 件数
+}
+
+// 会話の取得への応答を表す。
+message GetConversationResponse {
+  string project = 1;                          // プロジェクト名
+  string session_id = 2;                       // セッション
+  string provider = 3;                         // プロバイダ（この版は opencode のみ）
+  repeated ConversationMessage messages = 4;    // 会話の並び（seq の昇順）
+  int64 next_after_seq = 5;                    // 次回に指定する after_seq
+  bool has_more = 6;                           // 未読の行が残っているか
+  repeated ConversationSkipped skipped = 7;     // スキップした行の理由と件数
+  optional string unavailable_reason = 8;      // 保存先が無いなどの理由
 }
 
 // 状態ストリーミングの接続を要求する。

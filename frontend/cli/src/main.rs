@@ -541,6 +541,14 @@ mod tests {
       Err(Status::unimplemented("このダミーサーバーは GetRunDetail を提供しません。"))
     }
 
+    async fn get_conversation(
+      &self,
+      _request: Request<v1::GetConversationRequest>,
+    ) -> Result<Response<v1::GetConversationResponse>, Status> {
+      self.record("GetConversation");
+      Err(Status::unimplemented("このダミーサーバーは GetConversation を提供しません。"))
+    }
+
     async fn watch_state(
       &self,
       _request: Request<v1::WatchStateRequest>,
