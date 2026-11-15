@@ -161,11 +161,18 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
     server_meta.insert(id, ServerMeta { name, kind, concurrency });
   }
   let mut projects = Vec::new();
+  let mut seen_names = std::collections::BTreeSet::new();
   for project in raw.projects {
     if !servers.contains_key(&project.server) {
       return Err(ConfigError::Invalid(format!(
         "プロジェクト {} が参照するサーバー {} は mcpServers にありません。",
         project.name, project.server
+      )));
+    }
+    if !seen_names.insert(project.name.clone()) {
+      return Err(ConfigError::Invalid(format!(
+        "プロジェクト名 {} が重複しています。プロジェクト名は一意である必要があります。",
+        project.name
       )));
     }
     let cwd = PathBuf::from(&project.cwd);

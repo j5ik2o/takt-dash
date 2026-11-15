@@ -88,6 +88,25 @@ impl StateStore {
     inner.projects = projects;
   }
 
+  /// 稼働中に再読み込みした設定のサーバー表示情報を反映する。
+  ///
+  /// 追加・改名・削除をすべて置き換え、次の投影から新しい表示情報に従います。
+  pub fn set_servers(&self, servers: BTreeMap<String, ServerMeta>) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    inner.servers = servers;
+  }
+
+  /// 接続先の設定が変わったプロジェクトのスロットを未読へ戻す。
+  ///
+  /// 旧接続先の snapshot・読めた時刻・接続状態を新接続先へ持ち越さないために使います。プロジェクト
+  /// の一覧とスロットの位置は保持し、内容だけを未読へ戻します。
+  pub fn reset_project(&self, project: &str) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    if let Some(slot) = inner.slots.get_mut(project) {
+      *slot = ProjectSlot::unread();
+    }
+  }
+
   /// 読み取りが失敗したプロジェクトを接続断として扱う。snapshot と last_read_at は保持する。
   pub fn record_failure(&self, project: &str) {
     let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
@@ -141,9 +160,14 @@ impl StateStore {
   /// runSlug を持つ run のプロジェクトを探し、その投影を返す。
   ///
   /// GetRunDetail は読み先の cwd とサーバーを状態ストアの run
-  /// から解決するため、この投影を使います。
+  /// から解決するため、この投影を使います。実行中の run 一覧に無くても、
+  /// 完了タスクが runSlug を保持していれば解決できます。run が完了すると
+  /// run 一覧から消えるため、詳細 URL を同じまま取得できるようにします。
   pub fn find_run_project(&self, run_slug: &str) -> Option<ProjectView> {
-    self.project_views().into_iter().find(|view| view.runs.iter().any(|run| run.run_slug == run_slug))
+    self.project_views().into_iter().find(|view| {
+      view.runs.iter().any(|run| run.run_slug == run_slug)
+        || view.tasks.iter().any(|task| task.run_slug.as_deref() == Some(run_slug))
+    })
   }
 
   /// 判断待ちの一覧を、`filter` の見方で組み立てる。

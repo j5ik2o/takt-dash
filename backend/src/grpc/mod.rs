@@ -38,6 +38,10 @@ const RECENT_EVENTS_LIMIT: usize = 20;
 const ACTIVITY_EVENTS_LIMIT: usize = 100;
 /// WatchState の送信元タスクとストリームの間のバッファの大きさ。
 const WATCH_CHANNEL_CAPACITY: usize = 16;
+/// 状態が変わらなくても WatchState の状態を再配信するまでの間隔。
+///
+/// 開いている画面が自動更新を確認できるよう、読み取り間隔（既定30秒）より短い15秒で再送します。
+const WATCH_RESEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// 読み取り系 API のサービス。
 pub struct TaktDashServiceImpl {
@@ -112,6 +116,8 @@ fn assemble_projects(views: &[model::ProjectView], activity: &ActivityStore, now
         about: view.about.clone(),
         server_id: view.server_id.clone(),
         completed_tasks_24h,
+        connected: view.connected,
+        last_read_at: optional_timestamp(view.last_read_at),
       }
     })
     .collect()
@@ -319,12 +325,10 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .store
       .find_run_project(&run_slug)
       .ok_or_else(|| Status::not_found(format!("runSlug {run_slug} は状態ストアにありません。")))?;
-    let stored_run = view
-      .runs
-      .iter()
-      .find(|run| run.run_slug == run_slug)
-      .cloned()
-      .ok_or_else(|| Status::not_found(format!("runSlug {run_slug} は状態ストアにありません。")))?;
+    let stored_run = view.runs.iter().find(|run| run.run_slug == run_slug).cloned();
+    // 完了した run は実行中一覧から消えるため、状態ストアの完了タスクからゴールと
+    // タスク名を補います。run の詳細 URL は完了後も同じまま取得できます。
+    let stored_task = view.tasks.iter().find(|task| task.run_slug.as_deref() == Some(run_slug.as_str()));
     let config = load_config(&self.config_path)
       .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
     let server_id = view.server_id.clone();
@@ -350,10 +354,24 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     client.shutdown().await;
     // 対象 run のゴールとタスク名は、状態ストアの run（定期読み取りで task
     // から解決済み）を正とする。 takt_get_run の応答に無い場合だけ、ストアの値で補う。
-    let goal_id = detail.goal_id.clone().or_else(|| stored_run.goal_id.clone());
-    let task_name = if detail.task_name.is_empty() { stored_run.task_name.clone() } else { detail.task_name.clone() };
-    let session_id =
-      if detail.session_id.is_empty() { stored_run.session_id.clone() } else { detail.session_id.clone() };
+    // run が完了して一覧から消えている場合は、完了タスクの値で補う。
+    let goal_id = detail
+      .goal_id
+      .clone()
+      .or_else(|| stored_run.as_ref().and_then(|run| run.goal_id.clone()))
+      .or_else(|| stored_task.and_then(|task| task.goal_id.clone()));
+    let fallback_task_name = stored_run
+      .as_ref()
+      .map(|run| run.task_name.clone())
+      .filter(|name| !name.is_empty())
+      .or_else(|| stored_task.map(|task| task.name.clone()));
+    let task_name =
+      if detail.task_name.is_empty() { fallback_task_name.unwrap_or_default() } else { detail.task_name.clone() };
+    let session_id = if detail.session_id.is_empty() {
+      stored_run.as_ref().map(|run| run.session_id.clone()).unwrap_or_default()
+    } else {
+      detail.session_id.clone()
+    };
     let log_silent = self.store.is_log_silent(
       &model::RunEntry {
         run_slug:                detail.run_slug.clone(),
@@ -429,22 +447,33 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let activity = self.activity.clone();
     let mut shutdown = self.shutdown.clone();
     tokio::spawn(async move {
+      // 期限到達の再配信のためのタイマー。初回の即時送信の直後から数え始めます。
+      let mut resend = tokio::time::interval(WATCH_RESEND_INTERVAL);
+      resend.tick().await;
       loop {
-        let result = tokio::select! {
-          result = changes.recv() => Some(result),
-          _ = shutdown.changed() => None,
-        };
-        let Some(result) = result else {
-          return;
-        };
-        match result {
-          | Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-            let state = assemble_state_for(&store, &activity, Utc::now());
-            if sender.send(Ok(state)).await.is_err() {
+        // 終了判断（クライアント切断・停止通知・購読の終端）と、変化通知・期限到達の
+        // 送信判断を別の分岐に分けます。終了する分岐だけが return し、それ以外は
+        // そのまま下の送信へ進みます。
+        tokio::select! {
+          // クライアントがストリームを閉じたら、次の変化通知を待たずに購読を解放します。
+          _ = sender.closed() => return,
+          _ = shutdown.changed() => return,
+          _ = resend.tick() => (),
+          result = changes.recv() => match result {
+            | Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => (),
+            | Err(broadcast::error::RecvError::Closed) => return,
+          },
+        }
+        let state = assemble_state_for(&store, &activity, Utc::now());
+        // 送信の待機中も停止通知とクライアント切断を監視し、待たずに終了します。
+        tokio::select! {
+          result = sender.send(Ok(state)) => {
+            if result.is_err() {
               return;
             }
           },
-          | Err(broadcast::error::RecvError::Closed) => return,
+          _ = sender.closed() => return,
+          _ = shutdown.changed() => return,
         }
       }
     });
