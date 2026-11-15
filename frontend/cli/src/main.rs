@@ -558,6 +558,19 @@ mod tests {
     addr
   }
 
+  /// 既定アドレスと一致しない閉塞アドレスを確保する。
+  ///
+  /// ephemeral 範囲は既定アドレスのポートを含みうるため、一致した場合は取り直す。
+  fn reserve_closed_addr_other_than_default() -> SocketAddr {
+    let default: SocketAddr = DEFAULT_BACKEND_ADDR.parse().expect("既定アドレスを解釈できませんでした");
+    loop {
+      let addr = reserve_closed_addr();
+      if addr != default {
+        return addr;
+      }
+    }
+  }
+
   /// 待ち受けはあるが gRPC を話さない相手を作る。接続を accept して即座に閉じる。
   ///
   /// accept のループを回すスレッドはデーモンとして動かし、テストの終了とともにプロセスが終わる
@@ -1030,7 +1043,8 @@ mod tests {
   #[test]
   fn config_listen_overrides_default_for_connection() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
-    let config = write_config(&dir, r#"{"listen":"127.0.0.1:59999"}"#);
+    let closed = reserve_closed_addr_other_than_default();
+    let config = write_config(&dir, &format!(r#"{{"listen":"{closed}"}}"#));
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -1044,27 +1058,32 @@ mod tests {
     let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
     // 設定の listen が使われ（既定値ではない）、待ち受けが無いため接続不能で終わる。
     assert_eq!(code, EXIT_FAILURE, "設定の listen に待ち受けが無いため失敗する必要があります");
-    assert!(stderr.contains("127.0.0.1:59999"), "設定の listen を接続先に使う必要があります: {stderr}");
+    assert!(stderr.contains(&closed.to_string()), "設定の listen を接続先に使う必要があります: {stderr}");
     assert!(!stderr.contains(DEFAULT_BACKEND_ADDR), "既定値へ戻ってはいけません: {stderr}");
   }
 
   #[test]
-  fn missing_config_file_falls_through_to_default() {
+  fn missing_config_file_falls_through_to_next_candidate() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
     let missing = dir.path().join("does-not-exist.json");
+    let closed = reserve_closed_addr_other_than_default();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
     let code = run_with(
       &["--config".to_owned(), missing.display().to_string()],
-      Err(std::env::VarError::NotPresent),
+      Ok(format!("{closed}")),
       &mut stdout,
       &mut stderr,
     );
 
     let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
     assert_eq!(code, EXIT_FAILURE);
-    assert!(stderr.contains(DEFAULT_BACKEND_ADDR), "設定ファイルが無いときは既定値へ進む必要があります: {stderr}");
+    assert!(stderr.contains(&closed.to_string()), "設定ファイルが無いときは次の候補へ進む必要があります: {stderr}");
+    assert!(
+      !stderr.contains(DEFAULT_BACKEND_ADDR),
+      "設定ファイルが無いことを理由に既定値へ進んではいけません: {stderr}"
+    );
   }
 
   // ----------------------------------------------------------------------------

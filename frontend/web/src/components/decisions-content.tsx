@@ -21,6 +21,15 @@ const inquiryKindLabel = (kind: InquiryKind): string => {
 
 const waitSeconds = (decision: PendingDecisionView): number => Math.round(decision.waitMinutes * 60);
 
+// 本文は takt-mcp の原文をそのまま運ぶ。空行を段落の区切りとして扱い、段落内の改行は
+// 空白へ畳まずに残す（issue #37 受け入れ条件1）。
+const splitBodyParagraphs = (body: string): string[] =>
+  body
+    .replace(/\r\n?/g, "\n")
+    .split(/\n[ \t]*\n+/)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph !== "");
+
 // 判断待ちは表示のみとする（order.md:25, :51）。回答・承認・却下の操作要素を持たない。
 export function DecisionsContent({ state, now }: DecisionsContentProps): ReactElement {
   const thresholds = resolveThresholds(state.thresholds);
@@ -55,8 +64,21 @@ export function DecisionsContent({ state, now }: DecisionsContentProps): ReactEl
                       : `問い合わせ（${inquiryKindLabel(decision.inquiryKind)}）`}
                   </span>
                 </div>
-                <p className="desc">{decision.body}</p>
-                {decision.options.length > 0 ? <p className="opts">選択肢は {decision.options.join(" と ")} です。</p> : null}
+                <div className="desc">
+                  {splitBodyParagraphs(decision.body).map((paragraph, paragraphIndex) => (
+                    <p key={paragraphIndex}>{paragraph}</p>
+                  ))}
+                </div>
+                {decision.options.length > 0 ? (
+                  <div className="opts">
+                    <span className="opts-label">選択肢</span>
+                    <ul>
+                      {decision.options.map((option, optionIndex) => (
+                        <li key={optionIndex}>{option}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
                 <div className="wait">
                   <b>{formatDuration(waitSeconds(decision))} 待ち</b>
                   {decision.stale ? <span className="stale-label">滞留しています。</span> : null}
