@@ -29,14 +29,22 @@ const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise
   }
 };
 
-const postJson = (handler: RouteHandler, path: string, body: unknown): Promise<Response> =>
+const postWithHeaders = (
+  handler: RouteHandler,
+  path: string,
+  body: unknown,
+  headers: Record<string, string>,
+): Promise<Response> =>
   handler(
     new NextRequest(`http://localhost${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: JSON.stringify(body),
     }),
   );
+
+const postJson = (handler: RouteHandler, path: string, body: unknown): Promise<Response> =>
+  postWithHeaders(handler, path, body, { "content-type": "application/json" });
 
 const withServer = async (
   behavior: Parameters<typeof startTaktDashServer>[0],
@@ -310,4 +318,130 @@ test("backend に接続できないときは 503 を返し、失敗を画面に�
       error: "backend に接続できません。",
     });
   });
+});
+
+const ANSWER_BODY = {
+  serverId: "mini",
+  project: "esa",
+  goalId: "goal-2",
+  inquiryId: "inquiry-text",
+  text: "回答",
+} as const;
+
+const MERGE_BODY = {
+  serverId: "mini",
+  project: "corporate-site",
+  goalId: "goal-1",
+  prNumber: 418,
+} as const;
+
+const REGISTRATION_BODY = {
+  serverId: "mini",
+  project: "takt",
+  revision: 7,
+} as const;
+
+const writeRoutes: Array<
+  [string, RouteHandler, string, unknown, Parameters<typeof startTaktDashServer>[0]]
+> = [
+  ["回答", postAnswer, ANSWER_PATH, ANSWER_BODY, { answerInquiry: { inquiryId: "inquiry-text" } }],
+  [
+    "マージ承認",
+    postMerge,
+    MERGE_PATH,
+    MERGE_BODY,
+    { approveGoalMerge: { taskName: "マージ", workflow: "simple" } },
+  ],
+  [
+    "ゴール登録の承認",
+    postApproveRegistration,
+    APPROVE_PATH,
+    REGISTRATION_BODY,
+    { approveGoalRegistration: { revision: 7, goalId: "goal-new" } },
+  ],
+  [
+    "ゴール登録の却下",
+    postRejectRegistration,
+    REJECT_PATH,
+    REGISTRATION_BODY,
+    { rejectGoalRegistration: { revision: 7 } },
+  ],
+];
+
+test("Content-Type が application/json でない書き込みは 415 で gRPC を呼ばない", async () => {
+  for (const [label, handler, path, body, behavior] of writeRoutes) {
+    await withServer(behavior, async (server) => {
+      const response = await postWithHeaders(handler, path, body, {
+        "content-type": "text/plain;charset=UTF-8",
+      });
+
+      assert.equal(response.status, 415, label);
+      assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
+    });
+  }
+});
+
+test("charset 付きの application/json は既存どおり許可する", async () => {
+  await withServer({ approveGoalMerge: { taskName: "マージ", workflow: "simple" } }, async (server) => {
+    const response = await postWithHeaders(postMerge, MERGE_PATH, MERGE_BODY, {
+      "content-type": "application/json; charset=utf-8",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(server.requests.length, 1);
+  });
+});
+
+test("外部オリジンからの書き込みは 403 で gRPC を呼ばない", async () => {
+  for (const [label, handler, path, body, behavior] of writeRoutes) {
+    await withServer(behavior, async (server) => {
+      const response = await postWithHeaders(handler, path, body, {
+        "content-type": "application/json",
+        origin: "https://evil.example",
+      });
+
+      assert.equal(response.status, 403, label);
+      assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
+    });
+  }
+});
+
+test("同一オリジンからの application/json は許可する", async () => {
+  for (const [label, handler, path, body, behavior] of writeRoutes) {
+    await withServer(behavior, async (server) => {
+      const response = await postWithHeaders(handler, path, body, {
+        "content-type": "application/json",
+        origin: "http://localhost",
+        "sec-fetch-site": "same-origin",
+      });
+
+      assert.equal(response.status, 200, label);
+      assert.equal(server.requests.length, 1, `${label} は gRPC を呼ぶ`);
+    });
+  }
+});
+
+test("Origin の無い CLI の要求は許可する", async () => {
+  for (const [label, handler, path, body, behavior] of writeRoutes) {
+    await withServer(behavior, async (server) => {
+      const response = await postJson(handler, path, body);
+
+      assert.equal(response.status, 200, label);
+      assert.equal(server.requests.length, 1, `${label} は gRPC を呼ぶ`);
+    });
+  }
+});
+
+test("Sec-Fetch-Site が cross-site の書き込みは 403 で gRPC を呼ばない", async () => {
+  for (const [label, handler, path, body, behavior] of writeRoutes) {
+    await withServer(behavior, async (server) => {
+      const response = await postWithHeaders(handler, path, body, {
+        "content-type": "application/json",
+        "sec-fetch-site": "cross-site",
+      });
+
+      assert.equal(response.status, 403, label);
+      assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
+    });
+  }
 });

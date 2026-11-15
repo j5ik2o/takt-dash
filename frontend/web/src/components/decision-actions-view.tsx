@@ -7,10 +7,18 @@ import { useCallback, useEffect, useId, useRef, type ReactElement, type RefObjec
 import type { PendingDecision } from "../proto/taktdash";
 import { OPERATION_ANSWER_REPORT } from "../state/proto-values";
 import {
+  INITIAL_DECISION_DIALOG_STATE,
   decisionActionState,
   decisionTargetLabel,
+  openDecisionDialogState,
+  resolveDecisionIntent,
+  toDecisionResult,
+  type DecisionAction,
   type DecisionDialogKind,
+  type DecisionDialogState,
+  type DecisionDialogTarget,
   type DecisionIntent,
+  type DecisionResult,
 } from "../state/decision-actions";
 
 export type DialogKind = DecisionDialogKind;
@@ -21,6 +29,7 @@ type DecisionActionsViewProps = {
   decision: PendingDecision;
   text: string;
   dialog: DialogKind | null;
+  dialogTarget: DecisionDialogTarget | null;
   busy: boolean;
   onTextChange: (text: string) => void;
   onAction: (intent: DecisionActionsIntent) => void;
@@ -96,6 +105,43 @@ export function decideDialogRestore(input: {
     return { kind: "wait", target };
   }
   return { kind: "restore", target };
+}
+
+export type DecisionTransition =
+  | { kind: "state"; state: DecisionDialogState }
+  | { kind: "result"; state: DecisionDialogState; result: DecisionResult }
+  | { kind: "submit"; action: DecisionAction | undefined };
+
+// 操作の意図を、次のダイアログ状態・結果通知・送信のいずれかへ写す。開いた時点の対象は
+// ダイアログ状態が保持し、確認はその値で解決する。DOM に依存しないため、開いた後に一覧が
+// 変わった確認が送信されず stale の結果になることを単体テストで確認できる。
+export function decideDecisionTransition(input: {
+  decision: PendingDecision;
+  intent: DecisionIntent;
+  text: string;
+  state: DecisionDialogState;
+}): DecisionTransition {
+  const target = input.state.kind === "open" ? input.state.target : null;
+  const resolution = resolveDecisionIntent(
+    input.decision,
+    input.intent,
+    { text: input.text },
+    target === null ? undefined : target,
+  );
+  switch (resolution.kind) {
+    case "open":
+      return { kind: "state", state: openDecisionDialogState(input.decision, resolution.dialog) };
+    case "close":
+      return { kind: "state", state: INITIAL_DECISION_DIALOG_STATE };
+    case "stale":
+      return {
+        kind: "result",
+        state: INITIAL_DECISION_DIALOG_STATE,
+        result: toDecisionResult(input.decision, { ok: false, message: resolution.message }),
+      };
+    case "submit":
+      return { kind: "submit", action: resolution.action };
+  }
 }
 
 function ConfirmDialog({ dialog, title, message, confirmLabel, busy, onAction }: ConfirmDialogProps): ReactElement {
@@ -246,28 +292,40 @@ const DIALOG_TRIGGERS = {
 type DialogGroup = "merge" | "goal-registration";
 
 // 種別ごとの見出し・本文・確定ボタン名。本文は対象の値（PR 番号・revision）を差し込む。
-function buildConfirmDialogs(group: DialogGroup, decision: PendingDecision): ConfirmDialogConfig[] {
+// 確認ダイアログを開いた時点の値を dialogTarget に保っている場合、開いた後に SSE で
+// 一覧が更新されても、確認する対象は開いた時点の値を表示する。
+function buildConfirmDialogs(
+  group: DialogGroup,
+  decision: PendingDecision,
+  dialogTarget: DecisionDialogTarget | null,
+): ConfirmDialogConfig[] {
   if (group === "merge") {
+    const prNumber =
+      dialogTarget?.kind === "merge" ? dialogTarget.prNumber : decision.pullRequest?.number;
     return [
       {
         dialog: "merge",
         title: "マージの承認",
-        message: `プルリクエスト #${decision.pullRequest?.number ?? ""} のマージを承認します。よろしいですか。`,
+        message: `プルリクエスト #${prNumber ?? ""} のマージを承認します。よろしいですか。`,
         confirmLabel: "マージする",
       },
     ];
   }
+  const revision =
+    dialogTarget?.kind === "approve-registration" || dialogTarget?.kind === "reject-registration"
+      ? dialogTarget.revision
+      : decision.revision;
   return [
     {
       dialog: "approve-registration",
       title: "ゴール登録の承認",
-      message: `revision ${decision.revision ?? ""} のゴール登録を承認します。よろしいですか。`,
+      message: `revision ${revision ?? ""} のゴール登録を承認します。よろしいですか。`,
       confirmLabel: "承認",
     },
     {
       dialog: "reject-registration",
       title: "ゴール登録の却下",
-      message: `revision ${decision.revision ?? ""} のゴール登録を却下します。よろしいですか。`,
+      message: `revision ${revision ?? ""} のゴール登録を却下します。よろしいですか。`,
       confirmLabel: "却下",
     },
   ];
@@ -329,6 +387,7 @@ export function DecisionActionsView({
   decision,
   text,
   dialog,
+  dialogTarget,
   busy,
   onTextChange,
   onAction,
@@ -443,7 +502,7 @@ export function DecisionActionsView({
       return (
         <DialogActionSection
           triggers={DIALOG_TRIGGERS.merge}
-          configs={buildConfirmDialogs("merge", decision)}
+          configs={buildConfirmDialogs("merge", decision, dialogTarget)}
           active={dialog}
           targetLabel={targetLabel}
           busy={busy}
@@ -456,7 +515,7 @@ export function DecisionActionsView({
       return (
         <DialogActionSection
           triggers={DIALOG_TRIGGERS.goalRegistration}
-          configs={buildConfirmDialogs("goal-registration", decision)}
+          configs={buildConfirmDialogs("goal-registration", decision, dialogTarget)}
           active={dialog}
           targetLabel={targetLabel}
           busy={busy}

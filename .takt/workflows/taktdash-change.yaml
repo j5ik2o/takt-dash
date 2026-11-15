@@ -132,6 +132,6 @@ steps:
         {context:aislop_gate.result.stderr}
     rules:
       - condition: aislop の指摘を修正または受け入れ一覧へ登録し、検証した
-        next: aislop_gate
+        next: machine_gate
       - condition: 修正できない
         next: ABORT

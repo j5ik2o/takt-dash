@@ -5,13 +5,18 @@
 import { useState, type ReactElement } from "react";
 import type { PendingDecision } from "../proto/taktdash";
 import {
-  resolveDecisionIntent,
+  INITIAL_DECISION_DIALOG_STATE,
   submitDecisionAction,
   toDecisionResult,
   type DecisionAction,
+  type DecisionDialogState,
   type DecisionResult,
 } from "../state/decision-actions";
-import { DecisionActionsView, type DecisionActionsIntent, type DialogKind } from "./decision-actions-view";
+import {
+  DecisionActionsView,
+  decideDecisionTransition,
+  type DecisionActionsIntent,
+} from "./decision-actions-view";
 
 type DecisionActionsProps = {
   decision: PendingDecision;
@@ -20,7 +25,7 @@ type DecisionActionsProps = {
 
 export function DecisionActions({ decision, onResult }: DecisionActionsProps): ReactElement {
   const [text, setText] = useState("");
-  const [dialog, setDialog] = useState<DialogKind | null>(null);
+  const [dialogState, setDialogState] = useState<DecisionDialogState>(INITIAL_DECISION_DIALOG_STATE);
   const [busy, setBusy] = useState(false);
 
   const run = async (action: DecisionAction | undefined): Promise<void> => {
@@ -30,7 +35,7 @@ export function DecisionActions({ decision, onResult }: DecisionActionsProps): R
     setBusy(true);
     const outcome = await submitDecisionAction(action);
     setBusy(false);
-    setDialog(null);
+    setDialogState(INITIAL_DECISION_DIALOG_STATE);
     onResult(toDecisionResult(decision, outcome));
     if (outcome.ok && action.kind === "answer") {
       setText("");
@@ -38,16 +43,17 @@ export function DecisionActions({ decision, onResult }: DecisionActionsProps): R
   };
 
   const handleAction = (intent: DecisionActionsIntent): void => {
-    const resolution = resolveDecisionIntent(decision, intent, { text });
-    switch (resolution.kind) {
-      case "open":
-        setDialog(resolution.dialog);
+    const transition = decideDecisionTransition({ decision, intent, text, state: dialogState });
+    switch (transition.kind) {
+      case "state":
+        setDialogState(transition.state);
         return;
-      case "close":
-        setDialog(null);
+      case "result":
+        setDialogState(transition.state);
+        onResult(transition.result);
         return;
       case "submit":
-        void run(resolution.action);
+        void run(transition.action);
         return;
     }
   };
@@ -56,7 +62,8 @@ export function DecisionActions({ decision, onResult }: DecisionActionsProps): R
     <DecisionActionsView
       decision={decision}
       text={text}
-      dialog={dialog}
+      dialog={dialogState.kind === "open" ? dialogState.dialog : null}
+      dialogTarget={dialogState.kind === "open" ? dialogState.target : null}
       busy={busy}
       onTextChange={setText}
       onAction={handleAction}

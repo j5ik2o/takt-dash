@@ -1,8 +1,8 @@
 // 判断待ちページの操作 UI の描画契約。
 //
 // 現在のテスト環境は DOM を持たないため、操作はサーバー描画した HTML と、
-// 状態を受け取らない純粋な表示コンポーネントの props で観測する。
-// クリックで確認ダイアログを開く遷移そのものは、この環境では観測できない。
+// 状態を受け取らない純粋な表示コンポーネントの props、DOM 非依存の遷移関数で観測する。
+// クリックで開く操作そのもの（マウント後のイベント）は、この環境では観測できない。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
@@ -10,9 +10,17 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { PendingDecisionType, type DashboardState, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { createActionableDashboardState, NOW } from "../support/fixtures.ts";
 import { DecisionsContent } from "../../src/components/decisions-content.tsx";
-import { DecisionActionsView, decideDialogKey, decideDialogRestore } from "../../src/components/decision-actions-view.tsx";
+import { DecisionActionsView, decideDecisionTransition, decideDialogKey, decideDialogRestore } from "../../src/components/decision-actions-view.tsx";
 import { DecisionResults } from "../../src/components/decision-results.tsx";
-import { toDecisionResult, upsertDecisionResult } from "../../src/state/decision-actions.ts";
+import {
+  INITIAL_DECISION_DIALOG_STATE,
+  openDecisionDialog,
+  toDecisionResult,
+  upsertDecisionResult,
+  type DecisionAction,
+  type DecisionDialogKind,
+  type DecisionDialogState,
+} from "../../src/state/decision-actions.ts";
 
 // 確認ダイアログの種類。null は閉じている状態を表す。
 type DialogKind = "merge" | "approve-registration" | "reject-registration" | null;
@@ -43,13 +51,19 @@ const renderDecisions = (state: DashboardState): string =>
 
 const noop = (): void => {};
 
-const renderActions = (decision: PendingDecision, dialog: DialogKind, busy = false): string =>
+const renderActions = (
+  decision: PendingDecision,
+  dialog: DialogKind,
+  busy = false,
+  dialogTarget: ReturnType<typeof openDecisionDialog> | null = null,
+): string =>
   renderToStaticMarkup(
     createElement(DecisionActionsView, {
       decision,
       text: "",
       dialog,
       busy,
+      dialogTarget,
       onTextChange: noop,
       onAction: noop,
     }),
@@ -125,6 +139,29 @@ test("マージ承認は閉じた状態では操作ボタンだけを描画し�
   assert.match(opened, /aria-modal="true"/);
   assert.match(openedDialog, /418/);
   assert.match(openedDialog, /やめる/);
+});
+
+test("マージ確認は開いた後に PR が変わっても、開いた時点の PR を表示する", () => {
+  const dialogTarget = openDecisionDialog(merge(), "merge");
+  const changed: PendingDecision = {
+    ...merge(),
+    pullRequest: { number: 419, url: "https://example.test/pr/419" },
+  };
+
+  const html = renderActions(changed, "merge", false, dialogTarget);
+  const dialog = html.slice(html.indexOf('role="dialog"'));
+  assert.match(dialog, /418/);
+  assert.doesNotMatch(dialog, /419/);
+});
+
+test("ゴール登録の確認は開いた後に revision が変わっても、開いた時点の revision を表示する", () => {
+  const dialogTarget = openDecisionDialog(registration(), "approve-registration");
+  const changed: PendingDecision = { ...registration(), revision: 8 };
+
+  const html = renderActions(changed, "approve-registration", false, dialogTarget);
+  const dialog = html.slice(html.indexOf('role="dialog"'));
+  assert.match(dialog, /revision 7/);
+  assert.doesNotMatch(dialog, /revision 8/);
 });
 
 test("ゴール登録の承認と却下はそれぞれの確認ダイアログを描画する", () => {
@@ -278,6 +315,142 @@ test("確認ダイアログの復帰は開いたトリガーの有効性で即�
     }),
     { kind: "wait", target: "reject-registration" },
   );
+});
+
+const openTransitionState = (decision: PendingDecision, dialog: DecisionDialogKind): DecisionDialogState => {
+  const transition = decideDecisionTransition({
+    decision,
+    intent: { type: "open", dialog },
+    text: "",
+    state: INITIAL_DECISION_DIALOG_STATE,
+  });
+  assert.equal(transition.kind, "state");
+  if (transition.kind !== "state") {
+    throw new Error("開く操作はダイアログ状態を返す");
+  }
+  return transition.state;
+};
+
+const confirmTransition = (
+  decision: PendingDecision,
+  dialog: DecisionDialogKind,
+  state: DecisionDialogState,
+) =>
+  decideDecisionTransition({
+    decision,
+    intent: { type: "confirm", dialog },
+    text: "",
+    state,
+  });
+
+const sentRevision = (action: DecisionAction | undefined): number | undefined =>
+  action?.kind === "approve-registration" || action?.kind === "reject-registration"
+    ? action.payload.revision
+    : undefined;
+
+test("マージ確認の遷移は開いた時点の PR を保持し、PR が変わった確認は送信しない", () => {
+  const opened = openTransitionState(merge(), "merge");
+  assert.deepEqual(opened, {
+    kind: "open",
+    dialog: "merge",
+    target: { kind: "merge", prNumber: 418, url: "https://example.test/pr/418" },
+  });
+
+  // 同じ対象のまま confirm すれば、開いた時点の PR で送信する。
+  const submitted = confirmTransition(merge(), "merge", opened);
+  assert.equal(submitted.kind, "submit");
+  if (submitted.kind !== "submit") {
+    throw new Error("同じ対象の確認は送信する");
+  }
+  assert.equal(submitted.action?.kind, "merge");
+  if (submitted.action?.kind !== "merge") {
+    throw new Error("マージの送信内容を返す");
+  }
+  assert.equal(submitted.action.payload.prNumber, 418);
+
+  // SSE 更新で PR 419 に変わった後は、開いた時点の 418 で送信せず stale の結果を返す。
+  const changed: PendingDecision = {
+    ...merge(),
+    pullRequest: { number: 419, url: "https://example.test/pr/419" },
+  };
+  const stale = confirmTransition(changed, "merge", opened);
+  assert.equal(stale.kind, "result");
+  if (stale.kind !== "result") {
+    throw new Error("対象が変わった確認は送信せず結果を返す");
+  }
+  assert.equal(stale.result.ok, false);
+  assert.notEqual(stale.result.message, "");
+  assert.deepEqual(stale.state, INITIAL_DECISION_DIALOG_STATE);
+});
+
+test("ゴール登録の遷移は開いた時点の revision を保持し、revision が変わった確認は送信しない", () => {
+  const cases: { dialog: DecisionDialogKind; kind: DecisionAction["kind"] }[] = [
+    { dialog: "approve-registration", kind: "approve-registration" },
+    { dialog: "reject-registration", kind: "reject-registration" },
+  ];
+  for (const { dialog, kind } of cases) {
+    const opened = openTransitionState(registration(), dialog);
+    assert.deepEqual(opened, { kind: "open", dialog, target: { kind: dialog, revision: 7 } });
+
+    const submitted = confirmTransition(registration(), dialog, opened);
+    assert.equal(submitted.kind, "submit");
+    if (submitted.kind !== "submit") {
+      throw new Error(`${dialog} の確認は送信する`);
+    }
+    assert.equal(submitted.action?.kind, kind);
+    assert.equal(sentRevision(submitted.action), 7);
+
+    const changed: PendingDecision = { ...registration(), revision: 8 };
+    const stale = confirmTransition(changed, dialog, opened);
+    assert.equal(stale.kind, "result");
+    if (stale.kind !== "result") {
+      throw new Error(`${dialog} の revision 変更後の確認は送信しない`);
+    }
+    assert.equal(stale.result.ok, false);
+    assert.deepEqual(stale.state, INITIAL_DECISION_DIALOG_STATE);
+  }
+});
+
+test("対象が欠けたマージ確認は送信せず失敗の結果を返す", () => {
+  const missing: PendingDecision = { ...merge(), pullRequest: undefined };
+  const opened = openTransitionState(missing, "merge");
+  assert.deepEqual(opened, { kind: "open", dialog: "merge", target: null });
+
+  const stale = confirmTransition(missing, "merge", opened);
+  assert.equal(stale.kind, "result");
+  if (stale.kind !== "result") {
+    throw new Error("対象が欠けた確認は送信せず結果を返す");
+  }
+  assert.equal(stale.result.ok, false);
+  assert.deepEqual(stale.state, INITIAL_DECISION_DIALOG_STATE);
+});
+
+test("ダイアログの中断は閉じ、回答は対象の有無に関わらず送信する", () => {
+  const opened = openTransitionState(merge(), "merge");
+  const cancelled = decideDecisionTransition({
+    decision: merge(),
+    intent: { type: "cancel" },
+    text: "",
+    state: opened,
+  });
+  assert.deepEqual(cancelled, { kind: "state", state: INITIAL_DECISION_DIALOG_STATE });
+
+  const options = findDecision((decision) => decision.inquiryId === "inquiry-options");
+  const answered = decideDecisionTransition({
+    decision: options,
+    intent: { type: "answer-option", option: "今週" },
+    text: "",
+    state: INITIAL_DECISION_DIALOG_STATE,
+  });
+  assert.equal(answered.kind, "submit");
+  if (answered.kind !== "submit") {
+    throw new Error("回答は対象が無くても送信する");
+  }
+  assert.equal(answered.action?.kind, "answer");
+  if (answered.action?.kind !== "answer") {
+    throw new Error("回答の送信内容を返す");
+  }
+  assert.equal(answered.action.payload.text, "今週");
 });
 
 test("一覧の操作要素と入力欄は対象を識別できる name を持つ", () => {
