@@ -113,6 +113,7 @@ fn seeded_harness() -> GrpcHarness {
     ],
     runs:          vec![recent_run("run-1")],
     notifications: vec![],
+    proposals:     vec![],
   };
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
@@ -213,6 +214,7 @@ async fn get_overview_marks_a_run_silent_beyond_the_configured_threshold() {
     inquiries:     vec![],
     runs:          vec![stale_run],
     notifications: vec![],
+    proposals:     vec![],
   };
   harness.store.record_success("takt-dash", snapshot, Utc::now());
   let server = start_server(&harness).await;

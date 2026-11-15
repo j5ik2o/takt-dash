@@ -13,9 +13,9 @@ use super::client::{CallError, McpClient, McpClientConfig};
 use crate::{
   config::McpServer,
   model::{
-    ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, ReportEntry,
-    RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, RunStatus, RunStepEntry, StepLogEntry, TaskEntry,
-    TaskStatus,
+    ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot,
+    RegistrationProposalEntry, ReportEntry, RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, RunStatus,
+    RunStepEntry, StepLogEntry, TaskEntry, TaskStatus,
   },
 };
 
@@ -103,7 +103,12 @@ impl<'a> ToolSet<'a> {
       }
     }
     let runs = self.get_running_runs(&tasks, prev).await?;
-    Ok(ProjectSnapshot { goals, tasks, inquiries, runs, notifications })
+    let proposals = match self.list_goal_registration_proposals().await {
+      | Ok(entries) => entries,
+      | Err(ToolError::Tool(_)) => prev.map(|snapshot| snapshot.proposals.clone()).unwrap_or_default(),
+      | Err(error) => return Err(error),
+    };
+    Ok(ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals })
   }
 
   async fn call_json(&mut self, name: &str, extra: Value) -> Result<Value, ToolError> {
@@ -672,6 +677,101 @@ impl<'a> ToolSet<'a> {
     }
     parse_run_detail(&value, run_slug, task.as_ref(), step_logs, reports, instructions)
   }
+
+  /// 問い合わせへ回答する。`answer` は takt の `answer` オブジェクト（例: `{"text": "..."}`）。
+  /// 応答の `questionId` を返します。takt の入力契約では `goalId` は必須（UUID）なので、
+  /// `goal_id` は必須の引数として受け取ります。
+  pub async fn answer_goal_question(
+    &mut self,
+    goal_id: &str,
+    question_id: &str,
+    answer: Value,
+  ) -> Result<String, ToolError> {
+    let value = self
+      .call_json("takt_answer_goal_question", json!({ "goalId": goal_id, "questionId": question_id, "answer": answer }))
+      .await?;
+    optional_string(&value, "questionId")
+      .ok_or_else(|| ToolError::Parse("takt_answer_goal_question の応答に questionId がありません".to_owned()))
+  }
+
+  /// ゴール登録の承認待ちを取得する。提案が無ければ空の並びを返します。
+  pub async fn list_goal_registration_proposals(&mut self) -> Result<Vec<RegistrationProposalEntry>, ToolError> {
+    let value = self.call_json("takt_list_goal_registration_proposals", json!({})).await?;
+    let proposals = value.get("proposals").and_then(Value::as_array).ok_or_else(|| {
+      ToolError::Parse("takt_list_goal_registration_proposals の応答に proposals の配列がありません".to_owned())
+    })?;
+    proposals
+      .iter()
+      .map(|proposal| {
+        Ok(RegistrationProposalEntry {
+          revision:             required_i32(proposal, "revision")?,
+          repository_directory: required_string(proposal, "repositoryDirectory")?,
+          summary:              required_string(proposal, "summary")?,
+        })
+      })
+      .collect()
+  }
+
+  /// ゴール登録の承認待ちを承認する。承認した revision と、登録されたゴールの ID を返します。
+  pub async fn approve_goal_registration(&mut self, revision: i32) -> Result<ApproveGoalRegistrationResult, ToolError> {
+    let value = self.call_json("takt_approve_goal_registration", json!({ "revision": revision })).await?;
+    let goal_id =
+      required_string(value.get("goal").ok_or_else(|| ToolError::Parse("応答に goal がありません".to_owned()))?, "id")?;
+    Ok(ApproveGoalRegistrationResult { revision: required_i32(&value, "revision")?, goal_id })
+  }
+
+  /// ゴール登録の承認待ちを却下する。却下した revision を返します。
+  pub async fn reject_goal_registration(&mut self, revision: i32) -> Result<i32, ToolError> {
+    let value = self.call_json("takt_reject_goal_registration", json!({ "revision": revision })).await?;
+    required_i32(&value, "revision")
+  }
+
+  /// プルリクエストのマージを承認する。依頼したタスク名とワークフローを返します。
+  pub async fn merge_goal_pr(
+    &mut self,
+    goal_id: &str,
+    pr_number: i64,
+    until: &str,
+  ) -> Result<MergeGoalPrResult, ToolError> {
+    let value =
+      self.call_json("takt_merge_goal_pr", json!({ "goalId": goal_id, "prNumber": pr_number, "until": until })).await?;
+    Ok(MergeGoalPrResult {
+      task_name: required_string(&value, "taskName")?,
+      workflow:  required_string(&value, "workflow")?,
+    })
+  }
+}
+
+/// takt_approve_goal_registration の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApproveGoalRegistrationResult {
+  pub revision: i32,
+  pub goal_id:  String,
+}
+
+/// takt_merge_goal_pr の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeGoalPrResult {
+  pub task_name: String,
+  pub workflow:  String,
+}
+
+/// 応答の必須の整数フィールドを読み取る。欠落は解析エラーにします。
+fn required_i32(value: &Value, key: &str) -> Result<i32, ToolError> {
+  value
+    .get(key)
+    .and_then(Value::as_i64)
+    .map(|number| number as i32)
+    .ok_or_else(|| ToolError::Parse(format!("{key} が数値ではありません")))
+}
+
+/// 応答の必須の文字列フィールドを読み取る。欠落は解析エラーにします。
+fn required_string(value: &Value, key: &str) -> Result<String, ToolError> {
+  value
+    .get(key)
+    .and_then(Value::as_str)
+    .map(str::to_owned)
+    .ok_or_else(|| ToolError::Parse(format!("{key} が文字列ではありません")))
 }
 
 fn parse_run_detail(

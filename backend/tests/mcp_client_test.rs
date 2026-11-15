@@ -8,7 +8,7 @@ use std::io::Write;
 use common::*;
 use serde_json::json;
 use takt_dash_backend::{
-  mcp::{CallError, TransportError},
+  mcp::{CallError, ToolError, TransportError},
   model::{GoalStatus, TaskStatus},
 };
 
@@ -70,6 +70,74 @@ async fn hanging_server_times_out() {
   );
 
   assert!(matches!(error, TransportError::Timeout(_)), "タイムアウトとして扱います: {error}");
+}
+
+#[tokio::test]
+async fn write_tools_time_out_finitely_when_the_server_hangs() {
+  // 書き込み系の5道具が応答しないサーバでも、有限のタイムアウトで輸送エラーとして終わる。
+  // これが unary の書き込み RPC の有限性の根拠です。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let cwd = directory.path();
+  let mut errors: Vec<(&str, ToolError)> = Vec::new();
+
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .answer_goal_question("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11", "q1", json!({ "text": "はい" }))
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_answer_goal_question", error));
+  }
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .list_goal_registration_proposals()
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_list_goal_registration_proposals", error));
+  }
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .approve_goal_registration(3)
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_approve_goal_registration", error));
+  }
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .reject_goal_registration(3)
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_reject_goal_registration", error));
+  }
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .merge_goal_pr("g1", 42, "merge")
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_merge_goal_pr", error));
+  }
+
+  for (name, error) in errors {
+    assert!(
+      matches!(error, ToolError::Transport(TransportError::Timeout(_))),
+      "{name} は有限時間でタイムアウトとして終わる必要があります: {error}"
+    );
+  }
 }
 
 #[tokio::test]
@@ -365,6 +433,59 @@ async fn approval_kind_is_skipped_and_unknown_kind_is_rejected() {
   let error = tool_set(&mut client2, directory2.path()).read_snapshot(None).await.expect_err("未知の種類は拒否します");
   assert!(matches!(error, takt_dash_backend::mcp::ToolError::Parse(_)), "未知の kind は解析エラーになります: {error}");
   client2.shutdown().await;
+}
+
+#[tokio::test]
+async fn write_tool_responses_missing_required_fields_are_parse_errors() {
+  // 応答の必須値が欠けていても既定値で補完せず、解析エラーにすることを、各書き込み道具で観測する。
+  async fn expect_parse(
+    tool_name: &str,
+    behavior: impl AsyncFnOnce(takt_dash_backend::mcp::ToolSet<'_>) -> Result<(), ToolError>,
+  ) -> Result<(), ToolError> {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let state = write_state(directory.path(), json!({ "responses": { tool_name: {} } }));
+    let mut client = mock_client(mock_config(directory.path(), &state, None));
+    let result = behavior(tool_set(&mut client, directory.path())).await;
+    client.shutdown().await;
+    result
+  }
+
+  let error = expect_parse("takt_approve_goal_registration", async |mut tools| {
+    tools.approve_goal_registration(3).await.map(|_| ())
+  })
+  .await
+  .expect_err("応答に revision が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_approve_goal_registration の欠落は解析エラー: {error}");
+
+  let error = expect_parse("takt_reject_goal_registration", async |mut tools| {
+    tools.reject_goal_registration(3).await.map(|_| ())
+  })
+  .await
+  .expect_err("応答に revision が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_reject_goal_registration の欠落は解析エラー: {error}");
+
+  let error =
+    expect_parse("takt_merge_goal_pr", async |mut tools| tools.merge_goal_pr("g1", 42, "merge").await.map(|_| ()))
+      .await
+      .expect_err("応答に taskName が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_merge_goal_pr の欠落は解析エラー: {error}");
+
+  let error = expect_parse("takt_answer_goal_question", async |mut tools| {
+    tools
+      .answer_goal_question("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11", "q1", json!({ "text": "はい" }))
+      .await
+      .map(|_| ())
+  })
+  .await
+  .expect_err("応答に questionId が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_answer_goal_question の欠落は解析エラー: {error}");
+
+  let error = expect_parse("takt_list_goal_registration_proposals", async |mut tools| {
+    tools.list_goal_registration_proposals().await.map(|_| ())
+  })
+  .await
+  .expect_err("応答に proposals が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_list_goal_registration_proposals の欠落は解析エラー: {error}");
 }
 
 #[tokio::test]

@@ -38,6 +38,7 @@ fn seeded_harness() -> GrpcHarness {
     inquiries:     vec![],
     runs:          vec![],
     notifications: vec![],
+    proposals:     vec![],
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   harness
