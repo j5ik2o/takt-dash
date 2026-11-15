@@ -14,12 +14,16 @@ import {
 export type ServerError = { code: grpc.status; details: string };
 
 export type ServerBehavior = {
-  overview?: DashboardState;
+  overview?: DashboardState | ServerError;
   projects?: GetProjectsResponse;
   pendingDecisions?: { state: DashboardState };
   activity?: GetActivityResponse;
   runDetail?: GetRunDetailResponse | ServerError;
   watch?: DashboardState[];
+  // unary RPC の callback を呼ばず、クライアントの deadline による終了だけを観測させる。
+  hangUnary?: boolean;
+  // getOverview が受け取った deadline を観測する。既定値の生成そのものを確かめるテストで使う。
+  onOverviewDeadline?: (deadline: grpc.Deadline) => void;
   // ストリームを送り終えた後も接続を保ち、クライアントの切断を待つか。
   holdWatchOpen?: boolean;
   // WatchState を購読している呼び出しがキャンセルされたときに呼ばれる。
@@ -27,6 +31,14 @@ export type ServerBehavior = {
 };
 
 const notFound = (details: string): ServerError => ({ code: grpc.status.NOT_FOUND, details });
+
+// 応答を返さず、クライアントのキャンセルだけで呼び出しを終わらせる。
+// deadline による終了を観測するテストで、サーバー停止が未完了の呼び出しを待ち続けないようにする。
+const hangUntilCancelled = <T>(call: grpc.ServerUnaryCall<unknown, unknown>, callback: grpc.sendUnaryData<T>): void => {
+  call.on("cancelled", () => {
+    callback({ code: grpc.status.CANCELLED, details: "クライアントがキャンセルしました" });
+  });
+};
 
 export type RunningServer = {
   address: string;
@@ -37,17 +49,31 @@ export type RunningServer = {
 export async function startTaktDashServer(behavior: ServerBehavior): Promise<RunningServer> {
   const server = new grpc.Server();
   server.addService(TaktDashServiceService, {
-    getOverview: (_call: grpc.ServerUnaryCall<unknown, unknown>, callback: grpc.sendUnaryData<DashboardState>) => {
-      if (!behavior.overview) {
+    getOverview: (call: grpc.ServerUnaryCall<unknown, unknown>, callback: grpc.sendUnaryData<DashboardState>) => {
+      behavior.onOverviewDeadline?.(call.getDeadline());
+      if (behavior.hangUnary) {
+        hangUntilCancelled(call, callback);
+        return;
+      }
+      const result = behavior.overview;
+      if (!result) {
         callback(notFound("未設定"));
         return;
       }
-      callback(null, behavior.overview);
+      if ("code" in result) {
+        callback(result);
+        return;
+      }
+      callback(null, result);
     },
     getProjects: (
-      _call: grpc.ServerUnaryCall<unknown, unknown>,
+      call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<GetProjectsResponse>,
     ) => {
+      if (behavior.hangUnary) {
+        hangUntilCancelled(call, callback);
+        return;
+      }
       if (!behavior.projects) {
         callback(notFound("未設定"));
         return;
@@ -55,9 +81,13 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       callback(null, behavior.projects);
     },
     getPendingDecisions: (
-      _call: grpc.ServerUnaryCall<unknown, unknown>,
+      call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<{ state: DashboardState }>,
     ) => {
+      if (behavior.hangUnary) {
+        hangUntilCancelled(call, callback);
+        return;
+      }
       if (!behavior.pendingDecisions) {
         callback(notFound("未設定"));
         return;
@@ -65,9 +95,13 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       callback(null, behavior.pendingDecisions);
     },
     getActivity: (
-      _call: grpc.ServerUnaryCall<unknown, unknown>,
+      call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<GetActivityResponse>,
     ) => {
+      if (behavior.hangUnary) {
+        hangUntilCancelled(call, callback);
+        return;
+      }
       if (!behavior.activity) {
         callback(notFound("未設定"));
         return;
@@ -75,9 +109,13 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       callback(null, behavior.activity);
     },
     getRunDetail: (
-      _call: grpc.ServerUnaryCall<unknown, unknown>,
+      call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<GetRunDetailResponse>,
     ) => {
+      if (behavior.hangUnary) {
+        hangUntilCancelled(call, callback);
+        return;
+      }
       const result = behavior.runDetail;
       if (!result) {
         callback(notFound("run が見つかりません"));
@@ -127,7 +165,21 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
     port,
     shutdown: () =>
       new Promise<void>((resolve) => {
-        server.tryShutdown(() => resolve());
+        // 応答を返さない unary を残したままでもテストが終わるよう、猶予後に強制停止する。
+        let settled = false;
+        const finish = (): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          server.forceShutdown();
+          finish();
+        }, 500);
+        server.tryShutdown(finish);
       }),
   };
 }

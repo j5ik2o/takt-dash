@@ -20,7 +20,9 @@
      呼ばず未実施にする。
   6. status は TAKT_PREVIOUS_RESPONSE_FILE が無くても、.takt/runs/<slug>/ の
      meta.json から order.md を解決する（最初のステップでは応答ファイルが無い）。
-  7. status の gh 失敗は非致命で、終了コード 0 と stdout の記録にする。
+  7. status は run ディレクトリも応答ファイルも無いとき、.takt/tasks.yaml の該当
+     エントリの task_dir から order.md を解決する（開始時点の解決経路）。
+  8. status の gh 失敗は非致命で、終了コード 0 と stdout の記録にする。
 
 実 gh・実 Git は呼ばない。publish.py と project_status.py を一時リポジトリへ複製し、
 PATH の先頭に置いたスタブだけを呼ぶ。
@@ -486,6 +488,29 @@ def test_status_resolves_order_without_environment() -> None:
         assert f"--url {ISSUE_URL}" in edits[0], edits
 
 
+def test_status_resolves_order_from_tasks_yaml_task_dir() -> None:
+    with Repo() as repo:
+        repo.remove_runs()
+        order = repo.root / ".takt" / "tasks" / "sample" / "order.md"
+        order.parent.mkdir(parents=True, exist_ok=True)
+        order.write_text(f"対象は {ISSUE_URL} です。\n", encoding="utf-8")
+        repo.write_tasks(
+            [
+                {
+                    "run_slug": SLUG,
+                    "base_branch": GOAL_BASE,
+                    "worktree_path": repo.root.resolve(),
+                    "task_dir": ".takt/tasks/sample",
+                }
+            ]
+        )
+        repo.gh_with_item(ISSUE_URL)
+        run_ok(repo, "status", "--status", "In Progress", response=False)
+        edits = [line for line in repo.gh_calls() if line.startswith("gh project item-edit")]
+        assert len(edits) == 1, repo.gh_calls()
+        assert f"--url {ISSUE_URL}" in edits[0], edits
+
+
 def test_status_failure_is_non_fatal() -> None:
     with Repo() as repo:
         repo.write_order(f"対象: {ISSUE_URL}\n")
@@ -521,6 +546,7 @@ def main() -> int:
         test_status_pull_url_is_unprocessed,
         test_status_without_order_is_unprocessed,
         test_status_resolves_order_without_environment,
+        test_status_resolves_order_from_tasks_yaml_task_dir,
         test_status_failure_is_non_fatal,
     ]
     failures = 0

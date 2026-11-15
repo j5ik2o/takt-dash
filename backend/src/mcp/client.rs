@@ -81,6 +81,11 @@ impl McpClient {
     McpClient { config, process: None, next_id: 1 }
   }
 
+  /// このクライアントが子プロセスの起動に使う設定を返す。稼働中の設定変更の検出に使います。
+  pub fn config(&self) -> &McpClientConfig {
+    &self.config
+  }
+
   /// 渡された順序で、指定した道具を1つずつ呼び出して応答の本文テキストを返す。
   ///
   /// 輸送エラーが起きたら子プロセスを破棄し、次の呼び出しで新しい子プロセスを起動します。
@@ -171,14 +176,20 @@ impl McpProcess {
   }
 
   async fn exchange(&mut self, request: Request, timeout_secs: u64) -> Result<Value, TransportError> {
+    // 呼び出し全体（送信と、応答が揃うまでの読み取りの往復）に同じ期限を適用します。
+    // 途中で通知やサーバー要求が来ても期限は延びません。
+    let deadline = Duration::from_secs(timeout_secs.max(1));
+    match timeout(deadline, self.exchange_until_reply(request)).await {
+      | Ok(result) => result,
+      | Err(_) => Err(TransportError::Timeout(timeout_secs)),
+    }
+  }
+
+  async fn exchange_until_reply(&mut self, request: Request) -> Result<Value, TransportError> {
     let id = request.id;
     self.send(&Outgoing::Request(request)).await?;
-    let deadline = Duration::from_secs(timeout_secs.max(1));
     loop {
-      let line = match timeout(deadline, self.read_line()).await {
-        | Ok(result) => result?,
-        | Err(_) => return Err(TransportError::Timeout(timeout_secs)),
-      };
+      let line = self.read_line().await?;
       let incoming: Incoming =
         serde_json::from_str(&line).map_err(|error| TransportError::InvalidJson(format!("{error}: {line}")))?;
       if incoming.is_server_request() {

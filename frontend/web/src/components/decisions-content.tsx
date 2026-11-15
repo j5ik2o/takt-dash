@@ -3,10 +3,12 @@ import type { DashboardState, InquiryKind } from "../proto/taktdash";
 import { INQUIRY_KIND, PENDING_DECISION_TYPE } from "../state/proto-values";
 import { sortPendingDecisions, resolveThresholds, type PendingDecisionView } from "../state/dashboard";
 import { formatDuration } from "../state/format";
+import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 
 type DecisionsContentProps = {
   state: DashboardState;
   now: Date;
+  disconnected: boolean;
 };
 
 const inquiryKindLabel = (kind: InquiryKind): string => {
@@ -22,7 +24,7 @@ const inquiryKindLabel = (kind: InquiryKind): string => {
 const waitSeconds = (decision: PendingDecisionView): number => Math.round(decision.waitMinutes * 60);
 
 // 判断待ちは表示のみとする（order.md:25, :51）。回答・承認・却下の操作要素を持たない。
-export function DecisionsContent({ state, now }: DecisionsContentProps): ReactElement {
+export function DecisionsContent({ state, now, disconnected }: DecisionsContentProps): ReactElement {
   const thresholds = resolveThresholds(state.thresholds);
   const decisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
@@ -30,6 +32,7 @@ export function DecisionsContent({ state, now }: DecisionsContentProps): ReactEl
 
   return (
     <main className="page">
+      {disconnected ? <BackendUnavailableNotice /> : null}
       <header className="page-head">
         <div>
           <h1>判断待ち</h1>
