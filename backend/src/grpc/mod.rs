@@ -195,6 +195,7 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
           })
           .collect(),
         current_step_started_at: optional_timestamp(run.current_step_started_at),
+        current_step_name:       run.current_step.clone(),
         last_log_at:             optional_timestamp(run.last_log_at),
         reports:                 run
           .reports
@@ -203,6 +204,9 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
           .collect(),
         status:                  run_status(run.status) as i32,
         log_silent:              store.is_log_silent(run, now),
+        current_step_number:     run.current_step_number,
+        total_steps:             run.total_steps,
+        current_iteration:       run.current_iteration,
       });
     }
   }

@@ -2,6 +2,7 @@ import type {
   AnomalyThresholds,
   DashboardState,
   ExecutionStatus,
+  Goal,
   GoalStatus,
   PendingDecision,
   Project,
@@ -33,8 +34,16 @@ type RunView = {
   run: Run;
   server: Server | undefined;
   connected: boolean;
+  state: "live" | "warn" | "idle";
   label: string;
   note: string;
+  goalName?: string;
+  currentStepName?: string;
+  stepNumber?: number;
+  totalSteps?: number;
+  iteration?: number;
+  model?: string;
+  elapsedSeconds?: number;
 };
 
 type PendingCounts = {
@@ -98,19 +107,53 @@ export function toRunView(
   serverById: ReadonlyMap<string, Server>,
   thresholds: AnomalyThresholds,
   now: Date,
+  goalsById?: ReadonlyMap<string, Goal>,
 ): RunView {
   const server = serverById.get(run.serverId);
+  const lastStep = run.steps.at(-1);
+  const goalName = goalsById?.get(run.goalId)?.name;
+  const elapsedSeconds = run.lastLogAt
+    ? Math.max(0, Math.floor((now.getTime() - run.lastLogAt.getTime()) / 1_000))
+    : undefined;
+  const derived = {
+    run,
+    server,
+    goalName: goalName !== undefined && goalName !== "" ? goalName : undefined,
+    currentStepName:
+      run.currentStepName !== undefined && run.currentStepName !== "" ? run.currentStepName : undefined,
+    model: lastStep?.model !== undefined && lastStep.model !== "" ? lastStep.model : undefined,
+    stepNumber: run.currentStepNumber,
+    totalSteps: run.totalSteps,
+    iteration: run.currentIteration,
+    elapsedSeconds,
+  };
   if (server !== undefined && !server.connected) {
     const at = server.lastReadAt ? formatClock(server.lastReadAt) : "不明";
-    return { run, server, connected: false, label: `実行中（${at} 時点）`, note: "サーバーから応答がないため、最後に読めた時点の状態です。" };
+    return {
+      ...derived,
+      connected: false,
+      state: "idle",
+      label: `実行中（${at} 時点）`,
+      note: "サーバーから応答がないため、最後に読めた時点の状態です。",
+    };
   }
-  if (run.logSilent && run.lastLogAt) {
-    const silentMinutes = Math.round(minutesSince(run.lastLogAt, now));
-    if (silentMinutes > thresholds.runLogSilentMinutes) {
-      return { run, server, connected: true, label: "ログが止まっています", note: `ログが ${silentMinutes}分 出ていません。` };
-    }
+  const silentMinutes = run.lastLogAt
+    ? Math.max(0, Math.floor((now.getTime() - run.lastLogAt.getTime()) / 60_000))
+    : undefined;
+  const silent =
+    run.lastLogAt !== undefined &&
+    (run.logSilent === true ||
+      (silentMinutes !== undefined && silentMinutes > thresholds.runLogSilentMinutes));
+  if (silent && silentMinutes !== undefined) {
+    return {
+      ...derived,
+      connected: true,
+      state: "warn",
+      label: "ログが止まっています",
+      note: `ログが ${silentMinutes}分 出ていません。`,
+    };
   }
-  return { run, server, connected: true, label: "実行中", note: "" };
+  return { ...derived, connected: true, state: "live", label: "実行中", note: "" };
 }
 
 const serverState = (server: Server, runs: readonly Run[]): OverviewServerView["state"] => {
@@ -134,10 +177,11 @@ const serverStateLabel = (state: OverviewServerView["state"]): string => {
 export function buildOverviewView(state: DashboardState, now: Date): OverviewView {
   const thresholds = resolveThresholds(state.thresholds);
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
+  const goalsById = new Map(state.goals.map((goal) => [goal.goalId, goal]));
   const pendingDecisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
   });
-  const runs = state.runs.map((run) => toRunView(run, serverById, thresholds, now));
+  const runs = state.runs.map((run) => toRunView(run, serverById, thresholds, now, goalsById));
   const servers = state.servers.map((server) => {
     const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);
     const status = serverState(server, serverRuns);
@@ -145,7 +189,7 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
       server,
       state: status,
       stateLabel: serverStateLabel(status),
-      runs: serverRuns.map((run) => toRunView(run, serverById, thresholds, now)),
+      runs: serverRuns.map((run) => toRunView(run, serverById, thresholds, now, goalsById)),
     };
   });
   return {

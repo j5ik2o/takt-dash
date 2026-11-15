@@ -19,6 +19,7 @@
 //     "runs": { "<runSlug>": {"runSlug","currentStep","startedAt","currentStepStartedAt","stepLogs",
 //                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
 //                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
+//     "workflows": { "<workflow名>": ["plan", "implement", ...] },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
@@ -73,6 +74,7 @@ const TOOL_ARGUMENTS = {
   takt_list_standalone_inquiries: { required: ["cwd"], optional: ["offset", "limit"] },
   takt_get_run: { required: ["cwd", "runSlug"], optional: ["offset", "limit", "view", "stepIndex", "instructionId", "report", "maxBytes"] },
   takt_get_goal: { required: ["cwd", "goalId"], optional: ["path", "offset", "limit"] },
+  takt_get_workflow: { required: ["cwd", "workflow"], optional: ["offset", "limit"] },
 };
 
 // 引数の検証。実契約と同じく cwd 必須・絶対パス、未知キーは拒否する。
@@ -149,8 +151,8 @@ const runResponse = (state, args) => {
 const handleToolCall = (name, args) => {
   const state = loadState();
   const isError = new Set(state.isError ?? []);
-  // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug>" の限定キーで対象を絞れる。
-  const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? ""}`;
+  // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug または workflow>" の限定キーで対象を絞れる。
+  const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? args.workflow ?? ""}`;
   if (isError.has(name) || isError.has(scopedKey)) {
     return { content: [{ type: "text", text: `${name} は失敗しました。` }], isError: true };
   }
@@ -170,6 +172,14 @@ const handleToolCall = (name, args) => {
         return asText(paged((state.notifications ?? {})[args.goalId] ?? [], "items", args.offset));
       }
       return asText({});
+    case "takt_get_workflow":
+      return asText(
+        paged(
+          ((state.workflows ?? {})[args.workflow] ?? []).map((name) => ({ name })),
+          "steps",
+          args.offset,
+        ),
+      );
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };
   }

@@ -93,6 +93,10 @@ export function createDashboardState(): DashboardState {
         startedAt: minutesAgo(35),
         steps: [{ stepName: "implement", model: "glm-5.3", startedAt: minutesAgo(20) }],
         currentStepStartedAt: minutesAgo(20),
+        currentStepNumber: 2,
+        totalSteps: 5,
+        currentIteration: 2,
+        currentStepName: "implement",
         lastLogAt: minutesAgo(1),
         reports: [{ filename: "review.md", sizeBytes: 1200 }],
         status: RunStatus.RUN_STATUS_RUNNING,
@@ -125,6 +129,24 @@ export function createDashboardState(): DashboardState {
       },
     ],
     thresholds: createThresholds(),
+  });
+}
+
+// takt_get_run の実データ形を作る。currentStep はトップレベルの step（develop）で、
+// stepLogs の末尾は入れ子 workflow の内側の step（write_tests）になる。
+// 位置と名前は currentStep 由来の値（1/1）で、steps の末尾とは異なる。
+export function createNestedStepDashboardState(): DashboardState {
+  const base = createDashboardState();
+  return DashboardState.create({
+    ...base,
+    runs: base.runs.map((run) => ({
+      ...run,
+      steps: [{ stepName: "write_tests", model: "glm-5.3", startedAt: minutesAgo(20) }],
+      currentStepName: "develop",
+      currentStepNumber: 1,
+      totalSteps: 1,
+      currentIteration: 3,
+    })),
   });
 }
 

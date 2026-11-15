@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
-import { createDashboardState, NOW } from "../support/fixtures.ts";
+import { createDashboardState, createNestedStepDashboardState, NOW } from "../support/fixtures.ts";
 import {
   buildOverviewView,
   DEFAULT_ANOMALY_THRESHOLDS,
@@ -94,4 +94,76 @@ test("閾値が無い応答では既定値を1か所で解決し、全画面が�
   const overview = buildOverviewView(withoutThresholds, NOW);
   assert.equal(overview.thresholds.pendingDecisionStaleMinutes, 240);
   assert.equal(overview.thresholds.runLogSilentMinutes, 10);
+});
+
+const overviewInputs = (state = createDashboardState()) => ({
+  serverById: new Map(state.servers.map((server) => [server.serverId, server])),
+  goalsById: new Map(state.goals.map((goal) => [goal.goalId, goal])),
+  thresholds: state.thresholds ?? DEFAULT_ANOMALY_THRESHOLDS,
+});
+
+test("run 行の表示値はゴール名・ステップ名・モデル・位置・反復・経過秒数を proto から導く", () => {
+  const state = createDashboardState();
+  const { serverById, goalsById, thresholds } = overviewInputs(state);
+
+  const view = toRunView(state.runs[0]!, serverById, thresholds, NOW, goalsById);
+
+  assert.equal(view.goalName, "採用ページのレイアウトを直す", "ゴール ID からゴールの目的を引く");
+  assert.equal(view.currentStepName, "implement", "今のステップ名は proto の currentStepName から出す");
+  assert.equal(view.model, "glm-5.3", "最後のステップのモデルを出す");
+  assert.equal(view.stepNumber, 2, "現在ステップの位置を出す");
+  assert.equal(view.totalSteps, 5, "全ステップ数を出す");
+  assert.equal(view.iteration, 2, "反復回数を出す");
+  assert.equal(view.elapsedSeconds, 60, "最後のログから60秒経過している");
+  assert.equal(view.state, "live", "実行中の run は live である");
+});
+
+test("同じ状態のまま時刻が1秒進むと最後のログからの経過秒数も1秒進む", () => {
+  const state = createDashboardState();
+  const { serverById, goalsById, thresholds } = overviewInputs(state);
+  const oneSecondLater = new Date(NOW.getTime() + 1_000);
+
+  const atNow = toRunView(state.runs[0]!, serverById, thresholds, NOW, goalsById);
+  const atNext = toRunView(state.runs[0]!, serverById, thresholds, oneSecondLater, goalsById);
+
+  assert.equal(atNow.elapsedSeconds, 60);
+  assert.equal(atNext.elapsedSeconds, 61, "backend の再配信が無くても状態が同じなら時刻だけで進む");
+  assert.equal(atNext.state, "live");
+});
+
+test("同じ状態のままログの無音が閾値を超えると run は警告になり注記を出す", () => {
+  const state = createDashboardState();
+  const { serverById, goalsById, thresholds } = overviewInputs(state);
+  const tenMinutesLater = new Date(NOW.getTime() + 10 * 60_000);
+
+  const view = toRunView(state.runs[0]!, serverById, thresholds, tenMinutesLater, goalsById);
+
+  assert.equal(view.state, "warn", "backend の logSilent フラグに依存せず時間の経過で警告になる");
+  assert.equal(view.note, "ログが 11分 出ていません。", "無音の分数を注記に出す");
+  assert.equal(view.elapsedSeconds, 660);
+});
+
+test("ステップ位置が分からない run は位置と総数を捏造しない", () => {
+  const state = createDashboardState();
+  const { serverById, goalsById, thresholds } = overviewInputs(state);
+  const run = { ...state.runs[0]!, currentStepNumber: undefined, totalSteps: undefined };
+
+  const view = toRunView(run, serverById, thresholds, NOW, goalsById);
+
+  assert.equal(view.stepNumber, undefined, "位置が無ければ undefined のままにする");
+  assert.equal(view.totalSteps, undefined, "総数が無ければ undefined のままにする");
+  assert.equal(view.iteration, 2, "反復回数は位置とは独立して保持する");
+});
+
+test("入れ子 workflow の内側ログがあってもステップ名は位置と同じ currentStep 由来になる", () => {
+  const state = createNestedStepDashboardState();
+  const { serverById, goalsById, thresholds } = overviewInputs(state);
+
+  const view = toRunView(state.runs[0]!, serverById, thresholds, NOW, goalsById);
+
+  assert.equal(view.currentStepName, "develop", "名前は steps 末尾ではなく currentStepName から出す");
+  assert.notEqual(view.currentStepName, "write_tests", "入れ子 workflow の内側の step 名を出さない");
+  assert.equal(view.stepNumber, 1, "位置は同じ currentStep 由来の 1 つ目");
+  assert.equal(view.totalSteps, 1, "総数も同じ workflow の step 集合から出す");
+  assert.equal(view.iteration, 3, "反復回数は独立して保持する");
 });

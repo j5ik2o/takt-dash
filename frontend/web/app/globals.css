@@ -9,6 +9,7 @@
   --warn-bg: #fff7ed;
   --live: #0f766e;
   --down: #9ca3af;
+  --track: #e9eef0;
 }
 
 html {
@@ -295,7 +296,6 @@ a {
   gap: 8px;
 }
 
-.run-row,
 .mini-runs li,
 .events li,
 .tray-item {
@@ -306,6 +306,184 @@ a {
   border-top: 1px solid var(--line);
   padding-top: 8px;
   font-size: 14px;
+}
+
+.runs .run-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) 200px;
+  gap: 4px 16px;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  font-size: 14px;
+}
+
+.run-row .st {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.run-row .st.live {
+  color: var(--accent);
+}
+
+.run-row .st.warn {
+  color: var(--warn);
+}
+
+.run-row .st.idle {
+  color: var(--muted);
+}
+
+.run-main {
+  min-width: 0;
+}
+
+.run-main .p {
+  font-weight: 700;
+}
+
+.run-main .g {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.run-main .task {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.run-main .model {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.run-prog {
+  min-width: 0;
+}
+
+.run-prog .stp {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.run-prog .stp b {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.run-prog .meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+
+.run-prog .meta .warn,
+.run-note.warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.bar {
+  height: 8px;
+  background: var(--track);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 6px 0;
+}
+
+.bar > i {
+  display: block;
+  height: 100%;
+  background: var(--live);
+  border-radius: 4px;
+}
+
+.bar.thick {
+  height: 12px;
+  border-radius: 6px;
+}
+
+.run-row .bar.live > i {
+  background-image: linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.28) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.28) 50%,
+    rgba(255, 255, 255, 0.28) 75%,
+    transparent 75%
+  );
+  background-size: 24px 24px;
+  animation: flow 1.6s linear infinite;
+}
+
+.bar.warn > i {
+  background: var(--warn);
+}
+
+.bar.idle > i {
+  background: var(--down);
+}
+
+.run-row .dot.live {
+  background: var(--live);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+.run-row .dot.warn {
+  background: var(--warn);
+}
+
+.run-row .dot.idle {
+  background: var(--down);
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(15, 118, 110, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(15, 118, 110, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(15, 118, 110, 0);
+  }
+}
+
+@keyframes flow {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 24px 0;
+  }
+}
+
+.run-row.flash {
+  animation: flash 1s ease-out;
+}
+
+@keyframes flash {
+  from {
+    background-color: rgba(15, 118, 110, 0.14);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-row .dot.live,
+  .run-row .bar.live > i,
+  .run-row.flash {
+    animation: none;
+  }
 }
 
 .tray-item .srv,
@@ -523,6 +701,11 @@ pre {
 
   .sum-grid .f.wide {
     grid-column: auto;
+  }
+
+  .runs .run-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
   }
 
   .content {

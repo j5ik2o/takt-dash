@@ -463,6 +463,9 @@ async fn is_error_on_get_run_keeps_previous_runs_without_transport_failure() {
       summary:                 String::new(),
       status:                  takt_dash_backend::model::RunStatus::Running,
       current_step:            Some("implement".to_owned()),
+      current_iteration:       None,
+      current_step_number:     None,
+      total_steps:             None,
       started_at:              Some(time("2026-11-13T10:00:00Z")),
       current_step_started_at: None,
       last_log_at:             Some(time("2026-11-13T10:05:00Z")),
@@ -513,6 +516,9 @@ async fn one_run_tool_error_keeps_only_that_run_previous_and_updates_the_healthy
       summary:                 String::new(),
       status:                  takt_dash_backend::model::RunStatus::Running,
       current_step:            Some("implement".to_owned()),
+      current_iteration:       None,
+      current_step_number:     None,
+      total_steps:             None,
       started_at:              Some(time("2026-11-13T10:00:00Z")),
       current_step_started_at: None,
       last_log_at:             Some(time("2026-11-13T10:05:00Z")),
@@ -586,5 +592,132 @@ async fn goal_question_tool_error_inherits_only_that_goal_and_leaves_the_healthy
   let q2 = snapshot.inquiries.iter().find(|entry| entry.inquiry_id == "q2").expect("健常な g2 の質問は今回値です");
   assert_eq!(q2.goal_id.as_deref(), Some("g2"));
   assert_eq!(q2.body, "g2 の質問", "健常なゴールの質問は今回値を採ります");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn run_step_progress_is_derived_from_the_workflow_step_list() {
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "workflow": "wf",
+        "currentStep": "implement",
+        "currentIteration": 2,
+        "startedAt": "2026-11-13T10:00:00Z",
+        "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ]
+      } },
+      "workflows": { "wf": ["plan", "implement", "review", "fix", "close"] }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+
+  let run = &snapshot.runs[0];
+  assert_eq!(run.current_step_number, Some(2), "現在ステップの位置を workflow の並びから求めます");
+  assert_eq!(run.total_steps, Some(5), "workflow の全ステップ数を求めます");
+  assert_eq!(run.current_iteration, Some(2), "takt_get_run の currentIteration を読み取ります");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn run_step_position_uses_the_current_step_even_when_the_last_log_is_a_nested_step() {
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "workflow": "wf",
+        "currentStep": "develop",
+        "currentIteration": 3,
+        "startedAt": "2026-11-13T10:00:00Z",
+        "stepLogs": [ { "step": "write_tests", "timestamp": "2026-11-13T10:20:00Z" } ]
+      } },
+      "workflows": { "wf": ["develop", "machine_gate", "fix_machine_gate"] }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+
+  let run = &snapshot.runs[0];
+  assert_eq!(run.current_step_number, Some(1), "入れ子 workflow のログではなく currentStep を位置に使います");
+  assert_eq!(run.total_steps, Some(3), "workflow の全ステップ数を求めます");
+  assert_eq!(run.current_iteration, Some(3), "takt_get_run の currentIteration を読み取ります");
+  assert_eq!(run.current_step.as_deref(), Some("develop"), "今のステップ名は currentStep から読み取ります");
+  assert_eq!(
+    run.steps.last().map(|step| step.step_name.as_str()),
+    Some("write_tests"),
+    "stepLogs の末尾は入れ子 workflow の内側の step で、今のトップレベル step とは異なります"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn run_step_position_is_unset_when_the_current_step_is_not_in_the_workflow() {
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "workflow": "wf",
+        "currentStep": "implement",
+        "currentIteration": 2,
+        "startedAt": "2026-11-13T10:00:00Z",
+        "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ]
+      } },
+      "workflows": { "wf": ["plan", "review"] }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+
+  let run = &snapshot.runs[0];
+  assert_eq!(run.current_step_number, None, "workflow に無いステップの位置を捏造しません");
+  assert_eq!(run.total_steps, None, "位置が決まらない run は総数も設定しません");
+  assert_eq!(run.current_iteration, Some(2), "反復回数は位置と独立して保持します");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn workflow_tool_error_keeps_the_run_without_step_progress() {
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "workflow": "wf",
+        "currentStep": "implement",
+        "currentIteration": 2,
+        "startedAt": "2026-11-13T10:00:00Z",
+        "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ]
+      } },
+      "workflows": { "wf": ["plan", "implement"] },
+      "isError": ["takt_get_workflow:wf"]
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None)
+    .await
+    .expect("workflow の道具エラーで run 一覧全体を失敗させません");
+
+  assert_eq!(snapshot.runs.len(), 1, "workflow が読めなくても run は一覧に残ります");
+  let run = &snapshot.runs[0];
+  assert_eq!(run.current_step_number, None, "workflow が読めない run は位置を設定しません");
+  assert_eq!(run.total_steps, None, "workflow が読めない run は総数を設定しません");
+  assert_eq!(run.current_iteration, Some(2), "反復回数は workflow の成否と独立して保持します");
   client.shutdown().await;
 }

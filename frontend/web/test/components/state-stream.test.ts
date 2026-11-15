@@ -10,6 +10,7 @@ import { DashboardState } from "../../src/proto/taktdash.ts";
 import { createDashboardState } from "../support/fixtures.ts";
 import { openStateStream, type EventSourceLike } from "../../src/components/state-stream.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
+import { restoreDashboardState } from "../../src/state/restore-state.ts";
 import { DecisionsContent } from "../../src/components/decisions-content.tsx";
 import { OverviewContent } from "../../src/components/overview-content.tsx";
 
@@ -143,4 +144,25 @@ test("close の後はエラーでも再接続しない", () => {
   stream.close();
   Ctor.instances[0]!.onerror?.({});
   assert.equal(Ctor.instances.length, 1);
+});
+
+test("ステップ位置と反復回数は proto の JSON を経て復元後も同じ意味で保持される", () => {
+  const wire = DashboardState.toJSON(createDashboardState());
+  const restored = restoreDashboardState(JSON.parse(JSON.stringify(wire)));
+  const run = restored.runs[0]!;
+
+  assert.equal(run.currentStepNumber, 2, "現在ステップの位置を保持する");
+  assert.equal(run.totalSteps, 5, "全ステップ数を保持する");
+  assert.equal(run.currentIteration, 2, "反復回数を保持する");
+  assert.equal(run.currentStepName, "implement", "今のステップ名を保持する");
+});
+
+test("位置と反復回数とステップ名を持たない run を復元しても 0 や空文字を捏造しない", () => {
+  const restored = restoreDashboardState({ runs: [{ runSlug: "run-x" }] });
+  const run = restored.runs[0]!;
+
+  assert.equal(run.currentStepNumber, undefined, "未設定は undefined のままにする");
+  assert.equal(run.totalSteps, undefined, "未設定は undefined のままにする");
+  assert.equal(run.currentIteration, undefined, "未設定は undefined のままにする");
+  assert.equal(run.currentStepName, undefined, "未設定は undefined のままにする");
 });
