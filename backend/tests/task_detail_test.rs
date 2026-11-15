@@ -40,6 +40,16 @@ fn task_harness() -> GrpcHarness {
     .build()
 }
 
+fn task_harness_with_goal_summary(goal_summary: Value) -> GrpcHarness {
+  GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", Path::new("/abs/takt-dash")),
+      server_meta(),
+      json!({ "tasks": tasks(), "goalDetails": { "g1": { "summary": goal_summary } } }),
+    )
+    .build()
+}
+
 fn timestamp(text: &str) -> prost_types::Timestamp {
   let time = time(text);
   prost_types::Timestamp { seconds: time.timestamp(), nanos: time.timestamp_subsec_nanos() as i32 }
@@ -68,7 +78,39 @@ async fn get_task_detail_collects_a_task_beyond_the_first_page() {
   assert_eq!(detail.summary, "要約 109");
   assert_eq!(detail.started_at, Some(timestamp("2026-11-13T09:00:00Z")));
   assert_eq!(detail.run_slug.as_deref(), Some("run-109"));
+  assert_eq!(detail.linked_run_slugs, vec!["run-109".to_owned()], "紐づく run の一覧を返します");
   assert_eq!(detail.pull_request_number, Some(42), "仕上げタスクのプルリクエスト番号を返します");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_returns_no_linked_runs_when_the_task_has_no_run_slug() {
+  let tasks = vec![json!({
+    "name": "merge-task",
+    "goalId": "g1",
+    "status": "completed",
+    "summary": "仕上げ",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", Path::new("/abs/takt-dash")), server_meta(), json!({ "tasks": tasks }))
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "merge-task".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect("runSlug を持たないタスクも取得できます")
+    .into_inner();
+
+  assert_eq!(detail.task_name, "merge-task");
+  assert!(detail.run_slug.is_none(), "runSlug を持たないタスクは run_slug を返しません");
+  assert!(detail.linked_run_slugs.is_empty(), "runSlug を持たないタスクは紐づく run を返しません");
 
   server.stop().await;
 }
@@ -249,6 +291,130 @@ async fn get_task_detail_maps_a_takt_mcp_tool_error_to_unavailable() {
     .expect_err("道具エラーは失敗になります");
 
   assert_eq!(status.code(), tonic::Code::Unavailable, "takt-mcp の道具エラーは Unavailable です: {status:?}");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_maps_the_goal_branch_and_pull_request_url() {
+  let harness = task_harness_with_goal_summary(json!({
+    "id": "g1",
+    "branch": "takt/goal-g1",
+    "pullRequest": {
+      "number": 42,
+      "url": "https://github.com/j5ik2o/takt-dash/pull/42",
+    },
+  }));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "task-109".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect("ゴールに branch とプルリクエストを持つタスクも取得できます")
+    .into_inner();
+
+  assert_eq!(detail.branch.as_deref(), Some("takt/goal-g1"), "ゴールのブランチを返します");
+  assert_eq!(
+    detail.pull_request_url.as_deref(),
+    Some("https://github.com/j5ik2o/takt-dash/pull/42"),
+    "ゴールのプルリクエスト URL を返します"
+  );
+  assert_eq!(detail.project, "takt-dash");
+  assert_eq!(detail.task_name, "task-109");
+  assert_eq!(detail.goal_id.as_deref(), Some("g1"));
+  assert_eq!(detail.status, ProtoTaskStatus::Completed as i32);
+  assert_eq!(detail.summary, "要約 109");
+  assert_eq!(detail.started_at, Some(timestamp("2026-11-13T09:00:00Z")));
+  assert_eq!(detail.run_slug.as_deref(), Some("run-109"));
+  assert_eq!(detail.linked_run_slugs, vec!["run-109".to_owned()]);
+  assert_eq!(detail.pull_request_number, Some(42), "既存のプルリクエスト番号は意味を変えません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_leaves_branch_and_pull_request_url_unset_when_the_goal_has_none() {
+  let harness = task_harness_with_goal_summary(json!({ "id": "g1" }));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "task-109".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect("branch とプルリクエストを持たないゴールのタスクも取得できます")
+    .into_inner();
+
+  assert!(detail.branch.is_none(), "ゴールに branch が無ければ未設定です");
+  assert!(detail.pull_request_url.is_none(), "ゴールにプルリクエスト URL が無ければ未設定です");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_leaves_branch_and_pull_request_url_unset_when_the_task_has_no_goal_id() {
+  let tasks = vec![json!({
+    "name": "standalone-task",
+    "status": "pending",
+    "summary": "単独",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", Path::new("/abs/takt-dash")),
+      server_meta(),
+      json!({ "tasks": tasks, "isError": ["takt_get_goal"] }),
+    )
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "standalone-task".to_owned(),
+      goal_id:   None,
+    })
+    .await
+    .expect("ゴール ID を持たないタスクは takt_get_goal を呼びません")
+    .into_inner();
+
+  assert!(detail.goal_id.is_none());
+  assert!(detail.branch.is_none(), "ゴール ID を持たないタスクは branch を未設定にします");
+  assert!(detail.pull_request_url.is_none(), "ゴール ID を持たないタスクはプルリクエスト URL を未設定にします");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_maps_a_goal_read_failure_to_unavailable() {
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", Path::new("/abs/takt-dash")),
+      server_meta(),
+      json!({ "tasks": tasks(), "isError": ["takt_get_goal:g1"] }),
+    )
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "task-109".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect_err("ゴールの読み取り失敗は空値ではなく失敗になります");
+
+  assert_eq!(status.code(), tonic::Code::Unavailable, "ゴールの読み取り失敗は Unavailable です: {status:?}");
 
   server.stop().await;
 }

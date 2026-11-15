@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use super::client::{CallError, McpClient, McpClientConfig};
+use super::client::{CallError, McpClient, McpClientConfig, ToolCallError};
 use crate::{
   config::McpServer,
   model::{
@@ -384,6 +384,15 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
   value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
+/// takt_get_goal が指定 path の項目を持たないときに返す道具エラーか。
+///
+/// 実 takt-mcp は存在しない項目を `Goal read failed: Selected field does not exist` の
+/// 道具エラーで返すため、これだけを任意項目の空として扱います。ほかの道具エラーは
+/// 失敗のまま伝播させます。
+fn is_missing_goal_field(error: &ToolCallError) -> bool {
+  error.tool == "takt_get_goal" && error.message.trim_end().ends_with("Selected field does not exist")
+}
+
 fn parse_time(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, ToolError> {
   match value {
     | None | Some(Value::Null) => Ok(None),
@@ -489,16 +498,27 @@ fn parse_goal_question(value: &Value) -> Result<GoalQuestionEntry, ToolError> {
   })
 }
 
-fn parse_task_detail(project: &str, value: &Value) -> Result<TaskDetail, ToolError> {
+/// タスクに紐づくゴールから得る、タスク詳細に載せる補助情報。
+#[derive(Debug, Default)]
+struct TaskLinkFields {
+  branch:           Option<String>,
+  pull_request_url: Option<String>,
+}
+
+fn parse_task_detail(project: &str, value: &Value, links: TaskLinkFields) -> Result<TaskDetail, ToolError> {
+  let run_slug = optional_string(value, "runSlug");
   Ok(TaskDetail {
-    project:             project.to_owned(),
-    task_name:           string_field(value, "name")?,
-    goal_id:             optional_string(value, "goalId"),
-    status:              parse_task_status(value.get("status"))?,
-    summary:             optional_string(value, "summary").unwrap_or_default(),
-    started_at:          parse_time(value.get("startedAt"))?,
-    run_slug:            optional_string(value, "runSlug"),
+    project: project.to_owned(),
+    task_name: string_field(value, "name")?,
+    goal_id: optional_string(value, "goalId"),
+    status: parse_task_status(value.get("status"))?,
+    summary: optional_string(value, "summary").unwrap_or_default(),
+    started_at: parse_time(value.get("startedAt"))?,
+    linked_run_slugs: run_slug.iter().cloned().collect(),
+    run_slug,
     pull_request_number: value.get("prNumber").and_then(Value::as_i64),
+    branch: links.branch,
+    pull_request_url: links.pull_request_url,
   })
 }
 
@@ -735,17 +755,26 @@ impl<'a> ToolSet<'a> {
   }
 
   /// takt_get_goal の文字列フィールドを textOffset で全ページ連結する。
+  ///
+  /// 空または省略された任意項目は空文字として扱います。`content` は必須項目ではないため、
+  /// 応答に無ければ空文字です（実 takt-mcp は項目そのものが無い場合に
+  /// `Selected field does not exist` の道具エラーを返します）。`content` が存在して型が
+  /// 文字列でない場合は解析エラーにします。
   async fn read_goal_text(&mut self, goal_id: &str, path: &str) -> Result<String, ToolError> {
     let mut content = String::new();
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
       let value =
-        self.call_json("takt_get_goal", json!({ "goalId": goal_id, "path": path, "textOffset": offset })).await?;
-      let chunk = value
-        .get("content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolError::Parse(format!("{path} の応答に content がありません")))?;
-      content.push_str(chunk);
+        match self.call_json("takt_get_goal", json!({ "goalId": goal_id, "path": path, "textOffset": offset })).await {
+          | Ok(value) => value,
+          | Err(ToolError::Tool(error)) if is_missing_goal_field(&error) => return Ok(content),
+          | Err(error) => return Err(error),
+        };
+      if let Some(chunk) = value.get("content") {
+        let chunk =
+          chunk.as_str().ok_or_else(|| ToolError::Parse(format!("{path} の content が文字列ではありません")))?;
+        content.push_str(chunk);
+      }
       match value.get("nextOffset").and_then(Value::as_u64) {
         | Some(next) => offset = next,
         | None => return Ok(content),
@@ -755,17 +784,30 @@ impl<'a> ToolSet<'a> {
   }
 
   /// takt_get_goal の配列フィールドを offset で全ページ集める。
+  ///
+  /// 空または省略された任意項目は空配列として扱います。`items` は必須項目ではないため、
+  /// 応答に無ければ空配列です（実 takt-mcp は項目そのものが無い場合に
+  /// `Selected field does not exist` の道具エラーを返します）。`items` が存在して配列でない
+  /// 場合は解析エラーにします。
   async fn read_goal_array(&mut self, goal_id: &str, path: &str) -> Result<Vec<String>, ToolError> {
     let mut entries = Vec::new();
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
-      let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id, "path": path, "offset": offset })).await?;
-      let page = Page::from_value(&value, "items")?;
-      for item in &page.items {
+      let value =
+        match self.call_json("takt_get_goal", json!({ "goalId": goal_id, "path": path, "offset": offset })).await {
+          | Ok(value) => value,
+          | Err(ToolError::Tool(error)) if is_missing_goal_field(&error) => return Ok(entries),
+          | Err(error) => return Err(error),
+        };
+      let Some(items) = value.get("items") else {
+        return Ok(entries);
+      };
+      let items = items.as_array().ok_or_else(|| ToolError::Parse(format!("{path} の items が配列ではありません")))?;
+      for item in items {
         let text = item.as_str().ok_or_else(|| ToolError::Parse(format!("{path} の要素が文字列ではありません")))?;
         entries.push(text.to_owned());
       }
-      match page.next_offset {
+      match value.get("nextOffset").and_then(Value::as_u64) {
         | Some(next) => offset = next,
         | None => return Ok(entries),
       }
@@ -809,9 +851,27 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_list_goal_questions のページ追従が上限に達しました".to_owned()))
   }
 
+  /// takt_get_goal（path なし）の goal summary から、タスク詳細に載せる
+  /// ブランチとプルリクエスト URL を読む。
+  async fn read_task_link_fields(&mut self, goal_id: &str) -> Result<TaskLinkFields, ToolError> {
+    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id })).await?;
+    let goal =
+      value.get("goal").ok_or_else(|| ToolError::Parse("takt_get_goal の応答に goal がありません".to_owned()))?;
+    Ok(TaskLinkFields {
+      branch:           optional_string(goal, "branch"),
+      pull_request_url: goal
+        .get("pullRequest")
+        .and_then(|pull_request| pull_request.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_owned),
+    })
+  }
+
   /// takt_list_tasks を全ページ取得し、タスク名（と任意の
   /// goalId）が一致する最初のタスク詳細を返す。
   ///
+  /// 一致するタスクが goalId を持つ場合は、そのゴールの summary から
+  /// ブランチとプルリクエスト URL を補います。
   /// 一致するタスクが無ければ Ok(None)、ページ追従が上限に達したら Parse エラーにします。
   pub async fn read_task_detail(
     &mut self,
@@ -832,7 +892,11 @@ impl<'a> ToolSet<'a> {
             continue;
           }
         }
-        return Ok(Some(parse_task_detail(project, item)?));
+        let links = match optional_string(item, "goalId") {
+          | Some(task_goal_id) => self.read_task_link_fields(&task_goal_id).await?,
+          | None => TaskLinkFields::default(),
+        };
+        return Ok(Some(parse_task_detail(project, item, links)?));
       }
       match page.next_offset {
         | Some(next) => offset = next,

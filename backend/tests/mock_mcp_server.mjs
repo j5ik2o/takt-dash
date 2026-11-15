@@ -29,9 +29,13 @@
 //         "constraints": ["..."],
 //         "specifications": { "<notation>": "長文" },
 //         "workLog": [ {"id","recordedAt","summary"} ],
-//         "questions": [ {"id","kind","status","body","options","answer","createdAt"} ]
+//         "questions": [ {"id","kind","status","body","options","answer","createdAt"} ],
+//         "omitFields": ["outOfScope"],  // 成功応答から content/items を省く path（応答の省略を再現する）
+//         "malformedFields": { "objective": { "content": 42 } }  // path ごとの生の応答（型不正を再現する）
 //       }
 //     },
+//   実 takt-mcp と同じく、存在しない path は
+//   "Goal read failed: Selected field does not exist" の道具エラーで返す。
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
 //   }
@@ -77,23 +81,52 @@ const paged = (items, key, offsetRaw) => {
   };
 };
 
-// takt_get_goal の textOffset / maxBytes によるテキストページ。実契約の既定は 4096 バイト。
-const textPage = (text, offsetRaw, maxBytesRaw) => {
-  const buffer = Buffer.from(String(text), "utf8");
+// takt 本体の listTaktGoalRecords と同じく、末尾から limit 件を切り出して反転する。
+// offset は「先頭から何件を読み終えたか」で、1ページ目が最新の記録になります。
+const pagedBackward = (items, key, offsetRaw) => {
   const offset = Number(offsetRaw ?? 0);
-  const maxBytes = Number(maxBytesRaw ?? 4096);
-  const end = Math.min(offset + maxBytes, buffer.length);
-  const nextOffset = end < buffer.length ? end : null;
+  const end = Math.max(0, items.length - offset);
+  const start = Math.max(0, end - PAGE_SIZE);
+  const page = items.slice(start, end).reverse();
+  const nextOffset = offset + page.length < items.length ? offset + page.length : null;
   return {
-    content: buffer.subarray(offset, end).toString("utf8"),
-    totalBytes: buffer.length,
+    [key]: page,
+    collection: key,
+    totalCount: items.length,
+    returnedCount: page.length,
+    omittedCount: items.length - page.length,
     offset,
-    returnedBytes: end - offset,
-    direction: "forward",
-    truncated: nextOffset !== null,
     nextOffset,
+    truncated: nextOffset !== null,
   };
 };
+
+// takt_get_goal の textOffset / maxBytes によるテキストページ。実契約の既定は 4096 バイト。
+// 実 takt-mcp の sliceUtf8（forward）と同じく、開始を継続バイトの後ろへ進め、
+// 終端を UTF-8 の文字境界へ戻す。文字の途中を nextOffset にしない。
+const textPage = (text, offsetRaw, maxBytesRaw) => {
+  const bytes = Buffer.from(String(text), "utf8");
+  const maxBytes = Number(maxBytesRaw ?? 4096);
+  let start = Math.min(Number(offsetRaw ?? 0), bytes.length);
+  let end = Math.min(bytes.length, start + maxBytes);
+  while (start < end && (bytes[start] & 0xc0) === 0x80) start++;
+  while (end > start && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+  return {
+    content: bytes.subarray(start, end).toString("utf8"),
+    totalBytes: bytes.length,
+    offset: start,
+    returnedBytes: end - start,
+    direction: "forward",
+    truncated: start > 0 || end < bytes.length,
+    nextOffset: end < bytes.length ? end : null,
+  };
+};
+
+// 実 takt-mcp の項目不在（selectGoalValue の throw）と同じ道具エラー。
+const goalFieldMissing = () => ({
+  content: [{ type: "text", text: "Goal read failed: Selected field does not exist" }],
+  isError: true,
+});
 
 // 実契約（schemas.ts の strict スキーマ）に対応する、道具ごとの必須キーと許容キー。
 const TOOL_ARGUMENTS = {
@@ -196,7 +229,7 @@ const handleToolCall = (name, args) => {
     }
     case "takt_list_goal_work_log": {
       const workLog = (state.goalDetails ?? {})[args.goalId]?.workLog ?? [];
-      return asText(paged(workLog, "workLog", args.offset));
+      return asText(pagedBackward(workLog, "workLog", args.offset));
     }
     case "takt_list_standalone_inquiries":
       return asText(paged(state.standaloneInquiries ?? [], "inquiries", args.offset));
@@ -210,6 +243,12 @@ const handleToolCall = (name, args) => {
       if (args.path === undefined) {
         return asText({ goal: detail.summary ?? {} });
       }
+      if ((detail.omitFields ?? []).includes(String(args.path))) {
+        return asText({ goalId: args.goalId, path: args.path });
+      }
+      if (Object.hasOwn(detail.malformedFields ?? {}, String(args.path))) {
+        return asText(detail.malformedFields[String(args.path)]);
+      }
       if (String(args.path).startsWith("specifications.")) {
         const notation = String(args.path).slice("specifications.".length);
         return asText(textPage((detail.specifications ?? {})[notation] ?? "", args.textOffset, args.maxBytes));
@@ -221,7 +260,10 @@ const handleToolCall = (name, args) => {
       if (typeof value === "string") {
         return asText(textPage(value, args.textOffset, args.maxBytes));
       }
-      return asText({});
+      if (value === undefined) {
+        return goalFieldMissing();
+      }
+      return asText({ items: value });
     }
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };

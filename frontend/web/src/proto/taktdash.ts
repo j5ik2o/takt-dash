@@ -933,7 +933,17 @@ export interface GetTaskDetailResponse {
     | string
     | undefined;
   /** 仕上げタスクのプルリクエスト番号 */
-  pullRequestNumber?: number | undefined;
+  pullRequestNumber?:
+    | number
+    | undefined;
+  /** 紐づく run の一覧 */
+  linkedRunSlugs: string[];
+  /** ゴールのブランチ */
+  branch?:
+    | string
+    | undefined;
+  /** ゴールのプルリクエスト URL */
+  pullRequestUrl?: string | undefined;
 }
 
 /** 状態ストリーミングの接続を要求する。 */
@@ -5886,6 +5896,9 @@ function createBaseGetTaskDetailResponse(): GetTaskDetailResponse {
     startedAt: undefined,
     runSlug: undefined,
     pullRequestNumber: undefined,
+    linkedRunSlugs: [],
+    branch: undefined,
+    pullRequestUrl: undefined,
   };
 }
 
@@ -5914,6 +5927,15 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
     }
     if (message.pullRequestNumber !== undefined) {
       writer.uint32(64).int64(message.pullRequestNumber);
+    }
+    for (const v of message.linkedRunSlugs) {
+      writer.uint32(74).string(v!);
+    }
+    if (message.branch !== undefined) {
+      writer.uint32(82).string(message.branch);
+    }
+    if (message.pullRequestUrl !== undefined) {
+      writer.uint32(90).string(message.pullRequestUrl);
     }
     return writer;
   },
@@ -5995,6 +6017,30 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
             message.pullRequestNumber = longToNumber(reader.int64());
             continue;
           }
+          case 9: {
+            if (tag !== 74) {
+              break;
+            }
+
+            message.linkedRunSlugs.push(reader.string());
+            continue;
+          }
+          case 10: {
+            if (tag !== 82) {
+              break;
+            }
+
+            message.branch = reader.string();
+            continue;
+          }
+          case 11: {
+            if (tag !== 90) {
+              break;
+            }
+
+            message.pullRequestUrl = reader.string();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -6037,6 +6083,17 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
         : isSet(object.pull_request_number)
         ? globalThis.Number(object.pull_request_number)
         : undefined,
+      linkedRunSlugs: globalThis.Array.isArray(object?.linkedRunSlugs)
+        ? object.linkedRunSlugs.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.linked_run_slugs)
+        ? object.linked_run_slugs.map((e: any) => globalThis.String(e))
+        : [],
+      branch: isSet(object.branch) ? globalThis.String(object.branch) : undefined,
+      pullRequestUrl: isSet(object.pullRequestUrl)
+        ? globalThis.String(object.pullRequestUrl)
+        : isSet(object.pull_request_url)
+        ? globalThis.String(object.pull_request_url)
+        : undefined,
     };
   },
 
@@ -6066,6 +6123,15 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
     if (message.pullRequestNumber !== undefined) {
       obj.pullRequestNumber = Math.round(message.pullRequestNumber);
     }
+    if (message.linkedRunSlugs?.length) {
+      obj.linkedRunSlugs = message.linkedRunSlugs;
+    }
+    if (message.branch !== undefined) {
+      obj.branch = message.branch;
+    }
+    if (message.pullRequestUrl !== undefined) {
+      obj.pullRequestUrl = message.pullRequestUrl;
+    }
     return obj;
   },
 
@@ -6082,6 +6148,9 @@ export const GetTaskDetailResponse: MessageFns<GetTaskDetailResponse> = {
     message.startedAt = object.startedAt ?? undefined;
     message.runSlug = object.runSlug ?? undefined;
     message.pullRequestNumber = object.pullRequestNumber ?? undefined;
+    message.linkedRunSlugs = object.linkedRunSlugs?.map((e) => e) || [];
+    message.branch = object.branch ?? undefined;
+    message.pullRequestUrl = object.pullRequestUrl ?? undefined;
     return message;
   },
 };

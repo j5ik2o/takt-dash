@@ -180,7 +180,10 @@ pub struct TaskDetail {
   pub summary:             String,
   pub started_at:          Option<DateTime<Utc>>,
   pub run_slug:            Option<String>,
+  pub linked_run_slugs:    Vec<String>,
   pub pull_request_number: Option<i64>,
+  pub branch:              Option<String>,
+  pub pull_request_url:    Option<String>,
 }
 
 /// ゴールに属する問い合わせ。

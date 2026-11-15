@@ -401,6 +401,9 @@ message GetTaskDetailResponse {
   optional google.protobuf.Timestamp started_at = 6;   // 開始時刻
   optional string run_slug = 7;                        // runSlug
   optional int64 pull_request_number = 8;              // 仕上げタスクのプルリクエスト番号
+  repeated string linked_run_slugs = 9;                // 紐づく run の一覧
+  optional string branch = 10;                         // ゴールのブランチ
+  optional string pull_request_url = 11;               // ゴールのプルリクエスト URL
 }
 
 // 状態ストリーミングの接続を要求する。

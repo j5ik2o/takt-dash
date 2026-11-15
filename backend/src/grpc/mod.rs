@@ -526,6 +526,9 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       started_at:          optional_timestamp(detail.started_at),
       run_slug:            detail.run_slug,
       pull_request_number: detail.pull_request_number,
+      linked_run_slugs:    detail.linked_run_slugs,
+      branch:              detail.branch,
+      pull_request_url:    detail.pull_request_url,
     }))
   }
 
