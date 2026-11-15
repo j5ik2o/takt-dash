@@ -92,6 +92,18 @@ export type CreateBackendClientOptions = {
   deadlineMs?: number;
 };
 
+type CallOptionsFactory = () => grpc.CallOptions;
+
+type ReadOperations = Pick<
+  BackendClient,
+  "getOverview" | "getProjects" | "getPendingDecisions" | "getActivity" | "getRunDetail" | "getConversation"
+>;
+
+type WriteOperations = Pick<
+  BackendClient,
+  "answerInquiry" | "approveGoalMerge" | "approveGoalRegistration" | "rejectGoalRegistration"
+>;
+
 // unary RPC に付ける既定の deadline。backend 側の取得上限より長く、かつ有限にする。
 const DEFAULT_UNARY_DEADLINE_MS = 30_000;
 
@@ -135,15 +147,7 @@ const unary = <Request, Response>(
     });
   });
 
-export function createBackendClient(options: CreateBackendClientOptions = {}): BackendClient {
-  const env = options.env ?? process.env;
-  const address = resolveBackendAddress(env);
-  const deadlineMs = options.deadlineMs ?? DEFAULT_UNARY_DEADLINE_MS;
-  const readOptions = (): grpc.CallOptions => ({ deadline: Date.now() + deadlineMs });
-  const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
-  const writeDeadlineMs = options.writeDeadlineMs ?? DEFAULT_WRITE_DEADLINE_MS;
-  const writeOptions = (): grpc.CallOptions => ({ deadline: Date.now() + writeDeadlineMs });
-
+function createReadOperations(client: TaktDashServiceClient, readOptions: CallOptionsFactory): ReadOperations {
   return {
     getOverview: () =>
       unary<object, DashboardState>(
@@ -207,7 +211,11 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
         },
         readOptions(),
       ),
-    watchState: () => client.watchState({} satisfies WatchStateRequest),
+  };
+}
+
+function createWriteOperations(client: TaktDashServiceClient, writeOptions: CallOptionsFactory): WriteOperations {
+  return {
     answerInquiry: (request) =>
       unary<AnswerInquiryRequest, AnswerInquiryResponse>(
         (req, metadata, callOptions, callback) => client.answerInquiry(req, metadata, callOptions, callback),
@@ -234,6 +242,22 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
         request,
         writeOptions(),
       ),
+  };
+}
+
+export function createBackendClient(options: CreateBackendClientOptions = {}): BackendClient {
+  const env = options.env ?? process.env;
+  const address = resolveBackendAddress(env);
+  const deadlineMs = options.deadlineMs ?? DEFAULT_UNARY_DEADLINE_MS;
+  const readOptions = (): grpc.CallOptions => ({ deadline: Date.now() + deadlineMs });
+  const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
+  const writeDeadlineMs = options.writeDeadlineMs ?? DEFAULT_WRITE_DEADLINE_MS;
+  const writeOptions = (): grpc.CallOptions => ({ deadline: Date.now() + writeDeadlineMs });
+
+  return {
+    ...createReadOperations(client, readOptions),
+    watchState: () => client.watchState({} satisfies WatchStateRequest),
+    ...createWriteOperations(client, writeOptions),
     close: () =>
       new Promise<void>((resolve) => {
         client.close();
