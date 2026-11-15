@@ -100,8 +100,9 @@ export function OverviewContent({ view }: OverviewContentProps): ReactElement {
                 <h3>
                   <span className={`dot ${state}`} aria-hidden="true" />
                   <span>
-                    {server.name}
-                    <span className="kind">{server.kind}</span>
+                    表示名: {server.name}
+                    <span className="srv-id">サーバー ID: {server.serverId}</span>
+                    <span className="kind">機種: {server.kind}</span>
                   </span>
                 </h3>
                 <span className={`big-badge ${state}`}>{stateLabel}</span>
