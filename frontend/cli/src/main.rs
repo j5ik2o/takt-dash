@@ -418,8 +418,9 @@ mod tests {
   use tonic::{transport::Server, Code, Request, Response, Status};
 
   use super::{
-    is_connection_failure, parse_arguments, proto, render_overview, resolve_backend_addr, run_with, AddrError,
-    AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
+    is_connection_failure, parse_arguments, proto, read_config_listen, render_overview, resolve_backend_addr, run_with,
+    AddrError, AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK,
+    EXIT_USAGE,
   };
 
   // proto の列挙値は生成コードの数値をそのまま使う。
@@ -539,6 +540,14 @@ mod tests {
     ) -> Result<Response<v1::GetRunDetailResponse>, Status> {
       self.record("GetRunDetail");
       Err(Status::unimplemented("このダミーサーバーは GetRunDetail を提供しません。"))
+    }
+
+    async fn get_conversation(
+      &self,
+      _request: Request<v1::GetConversationRequest>,
+    ) -> Result<Response<v1::GetConversationResponse>, Status> {
+      self.record("GetConversation");
+      Err(Status::unimplemented("このダミーサーバーは GetConversation を提供しません。"))
     }
 
     async fn watch_state(
@@ -1052,19 +1061,14 @@ mod tests {
   fn missing_config_file_falls_through_to_default() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
     let missing = dir.path().join("does-not-exist.json");
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
 
-    let code = run_with(
-      &["--config".to_owned(), missing.display().to_string()],
-      Err(std::env::VarError::NotPresent),
-      &mut stdout,
-      &mut stderr,
-    );
+    // 設定ファイルが無いことは異常にせず、listen 未指定として次の候補へ進む。
+    assert_eq!(read_config_listen(&missing), Ok(None));
 
-    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-    assert_eq!(code, EXIT_FAILURE);
-    assert!(stderr.contains(DEFAULT_BACKEND_ADDR), "設定ファイルが無いときは既定値へ進む必要があります: {stderr}");
+    // 既定値の待ち受けの有無は実行環境に依存するため、接続はせず解決結果だけを確かめる。
+    let sources =
+      AddrSources { cli_addr: None, env_addr: Err(std::env::VarError::NotPresent), config_listen: None };
+    assert_eq!(resolve_backend_addr(&sources), Ok(DEFAULT_BACKEND_ADDR.parse().unwrap()));
   }
 
   // ----------------------------------------------------------------------------
