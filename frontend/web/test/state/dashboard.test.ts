@@ -50,19 +50,47 @@ test("判断待ちの件数を問い合わせとマージ待ちに分けて数�
 test("run の状態はサーバー応答とログ無音と実行状態から決まる", () => {
   const state = createDashboardState();
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
+  const projectById = new Map(state.projects.map((project) => [project.name, project]));
 
-  const live = toRunView(state.runs[0]!, serverById, state.thresholds!, NOW);
+  const live = toRunView(state.runs[0]!, serverById, projectById, state.thresholds!, NOW);
   assert.equal(live.connected, true);
   assert.equal(live.label, "実行中");
 
   const disconnected = toRunView(
     { ...state.runs[0]!, serverId: "down" },
     serverById,
+    projectById,
     state.thresholds!,
     NOW,
   );
   assert.equal(disconnected.connected, false);
   assert.match(disconnected.label, /時点/);
+});
+
+test("run の状態はその run のプロジェクトの接続状態を使う", () => {
+  const state = createDashboardState();
+  const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
+  const projectById = new Map(state.projects.map((project) => [project.name, project]));
+  projectById.set("esa", {
+    ...projectById.get("esa")!,
+    connected: false,
+    lastReadAt: new Date(NOW.getTime() - 21 * 60_000),
+  });
+
+  const failed = toRunView(
+    { ...state.runs[0]!, runSlug: "run-esa", project: "esa" },
+    serverById,
+    projectById,
+    state.thresholds!,
+    NOW,
+  );
+  assert.equal(failed.connected, false, "読み取りに失敗したプロジェクトの run は接続なしとして扱う");
+  assert.match(failed.label, /実行中（.+時点）/);
+  assert.ok(failed.note.length > 0, "接続がない理由を表示します");
+
+  const healthy = toRunView(state.runs[0]!, serverById, projectById, state.thresholds!, NOW);
+  assert.equal(healthy.connected, true, "同じサーバーの健常なプロジェクトの run は実行中のままです");
+  assert.equal(healthy.label, "実行中");
 });
 
 test("概要の集計は proto の閾値をそのまま表示用に運ぶ", () => {

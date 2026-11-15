@@ -11,7 +11,7 @@ use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
-  model::{ExecutionStatus, GoalStatus, ProjectSnapshot},
+  model::{ExecutionStatus, GoalStatus, ProjectSnapshot, TaskEntry, TaskStatus},
   takt_dash::v1::{GetRunDetailRequest, RunStatus},
 };
 
@@ -223,6 +223,63 @@ async fn get_run_detail_marks_log_silent_true_when_the_last_log_exceeds_the_thre
     .into_inner();
 
   assert!(detail.log_silent, "閾値外側の最後のログは無音です");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn 完了した実行の詳細は実行中一覧になくても取得できる() {
+  // 状態ストアの runs が空でも、完了タスクの runSlug からプロジェクトを解決して
+  // 詳細を返します。mock の応答とタスク一覧にゴールとタスク名がないため、状態ストアの
+  // 完了タスクからそれらを補うことも観測します。
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", project_dir()),
+      server_meta(),
+      json!({
+        "runs": { "run-1": {
+          "runSlug": "run-1",
+          "sessionId": "sess-1",
+          "summary": "完了した run",
+          "status": "completed",
+          "startedAt": "2026-11-13T09:00:00Z",
+          "currentStep": "review",
+          "lastLogAt": "2026-11-13T09:30:00Z",
+          "stepLogs": []
+        } }
+      }),
+    )
+    .build();
+  let snapshot = ProjectSnapshot {
+    goals:         vec![],
+    tasks:         vec![TaskEntry {
+      name:         "implement".to_owned(),
+      goal_id:      Some("g1".to_owned()),
+      status:       TaskStatus::Completed,
+      started_at:   Some(time("2026-11-13T09:00:00Z")),
+      run_slug:     Some("run-1".to_owned()),
+      current_step: Some("review".to_owned()),
+      merge_task:   false,
+    }],
+    inquiries:     vec![],
+    runs:          vec![],
+    notifications: vec![],
+  };
+  harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("完了後も同じ runSlug で詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(detail.run_slug, "run-1");
+  assert_eq!(detail.project, "takt-dash", "完了タスクの runSlug からプロジェクトを解決します");
+  assert_eq!(detail.goal_id, "g1", "状態ストアの完了タスクからゴールを補います");
+  assert_eq!(detail.task_name, "implement", "状態ストアの完了タスクからタスク名を補います");
+  assert_eq!(detail.status, RunStatus::Completed as i32);
 
   server.stop().await;
 }

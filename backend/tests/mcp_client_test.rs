@@ -538,3 +538,145 @@ async fn goal_question_tool_error_inherits_only_that_goal_and_leaves_the_healthy
   assert_eq!(q2.body, "g2 の質問", "健常なゴールの質問は今回値を採ります");
   client.shutdown().await;
 }
+
+#[tokio::test]
+async fn 一覧の最終ログ時刻は応答の最終ログ時刻を最優先する() {
+  // 応答の lastLogAt がステップ記録と現在ステップの開始時刻より新しいとき、一覧の
+  // last_log_at は lastLogAt を採ります。同じ状態の詳細も同じ値になることを観測します。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T11:30:00Z", "runSlug": "r1", "currentStep": "implement" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "startedAt": "2026-11-13T11:30:00Z",
+        "currentStep": "implement",
+        "currentStepStartedAt": "2026-11-13T11:50:00Z",
+        "lastLogAt": "2026-11-13T11:59:00Z",
+        "stepLogs": [ { "step": "plan", "status": "completed", "timestamp": "2026-11-13T11:40:00Z" } ]
+      } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+
+  assert_eq!(detail.last_log_at, time("2026-11-13T11:59:00Z"), "詳細は応答の lastLogAt を最終ログ時刻に使います");
+  assert_eq!(
+    snapshot.runs[0].last_log_at,
+    time("2026-11-13T11:59:00Z"),
+    "一覧の最終ログ時刻は応答の lastLogAt を最優先します"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn 最終ログ時刻がないときは現在ステップの開始時刻を採る() {
+  // lastLogAt が無いとき、古い完了ステップの記録ではなく、現在ステップの開始時刻が
+  // 新しければそちらを採ります。一覧と詳細の無音判定が食い違わないことを観測します。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T11:30:00Z", "runSlug": "r1", "currentStep": "implement" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "startedAt": "2026-11-13T11:30:00Z",
+        "currentStep": "implement",
+        "currentStepStartedAt": "2026-11-13T11:59:00Z",
+        "stepLogs": [ { "step": "plan", "status": "completed", "timestamp": "2026-11-13T11:40:00Z" } ]
+      } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+
+  assert_eq!(
+    detail.last_log_at,
+    time("2026-11-13T11:59:00Z"),
+    "詳細は lastLogAt が無ければ現在ステップの開始時刻を使います"
+  );
+  assert_eq!(snapshot.runs[0].last_log_at, time("2026-11-13T11:59:00Z"), "一覧も現在ステップの開始時刻を使います");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn 一覧と詳細の最終ログ時刻はステップ記録と現在ステップの開始時刻の新しい方で一致する() {
+  // lastLogAt が無く、ステップ記録が現在ステップの開始時刻より新しいとき、一覧と詳細の
+  // 最終ログ時刻が同じ値になることを観測します。片方だけが現在ステップの開始時刻に落ちると
+  // 無音判定が食い違います。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "implement" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "startedAt": "2026-11-13T10:00:00Z",
+        "currentStep": "implement",
+        "currentStepStartedAt": "2026-11-13T10:02:00Z",
+        "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:05:00Z" } ]
+      } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+
+  assert_eq!(
+    snapshot.runs[0].last_log_at,
+    time("2026-11-13T10:05:00Z"),
+    "一覧は現在ステップの開始時刻より新しいステップ記録を最終ログ時刻に採ります"
+  );
+  assert_eq!(
+    detail.last_log_at,
+    time("2026-11-13T10:05:00Z"),
+    "詳細も同じステップ記録を最終ログ時刻に採り、一覧と一致します"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn 一覧と詳細の最終ログ時刻は複数ページの末尾ステップで一致する() {
+  // 51 ステップの run。lastLogAt と currentStepStartedAt が無いとき、先頭ページだけでなく
+  // 2 ページ目の末尾ステップの時刻を一覧と詳細の両方が採ることを観測します。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let mut step_logs = Vec::new();
+  for index in 0..51 {
+    let minute = index;
+    step_logs.push(json!({ "step": format!("step{index}"), "timestamp": format!("2026-11-13T10:{minute:02}:00Z") }));
+  }
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "step50" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "startedAt": "2026-11-13T10:00:00Z",
+        "currentStep": "step50",
+        "stepLogs": step_logs
+      } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+
+  assert_eq!(
+    snapshot.runs[0].last_log_at,
+    time("2026-11-13T10:50:00Z"),
+    "一覧は末尾ページの最終ステップを最終ログ時刻に採ります"
+  );
+  assert_eq!(
+    detail.last_log_at,
+    time("2026-11-13T10:50:00Z"),
+    "詳細も末尾ページの最終ステップを採り、一覧と一致します"
+  );
+  client.shutdown().await;
+}

@@ -10,6 +10,7 @@ import { DashboardState } from "../../src/proto/taktdash.ts";
 import { createDashboardState } from "../support/fixtures.ts";
 import { openStateStream, type EventSourceLike } from "../../src/components/state-stream.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
+import { restoreDashboardState } from "../../src/state/restore-state.ts";
 import { DecisionsContent } from "../../src/components/decisions-content.tsx";
 import { OverviewContent } from "../../src/components/overview-content.tsx";
 
@@ -76,6 +77,9 @@ test("proto の JSON（時刻は ISO 文字列、列挙型は名称文字列）�
   assert.ok(state.servers[0]!.lastReadAt instanceof Date);
   assert.ok(state.runs[0]!.startedAt instanceof Date);
   assert.ok(state.pendingDecisions[0]!.createdAt instanceof Date);
+  // プロジェクト単位の接続状態と最後に読めた時刻も実送信形式から復元される。
+  assert.equal(state.projects[0]!.connected, true);
+  assert.ok(state.projects[0]!.lastReadAt instanceof Date);
   // 列挙型は名称文字列から数値へ戻る（NaN にならない）。
   assert.equal(state.runs[0]!.status, 1); // RUN_STATUS_RUNNING
   assert.equal(state.pendingDecisions[1]!.type, 2); // PENDING_DECISION_TYPE_AWAITING_MERGE
@@ -143,4 +147,24 @@ test("close の後はエラーでも再接続しない", () => {
   stream.close();
   Ctor.instances[0]!.onerror?.({});
   assert.equal(Ctor.instances.length, 1);
+});
+
+test("受信したプロジェクトの接続状態と最後に読めた時刻を復元する", () => {
+  // 実送信形式（Project.toJSON）は connected が false のときフィールドを省略する。
+  // 省略された connected を切断として復元し、最後に読めた時刻を Date として保持することを観測する。
+  const restored = restoreDashboardState({
+    projects: [
+      {
+        name: "esa",
+        about: "イベントストアの実装",
+        serverId: "mini",
+        completedTasks24h: 1,
+        lastReadAt: "2026-11-13T07:09:00.000Z",
+      },
+    ],
+  });
+
+  assert.equal(restored.projects[0]?.connected, false);
+  assert.ok(restored.projects[0]?.lastReadAt instanceof Date);
+  assert.equal(restored.projects[0]?.lastReadAt?.toISOString(), "2026-11-13T07:09:00.000Z");
 });

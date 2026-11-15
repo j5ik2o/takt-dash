@@ -526,6 +526,24 @@ fn parse_notification(goal_id: &str, value: &Value) -> Result<NotificationEntry,
   })
 }
 
+/// 一覧と詳細で共通の最終ログ時刻の決定順です。
+///
+/// 応答の `lastLogAt` を最優先し、無いときだけ全ページのステップ記録の末尾時刻と現在ステップの
+/// 開始時刻の新しい方を使います。どちらも無ければ run の開始時刻に落とします。概要（`parse_run`）と
+/// 詳細（`parse_run_detail`）が同じ決定順を通り、無音判定が食い違わないようにします。
+fn resolve_last_log_at(
+  value: &Value,
+  last_step_timestamp: Option<DateTime<Utc>>,
+  current_step_started_at: Option<DateTime<Utc>>,
+  started_at: DateTime<Utc>,
+) -> Result<DateTime<Utc>, ToolError> {
+  Ok(
+    parse_time(value.get("lastLogAt"))?
+      .or_else(|| [last_step_timestamp, current_step_started_at].into_iter().flatten().max())
+      .unwrap_or(started_at),
+  )
+}
+
 fn parse_run(
   value: &Value,
   task: &TaskEntry,
@@ -537,7 +555,7 @@ fn parse_run(
     .or(task.started_at)
     .ok_or_else(|| ToolError::Parse("run の開始時刻を取得できません".to_owned()))?;
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
-  let last_log_at = last_step_timestamp.or(current_step_started_at).unwrap_or(started_at);
+  let last_log_at = resolve_last_log_at(value, last_step_timestamp, current_step_started_at, started_at)?;
   Ok(RunEntry {
     run_slug,
     session_id: optional_string(value, "sessionId").unwrap_or_default(),
@@ -631,6 +649,7 @@ impl<'a> ToolSet<'a> {
     let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug })).await?;
     let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_deref() == Some(run_slug));
     let mut step_logs = step_log_entries(&value);
+    let mut latest_step_timestamp = last_step_timestamp(&value);
     let mut next_offset = step_log_next_offset(&value);
     let mut pages_taken = 0;
     while let Some(offset) = next_offset {
@@ -639,6 +658,9 @@ impl<'a> ToolSet<'a> {
       }
       pages_taken += 1;
       let page_value = self.call_json("takt_get_run", json!({ "runSlug": run_slug, "offset": offset })).await?;
+      if let Some(timestamp) = last_step_timestamp(&page_value) {
+        latest_step_timestamp = Some(timestamp);
+      }
       step_logs.extend(step_log_entries(&page_value));
       next_offset = step_log_next_offset(&page_value);
     }
@@ -670,7 +692,7 @@ impl<'a> ToolSet<'a> {
         content: optional_string(&instruction_value, "content").unwrap_or_default(),
       });
     }
-    parse_run_detail(&value, run_slug, task.as_ref(), step_logs, reports, instructions)
+    parse_run_detail(&value, run_slug, task.as_ref(), latest_step_timestamp, step_logs, reports, instructions)
   }
 }
 
@@ -678,6 +700,7 @@ fn parse_run_detail(
   value: &Value,
   run_slug: &str,
   task: Option<&TaskEntry>,
+  last_step_timestamp: Option<DateTime<Utc>>,
   step_logs: Vec<StepLogEntry>,
   reports: Vec<RunReportEntry>,
   instructions: Vec<RunInstructionEntry>,
@@ -685,7 +708,7 @@ fn parse_run_detail(
   let started_at =
     parse_time(value.get("startedAt"))?.ok_or_else(|| ToolError::Parse("run の開始時刻を取得できません".to_owned()))?;
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
-  let last_log_at = parse_time(value.get("lastLogAt"))?.or(current_step_started_at).unwrap_or(started_at);
+  let last_log_at = resolve_last_log_at(value, last_step_timestamp, current_step_started_at, started_at)?;
   let task_name = optional_string(value, "taskName").or_else(|| task.map(|task| task.name.clone())).unwrap_or_default();
   let goal_id = optional_string(value, "goalId").or_else(|| task.and_then(|task| task.goal_id.clone()));
   Ok(RunDetail {

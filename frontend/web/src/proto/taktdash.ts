@@ -418,6 +418,10 @@ export interface Project {
   serverId: string;
   /** 直近24時間に完了したタスクの件数 */
   completedTasks24h: number;
+  /** 応答の有無（プロジェクト単位） */
+  connected: boolean;
+  /** 最後に読めた時刻 */
+  lastReadAt: Date | undefined;
 }
 
 /** タスクの状態ごとの件数を表す。 */
@@ -953,7 +957,7 @@ export const Server: MessageFns<Server> = {
 };
 
 function createBaseProject(): Project {
-  return { name: "", about: "", serverId: "", completedTasks24h: 0 };
+  return { name: "", about: "", serverId: "", completedTasks24h: 0, connected: false, lastReadAt: undefined };
 }
 
 export const Project: MessageFns<Project> = {
@@ -969,6 +973,12 @@ export const Project: MessageFns<Project> = {
     }
     if (message.completedTasks24h !== 0) {
       writer.uint32(32).int32(message.completedTasks24h);
+    }
+    if (message.connected !== false) {
+      writer.uint32(40).bool(message.connected);
+    }
+    if (message.lastReadAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.lastReadAt), writer.uint32(50).fork()).join();
     }
     return writer;
   },
@@ -1018,6 +1028,22 @@ export const Project: MessageFns<Project> = {
             message.completedTasks24h = reader.int32();
             continue;
           }
+          case 5: {
+            if (tag !== 40) {
+              break;
+            }
+
+            message.connected = reader.bool();
+            continue;
+          }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.lastReadAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -1044,6 +1070,12 @@ export const Project: MessageFns<Project> = {
         : isSet(object.completed_tasks_24h)
         ? globalThis.Number(object.completed_tasks_24h)
         : 0,
+      connected: isSet(object.connected) ? globalThis.Boolean(object.connected) : false,
+      lastReadAt: isSet(object.lastReadAt)
+        ? fromJsonTimestamp(object.lastReadAt)
+        : isSet(object.last_read_at)
+        ? fromJsonTimestamp(object.last_read_at)
+        : undefined,
     };
   },
 
@@ -1061,6 +1093,12 @@ export const Project: MessageFns<Project> = {
     if (message.completedTasks24h !== 0) {
       obj.completedTasks24h = Math.round(message.completedTasks24h);
     }
+    if (message.connected !== false) {
+      obj.connected = message.connected;
+    }
+    if (message.lastReadAt !== undefined) {
+      obj.lastReadAt = message.lastReadAt.toISOString();
+    }
     return obj;
   },
 
@@ -1073,6 +1111,8 @@ export const Project: MessageFns<Project> = {
     message.about = object.about ?? "";
     message.serverId = object.serverId ?? "";
     message.completedTasks24h = object.completedTasks24h ?? 0;
+    message.connected = object.connected ?? false;
+    message.lastReadAt = object.lastReadAt ?? undefined;
     return message;
   },
 };
