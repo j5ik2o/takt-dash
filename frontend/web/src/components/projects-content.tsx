@@ -1,11 +1,23 @@
 import type { ReactElement } from "react";
-import type { GetProjectsResponse } from "../proto/taktdash";
+import type { ExecutionStatus, GetProjectsResponse } from "../proto/taktdash";
 import { projectAnchorId } from "../state/anchors";
+import { EXECUTION_STATUS } from "../state/proto-values";
 import { executionStatusLabel, goalStatusLabel, projectKey, resolveThresholds, sortPendingDecisions, toRunView } from "../state/dashboard";
 
 type ProjectsContentProps = {
   response: GetProjectsResponse;
   now: Date;
+};
+
+const executionStateClass = (status: ExecutionStatus): "live" | "idle" | "warn" => {
+  switch (status) {
+    case EXECUTION_STATUS.ACTIVE:
+      return "live";
+    case EXECUTION_STATUS.ABORTED:
+      return "warn";
+    default:
+      return "idle";
+  }
 };
 
 export function ProjectsContent({ response, now }: ProjectsContentProps): ReactElement {
@@ -49,7 +61,11 @@ export function ProjectsContent({ response, now }: ProjectsContentProps): ReactE
                     <li key={goal.goalId}>
                       <p className="gn">{goal.name}</p>
                       <p className="gs">
-                        ゴールは{goalStatusLabel(goal.status)}で、実行状態は{executionStatusLabel(goal.executionStatus)}です。
+                        ゴールは{goalStatusLabel(goal.status)}で、実行状態は
+                        <span className={executionStateClass(goal.executionStatus)}>
+                          {executionStatusLabel(goal.executionStatus)}
+                        </span>
+                        です。
                       </p>
                     </li>
                   ))}
@@ -65,7 +81,7 @@ export function ProjectsContent({ response, now }: ProjectsContentProps): ReactE
                       <li key={run.runSlug}>
                         <span className="tn">{run.taskName}</span>
                         <span>{view.label}</span>
-                        <a className="view" href={`/runs/${encodeURIComponent(run.runSlug)}`}>
+                        <a className="view mono" href={`/runs/${encodeURIComponent(run.runSlug)}`}>
                           {run.runSlug}
                         </a>
                       </li>
