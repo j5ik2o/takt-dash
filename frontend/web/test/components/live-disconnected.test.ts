@@ -1,0 +1,62 @@
+// 概要と判断待ちの内容コンポーネントが、渡された切断フラグに応じて通知を描画する契約（issue #20 の prop 契約）。
+//
+// ここでは内容コンポーネントへ disconnected を prop として直接渡し、通知が出ることと、
+// 切断時も最後に読めた状態の表示が残ることを観測する。Provider から useLiveState を経由する
+// 配線層の観測は live-provider-wiring.test.ts が担う。docs/requirements.md:47 のキャッシュ表示を
+// 消さないことも確かめる。
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { createDashboardState, NOW } from "../support/fixtures.ts";
+import { buildOverviewView } from "../../src/state/dashboard.ts";
+import { OverviewContent } from "../../src/components/overview-content.tsx";
+import { DecisionsContent } from "../../src/components/decisions-content.tsx";
+import { BACKEND_UNAVAILABLE_MESSAGE } from "../../src/components/backend-unavailable-notice.tsx";
+
+const renderOverview = (disconnected: boolean): string =>
+  renderToStaticMarkup(
+    createElement(OverviewContent, { view: buildOverviewView(createDashboardState(), NOW), disconnected }),
+  );
+
+const renderDecisions = (disconnected: boolean): string =>
+  renderToStaticMarkup(
+    createElement(DecisionsContent, { state: createDashboardState(), now: NOW, disconnected }),
+  );
+
+test("概要は SSE の切断中に backend 不通の通知を描画する", () => {
+  const html = renderOverview(true);
+  assert.match(html, /backend に接続できません/);
+  assert.ok(html.includes(BACKEND_UNAVAILABLE_MESSAGE), "既存の不通の文言を使います");
+});
+
+test("概要は接続中に backend 不通の通知を描画しない", () => {
+  const html = renderOverview(false);
+  assert.doesNotMatch(html, /backend に接続できません/);
+});
+
+test("概要は切断中も最後に読めた状態と時刻の表示を残す", () => {
+  const html = renderOverview(true);
+  assert.match(html, /最終読み取り時刻/, "キャッシュとして最後に読めた時刻の表示を残します");
+  assert.match(html, /Mac mini/, "最後に読めたサーバーの表示を残します");
+});
+
+test("判断待ちは SSE の切断中に backend 不通の通知を描画する", () => {
+  const html = renderDecisions(true);
+  assert.match(html, /backend に接続できません/);
+  assert.ok(html.includes(BACKEND_UNAVAILABLE_MESSAGE), "既存の不通の文言を使います");
+});
+
+test("判断待ちは接続中に backend 不通の通知を描画しない", () => {
+  const html = renderDecisions(false);
+  assert.doesNotMatch(html, /backend に接続できません/);
+});
+
+test("判断待ちは切断中も最後に読めた状態の表示を残す", () => {
+  const html = renderDecisions(true);
+  assert.match(html, /判断待ち/, "最後に読めた判断待ちの表示を残します");
+  // 見出しや脚注にも「判断待ち」が含まれるため、状態に由来する一覧の値で
+  // キャッシュ表示が実際に描画されていることを確かめる。
+  assert.match(html, /corporate-site/, "最後に読めた判断待ちの対象プロジェクトを残します");
+  assert.match(html, /プルリクエスト #418/, "最後に読めた判断待ちの本文を残します");
+});

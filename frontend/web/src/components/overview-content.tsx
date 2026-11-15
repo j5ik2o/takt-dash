@@ -1,17 +1,20 @@
 import type { ReactElement } from "react";
 import type { OverviewView } from "../state/dashboard";
 import { formatClock, formatDateTime } from "../state/format";
+import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 
 type OverviewContentProps = {
   view: OverviewView;
+  disconnected: boolean;
 };
 
 // 概要は要件 order.md:23 とモック docs/taktdash.html:663-699 に沿う。「24時間のトークン消費」は
 // 対象外のため、タイルもその旨の表示も持たない。
-export function OverviewContent({ view }: OverviewContentProps): ReactElement {
+export function OverviewContent({ view, disconnected }: OverviewContentProps): ReactElement {
   const { thresholds, pendingCounts } = view;
   return (
     <main className="page">
+      {disconnected ? <BackendUnavailableNotice /> : null}
       <header className="page-head">
         <div>
           <h1>概要</h1>
@@ -43,6 +46,10 @@ export function OverviewContent({ view }: OverviewContentProps): ReactElement {
             <li>
               <span>人のマージ待ち</span>
               <b>{pendingCounts.awaitingMerge}件</b>
+            </li>
+            <li>
+              <span>ゴール登録の承認待ち</span>
+              <b>{pendingCounts.goalRegistration}件</b>
             </li>
           </ul>
         </div>

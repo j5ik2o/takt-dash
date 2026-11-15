@@ -4,8 +4,8 @@ package takt_dash.v1;
 
 import "google/protobuf/timestamp.proto";
 
-// taktDash の読み取り系 API を提供する。
-// このサービスは状態を返すだけで、状態を書き換える操作は提供しない。
+// taktDash の読み取り系と書き込み系の API を提供する。
+// 読み取りは状態を返し、書き込みは takt-mcp の道具を通して takt の状態を変える。
 service TaktDashService {
   // すべての集約対象の今の状態を返す。
   rpc GetOverview(GetOverviewRequest) returns (DashboardState);
@@ -13,7 +13,7 @@ service TaktDashService {
   // プロジェクトごとの状態と、直近の出来事を返す。
   rpc GetProjects(GetProjectsRequest) returns (GetProjectsResponse);
 
-  // 未回答の問い合わせと人のマージ待ちのゴールからなる判断待ちを返す。
+  // 未回答の問い合わせと人のマージ待ちのゴールとゴール登録の承認待ちからなる判断待ちを返す。
   rpc GetPendingDecisions(GetPendingDecisionsRequest) returns (GetPendingDecisionsResponse);
 
   // 出来事の一覧と直近7日分の日次集計を返す。
@@ -21,6 +21,9 @@ service TaktDashService {
 
   // 1つの run について、takt_get_run で取得できる範囲を返す。
   rpc GetRunDetail(GetRunDetailRequest) returns (GetRunDetailResponse);
+
+  // manager の会話を時系列で返す。after_seq で増分取得できる。
+  rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);
 
   // すべてのサーバー・すべてのプロジェクトのゴールを返す。
   rpc GetGoals(GetGoalsRequest) returns (GetGoalsResponse);
@@ -33,6 +36,21 @@ service TaktDashService {
 
   // 接続時に即時に全件を返し、その後は状態が変わるたびに送る。
   rpc WatchState(WatchStateRequest) returns (stream DashboardState);
+
+  // 判断待ちの問い合わせへ回答する。回答の内容は問い合わせの種類に応じて text か report を使う。
+  rpc AnswerInquiry(AnswerInquiryRequest) returns (AnswerInquiryResponse);
+
+  // プルリクエストのマージを承認し、マージのタスクを依頼する。
+  rpc ApproveGoalMerge(ApproveGoalMergeRequest) returns (ApproveGoalMergeResponse);
+
+  // ゴール登録の承認待ちを承認する。
+  rpc ApproveGoalRegistration(ApproveGoalRegistrationRequest) returns (ApproveGoalRegistrationResponse);
+
+  // ゴール登録の承認待ちを却下する。
+  rpc RejectGoalRegistration(RejectGoalRegistrationRequest) returns (RejectGoalRegistrationResponse);
+
+  // ゴール登録の承認待ちを、判断待ちの一覧へ表示できる形で返す。
+  rpc ListGoalRegistrationProposals(ListGoalRegistrationProposalsRequest) returns (ListGoalRegistrationProposalsResponse);
 }
 
 // ゴールの状態を表す。
@@ -92,11 +110,20 @@ enum InquiryKind {
 }
 
 // 判断待ちの種類を表す。
-// 判断待ちの一覧は未回答の問い合わせと人のマージ待ちのゴールに限る。
+// 判断待ちの一覧は未回答の問い合わせと人のマージ待ちのゴールとゴール登録の承認待ちからなる。
 enum PendingDecisionType {
   PENDING_DECISION_TYPE_UNSPECIFIED = 0;
   PENDING_DECISION_TYPE_INQUIRY = 1;
   PENDING_DECISION_TYPE_AWAITING_MERGE = 2;
+  PENDING_DECISION_TYPE_GOAL_REGISTRATION = 3;
+}
+
+// 会話の発話者を表す。
+enum ConversationSpeaker {
+  CONVERSATION_SPEAKER_UNSPECIFIED = 0;
+  CONVERSATION_SPEAKER_USER = 1;
+  CONVERSATION_SPEAKER_MANAGER = 2;
+  CONVERSATION_SPEAKER_SYSTEM = 3;
 }
 
 // 集約対象のサーバーを表す。
@@ -111,10 +138,12 @@ message Server {
 
 // 集約対象のプロジェクトを表す。
 message Project {
-  string name = 1;                  // 名前
-  string about = 2;                 // 説明
-  string server_id = 3;             // 集約設定上のサーバー
-  int32 completed_tasks_24h = 4;    // 直近24時間に完了したタスクの件数
+  string name = 1;                             // 名前
+  string about = 2;                            // 説明
+  string server_id = 3;                        // 集約設定上のサーバー
+  int32 completed_tasks_24h = 4;               // 直近24時間に完了したタスクの件数
+  bool connected = 5;                          // 応答の有無（プロジェクト単位）
+  google.protobuf.Timestamp last_read_at = 6;  // 最後に読めた時刻
 }
 
 // タスクの状態ごとの件数を表す。
@@ -182,7 +211,7 @@ message Run {
 
 // 判断待ちの項目を表す。
 message PendingDecision {
-  PendingDecisionType type = 1;           // 種類（問い合わせ・マージ待ち）。判断待ちはこの2種のみ
+  PendingDecisionType type = 1;           // 種類（問い合わせ・マージ待ち・ゴール登録の承認待ち）
   string server_id = 2;                   // サーバー
   string project = 3;                     // プロジェクト
   optional string goal_id = 4;            // ゴール ID（ゴールに属さない問い合わせは省略する）
@@ -192,6 +221,8 @@ message PendingDecision {
   repeated string options = 8;            // 選択肢
   PullRequest pull_request = 9;           // マージ待ちのプルリクエスト
   bool stale = 10;                        // 滞留の判定済みフラグ
+  string inquiry_id = 11;                 // 問い合わせの識別子（AnswerInquiry の inquiry_id に渡す。マージ待ちは空。ゴールに属さない問い合わせには回答できない）
+  optional int32 revision = 12;           // ゴール登録の承認待ちの revision（承認・却下に渡す。それ以外は省略）
 }
 
 // 異常判定の基準を表す。
@@ -408,5 +439,121 @@ message GetTaskDetailResponse {
   optional google.protobuf.Timestamp completed_at = 13; // 完了時刻
 }
 
+// 会話の取得を要求する。
+message GetConversationRequest {
+  string project = 1;              // プロジェクト名
+  optional string session_id = 2;  // セッション（省略時は最新の manager のセッション）
+  int64 after_seq = 3;             // この seq より後の行を返す
+  int32 limit = 4;                 // 調べる行数の上限
+}
+
+// 会話の1件を表す。
+message ConversationMessage {
+  int64 seq = 1;                              // セッション内の順序
+  google.protobuf.Timestamp occurred_at = 2;  // 発言の時刻
+  ConversationSpeaker speaker = 3;            // 発話者
+  string text = 4;                            // 本文
+}
+
+// 解釈できずスキップした行の理由と件数を表す。
+message ConversationSkipped {
+  string reason = 1;  // スキップした理由
+  int32 count = 2;    // 件数
+}
+
+// 会話の取得への応答を表す。
+message GetConversationResponse {
+  string project = 1;                          // プロジェクト名
+  string session_id = 2;                       // セッション
+  string provider = 3;                         // プロバイダ（この版は opencode のみ）
+  repeated ConversationMessage messages = 4;    // 会話の並び（seq の昇順）
+  int64 next_after_seq = 5;                    // 次回に指定する after_seq
+  bool has_more = 6;                           // 未読の行が残っているか
+  repeated ConversationSkipped skipped = 7;     // スキップした行の理由と件数
+  optional string unavailable_reason = 8;      // 保存先が無いなどの理由
+}
+
 // 状態ストリーミングの接続を要求する。
 message WatchStateRequest {}
+
+// operation_request への回答の種類を表す。
+enum OperationAnswerReport {
+  OPERATION_ANSWER_REPORT_UNSPECIFIED = 0;
+  OPERATION_ANSWER_REPORT_COMPLETED = 1;  // 実施した
+  OPERATION_ANSWER_REPORT_UNABLE = 2;     // 対応できない
+}
+
+// 問い合わせへの回答を要求する。
+message AnswerInquiryRequest {
+  string server_id = 1;                              // サーバー
+  string project = 2;                                // プロジェクト
+  optional string goal_id = 3;                       // ゴール ID（明示指定するか判断待ちの一覧から引き当てる。ゴールに属さない問い合わせには回答できない）
+  string inquiry_id = 4;                             // 問い合わせの識別子（判断待ちの inquiry_id）
+  optional string text = 5;                          // 自由記述または選択肢の回答（質問への回答で使う）
+  optional OperationAnswerReport report = 6;         // 作業の依頼への回答（operation_request で使う）
+}
+
+// 問い合わせへの回答への応答を表す。
+message AnswerInquiryResponse {
+  string inquiry_id = 1;                             // 受け付けた回答の対象の識別子
+}
+
+// プルリクエストのマージの承認を要求する。
+message ApproveGoalMergeRequest {
+  string server_id = 1;  // サーバー
+  string project = 2;    // プロジェクト
+  string goal_id = 3;    // ゴール ID
+  int64 pr_number = 4;   // プルリクエストの番号
+  string until = 5;      // "prepare" なら準備まで、"merge" ならマージまで行う
+}
+
+// プルリクエストのマージの承認への応答を表す。
+message ApproveGoalMergeResponse {
+  string task_name = 1;  // 依頼したタスク名
+  string workflow = 2;   // 使うワークフロー
+}
+
+// ゴール登録の承認を要求する。
+message ApproveGoalRegistrationRequest {
+  string server_id = 1;  // サーバー
+  string project = 2;    // プロジェクト
+  int32 revision = 3;    // 承認待ちの revision
+}
+
+// ゴール登録の承認への応答を表す。
+message ApproveGoalRegistrationResponse {
+  int32 revision = 1;    // 承認した revision
+  string goal_id = 2;    // 登録されたゴールの ID
+}
+
+// ゴール登録の却下を要求する。
+message RejectGoalRegistrationRequest {
+  string server_id = 1;  // サーバー
+  string project = 2;    // プロジェクト
+  int32 revision = 3;    // 却下する承認待ちの revision
+}
+
+// ゴール登録の却下への応答を表す。
+message RejectGoalRegistrationResponse {
+  int32 revision = 1;    // 却下した revision
+}
+
+// ゴール登録の承認待ちを表す。判断待ちの一覧へ表示できる形にする。
+message GoalRegistrationProposal {
+  int32 revision = 1;    // 承認待ちの revision
+  string server_id = 2;  // サーバー
+  string project = 3;    // プロジェクト
+  string body = 4;       // 本文（提案の要約）
+  string repository_directory = 5;  // 提案の対象プロジェクトのディレクトリ
+}
+
+// ゴール登録の承認待ちの取得を要求する。
+message ListGoalRegistrationProposalsRequest {
+  string server_id = 1;  // サーバー
+  string project = 2;    // プロジェクト
+}
+
+// ゴール登録の承認待ちの取得への応答を表す。
+message ListGoalRegistrationProposalsResponse {
+  repeated GoalRegistrationProposal proposals = 1;  // 承認待ち（無ければ空）
+}

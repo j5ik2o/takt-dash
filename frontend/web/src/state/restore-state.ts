@@ -50,6 +50,8 @@ const toProject = (raw: Record<string, unknown>): Project => ({
   about: String(raw.about ?? ""),
   serverId: String(raw.serverId ?? ""),
   completedTasks24h: asNumber(raw.completedTasks24h),
+  connected: raw.connected === true,
+  lastReadAt: toDate(raw.lastReadAt),
 });
 
 const toTaskCounts = (raw: unknown): TaskStatusCounts | undefined => {
@@ -136,6 +138,8 @@ const toPendingDecision = (raw: Record<string, unknown>): PendingDecision => ({
         }
       : undefined,
   stale: raw.stale === true,
+  inquiryId: String(raw.inquiryId ?? ""),
+  revision: typeof raw.revision === "number" ? raw.revision : undefined,
 });
 
 const toThresholds = (raw: unknown): AnomalyThresholds | undefined => {

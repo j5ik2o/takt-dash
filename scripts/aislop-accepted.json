@@ -1,0 +1,75 @@
+{
+  "engines": ["format", "lint", "code-quality", "ai-slop", "security"],
+  "missingToolsAllowed": {
+    "ruff": "このリポジトリの Python は tools/ 配下の補助スクリプトだけで、ruff を導入していない。format と lint の Python 側は未検査になる。"
+  },
+  "accepted": [
+    {
+      "reason": "repo_gate.py は機械ゲート検査の判定が1か所に集まっており、これ以上の分割は別作業になる。issue #2 の制約により無関係なリファクタリングをしないため、行数超過を理由付きで受け入れる。",
+      "findings": [
+        {
+          "engine": "code-quality",
+          "rule": "complexity/file-too-large",
+          "file": "tools/repo-gate/repo_gate.py",
+          "message": "File too large (limit: 400, flagged above 441 lines)"
+        }
+      ]
+    },
+    {
+      "reason": "CLI の引数解析（parse_arguments）とその設定・サブコマンド定義が main.rs の1か所に集まっており、これ以上の分割は引数解析の構造変更になって PR #85 の範囲を超える。行数と関数長の超過はいずれも上限の約1割で、引数の追加や削除のたびに同じ箇所を見ればよいため、追跡性の面でも分割の利益が小さい。",
+      "findings": [
+        {
+          "engine": "code-quality",
+          "rule": "complexity/file-too-large",
+          "file": "frontend/cli/src/main.rs",
+          "message": "File too large (limit: 1000, flagged above 1100 lines)"
+        },
+        {
+          "engine": "code-quality",
+          "rule": "complexity/function-too-long",
+          "file": "frontend/cli/src/main.rs",
+          "message": "Function too long (limit: 120, flagged above 132 lines)"
+        }
+      ]
+    },
+    {
+      "reason": "tests.rs は今回追加した CLI 書き込みコマンドのテスト群を含み、ケースを1ファイルに並べる方が同じ前提を共有するテストとして追跡しやすい。テストコードの行数・関数長の超過はコンパイル時間や保守のしきい値であって実行時のリスクは低く、テストの分割は今回の目的と因果関係がないため受け入れる。",
+      "findings": [
+        {
+          "engine": "code-quality",
+          "rule": "complexity/file-too-large",
+          "file": "frontend/cli/src/tests.rs",
+          "message": "File too large (limit: 1000, flagged above 1100 lines)"
+        },
+        {
+          "engine": "code-quality",
+          "rule": "complexity/function-too-long",
+          "file": "frontend/cli/src/tests.rs",
+          "message": "Function too long (limit: 120, flagged above 132 lines)"
+        }
+      ]
+    },
+    {
+      "reason": "createBackendClient は生成された gRPC クライアントの unary 呼び出しを同じ形で束ねる関数で、分割すると同一パターンの重複が増えて呼び出しごとの差異が読みにくくなる。上限を超えるのは8行だけで、束ねる対象を1か所で比較できる利点を優先して受け入れる。",
+      "findings": [
+        {
+          "engine": "code-quality",
+          "rule": "complexity/function-too-long",
+          "file": "frontend/web/src/grpc/client.ts",
+          "message": "Function too long (limit: 80, flagged above 88 lines)"
+        }
+      ]
+    },
+    {
+      "reason": "decision-actions.ts は判断待ち3種別の意図解決と対象保持の処理が1か所にまとまっており、分割すると種別ごとの分岐と状態遷移の対応が見通しにくくなる。行数超過は1ファイルで状態遷移を追える利点と引き換えであり、今回の PR #85 では分割しない判断で受け入れる。",
+      "findings": [
+        {
+          "engine": "code-quality",
+          "rule": "complexity/file-too-large",
+          "file": "frontend/web/src/state/decision-actions.ts",
+          "message": "File too large (limit: 400, flagged above 441 lines)"
+        }
+      ]
+    }
+  ]
+}

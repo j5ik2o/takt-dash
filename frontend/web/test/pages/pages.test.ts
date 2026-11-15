@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { createElement, type ComponentType, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  createActionableDashboardState,
   createActivityResponse,
   createDashboardState,
   createProjectsResponse,
@@ -94,6 +95,43 @@ test("プロジェクトページはゴール・タスク・run・判断待ち�
   }
 });
 
+test("プロジェクトページは読み取りに失敗したプロジェクトの run を時点付きで描画する", () => {
+  const response = createProjectsResponse();
+  const state = response.state!;
+  const failedState = {
+    ...state,
+    projects: state.projects.map((project) =>
+      project.name === "esa"
+        ? { ...project, connected: false, lastReadAt: new Date(NOW.getTime() - 21 * 60_000) }
+        : project,
+    ),
+    runs: [...state.runs, { ...state.runs[0]!, runSlug: "run-esa", project: "esa" }],
+  };
+  const html = renderPage(ProjectsPage, { response: { ...response, state: failedState }, now: NOW });
+  assert.match(html, /run-esa/);
+  assert.match(html, /実行中（.+時点）/);
+});
+
+test("バックエンドが無音と判定した run の警告を概要ページとプロジェクトページに表示する", () => {
+  const state = createDashboardState();
+  const base = state.runs[0]!;
+  const justOverThreshold = new Date(NOW.getTime() - (10 * 60_000 + 1_000));
+  const silentState = {
+    ...state,
+    runs: [{ ...base, logSilent: true, lastLogAt: justOverThreshold }],
+  };
+
+  const overviewHtml = renderPage(OverviewPage, { view: buildOverviewView(silentState, NOW) });
+  assert.match(overviewHtml, /ログが止まっています/, "概要の run 行に警告を出します");
+
+  const response = createProjectsResponse();
+  const projectsHtml = renderPage(ProjectsPage, {
+    response: { ...response, state: silentState },
+    now: NOW,
+  });
+  assert.match(projectsHtml, /ログが止まっています/, "プロジェクトの run 行に警告を出します");
+});
+
 test("判断待ちページは待ち時間順に描画し、滞留の項目に滞留の表示を付ける", async () => {
   const state = createDashboardState();
   const html = renderPage(DecisionsPage, { state, now: NOW });
@@ -104,13 +142,14 @@ test("判断待ちページは待ち時間順に描画し、滞留の項目に�
   assert.match(html, /滞留/);
 });
 
-test("判断待ちページは回答・承認・却下の操作要素を持たない", () => {
-  const html = renderPage(DecisionsPage, { state: createDashboardState(), now: NOW });
-  assert.doesNotMatch(html, /<button/i);
-  assert.doesNotMatch(html, /<form/i);
-  assert.doesNotMatch(html, /<input/i);
-  assert.doesNotMatch(html, /実施した/);
-  assert.doesNotMatch(html, /承認/);
+test("判断待ちページは種別ごとの操作要素を一覧に描画する", () => {
+  const html = renderPage(DecisionsPage, { state: createActionableDashboardState(), now: NOW });
+  assert.match(html, /<button/i);
+  assert.match(html, /<input[^>]*type="text"/);
+  assert.match(html, /実施した/);
+  assert.match(html, /対応できない/);
+  assert.match(html, /マージを承認/);
+  assert.match(html, /却下/);
 });
 
 test("アクティビティページは出来事を新しい順に並べ、7日分の集計とサーバー別の当日件数を描画する", async () => {

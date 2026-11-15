@@ -5,6 +5,7 @@
 import {
   ActivityKind,
   AnomalyThresholds,
+  ConversationSpeaker,
   DashboardState,
   ExecutionStatus,
   GetGoalDetailResponse,
@@ -15,8 +16,10 @@ import {
   RunStatus,
   TaskStatus,
   type ActivityEvent,
+  type ConversationMessage,
   type DailySummary,
   type GetActivityResponse,
+  type GetConversationResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
   type Goal,
@@ -59,8 +62,22 @@ export function createDashboardState(): DashboardState {
       },
     ],
     projects: [
-      { name: "corporate-site", about: "採用ページを管理する", serverId: "mini", completedTasks24h: 3 },
-      { name: "esa", about: "イベントストアの実装", serverId: "mini", completedTasks24h: 1 },
+      {
+        name: "corporate-site",
+        about: "採用ページを管理する",
+        serverId: "mini",
+        completedTasks24h: 3,
+        connected: true,
+        lastReadAt: minutesAgo(1),
+      },
+      {
+        name: "esa",
+        about: "イベントストアの実装",
+        serverId: "mini",
+        completedTasks24h: 1,
+        connected: true,
+        lastReadAt: minutesAgo(1),
+      },
     ],
     goals: [
       {
@@ -110,6 +127,7 @@ export function createDashboardState(): DashboardState {
         project: "esa",
         goalId: "goal-2",
         inquiryKind: InquiryKind.INQUIRY_KIND_QUESTION,
+        inquiryId: "inquiry-schedule",
         createdAt: minutesAgo(30),
         body: "リリースの日取りはどうしますか。",
         options: ["今週", "来週"],
@@ -126,6 +144,122 @@ export function createDashboardState(): DashboardState {
         options: [],
         pullRequest: { number: 418, url: "https://example.test/pr/418" },
         stale: true,
+      },
+    ],
+    thresholds: createThresholds(),
+  });
+}
+
+// 判断待ちページの操作 UI を確かめるための状態。
+// 3種別（問い合わせ・マージ待ち・ゴール登録の承認待ち）と、操作に必要な値が欠けた
+// 項目をまとめて持つ。各テストは使う項目だけを取り出し、状態を作り直さずに共有しない。
+export function createActionableDashboardState(): DashboardState {
+  return DashboardState.create({
+    readAt: NOW,
+    servers: [
+      {
+        serverId: "mini",
+        name: "Mac mini",
+        kind: "Mac mini",
+        connected: true,
+        lastReadAt: minutesAgo(1),
+        concurrency: 4,
+      },
+    ],
+    projects: [
+      { name: "esa", about: "イベントストアの実装", serverId: "mini", completedTasks24h: 1 },
+      { name: "corporate-site", about: "採用ページを管理する", serverId: "mini", completedTasks24h: 3 },
+      { name: "takt", about: "判断待ちを管理する", serverId: "mini", completedTasks24h: 0 },
+    ],
+    goals: [],
+    runs: [],
+    pendingDecisions: [
+      {
+        type: PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY,
+        serverId: "mini",
+        project: "esa",
+        goalId: "goal-2",
+        inquiryKind: InquiryKind.INQUIRY_KIND_QUESTION,
+        inquiryId: "inquiry-options",
+        createdAt: minutesAgo(10),
+        body: "リリースの日取りはどうしますか。",
+        options: ["今週", "来週"],
+        stale: false,
+      },
+      {
+        type: PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY,
+        serverId: "mini",
+        project: "esa",
+        goalId: "goal-2",
+        inquiryKind: InquiryKind.INQUIRY_KIND_QUESTION,
+        inquiryId: "inquiry-text",
+        createdAt: minutesAgo(12),
+        body: "補足を入力してください。",
+        options: [],
+        stale: false,
+      },
+      {
+        type: PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY,
+        serverId: "mini",
+        project: "esa",
+        goalId: "goal-2",
+        inquiryKind: InquiryKind.INQUIRY_KIND_OPERATION_REQUEST,
+        inquiryId: "inquiry-operation",
+        createdAt: minutesAgo(14),
+        body: "ログを確認してください。",
+        options: [],
+        stale: false,
+      },
+      {
+        type: PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE,
+        serverId: "mini",
+        project: "corporate-site",
+        goalId: "goal-1",
+        inquiryKind: InquiryKind.INQUIRY_KIND_UNSPECIFIED,
+        inquiryId: "",
+        createdAt: minutesAgo(300),
+        body: "プルリクエスト #418 のマージを待っています。",
+        options: [],
+        pullRequest: { number: 418, url: "https://example.test/pr/418" },
+        stale: true,
+      },
+      {
+        type: PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION,
+        serverId: "mini",
+        project: "takt",
+        goalId: undefined,
+        inquiryKind: InquiryKind.INQUIRY_KIND_UNSPECIFIED,
+        inquiryId: "",
+        createdAt: minutesAgo(20),
+        body: "新しいゴールを登録する提案です。",
+        options: [],
+        revision: 7,
+        stale: false,
+      },
+      {
+        type: PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY,
+        serverId: "mini",
+        project: "esa",
+        goalId: undefined,
+        inquiryKind: InquiryKind.INQUIRY_KIND_QUESTION,
+        inquiryId: "inquiry-without-goal",
+        createdAt: minutesAgo(16),
+        body: "ゴールに属さない問い合わせです。",
+        options: ["はい"],
+        stale: false,
+      },
+      {
+        type: PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION,
+        serverId: "mini",
+        project: "takt",
+        goalId: undefined,
+        inquiryKind: InquiryKind.INQUIRY_KIND_UNSPECIFIED,
+        inquiryId: "",
+        createdAt: minutesAgo(25),
+        body: "revision の無い承認待ちです。",
+        options: [],
+        revision: undefined,
+        stale: false,
       },
     ],
     thresholds: createThresholds(),
@@ -183,6 +317,45 @@ export function createActivityResponse(): GetActivityResponse {
     events: createActivityEvents(),
     dailySummaries: createDailySummaries(),
     todayCountsByServer: createServerEventCounts(),
+  };
+}
+
+export function createConversationMessages(): ConversationMessage[] {
+  return [
+    {
+      seq: 1,
+      occurredAt: minutesAgo(6),
+      speaker: ConversationSpeaker.CONVERSATION_SPEAKER_USER,
+      text: "採用ページの見出しを直してください。",
+    },
+    {
+      seq: 2,
+      occurredAt: minutesAgo(5),
+      speaker: ConversationSpeaker.CONVERSATION_SPEAKER_MANAGER,
+      text: "見出しの文言を確認しています。",
+    },
+    {
+      seq: 3,
+      occurredAt: minutesAgo(4),
+      speaker: ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM,
+      text: "作業を開始しました。",
+    },
+  ];
+}
+
+export function createConversationResponse(
+  overrides: Partial<GetConversationResponse> = {},
+): GetConversationResponse {
+  return {
+    project: "corporate-site",
+    sessionId: "session-conv-1",
+    provider: "opencode",
+    messages: createConversationMessages(),
+    nextAfterSeq: 3,
+    hasMore: false,
+    skipped: [],
+    unavailableReason: undefined,
+    ...overrides,
   };
 }
 

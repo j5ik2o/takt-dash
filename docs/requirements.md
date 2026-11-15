@@ -74,7 +74,7 @@ taktDash は、複数のサーバーで動く takt manager の状態を1つの�
 
 ## 4. takt 側の先行作業
 
-takt-dash の最初の版の実装に先立ち、カスタム版 takt リポジトリの側で次の道具を takt-mcp に追加する。追加した道具を Mac mini と Mac Studio の両方に配置するところまでが、takt-dash 実装開始の前提条件である。
+takt-dash の最初の版の実装に先立ち、カスタム版 takt リポジトリの側で次の道具を takt-mcp に追加する。追加した道具と、manager の会話を読む道具（バックエンドが保存場所を直接読む経路を含む）を Mac mini へ配置するところまでが、takt-dash 実装開始の前提条件である。Mac Studio への配置は鍵の引き渡し後に必要なら行うものであり、実装開始の前提にはしない。このゴールの対象は Mac mini に限る。
 
 - 判断待ちの問い合わせへ回答する道具。
 - ゴール登録の承認待ちを一覧で取得する道具。
@@ -111,5 +111,5 @@ takt-dash の最初の版の実装に先立ち、カスタム版 takt リポジ�
 
 ## 6. 次の手順
 
-1. カスタム版 takt リポジトリで4章の道具を takt-mcp に追加し、Mac mini と Mac Studio の両方へ配置する。
+1. カスタム版 takt リポジトリで4章の道具を takt-mcp に追加し、Mac mini へ配置する。Mac Studio へは鍵の引き渡し後に必要なら配置する。
 2. 担当者は fraktor-ng-rs の .takt の形を参考に takt-dash の .takt を設定し、窓口は最初のゴールを takt-dash の takt manager へ登録する。

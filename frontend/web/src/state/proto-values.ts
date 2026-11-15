@@ -48,9 +48,22 @@ export const INQUIRY_KIND = {
   OPERATION_REQUEST: 2,
 } as const;
 
+// operation_request への回答。画面の「実施した」「対応できない」が送る値。
+export const OPERATION_ANSWER_REPORT = {
+  COMPLETED: 1,
+  UNABLE: 2,
+} as const;
+
 export const PENDING_DECISION_TYPE = {
   INQUIRY: 1,
   AWAITING_MERGE: 2,
+  GOAL_REGISTRATION: 3,
+} as const;
+
+export const CONVERSATION_SPEAKER = {
+  USER: 1,
+  MANAGER: 2,
+  SYSTEM: 3,
 } as const;
 
 // proto の JSON 表現（DashboardState.toJSON）は列挙型を名称文字列で出す。受信側で
@@ -99,6 +112,14 @@ const ENUM_NAME_TO_NUMBER: Record<string, Record<string, number>> = {
     PENDING_DECISION_TYPE_UNSPECIFIED: 0,
     PENDING_DECISION_TYPE_INQUIRY: 1,
     PENDING_DECISION_TYPE_AWAITING_MERGE: 2,
+    PENDING_DECISION_TYPE_GOAL_REGISTRATION: 3,
+    UNRECOGNIZED: -1,
+  },
+  ConversationSpeaker: {
+    CONVERSATION_SPEAKER_UNSPECIFIED: 0,
+    CONVERSATION_SPEAKER_USER: 1,
+    CONVERSATION_SPEAKER_MANAGER: 2,
+    CONVERSATION_SPEAKER_SYSTEM: 3,
     UNRECOGNIZED: -1,
   },
 };

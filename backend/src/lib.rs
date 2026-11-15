@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod config;
+pub mod conversation;
 pub mod events;
 pub mod grpc;
 pub mod mcp;

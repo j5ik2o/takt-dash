@@ -43,6 +43,7 @@ type PendingCounts = {
   total: number;
   inquiries: number;
   awaitingMerge: number;
+  goalRegistration: number;
 };
 
 type OverviewServerView = {
@@ -92,25 +93,35 @@ export function summarizePendingDecisions(decisions: readonly PendingDecisionVie
   const awaitingMerge = decisions.filter(
     (decision) => decision.type === PENDING_DECISION_TYPE.AWAITING_MERGE,
   ).length;
-  return { total: decisions.length, inquiries, awaitingMerge };
+  const goalRegistration = decisions.filter(
+    (decision) => decision.type === PENDING_DECISION_TYPE.GOAL_REGISTRATION,
+  ).length;
+  return { total: decisions.length, inquiries, awaitingMerge, goalRegistration };
 }
 
 export function toRunView(
   run: Run,
   serverById: ReadonlyMap<string, Server>,
-  thresholds: AnomalyThresholds,
+  projectById: ReadonlyMap<string, Project>,
   now: Date,
 ): RunView {
   const server = serverById.get(run.serverId);
-  if (server !== undefined && !server.connected) {
-    const at = server.lastReadAt ? formatClock(server.lastReadAt) : "不明";
-    return { run, server, connected: false, label: `実行中（${at} 時点）`, note: "サーバーから応答がないため、最後に読めた時点の状態です。" };
+  const project = projectById.get(run.project);
+  const serverConnected = server === undefined || server.connected;
+  const projectConnected = project === undefined || project.connected;
+  if (!serverConnected || !projectConnected) {
+    const lastReadAt = projectConnected ? server?.lastReadAt : project?.lastReadAt;
+    const at = lastReadAt ? formatClock(lastReadAt) : "不明";
+    const note = projectConnected
+      ? "サーバーから応答がないため、最後に読めた時点の状態です。"
+      : "プロジェクトから応答がないため、最後に読めた時点の状態です。";
+    return { run, server, connected: false, label: `実行中（${at} 時点）`, note };
   }
+  // 無音の判定はバックエンドが閾値と現在時刻で行う。画面側で丸め直すと、閾値直後の
+  // logSilent を落とすため、ここでは判定結果だけを使う。
   if (run.logSilent && run.lastLogAt) {
-    const silentMinutes = Math.round(minutesSince(run.lastLogAt, now));
-    if (silentMinutes > thresholds.runLogSilentMinutes) {
-      return { run, server, connected: true, label: "ログが止まっています", note: `ログが ${silentMinutes}分 出ていません。` };
-    }
+    const silentMinutes = Math.floor(minutesSince(run.lastLogAt, now));
+    return { run, server, connected: true, label: "ログが止まっています", note: `ログが ${silentMinutes}分 出ていません。` };
   }
   return { run, server, connected: true, label: "実行中", note: "" };
 }
@@ -136,10 +147,11 @@ const serverStateLabel = (state: OverviewServerView["state"]): string => {
 export function buildOverviewView(state: DashboardState, now: Date): OverviewView {
   const thresholds = resolveThresholds(state.thresholds);
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
+  const projectById = new Map(state.projects.map((project) => [project.name, project]));
   const pendingDecisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
   });
-  const runs = state.runs.map((run) => toRunView(run, serverById, thresholds, now));
+  const runs = state.runs.map((run) => toRunView(run, serverById, projectById, now));
   const servers = state.servers.map((server) => {
     const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);
     const status = serverState(server, serverRuns);
@@ -147,7 +159,7 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
       server,
       state: status,
       stateLabel: serverStateLabel(status),
-      runs: serverRuns.map((run) => toRunView(run, serverById, thresholds, now)),
+      runs: serverRuns.map((run) => toRunView(run, serverById, projectById, now)),
     };
   });
   return {

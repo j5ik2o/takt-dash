@@ -13,6 +13,7 @@ const PAGES = [
   { href: "/projects", label: "プロジェクト" },
   { href: "/goals", label: "ゴール" },
   { href: "/activity", label: "アクティビティ" },
+  { href: "/conversations", label: "会話" },
 ] as const;
 
 export function Sidebar({ servers, pendingCount }: SidebarProps): ReactElement {

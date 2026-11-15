@@ -14,8 +14,8 @@ use chrono::{DateTime, Duration, Utc};
 use crate::{
   config::{Project, ServerMeta, Thresholds},
   model::{
-    GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot, ProjectView, RunEntry,
-    TaskEntry, TaskStatus,
+    GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot, ProjectView,
+    RegistrationProposalEntry, RunEntry, TaskEntry, TaskStatus,
   },
 };
 
@@ -88,6 +88,25 @@ impl StateStore {
     inner.projects = projects;
   }
 
+  /// 稼働中に再読み込みした設定のサーバー表示情報を反映する。
+  ///
+  /// 追加・改名・削除をすべて置き換え、次の投影から新しい表示情報に従います。
+  pub fn set_servers(&self, servers: BTreeMap<String, ServerMeta>) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    inner.servers = servers;
+  }
+
+  /// 接続先の設定が変わったプロジェクトのスロットを未読へ戻す。
+  ///
+  /// 旧接続先の snapshot・読めた時刻・接続状態を新接続先へ持ち越さないために使います。プロジェクト
+  /// の一覧とスロットの位置は保持し、内容だけを未読へ戻します。
+  pub fn reset_project(&self, project: &str) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    if let Some(slot) = inner.slots.get_mut(project) {
+      *slot = ProjectSlot::unread();
+    }
+  }
+
   /// 読み取りが失敗したプロジェクトを接続断として扱う。snapshot と last_read_at は保持する。
   pub fn record_failure(&self, project: &str) {
     let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
@@ -141,9 +160,14 @@ impl StateStore {
   /// runSlug を持つ run のプロジェクトを探し、その投影を返す。
   ///
   /// GetRunDetail は読み先の cwd とサーバーを状態ストアの run
-  /// から解決するため、この投影を使います。
+  /// から解決するため、この投影を使います。実行中の run 一覧に無くても、
+  /// 完了タスクが runSlug を保持していれば解決できます。run が完了すると
+  /// run 一覧から消えるため、詳細 URL を同じまま取得できるようにします。
   pub fn find_run_project(&self, run_slug: &str) -> Option<ProjectView> {
-    self.project_views().into_iter().find(|view| view.runs.iter().any(|run| run.run_slug == run_slug))
+    self.project_views().into_iter().find(|view| {
+      view.runs.iter().any(|run| run.run_slug == run_slug)
+        || view.tasks.iter().any(|task| task.run_slug.as_deref() == Some(run_slug))
+    })
   }
 
   /// goal_id を持つゴールのプロジェクトを探し、その投影を返す。
@@ -172,8 +196,27 @@ impl StateStore {
       if matches!(filter, PendingDecisionFilter::All | PendingDecisionFilter::AwaitingMerge) {
         decisions.extend(merge_decisions(project, snapshot, now, stale_threshold));
       }
+      if matches!(filter, PendingDecisionFilter::All) {
+        decisions.extend(registration_decisions(project, snapshot, now));
+      }
     }
     decisions
+  }
+
+  /// ゴール登録の承認待ちを、指定したサーバー・プロジェクトの分だけ返す。
+  ///
+  /// `pending_decisions` の承認待ち射影と同じデータ源（各プロジェクトの
+  /// snapshot.proposals）を読みます。
+  pub fn registration_proposals(&self, server_id: &str, project: &str) -> Vec<RegistrationProposalEntry> {
+    let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    inner
+      .projects
+      .iter()
+      .filter(|entry| entry.server == server_id && entry.name == project)
+      .filter_map(|entry| inner.slots.get(&entry.name))
+      .filter_map(|slot| slot.snapshot.as_ref())
+      .flat_map(|snapshot| snapshot.proposals.iter().cloned())
+      .collect()
   }
 
   /// ログの無音の判定を、run ごとに返す。
@@ -211,6 +254,8 @@ fn inquiry_decisions(
         pull_request_number: None,
         pull_request_url:    None,
         stale:               wait >= stale_threshold,
+        inquiry_id:          inquiry.inquiry_id.clone(),
+        revision:            None,
       }
     })
     .collect()
@@ -243,7 +288,35 @@ fn merge_decisions(
         pull_request_number: goal.pull_request_number,
         pull_request_url: goal.pull_request_url.clone(),
         stale: wait >= stale_threshold,
+        inquiry_id: String::new(),
+        revision: None,
       }
+    })
+    .collect()
+}
+
+/// ゴール登録の承認待ちを判断待ちの一覧へ射影する。
+///
+/// 承認待ちは作成時刻を持たないため、滞留の判定はせず `created_at` は射影の時刻を、`stale`
+/// は偽を入れます。本文には提案の要約を使い、承認・却下に使う revision を持ちます。
+fn registration_decisions(project: &Project, snapshot: &ProjectSnapshot, now: DateTime<Utc>) -> Vec<PendingDecision> {
+  snapshot
+    .proposals
+    .iter()
+    .map(|proposal| PendingDecision {
+      decision_type:       PendingDecisionType::GoalRegistration,
+      server_id:           project.server.clone(),
+      project:             project.name.clone(),
+      goal_id:             None,
+      inquiry_kind:        None,
+      created_at:          now,
+      body:                proposal.summary.clone(),
+      options:             Vec::new(),
+      pull_request_number: None,
+      pull_request_url:    None,
+      stale:               false,
+      inquiry_id:          String::new(),
+      revision:            Some(proposal.revision),
     })
     .collect()
 }

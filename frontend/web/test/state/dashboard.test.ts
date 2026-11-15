@@ -4,8 +4,8 @@
 // 閾値は proto の AnomalyThresholds から取り、240/10 を実装側へ直書きさせない。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
-import { createDashboardState, NOW } from "../support/fixtures.ts";
+import { PendingDecisionType, InquiryKind, type PendingDecision } from "../../src/proto/taktdash.ts";
+import { createDashboardState, NOW, SILENT_MINUTES } from "../support/fixtures.ts";
 import {
   buildOverviewView,
   DEFAULT_ANOMALY_THRESHOLDS,
@@ -47,22 +47,105 @@ test("判断待ちの件数を問い合わせとマージ待ちに分けて数�
   assert.equal(counts.awaitingMerge, 1);
 });
 
+test("承認待ちを独立の区分として数え、内訳の和を total に一致させる", () => {
+  const state = createDashboardState();
+  const goalRegistration: PendingDecision = {
+    type: PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION,
+    serverId: "mini",
+    project: "esa",
+    inquiryKind: InquiryKind.INQUIRY_KIND_UNSPECIFIED,
+    createdAt: new Date(NOW.getTime() - 60 * 60_000),
+    body: "新しいゴール",
+    options: [],
+    stale: false,
+    revision: 3,
+  };
+  const counts = summarizePendingDecisions(
+    sortPendingDecisions([...state.pendingDecisions, goalRegistration], NOW),
+  );
+  assert.equal(counts.total, 3);
+  assert.equal(counts.inquiries, 1);
+  assert.equal(counts.awaitingMerge, 1);
+  assert.equal(counts.goalRegistration, 1);
+  assert.equal(counts.inquiries + counts.awaitingMerge + counts.goalRegistration, counts.total);
+});
+
+test("承認待ちが無いときは既存2種の数え方が変わらない", () => {
+  const counts = summarizePendingDecisions(sortPendingDecisions(createDashboardState().pendingDecisions, NOW));
+  assert.equal(counts.goalRegistration, 0);
+  assert.equal(counts.inquiries + counts.awaitingMerge + counts.goalRegistration, counts.total);
+});
+
 test("run の状態はサーバー応答とログ無音と実行状態から決まる", () => {
   const state = createDashboardState();
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
+  const projectById = new Map(state.projects.map((project) => [project.name, project]));
 
-  const live = toRunView(state.runs[0]!, serverById, state.thresholds!, NOW);
+  const live = toRunView(state.runs[0]!, serverById, projectById, NOW);
   assert.equal(live.connected, true);
   assert.equal(live.label, "実行中");
 
   const disconnected = toRunView(
     { ...state.runs[0]!, serverId: "down" },
     serverById,
-    state.thresholds!,
+    projectById,
     NOW,
   );
   assert.equal(disconnected.connected, false);
   assert.match(disconnected.label, /時点/);
+});
+
+test("run の状態はその run のプロジェクトの接続状態を使う", () => {
+  const state = createDashboardState();
+  const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
+  const projectById = new Map(state.projects.map((project) => [project.name, project]));
+  projectById.set("esa", {
+    ...projectById.get("esa")!,
+    connected: false,
+    lastReadAt: new Date(NOW.getTime() - 21 * 60_000),
+  });
+
+  const failed = toRunView(
+    { ...state.runs[0]!, runSlug: "run-esa", project: "esa" },
+    serverById,
+    projectById,
+    NOW,
+  );
+  assert.equal(failed.connected, false, "読み取りに失敗したプロジェクトの run は接続なしとして扱う");
+  assert.match(failed.label, /実行中（.+時点）/);
+  assert.ok(failed.note.length > 0, "接続がない理由を表示します");
+
+  const healthy = toRunView(state.runs[0]!, serverById, projectById, NOW);
+  assert.equal(healthy.connected, true, "同じサーバーの健常なプロジェクトの run は実行中のままです");
+  assert.equal(healthy.label, "実行中");
+});
+
+test("バックエンドが無音と判定した run は閾値直後でも警告になり、サーバー別の run 行にも出る", () => {
+  const state = createDashboardState();
+  const base = state.runs[0]!;
+  // 閾値の10分を1秒だけ超えた時点。画面側の丸め直しが残っていると 10 > 10 で警告を落とす。
+  const justOverThreshold = new Date(NOW.getTime() - (SILENT_MINUTES * 60_000 + 1_000));
+  const silentState = {
+    ...state,
+    runs: [{ ...base, logSilent: true, lastLogAt: justOverThreshold }],
+  };
+
+  const overview = buildOverviewView(silentState, NOW);
+
+  assert.equal(overview.runs[0]?.label, "ログが止まっています", "バックエンドの無音判定をそのまま表示します");
+  assert.match(overview.runs[0]?.note ?? "", /ログが .*出ていません。/, "無音の説明を添えます");
+  const mini = overview.servers.find((item) => item.server.serverId === "mini");
+  assert.ok(mini, "run の所属サーバーが概要にあります");
+  assert.equal(mini.runs[0]?.label, "ログが止まっています", "サーバー別の run 行にも同じ警告を出します");
+});
+
+test("logSilent が偽の run は経過時間だけでは警告にしない", () => {
+  const state = createDashboardState();
+  const base = state.runs[0]!;
+  const staleLog = new Date(NOW.getTime() - (SILENT_MINUTES * 60_000 + 60_000));
+  const overview = buildOverviewView({ ...state, runs: [{ ...base, logSilent: false, lastLogAt: staleLog }] }, NOW);
+
+  assert.equal(overview.runs[0]?.label, "実行中", "バックエンドが無音と判定していなければ警告にしません");
 });
 
 test("概要の集計は proto の閾値をそのまま表示用に運ぶ", () => {
