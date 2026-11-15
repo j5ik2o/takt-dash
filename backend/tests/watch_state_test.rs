@@ -7,6 +7,7 @@ mod grpc_harness;
 
 use std::path::Path;
 
+use chrono::Utc;
 use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
@@ -383,6 +384,68 @@ async fn watch_state_sends_added_server_metadata_after_a_config_change() {
     .expect("変化後の状態があります");
   assert_eq!(second.servers[0].name, "j5ik2o-mac-mini-renamed", "変化通知後の servers は新しい設定の表示名を返します");
   assert_eq!(second.servers[0].concurrency, 8, "並列度の変更も新しい状態に現れます");
+
+  poller.shutdown().await;
+  server.stop().await;
+}
+
+/// running なタスクと、その run を持つ mock の状態。`lastLogAt` を固定し、無音判定を決定的にする。
+fn run_state(last_log_at: &str) -> serde_json::Value {
+  json!({
+    "tasks": [ { "name": "implement", "status": "running", "runSlug": "run-1", "startedAt": last_log_at } ],
+    "runs": { "run-1": { "runSlug": "run-1", "currentStep": "implement", "startedAt": last_log_at, "lastLogAt": last_log_at } }
+  })
+}
+
+#[tokio::test]
+async fn watch_state_reassembles_and_returns_the_new_run_log_silent() {
+  // 同じ WatchState ストリームを開いたまま、run の最終ログ時刻を閾値外へ変えて poller を
+  // 1サイクル回す。変化通知後に再 assemble した状態が新しい無音を返す。
+  // 通知時に以前の assemble 結果を再利用する実装では、古い無音のままになる。
+  let recent = Utc::now() - chrono::Duration::minutes(5);
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", project_dir()), server_meta(), run_state(&recent.to_rfc3339()))
+    .build();
+  let snapshot = ProjectSnapshot {
+    goals:         vec![],
+    tasks:         vec![],
+    inquiries:     vec![],
+    runs:          vec![run("run-1", "implement", recent)],
+    notifications: vec![],
+  };
+  harness.store.record_success("takt-dash", snapshot, Utc::now());
+
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  let mut stream =
+    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+
+  let first = timeout(Duration::from_secs(5), stream.message())
+    .await
+    .expect("初回の全件は即時に届きます")
+    .expect("ストリームから読めます")
+    .expect("初回の状態があります");
+  assert_eq!(first.runs.len(), 1);
+  assert!(!first.runs[0].log_silent, "5分前なら10分の閾値の内側で無音ではありません");
+
+  // 同じ run の最終ログ時刻を閾値外へ変え、同じストリームを開いたまま poller を1サイクル回す。
+  let stale = Utc::now() - chrono::Duration::minutes(300);
+  harness.rewrite_state(run_state(&stale.to_rfc3339()));
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+  );
+  poller.read_cycle_once().await.expect("無音が閾値を跨いだサイクルを実行できます");
+
+  let second = timeout(Duration::from_secs(5), stream.message())
+    .await
+    .expect("変化通知後の状態が届きます")
+    .expect("ストリームから読めます")
+    .expect("変化後の状態があります");
+  assert_eq!(second.runs.len(), 1);
+  assert!(second.runs[0].log_silent, "再 assemble した状態は新しい無音を返します");
 
   poller.shutdown().await;
   server.stop().await;

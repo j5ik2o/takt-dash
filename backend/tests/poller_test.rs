@@ -12,7 +12,11 @@ use std::{
 use common::*;
 use serde_json::{json, Value};
 use takt_dash_backend::{
-  activity::ActivityStore, config::Thresholds, model::EventKind, poller::Poller, store::StateStore,
+  activity::ActivityStore,
+  config::Thresholds,
+  model::EventKind,
+  poller::{run_until_stopped, Poller},
+  store::StateStore,
 };
 
 struct Harness {
@@ -48,8 +52,29 @@ fn allow_event_recording(db_path: &Path) {
   connection.execute_batch("DROP TRIGGER IF EXISTS reject_events").expect("記録の中断を解除できます");
 }
 
+/// mock MCP サーバが起動時に書いた PID を読む。
+fn read_pid_file(path: &Path) -> u32 {
+  std::fs::read_to_string(path).expect("PID ファイルを読めます").trim().parse().expect("PID を数値として読めます")
+}
+
+/// 指定した PID のプロセスが存在するか。終了済みなら偽です。
+fn process_is_running(pid: u32) -> bool {
+  matches!(
+    std::process::Command::new("kill").arg("-0").arg(pid.to_string()).status(),
+    Ok(status) if status.success()
+  )
+}
+
 fn state_with_goal(goal_id: &str) -> Value {
   json!({ "goals": [ { "id": goal_id, "status": "created", "executionStatus": "active", "objective": format!("ゴール {goal_id}"), "integrationBranch": format!("takt/{goal_id}") } ] })
+}
+
+/// running なタスクと、その run を持つ状態。`lastLogAt` を固定し、無音判定を決定的にする。
+fn state_with_running_run(last_log_at: &str) -> Value {
+  json!({
+    "tasks": [ { "name": "implement", "status": "running", "runSlug": "r1", "startedAt": last_log_at } ],
+    "runs": { "r1": { "runSlug": "r1", "currentStep": "implement", "startedAt": last_log_at, "lastLogAt": last_log_at } }
+  })
 }
 
 impl Harness {
@@ -830,6 +855,43 @@ async fn failed_event_record_keeps_the_connection_lost_event_once_after_recovery
 }
 
 #[tokio::test]
+async fn failed_connection_lost_record_keeps_the_baseline_and_records_it_once_while_reads_keep_failing() {
+  // 接続断の記録に失敗したサイクルでは接続状態の比較基準を据え置き、読み取り失敗が続く中で
+  // 記録だけが回復したとき、未記録だった接続断をちょうど1回記録します。基準を偽へ進める
+  // 実装では回復後も再検出できず欠落し、毎サイクル記録する実装では重複します。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  // サイクル2: 読み取り失敗かつ接続断の記録も失敗させる。
+  harness.rewrite_state(json!({ "goals": [], "isError": ["takt_list_goals"] }));
+  fail_event_recording_for(&harness.activity_db_path, "mac-mini");
+  poller.read_cycle_once().await.expect_err("接続断の出来事を記録できないサイクルは失敗で終わります");
+  let down = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert!(!down.connected, "記録に失敗しても応答がないプロジェクトは connected 偽です");
+  assert!(down.snapshot.is_some(), "最後に読めた状態は保持します");
+
+  // サイクル3: 記録だけを回復する。読み取り失敗は続くので、未記録だった接続断を記録する。
+  allow_event_recording(&harness.activity_db_path);
+  let recovered = poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
+  assert_eq!(recovered.events_recorded, 1, "未記録だった接続断だけを回復後に記録します");
+
+  // サイクル4: 読み取り失敗が続いても、記録済みの接続断を再検出しない。
+  let continuing = poller.read_cycle_once().await.expect("読み取り失敗が続くサイクルを実行できます");
+  assert_eq!(continuing.events_recorded, 0, "記録済みの接続断を再記録しません");
+  poller.shutdown().await;
+
+  let lost: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost, 1, "接続断は欠落も重複もなくちょうど1回記録します");
+}
+
+#[tokio::test]
 async fn config_server_changes_are_reflected_after_a_cycle_and_notify_watchers() {
   // 設定のサーバー情報だけを変えたサイクルでも、状態ストアの servers が新しい内容になり、
   // WatchState の変化通知が届く。起動時の servers を返し続ける実装や、変化指紋が servers を
@@ -852,4 +914,174 @@ async fn config_server_changes_are_reflected_after_a_cycle_and_notify_watchers()
   assert_eq!(meta.name, "j5ik2o-mac-mini-renamed", "再読み込み後の servers は新しい設定の表示名になります");
   assert_eq!(meta.concurrency, 8, "並列度の変更も状態ストアへ反映されます");
   assert!(watch.try_recv().is_ok(), "サーバー情報だけが変わったサイクルでも変化通知を1回送ります");
+}
+
+#[tokio::test]
+async fn log_silent_threshold_crossing_notifies_once_on_the_same_poller() {
+  // 同じ Poller 実体のまま時刻だけを進め、run のログ無音が閾値（既定 10 分）を跨いだ
+  // サイクルでだけ変化通知を 1 回送る。時刻は注入し、実時間の待機に依存しない。
+  let last_log_at = "2026-11-13T10:00:00Z";
+  let harness = Harness::new(state_with_running_run(last_log_at));
+  let mut changes = harness.changes.subscribe();
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once_at(time("2026-11-13T10:01:00Z")).await.expect("閾値内の初回サイクルを実行できます");
+  assert!(changes.try_recv().is_ok(), "未読から読めた状態への初回の遷移も通知します");
+
+  poller.read_cycle_once_at(time("2026-11-13T10:05:00Z")).await.expect("閾値内のサイクルを実行できます");
+  assert!(changes.try_recv().is_err(), "無音が閾値内のままのサイクルでは通知しません");
+
+  poller.read_cycle_once_at(time("2026-11-13T10:31:00Z")).await.expect("閾値を跨いだサイクルを実行できます");
+  assert!(changes.try_recv().is_ok(), "無音が閾値を跨いだサイクルで通知します");
+  assert!(changes.try_recv().is_err(), "同じサイクルで通知を重ねて送りません");
+
+  poller.read_cycle_once_at(time("2026-11-13T11:00:00Z")).await.expect("閾値外のままのサイクルを実行できます");
+  assert!(changes.try_recv().is_err(), "無音が真のままのサイクルでは通知しません");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn pending_decision_stale_threshold_crossing_notifies_once_on_the_same_poller() {
+  // 問い合わせと人のマージ待ちの起点を別々の固定時刻にし、滞留が閾値（既定 240 分）を
+  // 跨ぐサイクルでだけ通知する。2回目は問い合わせだけ、3回目はマージ待ちだけが跨ぐため、
+  // 片方の種別だけを比較する実装でも検出できる。
+  let harness = Harness::new(json!({
+    "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1", "pullRequest": { "number": 5, "url": "https://example.test/pr/5" } } ],
+    "tasks": [ { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true } ],
+    "standaloneInquiries": [ { "id": "s1", "status": "pending", "kind": "question", "body": "どうしますか", "createdAt": "2026-11-13T10:00:00Z" } ],
+    "notifications": { "g1": [ { "id": "n-merge", "kind": "awaiting_merge", "body": "マージ待ち", "recordedAt": "2026-11-13T11:00:00Z" } ] }
+  }));
+  let mut changes = harness.changes.subscribe();
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once_at(time("2026-11-13T12:00:00Z")).await.expect("閾値内の初回サイクルを実行できます");
+  assert!(changes.try_recv().is_ok(), "未読から読めた状態への初回の遷移も通知します");
+
+  poller
+    .read_cycle_once_at(time("2026-11-13T14:10:00Z"))
+    .await
+    .expect("問い合わせだけが閾値を跨いだサイクルを実行できます");
+  assert!(changes.try_recv().is_ok(), "問い合わせの滞留が閾値を跨いだサイクルで通知します");
+
+  poller
+    .read_cycle_once_at(time("2026-11-13T15:20:00Z"))
+    .await
+    .expect("マージ待ちだけが閾値を跨いだサイクルを実行できます");
+  assert!(changes.try_recv().is_ok(), "人のマージ待ちの滞留が閾値を跨いだサイクルで通知します");
+
+  poller.read_cycle_once_at(time("2026-11-13T16:00:00Z")).await.expect("両方とも滞留のままのサイクルを実行できます");
+  assert!(changes.try_recv().is_err(), "滞留が真のままのサイクルでは通知しません");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn stop_request_during_the_wait_returns_promptly() {
+  // interval 30 秒の待機中に停止要求を送ると、interval の満了を待たずに戻る。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+  let (sent_at_tx, sent_at_rx) = tokio::sync::oneshot::channel();
+  let store = harness.store.clone();
+  let signal = tokio::spawn(async move {
+    // 最初のサイクルが終わって待機に入ったことを、状態ストアで観測してから停止を送る。
+    for _ in 0..500 {
+      if store.slot("takt-dash").is_some_and(|slot| slot.connected) {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let sent = std::time::Instant::now();
+    stop_tx.send(true).expect("停止要求を送れます");
+    let _ = sent_at_tx.send(sent);
+  });
+
+  tokio::time::timeout(std::time::Duration::from_secs(2), run_until_stopped(&mut poller, stop_rx))
+    .await
+    .expect("停止要求で待機を抜けて戻ります");
+  signal.await.expect("停止要求の送信タスクが完了します");
+
+  let sent_at = sent_at_rx.await.expect("停止要求を送った時刻を受け取れます");
+  assert!(
+    sent_at.elapsed() < std::time::Duration::from_secs(1),
+    "30秒の interval を待たずに戻ります: {:?}",
+    sent_at.elapsed()
+  );
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn stop_request_shuts_down_the_mcp_child_process() {
+  // 停止要求で run_until_stopped が戻ったとき、起動済みの MCP 子プロセスが終了している。
+  // ループを抜けるだけで shutdown を呼ばない実装では、子プロセスが残る。
+  let harness = Harness::new(state_with_goal("g1"));
+  let pid_path = harness._directory.path().join("mock.pid");
+  let pid_for_config = pid_path.clone();
+  harness.rewrite_config(|value| {
+    let args = value["mcpServers"]["mac-mini"]["args"].as_array_mut().expect("起動引数があります");
+    args.push(json!("--pid-file"));
+    args.push(json!(pid_for_config.display().to_string()));
+  });
+
+  let mut poller = harness.poller();
+  let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+  let store = harness.store.clone();
+  let pid_wait = pid_path.clone();
+  let signal = tokio::spawn(async move {
+    // 子プロセスの起動（PID ファイル）と最初のサイクル完了を観測してから停止を送る。
+    for _ in 0..500 {
+      if store.slot("takt-dash").is_some_and(|slot| slot.connected) && pid_wait.exists() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    stop_tx.send(true).expect("停止要求を送れます");
+  });
+
+  tokio::time::timeout(std::time::Duration::from_secs(5), run_until_stopped(&mut poller, stop_rx))
+    .await
+    .expect("停止要求で待機を抜けて戻ります");
+  signal.await.expect("停止要求の送信タスクが完了します");
+
+  let pid = read_pid_file(&pid_path);
+  assert!(!process_is_running(pid), "停止後は MCP 子プロセスが終了しています: pid={pid}");
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn changing_the_project_server_assignment_reads_the_new_server_state() {
+  // 同じ Poller 実体のままプロジェクトの server 割り当てを別サーバーへ変えると、
+  // 次のサイクルで新しい接続先の状態を読み、投影の server_id も新しい割り当てになる。
+  let harness = Harness::new(state_with_goal("g1"));
+  let directory = harness._directory.path();
+  let state_two = directory.join("state-two.json");
+  write_json(&state_two, &state_with_goal("g2"));
+  harness.rewrite_config(|value| {
+    value["mcpServers"]["mini-two"] = json!({
+      "command": "node",
+      "args": [mock_script().display().to_string(), "--state", state_two.display().to_string()],
+      "env": {}
+    });
+    value["servers"]["mini-two"] = json!({ "name": "j5ik2o-mac-mini-2", "kind": "Mac mini", "concurrency": 4 });
+  });
+
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  let before = harness.store.project_views();
+  assert_eq!(before[0].server_id, "mac-mini", "初回は元のサーバー割り当てです");
+
+  harness.rewrite_config(|value| {
+    value["projects"][0]["server"] = json!("mini-two");
+  });
+  poller.read_cycle_once().await.expect("server 割り当てを変えたサイクルを実行できます");
+  poller.shutdown().await;
+
+  let views = harness.store.project_views();
+  let view = &views[0];
+  assert_eq!(view.server_id, "mini-two", "投影の server_id は新しい割り当てになります");
+  let goals: Vec<String> =
+    view.snapshot.as_ref().expect("読み取った状態があります").goals.iter().map(|goal| goal.goal_id.clone()).collect();
+  assert!(goals.contains(&"g2".to_owned()), "新しいサーバーの状態を読みます: {goals:?}");
+  assert!(!goals.contains(&"g1".to_owned()), "旧サーバーの状態を持ち越しません: {goals:?}");
 }

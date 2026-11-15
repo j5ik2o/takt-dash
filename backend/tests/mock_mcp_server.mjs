@@ -23,7 +23,7 @@
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
 //   }
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isAbsolute } from "node:path";
 
@@ -35,11 +35,17 @@ const option = (name) => {
 
 const behavior = option("--behavior") ?? "ok";
 const statePath = option("--state");
+// 起動時の PID の書き出し先。子プロセスの終了をテストから観測するために使う。
+const pidFile = option("--pid-file");
 // 実 takt-mcp と同じページサイズ（limit 既定 50）。
 const PAGE_SIZE = 50;
 
 if (behavior === "exit") {
   process.exit(3);
+}
+
+if (pidFile) {
+  writeFileSync(pidFile, String(process.pid));
 }
 
 const loadState = () => {
