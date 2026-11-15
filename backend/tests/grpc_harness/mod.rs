@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use takt_dash_backend::{
   activity::ActivityStore,
   config::{Project, ServerMeta, Thresholds},
+  conversation::{ConversationPaths, ConversationReader},
   mcp::McpClientRegistry,
   store::StateStore,
 };
@@ -30,7 +31,9 @@ pub struct GrpcHarness {
   state_path:     PathBuf,
   calls_path:     PathBuf,
   processes_path: PathBuf,
-  cwd_by_project: BTreeMap<String, PathBuf>,
+  home:           PathBuf,
+  project_dir:    PathBuf,
+  project_cwds:   BTreeMap<String, PathBuf>,
   pub store:      Arc<StateStore>,
   pub activity:   Arc<ActivityStore>,
   pub changes:    tokio::sync::broadcast::Sender<()>,
@@ -59,7 +62,8 @@ impl Default for GrpcHarnessBuilder {
 }
 
 impl GrpcHarnessBuilder {
-  /// 1サーバー1プロジェクトの土台を作る。`state` は mock MCP サーバが返す状態です。
+  /// 1プロジェクトを土台へ加える。複数回呼ぶと複数プロジェクトの土台になります。
+  /// `state` は mock MCP サーバが返す状態です。
   pub fn single_project(mut self, project: Project, server: ServerMeta, state: Value) -> Self {
     self.servers.insert(project.server.clone(), server);
     self.projects.push(project);
@@ -88,17 +92,35 @@ impl GrpcHarnessBuilder {
     let configured_projects = self.projects;
     let thresholds = self.thresholds;
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-    // mock の子プロセスを起動する cwd は実在する必要があるため、渡された cwd を実在の
-    // ディレクトリへ置き換える。プロジェクトごとに別のディレクトリを割り当て、道具呼び出しの
-    // cwd から対象プロジェクトを区別できるようにする。
-    let mut cwd_by_project = BTreeMap::new();
-    let mut projects: Vec<Project> = Vec::with_capacity(configured_projects.len());
-    for project in configured_projects {
-      let project_dir = directory.path().join(format!("project-{}", project.name));
-      std::fs::create_dir_all(&project_dir).expect("プロジェクトの cwd を作れます");
-      cwd_by_project.insert(project.name.clone(), project_dir.clone());
-      projects.push(Project { cwd: project_dir, ..project });
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&home).expect("テスト用のホームを作れます");
+    let home = std::fs::canonicalize(&home).expect("テスト用のホームの実パスを解決できます");
+    // mock の子プロセスを起動する cwd は実在する必要があるため、プロジェクトごとに
+    // 実在のディレクトリを割り当てて置き換える。単一プロジェクトでは従来と同じ cwd を使う。
+    let multiple = configured_projects.len() > 1;
+    let mut project_cwds = BTreeMap::new();
+    for project in &configured_projects {
+      let path =
+        if multiple { directory.path().join("projects").join(&project.name) } else { directory.path().join("project") };
+      std::fs::create_dir_all(&path).expect("プロジェクトの cwd を作れます");
+      let path = std::fs::canonicalize(&path).expect("プロジェクトの cwd の実パスを解決できます");
+      project_cwds.insert(project.name.clone(), path);
     }
+    let project_dir = match project_cwds.values().next() {
+      | Some(cwd) => cwd.clone(),
+      | None => {
+        let path = directory.path().join("project");
+        std::fs::create_dir_all(&path).expect("プロジェクトの cwd を作れます");
+        std::fs::canonicalize(&path).expect("プロジェクトの cwd の実パスを解決できます")
+      },
+    };
+    let projects: Vec<Project> = configured_projects
+      .into_iter()
+      .map(|project| {
+        let cwd = project_cwds.get(&project.name).cloned().expect("プロジェクトの cwd は build 時に割り当て済みです");
+        Project { cwd, ..project }
+      })
+      .collect();
     let state = self.state;
     let state_path = directory.path().join("state.json");
     std::fs::write(&state_path, state.to_string()).expect("状態ファイルを書けます");
@@ -151,7 +173,9 @@ impl GrpcHarnessBuilder {
       state_path,
       calls_path,
       processes_path,
-      cwd_by_project,
+      home,
+      project_dir,
+      project_cwds,
       store,
       activity,
       changes,
@@ -169,9 +193,23 @@ impl GrpcHarness {
     &self.config_path
   }
 
-  /// プロジェクトに割り当てた cwd。mock へ渡る cwd を期待値として使います。
-  pub fn project_cwd(&self, project: &str) -> PathBuf {
-    self.cwd_by_project.get(project).cloned().unwrap_or_else(|| panic!("プロジェクト {project} の cwd がありません"))
+  /// manager の記録と opencode の DB を置く、テスト用のホーム。
+  pub fn home(&self) -> &Path {
+    &self.home
+  }
+
+  /// 設定の全プロジェクトに割り当てた、実在する cwd。
+  pub fn project_dir(&self) -> &Path {
+    &self.project_dir
+  }
+
+  /// 指定したプロジェクトに割り当てた、実在する cwd。mock へ渡る cwd を期待値として使います。
+  pub fn project_cwd(&self, name: &str) -> &Path {
+    self
+      .project_cwds
+      .get(name)
+      .map(PathBuf::as_path)
+      .unwrap_or_else(|| panic!("プロジェクト {name} はこの harness の設定にありません"))
   }
 
   pub fn rewrite_state(&self, state: Value) {
@@ -186,6 +224,39 @@ impl GrpcHarness {
       "pendingDecisionStaleMinutes": thresholds.pending_decision_stale_minutes,
       "runLogSilentMinutes": thresholds.run_log_silent_minutes,
     });
+    std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
+  }
+
+  /// 設定ファイルのサーバー表示情報を書き換える。poller の次の読み取りサイクルで state store
+  /// へ反映されます。
+  pub fn rewrite_server_meta(&self, server_id: &str, meta: ServerMeta) {
+    let text = std::fs::read_to_string(&self.config_path).expect("設定を読めます");
+    let mut value: Value = serde_json::from_str(&text).expect("設定を解析できます");
+    value["servers"][server_id] = json!({
+      "name": meta.name,
+      "kind": meta.kind,
+      "concurrency": meta.concurrency,
+    });
+    std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
+  }
+
+  /// 設定ファイルのサーバー表示情報を書き換える。poller の次の読み取りサイクルで state
+  /// store へ反映されます。
+  pub fn rewrite_servers(&self, mutate: impl FnOnce(&mut Value)) {
+    let text = std::fs::read_to_string(&self.config_path).expect("設定を読めます");
+    let mut value: Value = serde_json::from_str(&text).expect("設定を解析できます");
+    mutate(&mut value["servers"]);
+    std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
+  }
+
+  /// 設定ファイルのプロジェクト一覧を書き換える。追加するプロジェクトの `cwd` は、
+  /// この harness が作る実在のプロジェクトディレクトリの絶対パスに置き換えて書きます。
+  pub fn rewrite_projects(&self, mutate: impl FnOnce(&mut Value, &Path)) {
+    let text = std::fs::read_to_string(&self.config_path).expect("設定を読めます");
+    let mut value: Value = serde_json::from_str(&text).expect("設定を解析できます");
+    let directory = self._directory.path().join("project");
+    std::fs::create_dir_all(&directory).expect("プロジェクトの cwd を作れます");
+    mutate(&mut value["projects"], &directory);
     std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
   }
 
@@ -262,13 +333,17 @@ pub async fn start_server_at(harness: &GrpcHarness, clock: takt_dash_backend::gr
   let address = listener.local_addr().expect("待ち受けアドレスを取得できます");
   let (stop, _) = tokio::sync::watch::channel(false);
   let stop_rx = stop.subscribe();
+  let conversation = Arc::new(ConversationReader::new(ConversationPaths::from_home(harness.home())));
   let service = takt_dash_backend::grpc::TaktDashServiceImpl::with_clock(
-    harness.store.clone(),
-    harness.activity.clone(),
-    harness.config_path().to_path_buf(),
-    harness.changes.clone(),
-    stop_rx.clone(),
-    harness.registry.clone(),
+    takt_dash_backend::grpc::ServiceDeps {
+      store: harness.store.clone(),
+      activity: harness.activity.clone(),
+      config_path: harness.config_path().to_path_buf(),
+      conversation,
+      changes: harness.changes.clone(),
+      shutdown: stop_rx.clone(),
+      registry: harness.registry.clone(),
+    },
     clock,
   );
   let task = tokio::spawn(async move {

@@ -2,7 +2,8 @@
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
-//! GetRunDetail は要求時に takt-mcp の takt_get_run を呼びます。WatchState は接続時に全件を返し、
+//! GetRunDetail は要求時に takt-mcp の takt_get_run を呼びます。GetConversation は保存領域の
+//! manager の会話を読みます。WatchState は接続時に全件を返し、
 //! 定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
 
 pub mod mapping;
@@ -11,8 +12,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use mapping::{
-  activity_kind, execution_status, goal_status, inquiry_kind, optional_timestamp, pending_decision_type, run_status,
-  step_log, task_status, timestamp,
+  activity_kind, conversation_speaker, execution_status, goal_status, inquiry_kind, optional_timestamp,
+  pending_decision_type, run_status, step_log, task_status, timestamp,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
@@ -21,17 +22,19 @@ use tonic::{Request, Response, Status};
 use crate::{
   activity::ActivityStore,
   config::load_config,
+  conversation::{ConversationPage, ConversationQuery, ConversationReader},
   mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
   model::{self, TaskEntry},
   store::StateStore,
   takt_dash::v1::{
     self, ActivityEvent, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
     ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse, DashboardState,
-    GetActivityRequest, GetActivityResponse, GetOverviewRequest, GetPendingDecisionsRequest,
-    GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse, GetRunDetailRequest, GetRunDetailResponse,
-    GoalRegistrationProposal, ListGoalRegistrationProposalsRequest, ListGoalRegistrationProposalsResponse,
-    OperationAnswerReport, PendingDecision, Project, RejectGoalRegistrationRequest, RejectGoalRegistrationResponse,
-    Run, RunInstruction, RunReport, Server, TaskStatusCounts, WatchStateRequest,
+    GetActivityRequest, GetActivityResponse, GetConversationRequest, GetConversationResponse, GetOverviewRequest,
+    GetPendingDecisionsRequest, GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse,
+    GetRunDetailRequest, GetRunDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
+    ListGoalRegistrationProposalsResponse, OperationAnswerReport, PendingDecision, Project,
+    RejectGoalRegistrationRequest, RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, Server,
+    TaskStatusCounts, WatchStateRequest,
   },
 };
 
@@ -41,20 +44,39 @@ const RECENT_EVENTS_LIMIT: usize = 20;
 const ACTIVITY_EVENTS_LIMIT: usize = 100;
 /// WatchState の送信元タスクとストリームの間のバッファの大きさ。
 const WATCH_CHANNEL_CAPACITY: usize = 16;
+/// 状態が変わらなくても WatchState の状態を再配信するまでの間隔。
+///
+/// 開いている画面が自動更新を確認できるよう、読み取り間隔（既定30秒）より短い15秒で再送します。
+const WATCH_RESEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// 読み取り系 API のサービス。
 pub struct TaktDashServiceImpl {
-  store:       Arc<StateStore>,
-  activity:    Arc<ActivityStore>,
-  config_path: PathBuf,
-  changes:     broadcast::Sender<()>,
-  shutdown:    watch::Receiver<bool>,
-  registry:    McpClientRegistry,
-  clock:       Clock,
+  store:        Arc<StateStore>,
+  activity:     Arc<ActivityStore>,
+  config_path:  PathBuf,
+  conversation: Arc<ConversationReader>,
+  changes:      broadcast::Sender<()>,
+  shutdown:     watch::Receiver<bool>,
+  registry:     McpClientRegistry,
+  clock:        Clock,
 }
 
 /// サービスの現在時刻を返す関数。テストは固定時計を注入します。
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+
+/// サービスが読み取りと書き込みに使う依存のまとまり。
+///
+/// 引数の数が増えすぎないよう、サービスを作る材料を一つにまとめます。各項目の意味は
+/// [`TaktDashServiceImpl::with_clock`] の説明を参照してください。
+pub struct ServiceDeps {
+  pub store:        Arc<StateStore>,
+  pub activity:     Arc<ActivityStore>,
+  pub config_path:  PathBuf,
+  pub conversation: Arc<ConversationReader>,
+  pub changes:      broadcast::Sender<()>,
+  pub shutdown:     watch::Receiver<bool>,
+  pub registry:     McpClientRegistry,
+}
 
 impl TaktDashServiceImpl {
   /// 状態ストアと activity と設定のパスと、共有する購読・停止のチャネルからサービスを作る。
@@ -71,28 +93,14 @@ impl TaktDashServiceImpl {
   ///
   /// GetRunDetail は要求のたびに設定のパスから対象サーバーの起動方法と cwd を解決し、
   /// takt-mcp の子プロセスを起動して takt_get_run を呼びます。
-  pub fn new(
-    store: Arc<StateStore>,
-    activity: Arc<ActivityStore>,
-    config_path: PathBuf,
-    changes: broadcast::Sender<()>,
-    shutdown: watch::Receiver<bool>,
-    registry: McpClientRegistry,
-  ) -> Self {
-    Self::with_clock(store, activity, config_path, changes, shutdown, registry, Arc::new(Utc::now))
+  pub fn new(deps: ServiceDeps) -> Self {
+    Self::with_clock(deps, Arc::new(Utc::now))
   }
 
   /// 現在時刻を返す関数を注入してサービスを作る。既定は実時計です。
-  pub fn with_clock(
-    store: Arc<StateStore>,
-    activity: Arc<ActivityStore>,
-    config_path: PathBuf,
-    changes: broadcast::Sender<()>,
-    shutdown: watch::Receiver<bool>,
-    registry: McpClientRegistry,
-    clock: Clock,
-  ) -> Self {
-    TaktDashServiceImpl { store, activity, config_path, changes, shutdown, registry, clock }
+  pub fn with_clock(deps: ServiceDeps, clock: Clock) -> Self {
+    let ServiceDeps { store, activity, config_path, conversation, changes, shutdown, registry } = deps;
+    TaktDashServiceImpl { store, activity, config_path, conversation, changes, shutdown, registry, clock }
   }
 
   /// サービスが今回の要求で使う現在時刻を返す。
@@ -142,6 +150,8 @@ fn assemble_projects(views: &[model::ProjectView], activity: &ActivityStore, now
         about: view.about.clone(),
         server_id: view.server_id.clone(),
         completed_tasks_24h,
+        connected: view.connected,
+        last_read_at: optional_timestamp(view.last_read_at),
       }
     })
     .collect()
@@ -328,6 +338,36 @@ impl TaktDashServiceImpl {
   }
 }
 
+/// 会話のページを proto の応答へ写す。
+fn conversation_response(page: ConversationPage) -> GetConversationResponse {
+  GetConversationResponse {
+    project:            page.project,
+    session_id:         page.session_id,
+    provider:           page.provider,
+    messages:           page
+      .messages
+      .into_iter()
+      .map(|message| v1::ConversationMessage {
+        seq:         message.seq,
+        occurred_at: Some(timestamp(message.occurred_at)),
+        speaker:     conversation_speaker(message.speaker) as i32,
+        text:        message.text,
+      })
+      .collect(),
+    next_after_seq:     page.next_after_seq,
+    has_more:           page.has_more,
+    skipped:            page
+      .skipped
+      .into_iter()
+      .map(|summary| v1::ConversationSkipped {
+        reason: summary.reason,
+        count:  i32::try_from(summary.count).unwrap_or(i32::MAX),
+      })
+      .collect(),
+    unavailable_reason: page.unavailable_reason,
+  }
+}
+
 #[tonic::async_trait]
 impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
   type WatchStateStream = ReceiverStream<Result<DashboardState, Status>>;
@@ -398,12 +438,10 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .store
       .find_run_project(&run_slug)
       .ok_or_else(|| Status::not_found(format!("runSlug {run_slug} は状態ストアにありません。")))?;
-    let stored_run = view
-      .runs
-      .iter()
-      .find(|run| run.run_slug == run_slug)
-      .cloned()
-      .ok_or_else(|| Status::not_found(format!("runSlug {run_slug} は状態ストアにありません。")))?;
+    let stored_run = view.runs.iter().find(|run| run.run_slug == run_slug).cloned();
+    // 完了した run は実行中一覧から消えるため、状態ストアの完了タスクからゴールと
+    // タスク名を補います。run の詳細 URL は完了後も同じまま取得できます。
+    let stored_task = view.tasks.iter().find(|task| task.run_slug.as_deref() == Some(run_slug.as_str()));
     let resolved = self.resolve_project(&view.server_id, &view.name)?;
     let mut client = McpClient::new(resolved.client_config);
     let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_run_detail(&run_slug).await {
@@ -417,10 +455,24 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let server_id = resolved.server_id;
     // 対象 run のゴールとタスク名は、状態ストアの run（定期読み取りで task
     // から解決済み）を正とする。 takt_get_run の応答に無い場合だけ、ストアの値で補う。
-    let goal_id = detail.goal_id.clone().or_else(|| stored_run.goal_id.clone());
-    let task_name = if detail.task_name.is_empty() { stored_run.task_name.clone() } else { detail.task_name.clone() };
-    let session_id =
-      if detail.session_id.is_empty() { stored_run.session_id.clone() } else { detail.session_id.clone() };
+    // run が完了して一覧から消えている場合は、完了タスクの値で補う。
+    let goal_id = detail
+      .goal_id
+      .clone()
+      .or_else(|| stored_run.as_ref().and_then(|run| run.goal_id.clone()))
+      .or_else(|| stored_task.and_then(|task| task.goal_id.clone()));
+    let fallback_task_name = stored_run
+      .as_ref()
+      .map(|run| run.task_name.clone())
+      .filter(|name| !name.is_empty())
+      .or_else(|| stored_task.map(|task| task.name.clone()));
+    let task_name =
+      if detail.task_name.is_empty() { fallback_task_name.unwrap_or_default() } else { detail.task_name.clone() };
+    let session_id = if detail.session_id.is_empty() {
+      stored_run.as_ref().map(|run| run.session_id.clone()).unwrap_or_default()
+    } else {
+      detail.session_id.clone()
+    };
     let log_silent = self.store.is_log_silent(
       &model::RunEntry {
         run_slug:                detail.run_slug.clone(),
@@ -483,6 +535,37 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     }))
   }
 
+  async fn get_conversation(
+    &self,
+    request: Request<GetConversationRequest>,
+  ) -> Result<Response<GetConversationResponse>, Status> {
+    let request = request.into_inner();
+    let project = request.project.trim();
+    if project.is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    let config = load_config(&self.config_path)
+      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
+    let configured = config
+      .projects
+      .iter()
+      .find(|configured| configured.name == project)
+      .ok_or_else(|| Status::not_found(format!("project {project} は設定にありません。")))?;
+    let query = ConversationQuery {
+      project:       project.to_owned(),
+      cwd:           configured.cwd.clone(),
+      project_roots: config.projects.iter().map(|project| project.cwd.clone()).collect(),
+      session_id:    request.session_id.filter(|session_id| !session_id.is_empty()),
+      after_seq:     request.after_seq,
+      limit:         usize::try_from(request.limit.max(1)).unwrap_or(usize::MAX),
+    };
+    let conversation = self.conversation.clone();
+    let page = tokio::task::spawn_blocking(move || conversation.read(&query))
+      .await
+      .map_err(|error| Status::internal(format!("会話の読み取りを実行できませんでした: {error}")))?;
+    Ok(Response::new(conversation_response(page)))
+  }
+
   async fn watch_state(
     &self,
     _request: Request<WatchStateRequest>,
@@ -497,22 +580,33 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let clock = self.clock.clone();
     let mut shutdown = self.shutdown.clone();
     tokio::spawn(async move {
+      // 期限到達の再配信のためのタイマー。初回の即時送信の直後から数え始めます。
+      let mut resend = tokio::time::interval(WATCH_RESEND_INTERVAL);
+      resend.tick().await;
       loop {
-        let result = tokio::select! {
-          result = changes.recv() => Some(result),
-          _ = shutdown.changed() => None,
-        };
-        let Some(result) = result else {
-          return;
-        };
-        match result {
-          | Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-            let state = assemble_state_for(&store, &activity, (clock)());
-            if sender.send(Ok(state)).await.is_err() {
+        // 終了判断（クライアント切断・停止通知・購読の終端）と、変化通知・期限到達の
+        // 送信判断を別の分岐に分けます。終了する分岐だけが return し、それ以外は
+        // そのまま下の送信へ進みます。
+        tokio::select! {
+          // クライアントがストリームを閉じたら、次の変化通知を待たずに購読を解放します。
+          _ = sender.closed() => return,
+          _ = shutdown.changed() => return,
+          _ = resend.tick() => (),
+          result = changes.recv() => match result {
+            | Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => (),
+            | Err(broadcast::error::RecvError::Closed) => return,
+          },
+        }
+        let state = assemble_state_for(&store, &activity, (clock)());
+        // 送信の待機中も停止通知とクライアント切断を監視し、待たずに終了します。
+        tokio::select! {
+          result = sender.send(Ok(state)) => {
+            if result.is_err() {
               return;
             }
           },
-          | Err(broadcast::error::RecvError::Closed) => return,
+          _ = sender.closed() => return,
+          _ = shutdown.changed() => return,
         }
       }
     });

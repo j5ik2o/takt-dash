@@ -4,6 +4,7 @@
 //! 実際の gRPC 通信は生成クライアントと本番と同じサービス定義のダミーサーバーを通して確かめる。
 
 use std::{
+  collections::VecDeque,
   net::{Ipv4Addr, SocketAddr, TcpListener},
   sync::{Arc, Mutex},
   time::Duration,
@@ -11,15 +12,17 @@ use std::{
 
 use prost_types::Timestamp;
 use proto::v1::{
-  self, takt_dash_service_server::TaktDashServiceServer, DashboardState, GetOverviewRequest, PendingDecision,
-  PendingDecisionType, Project, Server as ServerInfo, TaskStatusCounts,
+  self, takt_dash_service_server::TaktDashServiceServer, ConversationMessage, ConversationSkipped, DashboardState,
+  GetConversationRequest, GetConversationResponse, GetOverviewRequest, PendingDecision, PendingDecisionType, Project,
+  Server as ServerInfo, TaskStatusCounts,
 };
 use tonic::{transport::Server, Code, Request, Response, Status};
 
 use super::{
-  is_connection_failure, parse_arguments, proto, read_config_listen, render_overview, resolve_backend_addr, run_with,
-  AddrError, AddrSources, Answer, Invocation, OverviewOptions, UsageError, WriteCommand, WriteInvocation,
-  ANSWER_COMMAND, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, UNTIL_MERGE,
+  is_connection_failure, parse_arguments, proto, read_config_listen, render_conversation, render_overview,
+  resolve_backend_addr, resolve_overview_addr, run_with, AddrError, AddrSources, Answer, ConversationOptions,
+  Invocation, OverviewOptions, UsageError, WriteCommand, WriteInvocation, ANSWER_COMMAND, BACKEND_ADDR_ENV,
+  DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, UNTIL_MERGE,
 };
 
 // proto の列挙値は生成コードの数値をそのまま使う。
@@ -40,16 +43,22 @@ fn ts(secs: i64) -> Timestamp {
 
 /// `start_dummy_server` が起動したダミーサーバーの起動結果。
 struct DummyServer {
-  addr:          SocketAddr,
-  seen:          Arc<Mutex<Vec<String>>>,
-  shutdown_tx:   tokio::sync::oneshot::Sender<()>,
-  server_handle: tokio::task::JoinHandle<()>,
+  addr:                  SocketAddr,
+  seen:                  Arc<Mutex<Vec<String>>>,
+  conversation_requests: Arc<Mutex<Vec<GetConversationRequest>>>,
+  shutdown_tx:           tokio::sync::oneshot::Sender<()>,
+  server_handle:         tokio::task::JoinHandle<()>,
 }
 
 impl DummyServer {
   /// 記録した RPC 名の一覧を返す。
   fn seen_calls(&self) -> Vec<String> {
     self.seen.lock().expect("RPC 名の記録を読めませんでした").clone()
+  }
+
+  /// 受け取った `GetConversation` の要求を到着順に返す。
+  fn conversation_requests(&self) -> Vec<GetConversationRequest> {
+    self.conversation_requests.lock().expect("会話の要求の記録を読めませんでした").clone()
   }
 
   /// サーバーを止め、待ち受けを解放する。
@@ -67,8 +76,30 @@ impl DummyServer {
 
 /// 概要を固定値で返すダミーサーバーを `127.0.0.1:0` で起動する。
 async fn start_dummy_server(overview: DashboardState) -> DummyServer {
+  start_dummy_server_with_conversation(overview, Vec::new()).await
+}
+
+/// 会話のページを呼び出しごとに1件ずつ返すダミーサーバーを起動する。
+async fn start_conversation_server(
+  overview: DashboardState,
+  conversation_pages: Vec<GetConversationResponse>,
+) -> DummyServer {
+  start_dummy_server_with_conversation(overview, conversation_pages).await
+}
+
+/// 概要と会話の固定応答を持つダミーサーバーを `127.0.0.1:0` で起動する。
+async fn start_dummy_server_with_conversation(
+  overview: DashboardState,
+  conversation_pages: Vec<GetConversationResponse>,
+) -> DummyServer {
   let seen = Arc::new(Mutex::new(Vec::new()));
-  let service = DummyTaktDashService { overview: Arc::new(overview), seen: seen.clone() };
+  let conversation_requests = Arc::new(Mutex::new(Vec::new()));
+  let service = DummyTaktDashService {
+    overview:              Arc::new(overview),
+    seen:                  seen.clone(),
+    conversation_pages:    Arc::new(Mutex::new(VecDeque::from(conversation_pages))),
+    conversation_requests: conversation_requests.clone(),
+  };
   let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
     .await
     .expect("ダミーサーバーは空きポートで待ち受けできる必要があります");
@@ -82,16 +113,18 @@ async fn start_dummy_server(overview: DashboardState) -> DummyServer {
       })
       .await;
   });
-  DummyServer { addr, seen, shutdown_tx, server_handle }
+  DummyServer { addr, seen, conversation_requests, shutdown_tx, server_handle }
 }
 
 /// 本番と同じ生成サービス定義を実装するテスト用サーバー。
 ///
-/// 閲覧は概要の取得だけを担うため、`GetOverview` だけを意味のある形で実装し、それ以外の
-/// 読み取り RPC と状態ストリーミングは Unimplemented を返す。
+/// 閲覧は概要と会話の取得だけを担うため、`GetOverview` と `GetConversation` だけを意味の
+/// ある形で実装し、それ以外の読み取り RPC と状態ストリーミングは Unimplemented を返す。
 struct DummyTaktDashService {
-  overview: Arc<DashboardState>,
-  seen:     Arc<Mutex<Vec<String>>>,
+  overview:              Arc<DashboardState>,
+  seen:                  Arc<Mutex<Vec<String>>>,
+  conversation_pages:    Arc<Mutex<VecDeque<GetConversationResponse>>>,
+  conversation_requests: Arc<Mutex<Vec<GetConversationRequest>>>,
 }
 
 impl DummyTaktDashService {
@@ -139,6 +172,20 @@ impl v1::takt_dash_service_server::TaktDashService for DummyTaktDashService {
   ) -> Result<Response<v1::GetRunDetailResponse>, Status> {
     self.record("GetRunDetail");
     Err(Status::unimplemented("このダミーサーバーは GetRunDetail を提供しません。"))
+  }
+
+  async fn get_conversation(
+    &self,
+    request: Request<v1::GetConversationRequest>,
+  ) -> Result<Response<v1::GetConversationResponse>, Status> {
+    self.record("GetConversation");
+    let request = request.into_inner();
+    self.conversation_requests.lock().expect("会話の要求の記録を書けませんでした").push(request);
+    let page = self.conversation_pages.lock().expect("会話のページを読めませんでした").pop_front();
+    match page {
+      | Some(page) => Ok(Response::new(page)),
+      | None => Err(Status::not_found("このダミーサーバーには会話のページが残っていません。")),
+    }
   }
 
   async fn watch_state(
@@ -266,6 +313,8 @@ fn sample_overview() -> DashboardState {
       about:               "taktDash の概要を表示する閲覧コマンド".to_owned(),
       server_id:           "mini".to_owned(),
       completed_tasks_24h: 3,
+      connected:           true,
+      last_read_at:        Some(ts(1_731_599_000)),
     }],
     goals:             vec![v1::Goal {
       goal_id:           "goal-cli".to_owned(),
@@ -370,6 +419,43 @@ fn sample_overview() -> DashboardState {
       run_log_silent_minutes:         10,
     }),
   }
+}
+
+// ----------------------------------------------------------------------------
+// ダミーサーバーが返す固定の会話
+// ----------------------------------------------------------------------------
+
+/// 会話の1件を組み立てる。`secs` は UNIX 時刻の秒。
+fn conversation_message(seq: i64, secs: i64, speaker: v1::ConversationSpeaker, text: &str) -> ConversationMessage {
+  ConversationMessage { seq, occurred_at: Some(ts(secs)), speaker: speaker as i32, text: text.to_owned() }
+}
+
+/// 会話の1ページを組み立てる。
+fn conversation_page(
+  project: &str,
+  session_id: &str,
+  messages: Vec<ConversationMessage>,
+  next_after_seq: i64,
+  has_more: bool,
+) -> GetConversationResponse {
+  GetConversationResponse {
+    project: project.to_owned(),
+    session_id: session_id.to_owned(),
+    provider: "opencode".to_owned(),
+    messages,
+    next_after_seq,
+    has_more,
+    skipped: Vec::new(),
+    unavailable_reason: None,
+  }
+}
+
+/// 表示に使う UTC の日時表記を、本番と同じ書式で組み立てる。
+fn formatted_time(secs: i64) -> String {
+  chrono::DateTime::from_timestamp(secs, 0)
+    .expect("テストの秒は有効な日時である必要があります")
+    .format("%Y-%m-%d %H:%M:%S UTC")
+    .to_string()
 }
 
 // ----------------------------------------------------------------------------
@@ -715,6 +801,61 @@ fn parse_arguments_requires_flag_value() {
   assert_eq!(parse_arguments(&["--addr".to_owned()]), Err(UsageError("--addr には値が必要です。".to_owned())));
 }
 
+#[test]
+fn parse_arguments_accepts_conversation_with_project_and_session() {
+  let args = [
+    "conversation",
+    "corporate-site",
+    "--session",
+    "session-1",
+    "--addr",
+    "127.0.0.1:50052",
+    "--config",
+    "/tmp/a.json",
+  ]
+  .map(str::to_owned);
+
+  assert_eq!(
+    parse_arguments(&args),
+    Ok(Invocation::Conversation(ConversationOptions {
+      project: "corporate-site".to_owned(),
+      session: Some("session-1".to_owned()),
+      addr:    Some("127.0.0.1:50052".to_owned()),
+      config:  Some(std::path::PathBuf::from("/tmp/a.json")),
+    }))
+  );
+}
+
+#[test]
+fn parse_arguments_requires_project_for_conversation() {
+  let result = parse_arguments(&["conversation".to_owned()]);
+
+  match result {
+    | Err(UsageError(message)) => assert!(message.contains("プロジェクト"), "-- {message}"),
+    | other => panic!("会話のプロジェクト未指定は使い方の誤りにする必要があります: {other:?}"),
+  }
+}
+
+#[test]
+fn parse_arguments_rejects_extra_project_position() {
+  let args = ["conversation".to_owned(), "corporate-site".to_owned(), "esa".to_owned()];
+
+  match parse_arguments(&args) {
+    | Err(UsageError(message)) => assert!(message.contains("esa"), "-- {message}"),
+    | other => panic!("会話の2個目の位置引数は使い方の誤りにする必要があります: {other:?}"),
+  }
+}
+
+#[test]
+fn parse_arguments_rejects_session_for_overview() {
+  let args = ["overview".to_owned(), "--session".to_owned(), "session-1".to_owned()];
+
+  match parse_arguments(&args) {
+    | Err(UsageError(message)) => assert!(message.contains("--session"), "-- {message}"),
+    | other => panic!("概要に --session は使い方の誤りにする必要があります: {other:?}"),
+  }
+}
+
 // ----------------------------------------------------------------------------
 // 書き込みコマンドの引数解釈
 // ----------------------------------------------------------------------------
@@ -893,6 +1034,140 @@ fn missing_config_file_falls_through_to_default() {
   assert!(!stderr.contains(DEFAULT_BACKEND_ADDR), "明示した接続先があるときは既定値へ戻ってはいけません: {stderr}");
 }
 
+#[test]
+fn explicit_addr_skips_config_read_even_if_config_is_invalid() {
+  // 上位の接続先指定（--addr）がある場合、設定ファイルは読まない。壊れた設定を置いても
+  // 解析エラーにならず、--addr のダミーサーバーから概要を取得できることを観測する。
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let server = runtime.block_on(start_dummy_server(sample_overview()));
+  let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+  let config = write_config(&dir, "{ これは JSON ではありません }");
+  let mut stdout = Vec::new();
+  let mut stderr = Vec::new();
+  let args = [
+    "overview".to_owned(),
+    "--addr".to_owned(),
+    format!("{}", server.addr),
+    "--config".to_owned(),
+    config.display().to_string(),
+  ];
+
+  let code = run_with(&args, Err(std::env::VarError::NotPresent), &mut stdout, &mut stderr);
+  let seen_calls = server.seen_calls();
+  runtime.block_on(server.shutdown());
+
+  let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
+  let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+  assert_eq!(code, EXIT_OK, "--addr があるときは設定ファイルの解析で止まってはいけません。stderr: {stderr}");
+  assert!(stderr.is_empty(), "成功時に設定ファイルのエラーを出してはいけません: {stderr}");
+  assert_eq!(seen_calls, vec!["GetOverview".to_owned()], "--addr の接続先から概要を取得する必要があります");
+  assert!(stdout.contains("概要"), "--addr の接続先から取得した概要を表示する必要があります: {stdout}");
+}
+
+#[test]
+fn env_addr_skips_config_read_even_if_config_is_invalid() {
+  // 上位の接続先指定（環境変数）がある場合も設定ファイルは読まない。
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let server = runtime.block_on(start_dummy_server(sample_overview()));
+  let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+  let config = write_config(&dir, "{ これは JSON ではありません }");
+  let mut stdout = Vec::new();
+  let mut stderr = Vec::new();
+  let args = ["overview".to_owned(), "--config".to_owned(), config.display().to_string()];
+
+  let code = run_with(&args, Ok(format!("{}", server.addr)), &mut stdout, &mut stderr);
+  let seen_calls = server.seen_calls();
+  runtime.block_on(server.shutdown());
+
+  let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
+  let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+  assert_eq!(code, EXIT_OK, "環境変数があるときは設定ファイルの解析で止まってはいけません。stderr: {stderr}");
+  assert!(stderr.is_empty(), "成功時に設定ファイルのエラーを出してはいけません: {stderr}");
+  assert_eq!(seen_calls, vec!["GetOverview".to_owned()], "環境変数の接続先から概要を取得する必要があります");
+  assert!(stdout.contains("概要"), "環境変数の接続先から取得した概要を表示する必要があります: {stdout}");
+}
+
+#[test]
+fn invalid_config_fails_when_no_higher_addr_is_specified() {
+  // 上位の指定が無い場合だけ設定ファイルを読み、解析できなければ接続前に失敗する。
+  let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+  let config = write_config(&dir, "{ これは JSON ではありません }");
+  let mut stdout = Vec::new();
+  let mut stderr = Vec::new();
+
+  let code = run_with(
+    &["overview".to_owned(), "--config".to_owned(), config.display().to_string()],
+    Err(std::env::VarError::NotPresent),
+    &mut stdout,
+    &mut stderr,
+  );
+
+  let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
+  let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+  assert_eq!(code, EXIT_FAILURE, "上位の指定が無いときの設定エラーは失敗にする必要があります");
+  assert!(stderr.contains("JSON を解析できませんでした"), "設定の解析失敗を示す必要があります: {stderr}");
+  assert!(stdout.is_empty(), "設定エラーで概要を標準出力へ出してはいけません: {stdout}");
+}
+
+#[test]
+fn empty_env_addr_reads_config_as_unset() {
+  // 空の環境変数は「上位の指定なし」として扱い、設定ファイルを読む。
+  let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+  let config = write_config(&dir, "{ これは JSON ではありません }");
+  let mut stdout = Vec::new();
+  let mut stderr = Vec::new();
+
+  let code = run_with(
+    &["overview".to_owned(), "--config".to_owned(), config.display().to_string()],
+    Ok(String::new()),
+    &mut stdout,
+    &mut stderr,
+  );
+
+  let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+  assert_eq!(code, EXIT_FAILURE, "空の環境変数は未設定として設定ファイルを読む必要があります");
+  assert!(stderr.contains("JSON を解析できませんでした"), "設定の解析失敗を示す必要があります: {stderr}");
+}
+
+#[test]
+fn invalid_env_addr_does_not_fall_through_to_config() {
+  // 非空だが不正な環境変数を「未設定」と扱い、設定の listen へ落ちてはいけない。
+  let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+  let listen = reserve_closed_addr();
+  let config = write_config(&dir, &format!(r#"{{"listen":"{listen}"}}"#));
+  let mut stdout = Vec::new();
+  let mut stderr = Vec::new();
+
+  let code = run_with(
+    &["overview".to_owned(), "--config".to_owned(), config.display().to_string()],
+    Ok("not-an-address".to_owned()),
+    &mut stdout,
+    &mut stderr,
+  );
+
+  let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+  assert_eq!(code, EXIT_USAGE, "不正な環境変数は既定値や設定の listen で補ってはいけません");
+  assert!(stderr.contains("not-an-address"), "不正な値を示す必要があります: {stderr}");
+  assert!(stderr.contains(BACKEND_ADDR_ENV), "どの指定が不正かを示す必要があります: {stderr}");
+}
+
+#[test]
+fn resolve_overview_addr_falls_back_to_default_when_config_file_is_missing() {
+  // 所有者関数 resolve_overview_addr を通して、設定ファイルの欠落が「未設定」として
+  // 既定値へ解決されることを、ソケットを開かずに観測する。
+  let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+  let missing = dir.path().join("does-not-exist.json");
+  let options = OverviewOptions { addr: None, config: Some(missing) };
+
+  assert_eq!(
+    resolve_overview_addr(&options, Err(std::env::VarError::NotPresent)),
+    Ok(DEFAULT_BACKEND_ADDR.parse::<SocketAddr>().unwrap()),
+    "設定ファイルが無いときは所有者関数も既定値へ解決する必要があります"
+  );
+}
+
 // ----------------------------------------------------------------------------
 // 到達経路: 引数解析・接続先解決・表示が一つの入口からつながる
 // ----------------------------------------------------------------------------
@@ -918,4 +1193,162 @@ fn cli_end_to_end_from_arguments_to_stdout() {
   assert_eq!(seen_calls, vec!["GetOverview".to_owned()], "取得は GetOverview だけを呼ぶ必要があります");
   assert!(stdout.contains("概要"), "--addr の接続先から取得した概要を表示する必要があります: {stdout}");
   assert!(stdout.contains("j5ik2o-mac-mini（Mac mini、接続中）"), "{stdout}");
+}
+
+// ----------------------------------------------------------------------------
+// CLI-CONVERSATION: 会話の取得と表示（AC38B-3/AC38B-4）
+// ----------------------------------------------------------------------------
+
+#[test]
+fn conversation_rendering_marks_empty_conversation() {
+  let rendered = render_conversation(&conversation_page("corporate-site", "session-1", Vec::new(), 0, false));
+
+  assert!(rendered.contains("会話: corporate-site"), "{rendered}");
+  assert!(
+    rendered.contains("（会話はありません）"),
+    "空の会話は空であることが分かる表示にする必要があります: {rendered}"
+  );
+}
+
+#[test]
+fn conversation_command_prints_messages_in_seq_order_and_follows_has_more() {
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let first_secs = 1_731_600_000;
+  let second_secs = 1_731_600_060;
+  let third_secs = 1_731_600_120;
+  let pages = vec![
+    {
+      let mut first_page = conversation_page(
+        "corporate-site",
+        "session-1",
+        vec![
+          conversation_message(1, first_secs, v1::ConversationSpeaker::User, "最初の発言"),
+          conversation_message(2, second_secs, v1::ConversationSpeaker::Manager, "次の発言"),
+        ],
+        4,
+        true,
+      );
+      first_page.skipped = vec![ConversationSkipped { reason: "解釈できない行".to_owned(), count: 1 }];
+      first_page
+    },
+    conversation_page(
+      "corporate-site",
+      "session-other",
+      vec![conversation_message(4, third_secs, v1::ConversationSpeaker::System, "最後の発言")],
+      4,
+      false,
+    ),
+  ];
+  let server = runtime.block_on(start_conversation_server(sample_overview(), pages));
+
+  let (code, stdout, stderr) = run_cli(&["conversation".to_owned(), "corporate-site".to_owned()], server.addr);
+  let requests = server.conversation_requests();
+  runtime.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_OK, "会話の表示は成功する必要があります。stderr: {stderr}");
+  assert!(stderr.is_empty(), "成功時に標準エラーへ出してはいけません: {stderr}");
+  assert!(stdout.contains("会話: corporate-site"), "対象プロジェクト: {stdout}");
+  assert!(
+    stdout.contains("セッション: session-1"),
+    "最初の応答の session_id を表示し、2ページ目の値で置き換えない: {stdout}"
+  );
+  assert!(stdout.contains("プロバイダ: opencode"), "プロバイダ: {stdout}");
+  assert!(stdout.contains("ユーザー"), "ユーザーの発言: {stdout}");
+  assert!(stdout.contains("manager"), "manager の発言: {stdout}");
+  assert!(stdout.contains("システム"), "システムの発言: {stdout}");
+  assert!(stdout.contains(&formatted_time(first_secs)), "発言の時刻: {stdout}");
+
+  let first = stdout.find("最初の発言").expect("最初の発言を表示する必要があります");
+  let second = stdout.find("次の発言").expect("次の発言を表示する必要があります");
+  let third = stdout.find("最後の発言").expect("最後の発言を表示する必要があります");
+  assert!(first < second && second < third, "会話は時系列で並ぶ必要があります: {stdout}");
+
+  assert_eq!(requests.len(), 2, "has_more の間は続きを取得する必要があります");
+  assert_eq!(requests[0].project, "corporate-site");
+  assert!(requests[0].session_id.is_none(), "初回は session_id を省略する");
+  assert_eq!(requests[0].after_seq, 0);
+  assert_eq!(requests[0].limit, 200);
+  assert_eq!(requests[1].session_id.as_deref(), Some("session-1"), "以降は最初の session_id を固定する");
+  assert_eq!(requests[1].after_seq, 4, "続きは末尾メッセージの seq ではなく next_after_seq から取る");
+}
+
+#[test]
+fn conversation_command_passes_session_id_to_backend() {
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let server = runtime.block_on(start_conversation_server(sample_overview(), vec![conversation_page(
+    "corporate-site",
+    "session-9",
+    Vec::new(),
+    0,
+    false,
+  )]));
+
+  let (code, _stdout, stderr) = run_cli(
+    &["conversation".to_owned(), "corporate-site".to_owned(), "--session".to_owned(), "session-9".to_owned()],
+    server.addr,
+  );
+  let requests = server.conversation_requests();
+  runtime.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_OK, "stderr: {stderr}");
+  assert_eq!(requests.len(), 1);
+  assert_eq!(requests[0].session_id.as_deref(), Some("session-9"));
+}
+
+#[test]
+fn conversation_command_shows_unavailable_reason() {
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let mut page = conversation_page("corporate-site", "session-1", Vec::new(), 0, false);
+  page.unavailable_reason = Some("会話の保存先がありません。".to_owned());
+  let server = runtime.block_on(start_conversation_server(sample_overview(), vec![page]));
+
+  let (code, stdout, stderr) = run_cli(&["conversation".to_owned(), "corporate-site".to_owned()], server.addr);
+  runtime.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_OK, "unavailable_reason は取得の成功として扱う必要があります。stderr: {stderr}");
+  assert!(
+    stdout.contains("会話を表示できません: 会話の保存先がありません。"),
+    "会話が無い理由を表示する必要があります: {stdout}"
+  );
+}
+
+#[test]
+fn conversation_command_shows_skipped_rows() {
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let mut page = conversation_page("corporate-site", "session-1", Vec::new(), 0, false);
+  page.skipped = vec![ConversationSkipped { reason: "解釈できない行".to_owned(), count: 2 }];
+  let server = runtime.block_on(start_conversation_server(sample_overview(), vec![page]));
+
+  let (code, stdout, stderr) = run_cli(&["conversation".to_owned(), "corporate-site".to_owned()], server.addr);
+  runtime.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_OK, "stderr: {stderr}");
+  assert!(
+    stdout.contains("スキップした行: 解釈できない行 2件"),
+    "スキップした行の理由と件数を表示する必要があります: {stdout}"
+  );
+}
+
+#[test]
+fn conversation_command_fails_when_backend_is_down() {
+  let addr = reserve_closed_addr();
+  let mut stdout = Vec::new();
+  let mut stderr = Vec::new();
+
+  let code = run_with(
+    &["conversation".to_owned(), "corporate-site".to_owned()],
+    Ok(format!("{addr}")),
+    &mut stdout,
+    &mut stderr,
+  );
+
+  let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
+  let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+  assert_eq!(code, EXIT_FAILURE, "接続できないときは取得の失敗として終わる必要があります");
+  assert!(stderr.contains("backend に接続できません。"), "接続できない旨を標準エラーへ出す必要があります: {stderr}");
+  assert!(!stdout.contains("会話:"), "接続できないときは会話を表示してはいけません: {stdout}");
 }

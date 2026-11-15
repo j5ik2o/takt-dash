@@ -10,8 +10,9 @@ use std::{env::VarError, io::Write, net::SocketAddr, path::PathBuf, time::Durati
 use proto::v1::{
   takt_dash_service_client::TaktDashServiceClient, AnswerInquiryRequest, AnswerInquiryResponse,
   ApproveGoalMergeRequest, ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse,
-  DashboardState, GetOverviewRequest, GetPendingDecisionsRequest, GoalRegistrationProposal, OperationAnswerReport,
-  PendingDecisionType, RejectGoalRegistrationRequest, RejectGoalRegistrationResponse,
+  ConversationSkipped, DashboardState, GetConversationRequest, GetConversationResponse, GetOverviewRequest,
+  GetPendingDecisionsRequest, GoalRegistrationProposal, OperationAnswerReport, PendingDecisionType,
+  RejectGoalRegistrationRequest, RejectGoalRegistrationResponse,
 };
 use tonic::{transport::Endpoint, Code, Request, Status};
 
@@ -37,6 +38,11 @@ const EXIT_USAGE: i32 = 2;
 
 /// 閲覧のみを持つコマンドの名前。位置引数の既定値でもあります。
 const OVERVIEW_COMMAND: &str = "overview";
+
+/// manager の会話を閲覧するコマンドの名前。
+const CONVERSATION_COMMAND: &str = "conversation";
+/// 会話の取得で一度に調べる行数の上限。
+const CONVERSATION_LIMIT: i32 = 200;
 
 /// 問い合わせへ回答するコマンド。
 const ANSWER_COMMAND: &str = "answer";
@@ -89,6 +95,63 @@ fn resolve_backend_addr(sources: &AddrSources<'_>) -> Result<SocketAddr, AddrErr
     .map_err(|_| AddrError::Invalid { source: "既定値", value: DEFAULT_BACKEND_ADDR.to_owned() })
 }
 
+/// 接続先の解決に失敗した理由。設定の読み込み失敗とアドレスの不正を分け、終了コードを写し分けます。
+#[derive(Debug, PartialEq, Eq)]
+enum AddrResolutionError {
+  /// 設定ファイルを読み込めない、または JSON を解析できない。
+  Config(String),
+  /// 指定された値が待ち受けアドレスとして解釈できない。
+  Invalid { source: &'static str, value: String },
+}
+
+/// 接続先を解決する。上位指定が無いときだけ設定ファイルを読みます。
+///
+/// `--addr` と環境変数の非空判定を先に行い、どちらかが非空なら設定ファイルを読まずに
+/// `resolve_backend_addr` へ渡します。両方とも未設定（または空）のときだけ `--config` または
+/// 既定パスの設定を読みます。不正な非空値は設定へフォールバックさせず失敗させます。
+fn resolve_overview_addr(
+  options: &OverviewOptions,
+  env_addr: Result<String, VarError>,
+) -> Result<SocketAddr, AddrResolutionError> {
+  let cli_addr = options.addr.as_deref();
+  let env_value = env_addr.as_ref().ok();
+  let higher_priority_present =
+    cli_addr.is_some_and(|value| !value.is_empty()) || env_value.is_some_and(|value| !value.is_empty());
+  let config_listen = if higher_priority_present {
+    None
+  } else {
+    let config_path = options.config.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+    read_config_listen(&config_path).map_err(AddrResolutionError::Config)?
+  };
+  let sources = AddrSources { cli_addr, env_addr, config_listen: config_listen.as_deref() };
+  resolve_backend_addr(&sources)
+    .map_err(|AddrError::Invalid { source, value }| AddrResolutionError::Invalid { source, value })
+}
+
+/// `--addr` ＞ 環境変数 ＞ 設定の `listen` ＞ 既定値の順で接続先を解決する。
+///
+/// `--addr` と環境変数のどちらかが非空なら設定ファイルは読まない。両方とも未設定（または空）の
+/// ときだけ `--config` または既定パスの設定を読む。不正な非空値は設定へフォールバックさせない。
+fn resolve_addr(
+  addr: Option<&str>,
+  config: Option<&PathBuf>,
+  env_addr: Result<String, VarError>,
+  stderr: &mut impl Write,
+) -> Result<SocketAddr, i32> {
+  let options = OverviewOptions { addr: addr.map(str::to_owned), config: config.cloned() };
+  match resolve_overview_addr(&options, env_addr) {
+    | Ok(addr) => Ok(addr),
+    | Err(AddrResolutionError::Config(message)) => {
+      let _ = writeln!(stderr, "{message}");
+      Err(EXIT_FAILURE)
+    },
+    | Err(AddrResolutionError::Invalid { source, value }) => {
+      let _ = writeln!(stderr, "{source} の値 {value} を待ち受けアドレスとして解釈できませんでした。");
+      Err(EXIT_USAGE)
+    },
+  }
+}
+
 /// 引数を解釈した結果。
 #[derive(Debug, PartialEq, Eq)]
 enum Invocation {
@@ -98,6 +161,8 @@ enum Invocation {
   Decisions(DecisionsOptions),
   /// 書き込み操作を実行する。
   Write(WriteInvocation),
+  /// manager の会話を表示する。
+  Conversation(ConversationOptions),
   /// 使い方を表示して正常終了する。
   Help,
 }
@@ -116,6 +181,15 @@ struct DecisionsOptions {
 struct OverviewOptions {
   addr:   Option<String>,
   config: Option<PathBuf>,
+}
+
+/// 会話の表示に使う解決前の入力。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConversationOptions {
+  project: String,
+  session: Option<String>,
+  addr:    Option<String>,
+  config:  Option<PathBuf>,
 }
 
 /// 書き込みコマンドと、その接続先の解決前の入力。
@@ -176,6 +250,7 @@ fn is_known_command(name: &str) -> bool {
       | DECISIONS_COMMAND
       | APPROVE_REGISTRATION_COMMAND
       | REJECT_REGISTRATION_COMMAND
+      | CONVERSATION_COMMAND
   )
 }
 
@@ -194,6 +269,7 @@ fn flag_allowed(command: Option<&str>, flag: &str) -> bool {
           | Some(REJECT_REGISTRATION_COMMAND)
       )
     },
+    | "--session" => command.is_none() || matches!(command, Some(OVERVIEW_COMMAND) | Some(CONVERSATION_COMMAND)),
     | "--goal" => matches!(command, Some(ANSWER_COMMAND) | Some(MERGE_COMMAND)),
     | "--question" | "--text" | "--report" => command == Some(ANSWER_COMMAND),
     | "--pr" | "--until" => command == Some(MERGE_COMMAND),
@@ -215,6 +291,7 @@ fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
   let mut pr = None;
   let mut until = None;
   let mut revision = None;
+  let mut session = None;
   let mut command: Option<&str> = None;
   let mut index = 0;
   while index < args.len() {
@@ -271,6 +348,13 @@ fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
           revision = Some(take_value(args, index, "--revision")?);
           index += 2;
         },
+        | "--session" => {
+          if command == Some(OVERVIEW_COMMAND) {
+            return Err(UsageError("概要の表示に --session は使えません。".to_owned()));
+          }
+          session = Some(take_value(args, index, "--session")?);
+          index += 2;
+        },
         | _ => return Err(UsageError(format!("未知の引数です: {argument}"))),
       }
       continue;
@@ -283,11 +367,26 @@ fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
       index += 1;
       continue;
     }
+    if command == Some(CONVERSATION_COMMAND) {
+      if project.is_some() {
+        return Err(UsageError(format!("会話の表示に位置引数は1つだけ取れます: {argument}")));
+      }
+      project = Some(argument.to_owned());
+      index += 1;
+      continue;
+    }
     return Err(UsageError(format!("{} に位置引数は取れません: {argument}", command.unwrap_or(OVERVIEW_COMMAND))));
   }
   let command = command.unwrap_or(OVERVIEW_COMMAND);
   if command == OVERVIEW_COMMAND {
+    if session.is_some() {
+      return Err(UsageError("概要の表示に --session は使えません。".to_owned()));
+    }
     return Ok(Invocation::Overview(OverviewOptions { addr, config }));
+  }
+  if command == CONVERSATION_COMMAND {
+    let project = project.ok_or_else(|| UsageError("会話の表示にはプロジェクト名が必要です。".to_owned()))?;
+    return Ok(Invocation::Conversation(ConversationOptions { project, session, addr, config }));
   }
   if command == DECISIONS_COMMAND {
     let server_id = require_flag(server, DECISIONS_COMMAND, "--server")?;
@@ -404,6 +503,8 @@ fn usage() -> String {
   [
     "使い方: takt-dash-cli [overview] [--addr <待ち受けアドレス>] [--config <設定ファイル>]",
     "  overview                            backend の gRPC から概要を取得して表示します（既定）",
+    "  conversation <プロジェクト> [--session <セッション>]",
+    "                                      manager の会話を発言の時系列で表示します",
     "  answer --server <名前> --project <名前> --question <ID> (--text <本文> | --report completed|unable)",
     "                                      問い合わせへ回答します（--goal でゴールを明示できます）",
     "  merge --server <名前> --project <名前> --goal <ID> --pr <番号> --until prepare|merge",
@@ -418,6 +519,7 @@ fn usage() -> String {
     "                                      ゴール登録を却下します",
     "--addr      接続先の待ち受けアドレス（例: 127.0.0.1:50051）",
     "--config    backend と同じ形式の設定ファイルのパス。listen を接続先に使います",
+    "--session   会話のセッション。省略した場合は最新の manager のセッションを使います",
     "--help      この使い方を表示します",
   ]
   .join("\n")
@@ -508,6 +610,78 @@ async fn fetch_decisions(addr: SocketAddr) -> Result<DashboardState, ReadError> 
     .into_inner()
     .state
     .ok_or_else(|| ReadError::Call(Status::internal("backend が判断待ちの状態を返しませんでした。")))
+}
+
+/// backend の `GetConversation` で会話を取得する。
+///
+/// `has_more` の間は応答の `next_after_seq` を次の `after_seq` にして続きを取り、最初の応答の
+/// `session_id` を固定します。カーソルが進まない応答では、同じページを取り続けないよう止めます。
+async fn fetch_conversation(
+  addr: SocketAddr,
+  project: &str,
+  session: Option<&str>,
+) -> Result<GetConversationResponse, ReadError> {
+  let channel = connect(addr).await.map_err(ReadError::Unavailable)?;
+  let mut client = TaktDashServiceClient::new(channel);
+
+  let mut after_seq = 0_i64;
+  let mut session_id = session.map(str::to_owned);
+  let mut merged: Option<GetConversationResponse> = None;
+  loop {
+    let request = GetConversationRequest {
+      project: project.to_owned(),
+      session_id: session_id.clone(),
+      after_seq,
+      limit: CONVERSATION_LIMIT,
+    };
+    let mut request = Request::new(request);
+    request.set_timeout(READ_TIMEOUT);
+    let page = client.get_conversation(request).await.map_err(|status| read_call_error(addr, "会話の取得", status))?;
+    let page = page.into_inner();
+    if session_id.is_none() {
+      session_id = Some(page.session_id.clone());
+    }
+    let has_more = page.has_more;
+    let next_after_seq = page.next_after_seq;
+    merged = Some(match merged {
+      | None => page,
+      | Some(accumulated) => merge_conversation_pages(accumulated, page),
+    });
+    if !has_more || next_after_seq <= after_seq {
+      break;
+    }
+    after_seq = next_after_seq;
+  }
+  Ok(merged.expect("会話の取得は少なくとも1回成功します"))
+}
+
+/// 差分のページを、既に取得した会話へ足す。
+///
+/// 同じ seq は重複させず、skipped は理由ごとに合算します。会話の識別は最初の応答の値を保ち、
+/// 続きの位置と未読の有無は新しいページの値を使います。
+fn merge_conversation_pages(
+  mut base: GetConversationResponse,
+  next: GetConversationResponse,
+) -> GetConversationResponse {
+  base.messages.extend(next.messages);
+  base.messages.sort_by_key(|message| message.seq);
+  base.messages.dedup_by_key(|message| message.seq);
+
+  let mut skipped: Vec<ConversationSkipped> = Vec::new();
+  for item in base.skipped.into_iter().chain(next.skipped) {
+    if let Some(existing) = skipped.iter_mut().find(|existing| existing.reason == item.reason) {
+      existing.count += item.count;
+    } else {
+      skipped.push(item);
+    }
+  }
+  base.skipped = skipped;
+  base.next_after_seq = next.next_after_seq;
+  base.has_more = next.has_more;
+  if next.unavailable_reason.is_some() {
+    base.unavailable_reason = next.unavailable_reason;
+  }
+  base
 }
 
 /// 書き込みコマンドの実行に失敗した理由。
@@ -639,22 +813,13 @@ fn run_with(
       (options.addr, options.config, Action::Decisions { server_id: options.server_id, project: options.project })
     },
     | Invocation::Write(write) => (write.addr, write.config, Action::Write(write.command)),
-  };
-  let config_path = config_option.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
-  let config_listen = match read_config_listen(&config_path) {
-    | Ok(listen) => listen,
-    | Err(message) => {
-      let _ = writeln!(stderr, "{message}");
-      return EXIT_FAILURE;
+    | Invocation::Conversation(options) => {
+      (options.addr, options.config, Action::Conversation { project: options.project, session: options.session })
     },
   };
-  let sources = AddrSources { cli_addr: addr_option.as_deref(), env_addr, config_listen: config_listen.as_deref() };
-  let addr = match resolve_backend_addr(&sources) {
+  let addr = match resolve_addr(addr_option.as_deref(), config_option.as_ref(), env_addr, stderr) {
     | Ok(addr) => addr,
-    | Err(AddrError::Invalid { source, value }) => {
-      let _ = writeln!(stderr, "{source} の値 {value} を待ち受けアドレスとして解釈できませんでした。");
-      return EXIT_USAGE;
-    },
+    | Err(code) => return code,
   };
   let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
     | Ok(runtime) => runtime,
@@ -713,6 +878,22 @@ fn run_with(
         EXIT_FAILURE
       },
     },
+    | Action::Conversation { project, session } => {
+      match runtime.block_on(fetch_conversation(addr, &project, session.as_deref())) {
+        | Ok(response) => {
+          let _ = writeln!(stdout, "{}", render_conversation(&response));
+          EXIT_OK
+        },
+        | Err(ReadError::Unavailable(message)) => {
+          let _ = writeln!(stderr, "backend に接続できません。{message}");
+          EXIT_FAILURE
+        },
+        | Err(ReadError::Call(status)) => {
+          let _ = writeln!(stderr, "backend から会話を取得できませんでした（{}）。{}", status.code(), status.message());
+          EXIT_FAILURE
+        },
+      }
+    },
   }
 }
 
@@ -724,6 +905,8 @@ enum Action {
   Decisions { server_id: String, project: String },
   /// 書き込みコマンドを実行する。
   Write(WriteCommand),
+  /// manager の会話を表示する。
+  Conversation { project: String, session: Option<String> },
 }
 
 /// 環境変数から接続先の上書きを読む。
@@ -829,6 +1012,53 @@ fn render_overview(state: &DashboardState) -> String {
     thresholds.pending_decision_stale_minutes,
     thresholds.run_log_silent_minutes,
   )
+}
+
+/// 会話の表示内容を日本語の文字列へ組み立てる。
+///
+/// 発言は seq の昇順に並べ、発話者・時刻・本文を出す。unavailable_reason は会話が無い理由、
+/// skipped は理由と件数として表示する。
+fn render_conversation(response: &GetConversationResponse) -> String {
+  let mut lines = vec![
+    format!("会話: {}", response.project),
+    format!("セッション: {}", response.session_id),
+    format!("プロバイダ: {}", response.provider),
+  ];
+  if let Some(reason) = response.unavailable_reason.as_deref() {
+    lines.push(format!("会話を表示できません: {reason}"));
+  }
+  for skipped in &response.skipped {
+    lines.push(format!("スキップした行: {} {}件", skipped.reason, skipped.count));
+  }
+
+  let mut messages = response.messages.clone();
+  messages.sort_by_key(|message| message.seq);
+  messages.dedup_by_key(|message| message.seq);
+  if messages.is_empty() {
+    if response.unavailable_reason.is_none() {
+      lines.push("（会話はありません）".to_owned());
+    }
+  } else {
+    lines.extend(messages.iter().map(|message| {
+      format!(
+        "- [{}] {}: {}",
+        format_timestamp(message.occurred_at.as_ref()),
+        conversation_speaker_label(message.speaker),
+        message.text
+      )
+    }));
+  }
+  lines.join("\n")
+}
+
+/// 発話者の数値を表示名へ変換する。未知の値は「不明」にする。
+fn conversation_speaker_label(speaker: i32) -> &'static str {
+  match proto::v1::ConversationSpeaker::try_from(speaker) {
+    | Ok(proto::v1::ConversationSpeaker::User) => "ユーザー",
+    | Ok(proto::v1::ConversationSpeaker::Manager) => "manager",
+    | Ok(proto::v1::ConversationSpeaker::System) => "システム",
+    | _ => "不明",
+  }
 }
 
 /// 判断待ちの一覧を、指定したサーバーとプロジェクトに絞って表示する。

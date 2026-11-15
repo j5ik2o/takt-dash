@@ -5,6 +5,7 @@
 import {
   ActivityKind,
   AnomalyThresholds,
+  ConversationSpeaker,
   DashboardState,
   ExecutionStatus,
   GoalStatus,
@@ -12,8 +13,10 @@ import {
   PendingDecisionType,
   RunStatus,
   type ActivityEvent,
+  type ConversationMessage,
   type DailySummary,
   type GetActivityResponse,
+  type GetConversationResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
   type ServerEventCount,
@@ -55,8 +58,22 @@ export function createDashboardState(): DashboardState {
       },
     ],
     projects: [
-      { name: "corporate-site", about: "採用ページを管理する", serverId: "mini", completedTasks24h: 3 },
-      { name: "esa", about: "イベントストアの実装", serverId: "mini", completedTasks24h: 1 },
+      {
+        name: "corporate-site",
+        about: "採用ページを管理する",
+        serverId: "mini",
+        completedTasks24h: 3,
+        connected: true,
+        lastReadAt: minutesAgo(1),
+      },
+      {
+        name: "esa",
+        about: "イベントストアの実装",
+        serverId: "mini",
+        completedTasks24h: 1,
+        connected: true,
+        lastReadAt: minutesAgo(1),
+      },
     ],
     goals: [
       {
@@ -296,6 +313,45 @@ export function createActivityResponse(): GetActivityResponse {
     events: createActivityEvents(),
     dailySummaries: createDailySummaries(),
     todayCountsByServer: createServerEventCounts(),
+  };
+}
+
+export function createConversationMessages(): ConversationMessage[] {
+  return [
+    {
+      seq: 1,
+      occurredAt: minutesAgo(6),
+      speaker: ConversationSpeaker.CONVERSATION_SPEAKER_USER,
+      text: "採用ページの見出しを直してください。",
+    },
+    {
+      seq: 2,
+      occurredAt: minutesAgo(5),
+      speaker: ConversationSpeaker.CONVERSATION_SPEAKER_MANAGER,
+      text: "見出しの文言を確認しています。",
+    },
+    {
+      seq: 3,
+      occurredAt: minutesAgo(4),
+      speaker: ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM,
+      text: "作業を開始しました。",
+    },
+  ];
+}
+
+export function createConversationResponse(
+  overrides: Partial<GetConversationResponse> = {},
+): GetConversationResponse {
+  return {
+    project: "corporate-site",
+    sessionId: "session-conv-1",
+    provider: "opencode",
+    messages: createConversationMessages(),
+    nextAfterSeq: 3,
+    hasMore: false,
+    skipped: [],
+    unavailableReason: undefined,
+    ...overrides,
   };
 }
 

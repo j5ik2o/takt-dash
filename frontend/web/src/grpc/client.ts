@@ -10,6 +10,8 @@ import {
   type ApproveGoalRegistrationResponse,
   type DashboardState,
   type GetActivityResponse,
+  type GetConversationRequest,
+  type GetConversationResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
   type RejectGoalRegistrationRequest,
@@ -70,6 +72,7 @@ export type BackendClient = {
   getPendingDecisions(): Promise<DashboardState>;
   getActivity(): Promise<GetActivityResponse>;
   getRunDetail(runSlug: string): Promise<GetRunDetailResponse>;
+  getConversation(request: GetConversationRequest): Promise<GetConversationResponse>;
   watchState(): ClientReadableStream<DashboardState>;
   answerInquiry(request: AnswerInquiryRequest): Promise<AnswerInquiryResponse>;
   approveGoalMerge(request: ApproveGoalMergeRequest): Promise<ApproveGoalMergeResponse>;
@@ -82,7 +85,15 @@ export type CreateBackendClientOptions = {
   env?: BackendEnv;
   // 書き込みの要求に設定する期限（ミリ秒）。読み取りには適用しない。
   writeDeadlineMs?: number;
+  /**
+   * unary RPC の deadline（ミリ秒）。省略時は既定の有限値を用いる。
+   * 応答を返さない backend で無期限に待たないため、テストからは短い値を注入する。
+   */
+  deadlineMs?: number;
 };
+
+// unary RPC に付ける既定の deadline。backend 側の取得上限より長く、かつ有限にする。
+const DEFAULT_UNARY_DEADLINE_MS = 30_000;
 
 const isConnectionFailure = (error: grpc.ServiceError): boolean =>
   error.code === grpc.status.UNAVAILABLE || error.code === grpc.status.DEADLINE_EXCEEDED;
@@ -127,6 +138,8 @@ const unary = <Request, Response>(
 export function createBackendClient(options: CreateBackendClientOptions = {}): BackendClient {
   const env = options.env ?? process.env;
   const address = resolveBackendAddress(env);
+  const deadlineMs = options.deadlineMs ?? DEFAULT_UNARY_DEADLINE_MS;
+  const readOptions = (): grpc.CallOptions => ({ deadline: Date.now() + deadlineMs });
   const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
   const writeDeadlineMs = options.writeDeadlineMs ?? DEFAULT_WRITE_DEADLINE_MS;
   const writeOptions = (): grpc.CallOptions => ({ deadline: Date.now() + writeDeadlineMs });
@@ -136,20 +149,20 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       unary<object, DashboardState>(
         (request, metadata, callOptions, callback) => client.getOverview(request, metadata, callOptions, callback),
         {},
-        {},
+        readOptions(),
       ),
     getProjects: () =>
       unary<object, GetProjectsResponse>(
         (request, metadata, callOptions, callback) => client.getProjects(request, metadata, callOptions, callback),
         {},
-        {},
+        readOptions(),
       ),
     getPendingDecisions: async () => {
       const response = await unary<object, { state: DashboardState | undefined }>(
         (request, metadata, callOptions, callback) =>
           client.getPendingDecisions(request, metadata, callOptions, callback),
         {},
-        {},
+        readOptions(),
       );
       if (response.state === undefined) {
         throw new Error("GetPendingDecisions の応答に state がありません。");
@@ -160,14 +173,14 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       unary<object, GetActivityResponse>(
         (request, metadata, callOptions, callback) => client.getActivity(request, metadata, callOptions, callback),
         {},
-        {},
+        readOptions(),
       ),
     getRunDetail: async (runSlug) => {
       const detail = await unary<{ runSlug: string }, GetRunDetailResponse>(
         (request, metadata, callOptions, callback) =>
           client.getRunDetail(request, metadata, callOptions, callback),
         { runSlug },
-        {},
+        readOptions(),
       ).catch((error: unknown) => {
         if (error instanceof BackendUnavailableError) {
           throw error;
@@ -182,6 +195,18 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       }
       return detail;
     },
+    getConversation: (request) =>
+      unary<GetConversationRequest, GetConversationResponse>(
+        (value, metadata, callOptions, callback) =>
+          client.getConversation(value, metadata, callOptions, callback),
+        {
+          project: request.project,
+          sessionId: request.sessionId,
+          afterSeq: request.afterSeq,
+          limit: request.limit,
+        },
+        readOptions(),
+      ),
     watchState: () => client.watchState({} satisfies WatchStateRequest),
     answerInquiry: (request) =>
       unary<AnswerInquiryRequest, AnswerInquiryResponse>(

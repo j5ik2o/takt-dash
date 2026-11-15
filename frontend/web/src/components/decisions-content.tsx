@@ -13,17 +13,19 @@ import {
 } from "../state/decision-actions";
 import { resolveThresholds, sortPendingDecisions } from "../state/dashboard";
 import { formatDuration } from "../state/format";
+import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { DecisionActions } from "./decision-actions";
 import { DecisionResults } from "./decision-results";
 
 type DecisionsContentProps = {
   state: DashboardState;
   now: Date;
+  disconnected: boolean;
 };
 
 const waitSeconds = (waitMinutes: number): number => Math.round(waitMinutes * 60);
 
-export function DecisionsContent({ state, now }: DecisionsContentProps): ReactElement {
+export function DecisionsContent({ state, now, disconnected }: DecisionsContentProps): ReactElement {
   const thresholds = resolveThresholds(state.thresholds);
   const decisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
@@ -36,6 +38,7 @@ export function DecisionsContent({ state, now }: DecisionsContentProps): ReactEl
 
   return (
     <main className="page">
+      {disconnected ? <BackendUnavailableNotice /> : null}
       <header className="page-head">
         <div>
           <h1>判断待ち</h1>

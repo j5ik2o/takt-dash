@@ -396,6 +396,52 @@ export function pendingDecisionTypeToJSON(object: PendingDecisionType): string {
   }
 }
 
+/** 会話の発話者を表す。 */
+export enum ConversationSpeaker {
+  CONVERSATION_SPEAKER_UNSPECIFIED = 0,
+  CONVERSATION_SPEAKER_USER = 1,
+  CONVERSATION_SPEAKER_MANAGER = 2,
+  CONVERSATION_SPEAKER_SYSTEM = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function conversationSpeakerFromJSON(object: any): ConversationSpeaker {
+  switch (object) {
+    case 0:
+    case "CONVERSATION_SPEAKER_UNSPECIFIED":
+      return ConversationSpeaker.CONVERSATION_SPEAKER_UNSPECIFIED;
+    case 1:
+    case "CONVERSATION_SPEAKER_USER":
+      return ConversationSpeaker.CONVERSATION_SPEAKER_USER;
+    case 2:
+    case "CONVERSATION_SPEAKER_MANAGER":
+      return ConversationSpeaker.CONVERSATION_SPEAKER_MANAGER;
+    case 3:
+    case "CONVERSATION_SPEAKER_SYSTEM":
+      return ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ConversationSpeaker.UNRECOGNIZED;
+  }
+}
+
+export function conversationSpeakerToJSON(object: ConversationSpeaker): string {
+  switch (object) {
+    case ConversationSpeaker.CONVERSATION_SPEAKER_UNSPECIFIED:
+      return "CONVERSATION_SPEAKER_UNSPECIFIED";
+    case ConversationSpeaker.CONVERSATION_SPEAKER_USER:
+      return "CONVERSATION_SPEAKER_USER";
+    case ConversationSpeaker.CONVERSATION_SPEAKER_MANAGER:
+      return "CONVERSATION_SPEAKER_MANAGER";
+    case ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM:
+      return "CONVERSATION_SPEAKER_SYSTEM";
+    case ConversationSpeaker.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 /** operation_request への回答の種類を表す。 */
 export enum OperationAnswerReport {
   OPERATION_ANSWER_REPORT_UNSPECIFIED = 0,
@@ -466,6 +512,10 @@ export interface Project {
   serverId: string;
   /** 直近24時間に完了したタスクの件数 */
   completedTasks24h: number;
+  /** 応答の有無（プロジェクト単位） */
+  connected: boolean;
+  /** 最後に読めた時刻 */
+  lastReadAt: Date | undefined;
 }
 
 /** タスクの状態ごとの件数を表す。 */
@@ -843,6 +893,62 @@ export interface GetRunDetailResponse {
   serverLastReadAt: Date | undefined;
 }
 
+/** 会話の取得を要求する。 */
+export interface GetConversationRequest {
+  /** プロジェクト名 */
+  project: string;
+  /** セッション（省略時は最新の manager のセッション） */
+  sessionId?:
+    | string
+    | undefined;
+  /** この seq より後の行を返す */
+  afterSeq: number;
+  /** 調べる行数の上限 */
+  limit: number;
+}
+
+/** 会話の1件を表す。 */
+export interface ConversationMessage {
+  /** セッション内の順序 */
+  seq: number;
+  /** 発言の時刻 */
+  occurredAt:
+    | Date
+    | undefined;
+  /** 発話者 */
+  speaker: ConversationSpeaker;
+  /** 本文 */
+  text: string;
+}
+
+/** 解釈できずスキップした行の理由と件数を表す。 */
+export interface ConversationSkipped {
+  /** スキップした理由 */
+  reason: string;
+  /** 件数 */
+  count: number;
+}
+
+/** 会話の取得への応答を表す。 */
+export interface GetConversationResponse {
+  /** プロジェクト名 */
+  project: string;
+  /** セッション */
+  sessionId: string;
+  /** プロバイダ（この版は opencode のみ） */
+  provider: string;
+  /** 会話の並び（seq の昇順） */
+  messages: ConversationMessage[];
+  /** 次回に指定する after_seq */
+  nextAfterSeq: number;
+  /** 未読の行が残っているか */
+  hasMore: boolean;
+  /** スキップした行の理由と件数 */
+  skipped: ConversationSkipped[];
+  /** 保存先が無いなどの理由 */
+  unavailableReason?: string | undefined;
+}
+
 /** 状態ストリーミングの接続を要求する。 */
 export interface WatchStateRequest {
 }
@@ -1115,7 +1221,7 @@ export const Server: MessageFns<Server> = {
 };
 
 function createBaseProject(): Project {
-  return { name: "", about: "", serverId: "", completedTasks24h: 0 };
+  return { name: "", about: "", serverId: "", completedTasks24h: 0, connected: false, lastReadAt: undefined };
 }
 
 export const Project: MessageFns<Project> = {
@@ -1131,6 +1237,12 @@ export const Project: MessageFns<Project> = {
     }
     if (message.completedTasks24h !== 0) {
       writer.uint32(32).int32(message.completedTasks24h);
+    }
+    if (message.connected !== false) {
+      writer.uint32(40).bool(message.connected);
+    }
+    if (message.lastReadAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.lastReadAt), writer.uint32(50).fork()).join();
     }
     return writer;
   },
@@ -1180,6 +1292,22 @@ export const Project: MessageFns<Project> = {
             message.completedTasks24h = reader.int32();
             continue;
           }
+          case 5: {
+            if (tag !== 40) {
+              break;
+            }
+
+            message.connected = reader.bool();
+            continue;
+          }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.lastReadAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -1206,6 +1334,12 @@ export const Project: MessageFns<Project> = {
         : isSet(object.completed_tasks_24h)
         ? globalThis.Number(object.completed_tasks_24h)
         : 0,
+      connected: isSet(object.connected) ? globalThis.Boolean(object.connected) : false,
+      lastReadAt: isSet(object.lastReadAt)
+        ? fromJsonTimestamp(object.lastReadAt)
+        : isSet(object.last_read_at)
+        ? fromJsonTimestamp(object.last_read_at)
+        : undefined,
     };
   },
 
@@ -1223,6 +1357,12 @@ export const Project: MessageFns<Project> = {
     if (message.completedTasks24h !== 0) {
       obj.completedTasks24h = Math.round(message.completedTasks24h);
     }
+    if (message.connected !== false) {
+      obj.connected = message.connected;
+    }
+    if (message.lastReadAt !== undefined) {
+      obj.lastReadAt = message.lastReadAt.toISOString();
+    }
     return obj;
   },
 
@@ -1235,6 +1375,8 @@ export const Project: MessageFns<Project> = {
     message.about = object.about ?? "";
     message.serverId = object.serverId ?? "";
     message.completedTasks24h = object.completedTasks24h ?? 0;
+    message.connected = object.connected ?? false;
+    message.lastReadAt = object.lastReadAt ?? undefined;
     return message;
   },
 };
@@ -4702,6 +4844,547 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
   },
 };
 
+function createBaseGetConversationRequest(): GetConversationRequest {
+  return { project: "", sessionId: undefined, afterSeq: 0, limit: 0 };
+}
+
+export const GetConversationRequest: MessageFns<GetConversationRequest> = {
+  encode(message: GetConversationRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.project !== "") {
+      writer.uint32(10).string(message.project);
+    }
+    if (message.sessionId !== undefined) {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.afterSeq !== 0) {
+      writer.uint32(24).int64(message.afterSeq);
+    }
+    if (message.limit !== 0) {
+      writer.uint32(32).int32(message.limit);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetConversationRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGetConversationRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.project = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.sessionId = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.afterSeq = longToNumber(reader.int64());
+            continue;
+          }
+          case 4: {
+            if (tag !== 32) {
+              break;
+            }
+
+            message.limit = reader.int32();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GetConversationRequest {
+    return {
+      project: isSet(object.project) ? globalThis.String(object.project) : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : undefined,
+      afterSeq: isSet(object.afterSeq)
+        ? globalThis.Number(object.afterSeq)
+        : isSet(object.after_seq)
+        ? globalThis.Number(object.after_seq)
+        : 0,
+      limit: isSet(object.limit) ? globalThis.Number(object.limit) : 0,
+    };
+  },
+
+  toJSON(message: GetConversationRequest): unknown {
+    const obj: any = {};
+    if (message.project !== "") {
+      obj.project = message.project;
+    }
+    if (message.sessionId !== undefined) {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.afterSeq !== 0) {
+      obj.afterSeq = Math.round(message.afterSeq);
+    }
+    if (message.limit !== 0) {
+      obj.limit = Math.round(message.limit);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetConversationRequest>, I>>(base?: I): GetConversationRequest {
+    return GetConversationRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetConversationRequest>, I>>(object: I): GetConversationRequest {
+    const message = createBaseGetConversationRequest();
+    message.project = object.project ?? "";
+    message.sessionId = object.sessionId ?? undefined;
+    message.afterSeq = object.afterSeq ?? 0;
+    message.limit = object.limit ?? 0;
+    return message;
+  },
+};
+
+function createBaseConversationMessage(): ConversationMessage {
+  return { seq: 0, occurredAt: undefined, speaker: 0, text: "" };
+}
+
+export const ConversationMessage: MessageFns<ConversationMessage> = {
+  encode(message: ConversationMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.seq !== 0) {
+      writer.uint32(8).int64(message.seq);
+    }
+    if (message.occurredAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.occurredAt), writer.uint32(18).fork()).join();
+    }
+    if (message.speaker !== 0) {
+      writer.uint32(24).int32(message.speaker);
+    }
+    if (message.text !== "") {
+      writer.uint32(34).string(message.text);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConversationMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseConversationMessage();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.seq = longToNumber(reader.int64());
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.occurredAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.speaker = reader.int32() as any;
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.text = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ConversationMessage {
+    return {
+      seq: isSet(object.seq) ? globalThis.Number(object.seq) : 0,
+      occurredAt: isSet(object.occurredAt)
+        ? fromJsonTimestamp(object.occurredAt)
+        : isSet(object.occurred_at)
+        ? fromJsonTimestamp(object.occurred_at)
+        : undefined,
+      speaker: isSet(object.speaker) ? conversationSpeakerFromJSON(object.speaker) : 0,
+      text: isSet(object.text) ? globalThis.String(object.text) : "",
+    };
+  },
+
+  toJSON(message: ConversationMessage): unknown {
+    const obj: any = {};
+    if (message.seq !== 0) {
+      obj.seq = Math.round(message.seq);
+    }
+    if (message.occurredAt !== undefined) {
+      obj.occurredAt = message.occurredAt.toISOString();
+    }
+    if (message.speaker !== 0) {
+      obj.speaker = conversationSpeakerToJSON(message.speaker);
+    }
+    if (message.text !== "") {
+      obj.text = message.text;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ConversationMessage>, I>>(base?: I): ConversationMessage {
+    return ConversationMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConversationMessage>, I>>(object: I): ConversationMessage {
+    const message = createBaseConversationMessage();
+    message.seq = object.seq ?? 0;
+    message.occurredAt = object.occurredAt ?? undefined;
+    message.speaker = object.speaker ?? 0;
+    message.text = object.text ?? "";
+    return message;
+  },
+};
+
+function createBaseConversationSkipped(): ConversationSkipped {
+  return { reason: "", count: 0 };
+}
+
+export const ConversationSkipped: MessageFns<ConversationSkipped> = {
+  encode(message: ConversationSkipped, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== "") {
+      writer.uint32(10).string(message.reason);
+    }
+    if (message.count !== 0) {
+      writer.uint32(16).int32(message.count);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConversationSkipped {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseConversationSkipped();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.reason = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.count = reader.int32();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ConversationSkipped {
+    return {
+      reason: isSet(object.reason) ? globalThis.String(object.reason) : "",
+      count: isSet(object.count) ? globalThis.Number(object.count) : 0,
+    };
+  },
+
+  toJSON(message: ConversationSkipped): unknown {
+    const obj: any = {};
+    if (message.reason !== "") {
+      obj.reason = message.reason;
+    }
+    if (message.count !== 0) {
+      obj.count = Math.round(message.count);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ConversationSkipped>, I>>(base?: I): ConversationSkipped {
+    return ConversationSkipped.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConversationSkipped>, I>>(object: I): ConversationSkipped {
+    const message = createBaseConversationSkipped();
+    message.reason = object.reason ?? "";
+    message.count = object.count ?? 0;
+    return message;
+  },
+};
+
+function createBaseGetConversationResponse(): GetConversationResponse {
+  return {
+    project: "",
+    sessionId: "",
+    provider: "",
+    messages: [],
+    nextAfterSeq: 0,
+    hasMore: false,
+    skipped: [],
+    unavailableReason: undefined,
+  };
+}
+
+export const GetConversationResponse: MessageFns<GetConversationResponse> = {
+  encode(message: GetConversationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.project !== "") {
+      writer.uint32(10).string(message.project);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.provider !== "") {
+      writer.uint32(26).string(message.provider);
+    }
+    for (const v of message.messages) {
+      ConversationMessage.encode(v!, writer.uint32(34).fork()).join();
+    }
+    if (message.nextAfterSeq !== 0) {
+      writer.uint32(40).int64(message.nextAfterSeq);
+    }
+    if (message.hasMore !== false) {
+      writer.uint32(48).bool(message.hasMore);
+    }
+    for (const v of message.skipped) {
+      ConversationSkipped.encode(v!, writer.uint32(58).fork()).join();
+    }
+    if (message.unavailableReason !== undefined) {
+      writer.uint32(66).string(message.unavailableReason);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetConversationResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGetConversationResponse();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.project = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.sessionId = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.provider = reader.string();
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.messages.push(ConversationMessage.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 5: {
+            if (tag !== 40) {
+              break;
+            }
+
+            message.nextAfterSeq = longToNumber(reader.int64());
+            continue;
+          }
+          case 6: {
+            if (tag !== 48) {
+              break;
+            }
+
+            message.hasMore = reader.bool();
+            continue;
+          }
+          case 7: {
+            if (tag !== 58) {
+              break;
+            }
+
+            message.skipped.push(ConversationSkipped.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 8: {
+            if (tag !== 66) {
+              break;
+            }
+
+            message.unavailableReason = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GetConversationResponse {
+    return {
+      project: isSet(object.project) ? globalThis.String(object.project) : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      provider: isSet(object.provider) ? globalThis.String(object.provider) : "",
+      messages: globalThis.Array.isArray(object?.messages)
+        ? object.messages.map((e: any) => ConversationMessage.fromJSON(e))
+        : [],
+      nextAfterSeq: isSet(object.nextAfterSeq)
+        ? globalThis.Number(object.nextAfterSeq)
+        : isSet(object.next_after_seq)
+        ? globalThis.Number(object.next_after_seq)
+        : 0,
+      hasMore: isSet(object.hasMore)
+        ? globalThis.Boolean(object.hasMore)
+        : isSet(object.has_more)
+        ? globalThis.Boolean(object.has_more)
+        : false,
+      skipped: globalThis.Array.isArray(object?.skipped)
+        ? object.skipped.map((e: any) => ConversationSkipped.fromJSON(e))
+        : [],
+      unavailableReason: isSet(object.unavailableReason)
+        ? globalThis.String(object.unavailableReason)
+        : isSet(object.unavailable_reason)
+        ? globalThis.String(object.unavailable_reason)
+        : undefined,
+    };
+  },
+
+  toJSON(message: GetConversationResponse): unknown {
+    const obj: any = {};
+    if (message.project !== "") {
+      obj.project = message.project;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.provider !== "") {
+      obj.provider = message.provider;
+    }
+    if (message.messages?.length) {
+      obj.messages = message.messages.map((e) => ConversationMessage.toJSON(e));
+    }
+    if (message.nextAfterSeq !== 0) {
+      obj.nextAfterSeq = Math.round(message.nextAfterSeq);
+    }
+    if (message.hasMore !== false) {
+      obj.hasMore = message.hasMore;
+    }
+    if (message.skipped?.length) {
+      obj.skipped = message.skipped.map((e) => ConversationSkipped.toJSON(e));
+    }
+    if (message.unavailableReason !== undefined) {
+      obj.unavailableReason = message.unavailableReason;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetConversationResponse>, I>>(base?: I): GetConversationResponse {
+    return GetConversationResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetConversationResponse>, I>>(object: I): GetConversationResponse {
+    const message = createBaseGetConversationResponse();
+    message.project = object.project ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.provider = object.provider ?? "";
+    message.messages = object.messages?.map((e) => ConversationMessage.fromPartial(e)) || [];
+    message.nextAfterSeq = object.nextAfterSeq ?? 0;
+    message.hasMore = object.hasMore ?? false;
+    message.skipped = object.skipped?.map((e) => ConversationSkipped.fromPartial(e)) || [];
+    message.unavailableReason = object.unavailableReason ?? undefined;
+    return message;
+  },
+};
+
 function createBaseWatchStateRequest(): WatchStateRequest {
   return {};
 }
@@ -5964,6 +6647,18 @@ export const TaktDashServiceService = {
       Buffer.from(GetRunDetailResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): GetRunDetailResponse => GetRunDetailResponse.decode(value),
   },
+  /** manager の会話を時系列で返す。after_seq で増分取得できる。 */
+  getConversation: {
+    path: "/takt_dash.v1.TaktDashService/GetConversation" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GetConversationRequest): Buffer =>
+      Buffer.from(GetConversationRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GetConversationRequest => GetConversationRequest.decode(value),
+    responseSerialize: (value: GetConversationResponse): Buffer =>
+      Buffer.from(GetConversationResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): GetConversationResponse => GetConversationResponse.decode(value),
+  },
   /** 接続時に即時に全件を返し、その後は状態が変わるたびに送る。 */
   watchState: {
     path: "/takt_dash.v1.TaktDashService/WatchState" as const,
@@ -6050,6 +6745,8 @@ export interface TaktDashServiceServer extends UntypedServiceImplementation {
   getActivity: handleUnaryCall<GetActivityRequest, GetActivityResponse>;
   /** 1つの run について、takt_get_run で取得できる範囲を返す。 */
   getRunDetail: handleUnaryCall<GetRunDetailRequest, GetRunDetailResponse>;
+  /** manager の会話を時系列で返す。after_seq で増分取得できる。 */
+  getConversation: handleUnaryCall<GetConversationRequest, GetConversationResponse>;
   /** 接続時に即時に全件を返し、その後は状態が変わるたびに送る。 */
   watchState: handleServerStreamingCall<WatchStateRequest, DashboardState>;
   /** 判断待ちの問い合わせへ回答する。回答の内容は問い合わせの種類に応じて text か report を使う。 */
@@ -6147,6 +6844,22 @@ export interface TaktDashServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: GetRunDetailResponse) => void,
+  ): ClientUnaryCall;
+  /** manager の会話を時系列で返す。after_seq で増分取得できる。 */
+  getConversation(
+    request: GetConversationRequest,
+    callback: (error: ServiceError | null, response: GetConversationResponse) => void,
+  ): ClientUnaryCall;
+  getConversation(
+    request: GetConversationRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: GetConversationResponse) => void,
+  ): ClientUnaryCall;
+  getConversation(
+    request: GetConversationRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: GetConversationResponse) => void,
   ): ClientUnaryCall;
   /** 接続時に即時に全件を返し、その後は状態が変わるたびに送る。 */
   watchState(request: WatchStateRequest, options?: Partial<CallOptions>): ClientReadableStream<DashboardState>;

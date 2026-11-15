@@ -10,11 +10,13 @@
 mod common;
 mod grpc_harness;
 
+use std::path::Path;
+
 use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
-use serde_json::json;
+use serde_json::{json, Value};
 use takt_dash_backend::{
-  model::{InquiryEntry, InquiryKind, ProjectSnapshot},
+  model::{EventKind, ExecutionStatus, InquiryEntry, InquiryKind, ProjectSnapshot},
   poller::Poller,
   takt_dash::v1::{
     AnswerInquiryRequest, ApproveGoalMergeRequest, ApproveGoalRegistrationRequest, GetPendingDecisionsRequest,
@@ -1243,4 +1245,145 @@ async fn write_rpcs_reuse_the_poller_mcp_process() {
   assert!(!process_exists(pid), "停止後は共有していた子プロセスが残りません");
 
   server.stop().await;
+}
+
+/// 設定ファイルの `projects[0].cwd` を `cwd` へ書き換える。
+fn rewrite_project_cwd(config_path: &Path, cwd: &Path) {
+  let mut value: Value =
+    serde_json::from_str(&std::fs::read_to_string(config_path).expect("設定を読めます")).expect("設定を解析できます");
+  let projects = value["projects"].as_array_mut().expect("プロジェクトの一覧があります");
+  let project = projects.first_mut().expect("プロジェクトが1件あります");
+  project["cwd"] = json!(cwd.display().to_string());
+  std::fs::write(config_path, value.to_string()).expect("設定を書けます");
+}
+
+/// 設定ファイルの mock 起動引数にある `--state` の値だけを `state_path` へ書き換える。
+///
+/// `--calls` と `--processes` の記録先はそのまま残します。
+fn rewrite_state_argument(config_path: &Path, state_path: &Path) {
+  let mut value: Value =
+    serde_json::from_str(&std::fs::read_to_string(config_path).expect("設定を読めます")).expect("設定を解析できます");
+  let mcp_servers = value["mcpServers"].as_object_mut().expect("mcpServers があります");
+  let server = mcp_servers.get_mut("mac-mini").expect("mac-mini の起動設定があります");
+  let args = server["args"].as_array_mut().expect("起動引数があります");
+  let index = args.iter().position(|arg| arg == "--state").expect("--state 引数があります");
+  *args.get_mut(index + 1).expect("--state の値があります") = json!(state_path.display().to_string());
+  std::fs::write(config_path, value.to_string()).expect("設定を書けます");
+}
+
+#[tokio::test]
+async fn write_rpc_rebuilds_the_client_when_the_project_cwd_changes() {
+  // 同じ gRPC サーバとレジストリのまま、プロジェクトの cwd を変える。
+  // 既存クライアントを設定と比較せずに再利用する実装では、次の書き込みが旧 cwd のまま
+  // 旧子プロセスを使い続けるため、記録された cwd と子プロセスの数で検出する。
+  let harness = harness_with(json!({}));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  client
+    .approve_goal_registration(ApproveGoalRegistrationRequest {
+      server_id: "mac-mini".to_owned(),
+      project:   "takt-dash".to_owned(),
+      revision:  3,
+    })
+    .await
+    .expect("最初の承認は成功します");
+
+  let first_processes = harness.recorded_processes();
+  assert_eq!(first_processes.len(), 1, "最初の書き込みで子プロセスを1つ起動します");
+  let first_calls = calls_named(&harness, "takt_approve_goal_registration");
+  assert_eq!(first_calls.len(), 1, "承認の道具を1回だけ呼びます: {first_calls:?}");
+  let old_cwd = first_calls[0]["cwd"].as_str().expect("記録された cwd を読めます").to_owned();
+
+  let new_directory = tempfile::tempdir().expect("新しい cwd を作れます");
+  let new_cwd = new_directory.path();
+  rewrite_project_cwd(harness.config_path(), new_cwd);
+
+  client
+    .approve_goal_registration(ApproveGoalRegistrationRequest {
+      server_id: "mac-mini".to_owned(),
+      project:   "takt-dash".to_owned(),
+      revision:  4,
+    })
+    .await
+    .expect("設定変更後の承認は成功します");
+
+  let calls = calls_named(&harness, "takt_approve_goal_registration");
+  assert_eq!(calls.len(), 2, "承認の道具を2回呼びます: {calls:?}");
+  assert_eq!(
+    calls[1]["cwd"],
+    json!(new_cwd.display().to_string()),
+    "設定変更後の書き込みは新しい cwd を道具へ渡します"
+  );
+  assert_ne!(calls[1]["cwd"], json!(old_cwd), "設定変更後の書き込みは旧 cwd を使いません");
+  let processes = harness.recorded_processes();
+  assert_eq!(processes.len(), 2, "設定変更後は新しい子プロセスで書き込みます: {processes:?}");
+  assert_ne!(processes[0], processes[1], "新しい子プロセスは旧プロセスと別の pid です");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn write_rpc_rebuild_resets_the_baseline_before_the_next_poll_cycle() {
+  // 書き込み RPC が設定変更でクライアントを作り直した場合も、次の読み取りサイクルは
+  // そのプロジェクトの差分基準とスロットをリセットする。書き込み由来の作り直しを知らない
+  // 実装では、旧接続先の状態との差分で一時停止の出来事を誤記録する。
+  let goal = json!({
+    "id": "3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11",
+    "status": "created",
+    "executionStatus": "active",
+    "objective": "確認の対象",
+    "integrationBranch": "takt/confirm"
+  });
+  let harness = harness_with(json!({ "goals": [goal] }));
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+    harness.registry.clone(),
+  );
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  let alternate_directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let alternate_state = alternate_directory.path().join("state-alternate.json");
+  std::fs::write(
+    &alternate_state,
+    json!({
+      "goals": [{
+        "id": "3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11",
+        "status": "created",
+        "executionStatus": "paused",
+        "objective": "確認の対象",
+        "integrationBranch": "takt/confirm"
+      }]
+    })
+    .to_string(),
+  )
+  .expect("別の状態を書けます");
+  rewrite_state_argument(harness.config_path(), &alternate_state);
+
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  client
+    .approve_goal_registration(ApproveGoalRegistrationRequest {
+      server_id: "mac-mini".to_owned(),
+      project:   "takt-dash".to_owned(),
+      revision:  3,
+    })
+    .await
+    .expect("設定変更後の書き込みは成功します");
+  assert_eq!(harness.recorded_processes().len(), 2, "書き込みが設定変更後の子プロセスを作ります");
+
+  let report = poller.read_cycle_once().await.expect("設定変更後のサイクルを実行できます");
+  poller.shutdown().await;
+  server.stop().await;
+
+  assert_eq!(report.events_recorded, 0, "作り直し後の初回は基準化だけを行い、出来事を出しません");
+  let events: Vec<EventKind> =
+    harness.activity.recent_events(50).expect("記録した出来事を読めます").into_iter().map(|event| event.kind).collect();
+  assert!(!events.contains(&EventKind::Paused), "旧接続先との差分で一時停止を誤記録しません: {events:?}");
+  let slot = harness.store.slot("takt-dash").expect("スロットがあります");
+  let snapshot = slot.snapshot.expect("新しい設定で読み取った状態があります");
+  assert_eq!(snapshot.goals[0].execution_status, ExecutionStatus::Paused, "新しい設定の状態を読み取ります");
 }

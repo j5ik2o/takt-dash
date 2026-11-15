@@ -91,7 +91,8 @@ impl<'a> ToolSet<'a> {
   /// （ゴール・タスク）の失敗と、補助読み取りの輸送エラーは全体の失敗として伝播します。
   ///
   /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知から得るため、通知を読んだ後に
-  /// ゴールへ起点時刻を反映します。
+  /// ゴールへ起点時刻を反映します。通知が無いゴールは前回 snapshot の同じゴールの起点を
+  /// 引き継ぎ、前回が無い初回観測でもその読み取りの観測時刻を起点として確定します。
   pub async fn read_snapshot(&mut self, prev: Option<&ProjectSnapshot>) -> Result<ProjectSnapshot, ToolError> {
     let observed_at = Utc::now();
     let mut goals = self.list_goals().await?;
@@ -99,9 +100,8 @@ impl<'a> ToolSet<'a> {
     let inquiries = self.list_all_inquiries(&goals, prev, observed_at).await?;
     let (notifications, awaiting_merge_at) = self.list_notifications(&goals, prev).await?;
     for goal in &mut goals {
-      if let Some(recorded_at) = awaiting_merge_at.get(&goal.goal_id) {
-        goal.awaiting_merge_at = Some(*recorded_at);
-      }
+      goal.awaiting_merge_at =
+        resolve_awaiting_merge_at(goal, awaiting_merge_at.get(&goal.goal_id).copied(), prev, observed_at);
     }
     let runs = self.get_running_runs(&tasks, prev).await?;
     let proposals = match self.list_goal_registration_proposals().await {
@@ -255,9 +255,9 @@ impl<'a> ToolSet<'a> {
   }
 
   /// takt_get_run の応答を解析する。stepLogs は先頭 50 件のウィンドウで返るため、
-  /// stepLogPage.nextOffset が残っていれば追加ページを取得して末尾のログの時刻を求める。
+  /// stepLogPage.nextOffset が残っていれば追加ページを取得して全件を集める。
   async fn parse_run_with_pages(&mut self, value: &Value, task: &TaskEntry) -> Result<RunEntry, ToolError> {
-    let mut latest_seen = last_step_timestamp(value);
+    let mut step_logs = step_log_entries(value);
     let mut steps = step_entries(value);
     let mut next_offset = step_log_next_offset(value);
     let run_slug = string_field(value, "runSlug")?;
@@ -268,13 +268,11 @@ impl<'a> ToolSet<'a> {
       }
       pages_taken += 1;
       let page_value = self.call_json("takt_get_run", json!({ "runSlug": run_slug, "offset": offset })).await?;
-      if let Some(timestamp) = last_step_timestamp(&page_value) {
-        latest_seen = Some(timestamp);
-      }
       steps.extend(step_entries(&page_value));
+      step_logs.extend(step_log_entries(&page_value));
       next_offset = step_log_next_offset(&page_value);
     }
-    parse_run(value, task, latest_seen, steps)
+    parse_run(value, task, step_logs, steps)
   }
 
   async fn list_notifications(
@@ -361,6 +359,31 @@ fn prev_inquiries(prev: Option<&ProjectSnapshot>, matches: impl Fn(Option<&str>)
       created_at: Some(entry.created_at),
     })
     .collect()
+}
+
+/// ゴールのマージ待ちの起点時刻を解像する。
+///
+/// 通知から取れた起点が最も優先です。通知が無い `awaiting_merge` のゴールは、前回 snapshot の
+/// 同じゴールの起点を引き継ぎ、前回が無い（初回観測）または前回に起点が無い場合は、その読み
+/// 取りの観測時刻を起点にします。初回観測でも起点を一度確定して以降の読み取りで保持するため、
+/// 待ち時間が読み取りごとに現在時刻へリセットされて滞留しなくなることを避けます。
+/// `awaiting_merge` でないゴールは起点を持ちません。
+fn resolve_awaiting_merge_at(
+  goal: &GoalEntry,
+  notification_start: Option<DateTime<Utc>>,
+  prev: Option<&ProjectSnapshot>,
+  observed_at: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+  if let Some(recorded_at) = notification_start {
+    return Some(recorded_at);
+  }
+  if goal.status != GoalStatus::AwaitingMerge {
+    return None;
+  }
+  let previous_start = prev
+    .and_then(|snapshot| snapshot.goals.iter().find(|entry| entry.goal_id == goal.goal_id))
+    .and_then(|entry| entry.awaiting_merge_at);
+  Some(previous_start.unwrap_or(observed_at))
 }
 
 struct Page {
@@ -534,10 +557,31 @@ fn parse_notification(goal_id: &str, value: &Value) -> Result<NotificationEntry,
   })
 }
 
+/// 一覧と詳細で共通の最終ログ時刻の決定順です。
+///
+/// 応答の `lastLogAt` を最優先し、無いときだけ全ページのステップ記録の最新時刻と現在ステップの
+/// 開始時刻の新しい方を使います。どちらも無ければ run の開始時刻に落とします。概要（`parse_run`）と
+/// 詳細（`parse_run_detail`）が同じ決定順を通り、無音判定が食い違わないようにします。
+///
+/// 時刻を持つステップ記録が 1 件も無いときは、欠落時刻（`UNIX_EPOCH`）を最新として採らず、
+/// 現在ステップの開始時刻だけを第 2 候補にします。
+fn resolve_last_log_at(
+  value: &Value,
+  step_logs: &[StepLogEntry],
+  current_step_started_at: Option<DateTime<Utc>>,
+  started_at: DateTime<Utc>,
+) -> Result<DateTime<Utc>, ToolError> {
+  let second = match latest_step_log_at(step_logs) {
+    | Some(latest) => Some(latest.max(current_step_started_at.unwrap_or(latest))),
+    | None => current_step_started_at,
+  };
+  Ok(parse_time(value.get("lastLogAt"))?.or(second).unwrap_or(started_at))
+}
+
 fn parse_run(
   value: &Value,
   task: &TaskEntry,
-  last_step_timestamp: Option<DateTime<Utc>>,
+  step_logs: Vec<StepLogEntry>,
   steps: Vec<RunStepEntry>,
 ) -> Result<RunEntry, ToolError> {
   let run_slug = string_field(value, "runSlug")?;
@@ -545,7 +589,7 @@ fn parse_run(
     .or(task.started_at)
     .ok_or_else(|| ToolError::Parse("run の開始時刻を取得できません".to_owned()))?;
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
-  let last_log_at = last_step_timestamp.or(current_step_started_at).unwrap_or(started_at);
+  let last_log_at = resolve_last_log_at(value, &step_logs, current_step_started_at, started_at)?;
   Ok(RunEntry {
     run_slug,
     session_id: optional_string(value, "sessionId").unwrap_or_default(),
@@ -572,14 +616,12 @@ fn parse_run_status(value: Option<&Value>) -> RunStatus {
   }
 }
 
-/// 応答の stepLogs 配列の末尾の timestamp を取り出す。先頭ページのウィンドウ末尾の時刻です。
-fn last_step_timestamp(value: &Value) -> Option<DateTime<Utc>> {
-  let timestamp = value
-    .get("stepLogs")
-    .and_then(Value::as_array)
-    .and_then(|logs| logs.last())
-    .and_then(|log| log.get("timestamp"))?;
-  DateTime::parse_from_rfc3339(timestamp.as_str()?).ok().map(|time| time.with_timezone(&Utc))
+/// 本文つきの stepLogs のうち、時刻を持つものの最新を返す。
+///
+/// `step_log_entries` は timestamp 欠落を `UNIX_EPOCH` にするため、その実値を最新時刻の候補に
+/// 含めません。時刻を持つ stepLog が無ければ `None` を返します。
+fn latest_step_log_at(step_logs: &[StepLogEntry]) -> Option<DateTime<Utc>> {
+  step_logs.iter().map(|log| log.timestamp).filter(|timestamp| *timestamp != DateTime::<Utc>::UNIX_EPOCH).max()
 }
 
 /// 応答の stepLogs 配列からステップの記録を出現順に取り出す。
@@ -846,7 +888,7 @@ fn parse_run_detail(
   let started_at =
     parse_time(value.get("startedAt"))?.ok_or_else(|| ToolError::Parse("run の開始時刻を取得できません".to_owned()))?;
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
-  let last_log_at = parse_time(value.get("lastLogAt"))?.or(current_step_started_at).unwrap_or(started_at);
+  let last_log_at = resolve_last_log_at(value, &step_logs, current_step_started_at, started_at)?;
   let task_name = optional_string(value, "taskName").or_else(|| task.map(|task| task.name.clone())).unwrap_or_default();
   let goal_id = optional_string(value, "goalId").or_else(|| task.and_then(|task| task.goal_id.clone()));
   Ok(RunDetail {

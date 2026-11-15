@@ -26,10 +26,9 @@
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
 //   }
-//
 // --calls <path> を渡すと、受け取った tools/call を {"name","arguments"} の JSONL として追記する。
 // --processes <path> を渡すと、起動時に自分の pid を 1 行追記する。
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isAbsolute } from "node:path";
 
@@ -47,6 +46,8 @@ const callsPath = option("--calls");
 // 起動時に自分の pid を追記する。テストは読み取りと書き込みが同じ子プロセスを使うことを
 // この記録で観測する。
 const processesPath = option("--processes");
+// 起動時の PID の書き出し先。子プロセスの終了をテストから観測するために使う。
+const pidFile = option("--pid-file");
 // 実 takt-mcp と同じページサイズ（limit 既定 50）。
 const PAGE_SIZE = 50;
 // takt の入力契約では goalId は UUID（z.uuid()）。
@@ -58,6 +59,10 @@ if (behavior === "exit") {
 
 if (processesPath !== undefined) {
   appendFileSync(processesPath, `${process.pid}\n`);
+}
+
+if (pidFile) {
+  writeFileSync(pidFile, String(process.pid));
 }
 
 const loadState = () => {
@@ -273,6 +278,19 @@ const onLine = (line) => {
     }
     if (behavior === "garbage") {
       process.stdout.write("これは JSON ではありません\n");
+      return;
+    }
+    if (behavior === "drip") {
+      // tools/call に対して、全体の期限より十分に長い間、途中経過だけを細切れに返し続ける。
+      // 行ごとのタイムアウトは満たすが、呼び出し全体は終わらないサーバーを模す。
+      const drip = (remaining) => {
+        if (remaining <= 0) {
+          return;
+        }
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } }) + "\n");
+        setTimeout(() => drip(remaining - 1), 100);
+      };
+      drip(100);
       return;
     }
     const { name, arguments: args } = message.params ?? {};

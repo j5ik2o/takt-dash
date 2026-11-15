@@ -38,6 +38,7 @@ fn proto_defines_the_read_and_write_rpcs() {
       "ApproveGoalMerge".to_owned(),
       "ApproveGoalRegistration".to_owned(),
       "GetActivity".to_owned(),
+      "GetConversation".to_owned(),
       "GetOverview".to_owned(),
       "GetPendingDecisions".to_owned(),
       "GetProjects".to_owned(),
@@ -46,7 +47,7 @@ fn proto_defines_the_read_and_write_rpcs() {
       "RejectGoalRegistration".to_owned(),
       "WatchState".to_owned(),
     ],
-    "読み取りの6 RPC と書き込みの5 RPC が定義されている必要があります: {names:?}"
+    "読み取りの7 RPC と書き込みの5 RPC が定義されている必要があります: {names:?}"
   );
 }
 
@@ -66,6 +67,7 @@ fn watch_state_is_a_server_streaming_rpc() {
     "GetPendingDecisions",
     "GetActivity",
     "GetRunDetail",
+    "GetConversation",
     "AnswerInquiry",
     "ApproveGoalMerge",
     "ApproveGoalRegistration",
@@ -148,6 +150,7 @@ fn generated_client_exposes_the_read_and_write_calls() {
     std::marker::PhantomData::<v1::GetPendingDecisionsRequest>,
     std::marker::PhantomData::<v1::GetActivityRequest>,
     std::marker::PhantomData::<v1::GetRunDetailRequest>,
+    std::marker::PhantomData::<v1::GetConversationRequest>,
     std::marker::PhantomData::<v1::WatchStateRequest>,
     std::marker::PhantomData::<v1::AnswerInquiryRequest>,
     std::marker::PhantomData::<v1::ApproveGoalMergeRequest>,
@@ -160,6 +163,7 @@ fn generated_client_exposes_the_read_and_write_calls() {
     std::marker::PhantomData::<v1::GetPendingDecisionsResponse>,
     std::marker::PhantomData::<v1::GetActivityResponse>,
     std::marker::PhantomData::<v1::GetRunDetailResponse>,
+    std::marker::PhantomData::<v1::GetConversationResponse>,
     std::marker::PhantomData::<v1::AnswerInquiryResponse>,
     std::marker::PhantomData::<v1::ApproveGoalMergeResponse>,
     std::marker::PhantomData::<v1::ApproveGoalRegistrationResponse>,
