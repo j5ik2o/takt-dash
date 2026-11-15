@@ -65,6 +65,39 @@ fn resolve_backend_addr(sources: &AddrSources<'_>) -> Result<SocketAddr, AddrErr
     .map_err(|_| AddrError::Invalid { source: "既定値", value: DEFAULT_BACKEND_ADDR.to_owned() })
 }
 
+/// 接続先の解決に失敗した理由。設定の読み込み失敗とアドレスの不正を分け、終了コードを写し分けます。
+#[derive(Debug, PartialEq, Eq)]
+enum AddrResolutionError {
+  /// 設定ファイルを読み込めない、または JSON を解析できない。
+  Config(String),
+  /// 指定された値が待ち受けアドレスとして解釈できない。
+  Invalid { source: &'static str, value: String },
+}
+
+/// 概要の接続先を解決する。上位指定が無いときだけ設定ファイルを読みます。
+///
+/// `--addr` と環境変数の非空判定を先に行い、どちらかが非空なら設定ファイルを読まずに
+/// `resolve_backend_addr` へ渡します。両方とも未設定（または空）のときだけ `--config` または
+/// 既定パスの設定を読みます。不正な非空値は設定へフォールバックさせず失敗させます。
+fn resolve_overview_addr(
+  options: &OverviewOptions,
+  env_addr: Result<String, VarError>,
+) -> Result<SocketAddr, AddrResolutionError> {
+  let cli_addr = options.addr.as_deref();
+  let env_value = env_addr.as_ref().ok();
+  let higher_priority_present =
+    cli_addr.is_some_and(|value| !value.is_empty()) || env_value.is_some_and(|value| !value.is_empty());
+  let config_listen = if higher_priority_present {
+    None
+  } else {
+    let config_path = options.config.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+    read_config_listen(&config_path).map_err(AddrResolutionError::Config)?
+  };
+  let sources = AddrSources { cli_addr, env_addr, config_listen: config_listen.as_deref() };
+  resolve_backend_addr(&sources)
+    .map_err(|AddrError::Invalid { source, value }| AddrResolutionError::Invalid { source, value })
+}
+
 /// 引数を解釈した結果。
 #[derive(Debug, PartialEq, Eq)]
 enum Invocation {
@@ -234,18 +267,13 @@ fn run_with(
     },
     | Invocation::Overview(options) => options,
   };
-  let config_path = options.config.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
-  let config_listen = match read_config_listen(&config_path) {
-    | Ok(listen) => listen,
-    | Err(message) => {
+  let addr = match resolve_overview_addr(&options, env_addr) {
+    | Ok(addr) => addr,
+    | Err(AddrResolutionError::Config(message)) => {
       let _ = writeln!(stderr, "{message}");
       return EXIT_FAILURE;
     },
-  };
-  let sources = AddrSources { cli_addr: options.addr.as_deref(), env_addr, config_listen: config_listen.as_deref() };
-  let addr = match resolve_backend_addr(&sources) {
-    | Ok(addr) => addr,
-    | Err(AddrError::Invalid { source, value }) => {
+    | Err(AddrResolutionError::Invalid { source, value }) => {
       let _ = writeln!(stderr, "{source} の値 {value} を待ち受けアドレスとして解釈できませんでした。");
       return EXIT_USAGE;
     },
@@ -418,8 +446,9 @@ mod tests {
   use tonic::{transport::Server, Code, Request, Response, Status};
 
   use super::{
-    is_connection_failure, parse_arguments, proto, render_overview, resolve_backend_addr, run_with, AddrError,
-    AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
+    is_connection_failure, parse_arguments, proto, read_config_listen, render_overview, resolve_backend_addr,
+    resolve_overview_addr, run_with, AddrError, AddrSources, Invocation, OverviewOptions, UsageError, BACKEND_ADDR_ENV,
+    DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
   };
 
   // proto の列挙値は生成コードの数値をそのまま使う。
@@ -1028,9 +1057,130 @@ mod tests {
   }
 
   #[test]
+  fn explicit_addr_skips_config_read_even_if_config_is_invalid() {
+    // 上位の接続先指定（--addr）がある場合、設定ファイルは読まない。壊れた設定を置いても
+    // 解析エラーにならず、--addr のダミーサーバーから概要を取得できることを観測する。
+    let runtime =
+      tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+    let server = runtime.block_on(start_dummy_server(sample_overview()));
+    let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+    let config = write_config(&dir, "{ これは JSON ではありません }");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let args = [
+      "overview".to_owned(),
+      "--addr".to_owned(),
+      format!("{}", server.addr),
+      "--config".to_owned(),
+      config.display().to_string(),
+    ];
+
+    let code = run_with(&args, Err(std::env::VarError::NotPresent), &mut stdout, &mut stderr);
+    let seen_calls = server.seen_calls();
+    runtime.block_on(server.shutdown());
+
+    let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
+    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+    assert_eq!(code, EXIT_OK, "--addr があるときは設定ファイルの解析で止まってはいけません。stderr: {stderr}");
+    assert!(stderr.is_empty(), "成功時に設定ファイルのエラーを出してはいけません: {stderr}");
+    assert_eq!(seen_calls, vec!["GetOverview".to_owned()], "--addr の接続先から概要を取得する必要があります");
+    assert!(stdout.contains("概要"), "--addr の接続先から取得した概要を表示する必要があります: {stdout}");
+  }
+
+  #[test]
+  fn env_addr_skips_config_read_even_if_config_is_invalid() {
+    // 上位の接続先指定（環境変数）がある場合も設定ファイルは読まない。
+    let runtime =
+      tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+    let server = runtime.block_on(start_dummy_server(sample_overview()));
+    let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+    let config = write_config(&dir, "{ これは JSON ではありません }");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let args = ["overview".to_owned(), "--config".to_owned(), config.display().to_string()];
+
+    let code = run_with(&args, Ok(format!("{}", server.addr)), &mut stdout, &mut stderr);
+    let seen_calls = server.seen_calls();
+    runtime.block_on(server.shutdown());
+
+    let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
+    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+    assert_eq!(code, EXIT_OK, "環境変数があるときは設定ファイルの解析で止まってはいけません。stderr: {stderr}");
+    assert!(stderr.is_empty(), "成功時に設定ファイルのエラーを出してはいけません: {stderr}");
+    assert_eq!(seen_calls, vec!["GetOverview".to_owned()], "環境変数の接続先から概要を取得する必要があります");
+    assert!(stdout.contains("概要"), "環境変数の接続先から取得した概要を表示する必要があります: {stdout}");
+  }
+
+  #[test]
+  fn invalid_config_fails_when_no_higher_addr_is_specified() {
+    // 上位の指定が無い場合だけ設定ファイルを読み、解析できなければ接続前に失敗する。
+    let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+    let config = write_config(&dir, "{ これは JSON ではありません }");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    let code = run_with(
+      &["overview".to_owned(), "--config".to_owned(), config.display().to_string()],
+      Err(std::env::VarError::NotPresent),
+      &mut stdout,
+      &mut stderr,
+    );
+
+    let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
+    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+    assert_eq!(code, EXIT_FAILURE, "上位の指定が無いときの設定エラーは失敗にする必要があります");
+    assert!(stderr.contains("JSON を解析できませんでした"), "設定の解析失敗を示す必要があります: {stderr}");
+    assert!(stdout.is_empty(), "設定エラーで概要を標準出力へ出してはいけません: {stdout}");
+  }
+
+  #[test]
+  fn empty_env_addr_reads_config_as_unset() {
+    // 空の環境変数は「上位の指定なし」として扱い、設定ファイルを読む。
+    let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+    let config = write_config(&dir, "{ これは JSON ではありません }");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    let code = run_with(
+      &["overview".to_owned(), "--config".to_owned(), config.display().to_string()],
+      Ok(String::new()),
+      &mut stdout,
+      &mut stderr,
+    );
+
+    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+    assert_eq!(code, EXIT_FAILURE, "空の環境変数は未設定として設定ファイルを読む必要があります");
+    assert!(stderr.contains("JSON を解析できませんでした"), "設定の解析失敗を示す必要があります: {stderr}");
+  }
+
+  #[test]
+  fn invalid_env_addr_does_not_fall_through_to_config() {
+    // 非空だが不正な環境変数を「未設定」と扱い、設定の listen へ落ちてはいけない。
+    let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+    let listen = reserve_closed_addr();
+    let config = write_config(&dir, &format!(r#"{{"listen":"{listen}"}}"#));
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    let code = run_with(
+      &["overview".to_owned(), "--config".to_owned(), config.display().to_string()],
+      Ok("not-an-address".to_owned()),
+      &mut stdout,
+      &mut stderr,
+    );
+
+    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+    assert_eq!(code, EXIT_USAGE, "不正な環境変数は既定値や設定の listen で補ってはいけません");
+    assert!(stderr.contains("not-an-address"), "不正な値を示す必要があります: {stderr}");
+    assert!(stderr.contains(BACKEND_ADDR_ENV), "どの指定が不正かを示す必要があります: {stderr}");
+  }
+
+  #[test]
   fn config_listen_overrides_default_for_connection() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
-    let config = write_config(&dir, r#"{"listen":"127.0.0.1:59999"}"#);
+    // 既定ポートの実サービスに依存しないよう、閉じた専用アドレスを設定に書く。
+    let listen = reserve_closed_addr();
+    let config = write_config(&dir, &format!(r#"{{"listen":"{listen}"}}"#));
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -1044,27 +1194,46 @@ mod tests {
     let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
     // 設定の listen が使われ（既定値ではない）、待ち受けが無いため接続不能で終わる。
     assert_eq!(code, EXIT_FAILURE, "設定の listen に待ち受けが無いため失敗する必要があります");
-    assert!(stderr.contains("127.0.0.1:59999"), "設定の listen を接続先に使う必要があります: {stderr}");
+    assert!(stderr.contains(&listen.to_string()), "設定の listen を接続先に使う必要があります: {stderr}");
     assert!(!stderr.contains(DEFAULT_BACKEND_ADDR), "既定値へ戻ってはいけません: {stderr}");
   }
 
   #[test]
   fn missing_config_file_falls_through_to_default() {
+    // 既定ポートの実サービスに依存せず、設定ファイルの欠落が「未設定」として既定値へ
+    // 解決されることだけを観測する。接続は行わない。
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
     let missing = dir.path().join("does-not-exist.json");
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
 
-    let code = run_with(
-      &["--config".to_owned(), missing.display().to_string()],
-      Err(std::env::VarError::NotPresent),
-      &mut stdout,
-      &mut stderr,
+    let listen = read_config_listen(&missing).expect("設定ファイルが無いときは未設定として扱う必要があります");
+    assert!(listen.is_none(), "存在しない設定ファイルから listen を読んではいけません");
+
+    let sources = AddrSources {
+      cli_addr:      None,
+      env_addr:      Err(std::env::VarError::NotPresent),
+      config_listen: listen.as_deref(),
+    };
+
+    assert_eq!(
+      resolve_backend_addr(&sources),
+      Ok(DEFAULT_BACKEND_ADDR.parse::<SocketAddr>().unwrap()),
+      "設定ファイルが無いときは既定値へ解決する必要があります"
     );
+  }
 
-    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-    assert_eq!(code, EXIT_FAILURE);
-    assert!(stderr.contains(DEFAULT_BACKEND_ADDR), "設定ファイルが無いときは既定値へ進む必要があります: {stderr}");
+  #[test]
+  fn resolve_overview_addr_falls_back_to_default_when_config_file_is_missing() {
+    // 所有者関数 resolve_overview_addr を通して、設定ファイルの欠落が「未設定」として
+    // 既定値へ解決されることを、ソケットを開かずに観測する。
+    let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+    let missing = dir.path().join("does-not-exist.json");
+    let options = OverviewOptions { addr: None, config: Some(missing) };
+
+    assert_eq!(
+      resolve_overview_addr(&options, Err(std::env::VarError::NotPresent)),
+      Ok(DEFAULT_BACKEND_ADDR.parse::<SocketAddr>().unwrap()),
+      "設定ファイルが無いときは所有者関数も既定値へ解決する必要があります"
+    );
   }
 
   // ----------------------------------------------------------------------------
