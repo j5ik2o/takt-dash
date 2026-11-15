@@ -2,10 +2,18 @@ import * as grpc from "@grpc/grpc-js";
 import type { ClientReadableStream } from "@grpc/grpc-js";
 import {
   TaktDashServiceClient,
+  type AnswerInquiryRequest,
+  type AnswerInquiryResponse,
+  type ApproveGoalMergeRequest,
+  type ApproveGoalMergeResponse,
+  type ApproveGoalRegistrationRequest,
+  type ApproveGoalRegistrationResponse,
   type DashboardState,
   type GetActivityResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
+  type RejectGoalRegistrationRequest,
+  type RejectGoalRegistrationResponse,
   type WatchStateRequest,
 } from "../proto/taktdash";
 
@@ -22,12 +30,25 @@ export function resolveBackendAddress(env: BackendEnv): string {
   return configured !== undefined && configured !== "" ? configured : DEFAULT_BACKEND_ADDR;
 }
 
-/** backend 自体に接続できないことを表す。応答がない対象の扱いは backend が担う。 */
+/**
+ * backend を利用できないことを表す。
+ *
+ * transport は backend へ接続できない状態、server は backend が応答の中で
+ * UNAVAILABLE を返した状態を指す。server の場合は backend が返した details を保つ。
+ * 読み取りページはどちらも従来どおり「接続できない」表示として扱う。
+ */
+export type BackendUnavailableKind = "transport" | "server";
+
 export class BackendUnavailableError extends Error {
-  constructor(cause: unknown) {
+  readonly kind: BackendUnavailableKind;
+  readonly details: string;
+
+  constructor(cause: unknown, kind: BackendUnavailableKind = "transport", details = "") {
     super("backend に接続できません。");
     this.name = "BackendUnavailableError";
     this.cause = cause;
+    this.kind = kind;
+    this.details = details;
   }
 }
 
@@ -47,6 +68,10 @@ export type BackendClient = {
   getActivity(): Promise<GetActivityResponse>;
   getRunDetail(runSlug: string): Promise<GetRunDetailResponse>;
   watchState(): ClientReadableStream<DashboardState>;
+  answerInquiry(request: AnswerInquiryRequest): Promise<AnswerInquiryResponse>;
+  approveGoalMerge(request: ApproveGoalMergeRequest): Promise<ApproveGoalMergeResponse>;
+  approveGoalRegistration(request: ApproveGoalRegistrationRequest): Promise<ApproveGoalRegistrationResponse>;
+  rejectGoalRegistration(request: RejectGoalRegistrationRequest): Promise<RejectGoalRegistrationResponse>;
   close(): Promise<void>;
 };
 
@@ -56,6 +81,23 @@ export type CreateBackendClientOptions = {
 
 const isConnectionFailure = (error: grpc.ServiceError): boolean =>
   error.code === grpc.status.UNAVAILABLE || error.code === grpc.status.DEADLINE_EXCEEDED;
+
+// server が応答として UNAVAILABLE を返した場合は応答ヘッダが metadata に載る。
+// 接続自体が成立しない transport 失敗では metadata が空になる。この差で分類する。
+const hasResponseMetadata = (error: grpc.ServiceError): boolean => {
+  const metadata = error.metadata;
+  if (metadata === undefined || metadata === null) {
+    return false;
+  }
+  return Object.keys(metadata.getMap()).length > 0;
+};
+
+const toBackendUnavailable = (error: grpc.ServiceError): BackendUnavailableError =>
+  new BackendUnavailableError(
+    error,
+    hasResponseMetadata(error) ? "server" : "transport",
+    typeof error.details === "string" ? error.details : "",
+  );
 
 const unary = <Request, Response>(
   invoke: (
@@ -67,7 +109,7 @@ const unary = <Request, Response>(
   new Promise<Response>((resolve, reject) => {
     invoke(request, (error, response) => {
       if (error) {
-        reject(isConnectionFailure(error) ? new BackendUnavailableError(error) : error);
+        reject(isConnectionFailure(error) ? toBackendUnavailable(error) : error);
         return;
       }
       resolve(response);
@@ -114,6 +156,23 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       return detail;
     },
     watchState: () => client.watchState({} satisfies WatchStateRequest),
+    answerInquiry: (request) =>
+      unary<AnswerInquiryRequest, AnswerInquiryResponse>((req, callback) => client.answerInquiry(req, callback), request),
+    approveGoalMerge: (request) =>
+      unary<ApproveGoalMergeRequest, ApproveGoalMergeResponse>(
+        (req, callback) => client.approveGoalMerge(req, callback),
+        request,
+      ),
+    approveGoalRegistration: (request) =>
+      unary<ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse>(
+        (req, callback) => client.approveGoalRegistration(req, callback),
+        request,
+      ),
+    rejectGoalRegistration: (request) =>
+      unary<RejectGoalRegistrationRequest, RejectGoalRegistrationResponse>(
+        (req, callback) => client.rejectGoalRegistration(req, callback),
+        request,
+      ),
     close: () =>
       new Promise<void>((resolve) => {
         client.close();

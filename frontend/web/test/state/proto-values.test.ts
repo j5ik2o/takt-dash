@@ -10,6 +10,7 @@ import {
   ExecutionStatus,
   GoalStatus,
   InquiryKind,
+  OperationAnswerReport,
   PendingDecisionType,
   RunStatus,
   TaskStatus,
@@ -25,6 +26,7 @@ import {
   EXECUTION_STATUS,
   GOAL_STATUS,
   INQUIRY_KIND,
+  OPERATION_ANSWER_REPORT,
   PENDING_DECISION_TYPE,
   RUN_STATUS,
   enumFromWire,
@@ -55,6 +57,9 @@ test("proto-values は生成コードの enum と一致する", () => {
 
   assert.equal(INQUIRY_KIND.QUESTION, InquiryKind.INQUIRY_KIND_QUESTION);
   assert.equal(INQUIRY_KIND.OPERATION_REQUEST, InquiryKind.INQUIRY_KIND_OPERATION_REQUEST);
+
+  assert.equal(OPERATION_ANSWER_REPORT.COMPLETED, OperationAnswerReport.OPERATION_ANSWER_REPORT_COMPLETED);
+  assert.equal(OPERATION_ANSWER_REPORT.UNABLE, OperationAnswerReport.OPERATION_ANSWER_REPORT_UNABLE);
 
   assert.equal(PENDING_DECISION_TYPE.INQUIRY, PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY);
   assert.equal(PENDING_DECISION_TYPE.AWAITING_MERGE, PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE);

@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { createElement, type ComponentType, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  createActionableDashboardState,
   createActivityResponse,
   createDashboardState,
   createProjectsResponse,
@@ -104,13 +105,14 @@ test("判断待ちページは待ち時間順に描画し、滞留の項目に�
   assert.match(html, /滞留/);
 });
 
-test("判断待ちページは回答・承認・却下の操作要素を持たない", () => {
-  const html = renderPage(DecisionsPage, { state: createDashboardState(), now: NOW });
-  assert.doesNotMatch(html, /<button/i);
-  assert.doesNotMatch(html, /<form/i);
-  assert.doesNotMatch(html, /<input/i);
-  assert.doesNotMatch(html, /実施した/);
-  assert.doesNotMatch(html, /承認/);
+test("判断待ちページは種別ごとの操作要素を一覧に描画する", () => {
+  const html = renderPage(DecisionsPage, { state: createActionableDashboardState(), now: NOW });
+  assert.match(html, /<button/i);
+  assert.match(html, /<input[^>]*type="text"/);
+  assert.match(html, /実施した/);
+  assert.match(html, /対応できない/);
+  assert.match(html, /マージを承認/);
+  assert.match(html, /却下/);
 });
 
 test("アクティビティページは出来事を新しい順に並べ、7日分の集計とサーバー別の当日件数を描画する", async () => {
