@@ -87,17 +87,32 @@ async fn start_conversation_server(
   start_dummy_server_with_conversation(overview, conversation_pages).await
 }
 
+/// 概要の取得を指定した失敗で返すダミーサーバーを起動する。
+async fn start_overview_error_server(status: Status) -> DummyServer {
+  start_dummy_server_with(Some(status), DashboardState::default(), Vec::new()).await
+}
+
 /// 概要と会話の固定応答を持つダミーサーバーを `127.0.0.1:0` で起動する。
 async fn start_dummy_server_with_conversation(
+  overview: DashboardState,
+  conversation_pages: Vec<GetConversationResponse>,
+) -> DummyServer {
+  start_dummy_server_with(None, overview, conversation_pages).await
+}
+
+/// 概要の失敗と会話の固定応答を受け取ってダミーサーバーを `127.0.0.1:0` で起動する。
+async fn start_dummy_server_with(
+  overview_error: Option<Status>,
   overview: DashboardState,
   conversation_pages: Vec<GetConversationResponse>,
 ) -> DummyServer {
   let seen = Arc::new(Mutex::new(Vec::new()));
   let conversation_requests = Arc::new(Mutex::new(Vec::new()));
   let service = DummyTaktDashService {
-    overview:              Arc::new(overview),
-    seen:                  seen.clone(),
-    conversation_pages:    Arc::new(Mutex::new(VecDeque::from(conversation_pages))),
+    overview: Arc::new(overview),
+    overview_error,
+    seen: seen.clone(),
+    conversation_pages: Arc::new(Mutex::new(VecDeque::from(conversation_pages))),
     conversation_requests: conversation_requests.clone(),
   };
   let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -122,6 +137,7 @@ async fn start_dummy_server_with_conversation(
 /// ある形で実装し、それ以外の読み取り RPC と状態ストリーミングは Unimplemented を返す。
 struct DummyTaktDashService {
   overview:              Arc<DashboardState>,
+  overview_error:        Option<Status>,
   seen:                  Arc<Mutex<Vec<String>>>,
   conversation_pages:    Arc<Mutex<VecDeque<GetConversationResponse>>>,
   conversation_requests: Arc<Mutex<Vec<GetConversationRequest>>>,
@@ -139,7 +155,10 @@ impl v1::takt_dash_service_server::TaktDashService for DummyTaktDashService {
 
   async fn get_overview(&self, _request: Request<GetOverviewRequest>) -> Result<Response<DashboardState>, Status> {
     self.record("GetOverview");
-    Ok(Response::new((*self.overview).clone()))
+    match &self.overview_error {
+      | Some(status) => Err(status.clone()),
+      | None => Ok(Response::new((*self.overview).clone())),
+    }
   }
 
   async fn get_projects(
@@ -601,6 +620,28 @@ fn overview_treats_non_grpc_listener_as_connection_failure() {
   );
   assert!(stderr.contains(&addr.to_string()), "接続先を標準エラーで示す必要があります: {stderr}");
   assert!(!stdout.contains("サーバー:"), "接続できないときは概要を標準出力へ出してはいけません: {stdout}");
+}
+
+#[test]
+fn overview_reports_backend_failure_without_treating_it_as_connection_failure() {
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let server = runtime.block_on(start_overview_error_server(Status::internal("概要の射影に失敗しました。")));
+
+  let (code, stdout, stderr) = run_cli(&["overview".to_owned()], server.addr);
+  runtime.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_FAILURE, "backend が応答した失敗は取得の失敗として終わる必要があります");
+  assert!(
+    stderr.contains("backend から概要を取得できませんでした"),
+    "backend の失敗を概要の取得失敗として表示する必要があります: {stderr}"
+  );
+  assert!(stderr.contains("概要の射影に失敗しました。"), "backend の失敗理由を表示する必要があります: {stderr}");
+  assert!(
+    !stderr.contains("backend に接続できません。"),
+    "backend が応答した失敗を接続不能として表示してはいけません: {stderr}"
+  );
+  assert!(!stdout.contains("概要"), "取得に失敗したときは概要を表示してはいけません: {stdout}");
 }
 
 #[test]
@@ -1351,4 +1392,30 @@ fn conversation_command_fails_when_backend_is_down() {
   assert_eq!(code, EXIT_FAILURE, "接続できないときは取得の失敗として終わる必要があります");
   assert!(stderr.contains("backend に接続できません。"), "接続できない旨を標準エラーへ出す必要があります: {stderr}");
   assert!(!stdout.contains("会話:"), "接続できないときは会話を表示してはいけません: {stdout}");
+}
+
+#[test]
+fn conversation_reports_backend_failure_without_treating_it_as_connection_failure() {
+  // 会話のページを持たないダミーサーバーは GetConversation に NotFound を返す。
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let server = runtime.block_on(start_conversation_server(sample_overview(), Vec::new()));
+
+  let (code, stdout, stderr) = run_cli(&["conversation".to_owned(), "corporate-site".to_owned()], server.addr);
+  runtime.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_FAILURE, "backend が応答した失敗は取得の失敗として終わる必要があります");
+  assert!(
+    stderr.contains("backend から会話を取得できませんでした"),
+    "backend の失敗を会話の取得失敗として表示する必要があります: {stderr}"
+  );
+  assert!(
+    stderr.contains("このダミーサーバーには会話のページが残っていません。"),
+    "backend の失敗理由を表示する必要があります: {stderr}"
+  );
+  assert!(
+    !stderr.contains("backend に接続できません。"),
+    "backend が応答した失敗を接続不能として表示してはいけません: {stderr}"
+  );
+  assert!(!stdout.contains("会話:"), "取得に失敗したときは会話を表示してはいけません: {stdout}");
 }

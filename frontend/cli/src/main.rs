@@ -786,7 +786,7 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
   }
 }
 
-/// 引数を解釈し、接続先を解決し、概要の取得または書き込みコマンドを実行して表示する。
+/// 引数を解釈し、接続先を解決し、概要・会話の表示または書き込みコマンドを実行する。
 ///
 /// 出力とエラーは指定された writer へ書き、終了コードを返します。`run` とテストの両方がこの
 /// 関数を通して観測します。
@@ -808,41 +808,22 @@ fn run_with(
       let _ = writeln!(stdout, "{}", usage());
       return EXIT_OK;
     },
-    | Invocation::Overview(options) => (options.addr, options.config, Action::Overview),
+    | Invocation::Overview(options) => return run_overview(&options, env_addr, stdout, stderr),
     | Invocation::Decisions(options) => {
       (options.addr, options.config, Action::Decisions { server_id: options.server_id, project: options.project })
     },
     | Invocation::Write(write) => (write.addr, write.config, Action::Write(write.command)),
-    | Invocation::Conversation(options) => {
-      (options.addr, options.config, Action::Conversation { project: options.project, session: options.session })
-    },
+    | Invocation::Conversation(options) => return run_conversation(&options, env_addr, stdout, stderr),
   };
   let addr = match resolve_addr(addr_option.as_deref(), config_option.as_ref(), env_addr, stderr) {
     | Ok(addr) => addr,
     | Err(code) => return code,
   };
-  let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+  let runtime = match build_runtime(stderr) {
     | Ok(runtime) => runtime,
-    | Err(error) => {
-      let _ = writeln!(stderr, "実行環境の準備に失敗しました: {error}");
-      return EXIT_FAILURE;
-    },
+    | Err(code) => return code,
   };
   match action {
-    | Action::Overview => match runtime.block_on(fetch_overview(addr)) {
-      | Ok(state) => {
-        let _ = writeln!(stdout, "{}", render_overview(&state));
-        EXIT_OK
-      },
-      | Err(ReadError::Unavailable(message)) => {
-        let _ = writeln!(stderr, "backend に接続できません。{message}");
-        EXIT_FAILURE
-      },
-      | Err(ReadError::Call(status)) => {
-        let _ = writeln!(stderr, "backend から概要を取得できませんでした（{}）。{}", status.code(), status.message());
-        EXIT_FAILURE
-      },
-    },
     | Action::Decisions { server_id, project } => match runtime.block_on(fetch_decisions(addr)) {
       | Ok(state) => {
         let _ = writeln!(stdout, "{}", render_decisions(&state, &server_id, &project));
@@ -878,35 +859,85 @@ fn run_with(
         EXIT_FAILURE
       },
     },
-    | Action::Conversation { project, session } => {
-      match runtime.block_on(fetch_conversation(addr, &project, session.as_deref())) {
-        | Ok(response) => {
-          let _ = writeln!(stdout, "{}", render_conversation(&response));
-          EXIT_OK
-        },
-        | Err(ReadError::Unavailable(message)) => {
-          let _ = writeln!(stderr, "backend に接続できません。{message}");
-          EXIT_FAILURE
-        },
-        | Err(ReadError::Call(status)) => {
-          let _ = writeln!(stderr, "backend から会話を取得できませんでした（{}）。{}", status.code(), status.message());
-          EXIT_FAILURE
-        },
-      }
+  }
+}
+
+/// 概要の表示を実行する。
+fn run_overview(
+  options: &OverviewOptions,
+  env_addr: Result<String, VarError>,
+  stdout: &mut impl Write,
+  stderr: &mut impl Write,
+) -> i32 {
+  let addr = match resolve_addr(options.addr.as_deref(), options.config.as_ref(), env_addr, stderr) {
+    | Ok(addr) => addr,
+    | Err(code) => return code,
+  };
+  let runtime = match build_runtime(stderr) {
+    | Ok(runtime) => runtime,
+    | Err(code) => return code,
+  };
+  match runtime.block_on(fetch_overview(addr)) {
+    | Ok(state) => {
+      let _ = writeln!(stdout, "{}", render_overview(&state));
+      EXIT_OK
+    },
+    | Err(ReadError::Unavailable(message)) => {
+      let _ = writeln!(stderr, "backend に接続できません。{message}");
+      EXIT_FAILURE
+    },
+    | Err(ReadError::Call(status)) => {
+      let _ = writeln!(stderr, "backend から概要を取得できませんでした（{}）。{}", status.code(), status.message());
+      EXIT_FAILURE
     },
   }
 }
 
+/// 会話の表示を実行する。
+fn run_conversation(
+  options: &ConversationOptions,
+  env_addr: Result<String, VarError>,
+  stdout: &mut impl Write,
+  stderr: &mut impl Write,
+) -> i32 {
+  let addr = match resolve_addr(options.addr.as_deref(), options.config.as_ref(), env_addr, stderr) {
+    | Ok(addr) => addr,
+    | Err(code) => return code,
+  };
+  let runtime = match build_runtime(stderr) {
+    | Ok(runtime) => runtime,
+    | Err(code) => return code,
+  };
+  match runtime.block_on(fetch_conversation(addr, &options.project, options.session.as_deref())) {
+    | Ok(response) => {
+      let _ = writeln!(stdout, "{}", render_conversation(&response));
+      EXIT_OK
+    },
+    | Err(ReadError::Unavailable(message)) => {
+      let _ = writeln!(stderr, "backend に接続できません。{message}");
+      EXIT_FAILURE
+    },
+    | Err(ReadError::Call(status)) => {
+      let _ = writeln!(stderr, "backend から会話を取得できませんでした（{}）。{}", status.code(), status.message());
+      EXIT_FAILURE
+    },
+  }
+}
+
+/// 非同期の処理を実行するための実行環境を準備する。
+fn build_runtime(stderr: &mut impl Write) -> Result<tokio::runtime::Runtime, i32> {
+  tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| {
+    let _ = writeln!(stderr, "実行環境の準備に失敗しました: {error}");
+    EXIT_FAILURE
+  })
+}
+
 /// `run_with` が実行する処理。
 enum Action {
-  /// 概要を表示する。
-  Overview,
   /// 判断待ちの操作対象を表示する。
   Decisions { server_id: String, project: String },
   /// 書き込みコマンドを実行する。
   Write(WriteCommand),
-  /// manager の会話を表示する。
-  Conversation { project: String, session: Option<String> },
 }
 
 /// 環境変数から接続先の上書きを読む。
