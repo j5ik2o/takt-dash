@@ -9,4 +9,4 @@ mod protocol;
 pub mod tools;
 
 pub use client::{CallError, McpClient, McpClientConfig, ToolCallError, TransportError};
-pub use tools::{client_config, ToolError, ToolSet};
+pub use tools::{client_config, ApproveGoalRegistrationResult, MergeGoalPrResult, ToolError, ToolSet};

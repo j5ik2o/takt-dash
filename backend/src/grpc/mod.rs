@@ -25,10 +25,13 @@ use crate::{
   model::{self, TaskEntry},
   store::StateStore,
   takt_dash::v1::{
-    self, ActivityEvent, DashboardState, GetActivityRequest, GetActivityResponse, GetOverviewRequest,
-    GetPendingDecisionsRequest, GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse,
-    GetRunDetailRequest, GetRunDetailResponse, PendingDecision, Project, Run, RunInstruction, RunReport, Server,
-    TaskStatusCounts, WatchStateRequest,
+    self, ActivityEvent, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
+    ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse, DashboardState,
+    GetActivityRequest, GetActivityResponse, GetOverviewRequest, GetPendingDecisionsRequest,
+    GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse, GetRunDetailRequest, GetRunDetailResponse,
+    GoalRegistrationProposal, ListGoalRegistrationProposalsRequest, ListGoalRegistrationProposalsResponse,
+    OperationAnswerReport, PendingDecision, Project, RejectGoalRegistrationRequest, RejectGoalRegistrationResponse,
+    Run, RunInstruction, RunReport, Server, TaskStatusCounts, WatchStateRequest,
   },
 };
 
@@ -209,7 +212,8 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
   runs
 }
 
-/// 判断待ちの一覧を、状態ストアの投影（未回答の問い合わせと人のマージ待ち）から組み立てる。
+/// 判断待ちの一覧を、状態ストアの投影（未回答の問い合わせ・人のマージ待ち・
+/// ゴール登録の承認待ち）から組み立てる。
 fn assemble_pending_decisions(store: &StateStore, now: DateTime<Utc>) -> Vec<PendingDecision> {
   store
     .pending_decisions(now, model::PendingDecisionFilter::All)
@@ -225,6 +229,8 @@ fn assemble_pending_decisions(store: &StateStore, now: DateTime<Utc>) -> Vec<Pen
       options:      decision.options,
       pull_request: pull_request(decision.pull_request_number, decision.pull_request_url.as_deref()),
       stale:        decision.stale,
+      inquiry_id:   decision.inquiry_id,
+      revision:     decision.revision,
     })
     .collect()
 }
@@ -246,6 +252,58 @@ fn tool_error_status(error: ToolError) -> Status {
     | ToolError::Parse(message) => Status::internal(format!("takt-mcp の応答を解析できませんでした: {message}")),
     | ToolError::Tool(error) => Status::unavailable(format!("takt-mcp の道具が失敗しました: {error}")),
     | ToolError::Transport(error) => Status::unavailable(format!("takt-mcp へ接続できませんでした: {error}")),
+  }
+}
+
+/// 設定から解決した、対象サーバーの起動方法とプロジェクトの cwd。
+struct ResolvedProject {
+  server_id:     String,
+  client_config: crate::mcp::McpClientConfig,
+  cwd:           PathBuf,
+}
+
+impl TaktDashServiceImpl {
+  /// 設定を読み、`server_id` と `project` から対象サーバーの起動方法と cwd を解決する。
+  ///
+  /// 設定に無いサーバー・プロジェクトは `unavailable` で返し、takt-mcp を起動しません。
+  fn resolve_project(&self, server_id: &str, project: &str) -> Result<ResolvedProject, Status> {
+    let config = load_config(&self.config_path)
+      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
+    let server = config
+      .servers
+      .get(server_id)
+      .ok_or_else(|| Status::unavailable(format!("サーバー {server_id} の起動方法が設定にありません。")))?
+      .clone();
+    let cwd = config
+      .projects
+      .iter()
+      .find(|entry| entry.name == project && entry.server == server_id)
+      .map(|entry| entry.cwd.clone())
+      .ok_or_else(|| Status::unavailable(format!("プロジェクト {project} の cwd が設定にありません。")))?;
+    Ok(ResolvedProject { server_id: server_id.to_owned(), client_config: client_config(&server, &cwd), cwd })
+  }
+
+  /// 対象プロジェクトの takt-mcp を起動する。呼び出し側は道具を呼んだ後に必ず
+  /// [`Self::finish_tools`] で子プロセスを停止します。
+  fn start_tools(resolved: &ResolvedProject) -> (McpClient, PathBuf) {
+    (McpClient::new(resolved.client_config.clone()), resolved.cwd.clone())
+  }
+
+  /// 道具呼び出しの結果を gRPC の応答へ写し、子プロセスを停止する。
+  async fn finish_tools<T>(mut client: McpClient, result: Result<T, ToolError>) -> Result<T, Status> {
+    client.shutdown().await;
+    result.map_err(tool_error_status)
+  }
+
+  /// 書き込み RPC の共通の入口。`server_id` と `project` の空文字を拒否し、対象を解決する。
+  fn resolve_write_target(&self, server_id: &str, project: &str) -> Result<ResolvedProject, Status> {
+    if server_id.trim().is_empty() {
+      return Err(Status::invalid_argument("server_id が空です。"));
+    }
+    if project.trim().is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    self.resolve_project(server_id, project)
   }
 }
 
@@ -325,22 +383,9 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .find(|run| run.run_slug == run_slug)
       .cloned()
       .ok_or_else(|| Status::not_found(format!("runSlug {run_slug} は状態ストアにありません。")))?;
-    let config = load_config(&self.config_path)
-      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
-    let server_id = view.server_id.clone();
-    let server = config
-      .servers
-      .get(&server_id)
-      .ok_or_else(|| Status::unavailable(format!("サーバー {server_id} の起動方法が設定にありません。")))?
-      .clone();
-    let project_cwd = config
-      .projects
-      .iter()
-      .find(|project| project.name == view.name)
-      .map(|project| project.cwd.clone())
-      .ok_or_else(|| Status::unavailable(format!("プロジェクト {} の cwd が設定にありません。", view.name)))?;
-    let mut client = McpClient::new(client_config(&server, &project_cwd));
-    let detail = match ToolSet::new(&mut client, project_cwd.clone()).read_run_detail(&run_slug).await {
+    let resolved = self.resolve_project(&view.server_id, &view.name)?;
+    let mut client = McpClient::new(resolved.client_config);
+    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_run_detail(&run_slug).await {
       | Ok(detail) => detail,
       | Err(error) => {
         client.shutdown().await;
@@ -348,6 +393,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       },
     };
     client.shutdown().await;
+    let server_id = resolved.server_id;
     // 対象 run のゴールとタスク名は、状態ストアの run（定期読み取りで task
     // から解決済み）を正とする。 takt_get_run の応答に無い場合だけ、ストアの値で補う。
     let goal_id = detail.goal_id.clone().or_else(|| stored_run.goal_id.clone());
@@ -450,6 +496,169 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     });
     Ok(Response::new(ReceiverStream::new(rx)))
   }
+
+  async fn answer_inquiry(
+    &self,
+    request: Request<AnswerInquiryRequest>,
+  ) -> Result<Response<AnswerInquiryResponse>, Status> {
+    let request = request.into_inner();
+    if request.inquiry_id.trim().is_empty() {
+      return Err(Status::invalid_argument("inquiry_id が空です。"));
+    }
+    let pending = self
+      .store
+      .pending_decisions(Utc::now(), model::PendingDecisionFilter::Inquiry)
+      .into_iter()
+      .find(|decision| decision.inquiry_id == request.inquiry_id);
+    let inquiry_kind = pending.as_ref().and_then(|decision| decision.inquiry_kind);
+    let answer = answer_payload(inquiry_kind, request.text, request.report)?;
+    // takt_answer_goal_question の入力契約では goalId は必須（UUID）です。回答は一覧の
+    // 判断待ちからゴールを引き当てて送り、引き当てられない場合は takt を呼ばずに拒否します。
+    let goal_id = request
+      .goal_id
+      .clone()
+      .or_else(|| pending.as_ref().and_then(|decision| decision.goal_id.clone()))
+      .filter(|goal_id| !goal_id.trim().is_empty())
+      .ok_or_else(|| {
+        Status::invalid_argument("goal_id を特定できません。ゴールに属さない問い合わせには回答できません。")
+      })?;
+    let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
+    let question_id = request.inquiry_id.clone();
+    let (mut client, cwd) = Self::start_tools(&resolved);
+    let result = ToolSet::new(&mut client, cwd).answer_goal_question(&goal_id, &request.inquiry_id, answer).await;
+    Self::finish_tools(client, result).await?;
+    Ok(Response::new(AnswerInquiryResponse { inquiry_id: question_id }))
+  }
+
+  async fn approve_goal_merge(
+    &self,
+    request: Request<ApproveGoalMergeRequest>,
+  ) -> Result<Response<ApproveGoalMergeResponse>, Status> {
+    let request = request.into_inner();
+    if request.goal_id.trim().is_empty() {
+      return Err(Status::invalid_argument("goal_id が空です。"));
+    }
+    if request.pr_number <= 0 {
+      return Err(Status::invalid_argument("pr_number は正の整数で指定してください。"));
+    }
+    if !matches!(request.until.as_str(), "prepare" | "merge") {
+      return Err(Status::invalid_argument("until は \"prepare\" か \"merge\" を指定してください。"));
+    }
+    let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
+    let (mut client, cwd) = Self::start_tools(&resolved);
+    let result =
+      ToolSet::new(&mut client, cwd).merge_goal_pr(&request.goal_id, request.pr_number, &request.until).await;
+    let result = Self::finish_tools(client, result).await?;
+    Ok(Response::new(ApproveGoalMergeResponse { task_name: result.task_name, workflow: result.workflow }))
+  }
+
+  async fn approve_goal_registration(
+    &self,
+    request: Request<ApproveGoalRegistrationRequest>,
+  ) -> Result<Response<ApproveGoalRegistrationResponse>, Status> {
+    let request = request.into_inner();
+    if request.revision <= 0 {
+      return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
+    }
+    let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
+    let (mut client, cwd) = Self::start_tools(&resolved);
+    let result = ToolSet::new(&mut client, cwd).approve_goal_registration(request.revision).await;
+    let result = Self::finish_tools(client, result).await?;
+    Ok(Response::new(ApproveGoalRegistrationResponse { revision: result.revision, goal_id: result.goal_id }))
+  }
+
+  async fn reject_goal_registration(
+    &self,
+    request: Request<RejectGoalRegistrationRequest>,
+  ) -> Result<Response<RejectGoalRegistrationResponse>, Status> {
+    let request = request.into_inner();
+    if request.revision <= 0 {
+      return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
+    }
+    let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
+    let (mut client, cwd) = Self::start_tools(&resolved);
+    let result = ToolSet::new(&mut client, cwd).reject_goal_registration(request.revision).await;
+    let rejected = Self::finish_tools(client, result).await?;
+    Ok(Response::new(RejectGoalRegistrationResponse { revision: rejected }))
+  }
+
+  async fn list_goal_registration_proposals(
+    &self,
+    request: Request<ListGoalRegistrationProposalsRequest>,
+  ) -> Result<Response<ListGoalRegistrationProposalsResponse>, Status> {
+    let request = request.into_inner();
+    if request.server_id.trim().is_empty() {
+      return Err(Status::invalid_argument("server_id が空です。"));
+    }
+    if request.project.trim().is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    // 一覧は `GetPendingDecisions` の承認待ち射影と同じデータ源（ストアの snapshot.proposals）
+    // から作り、ストアだけを読む。
+    let proposals = self
+      .store
+      .registration_proposals(&request.server_id, &request.project)
+      .into_iter()
+      .map(|entry| GoalRegistrationProposal {
+        revision:             entry.revision,
+        server_id:            request.server_id.clone(),
+        project:              request.project.clone(),
+        body:                 entry.summary,
+        repository_directory: entry.repository_directory,
+      })
+      .collect();
+    Ok(Response::new(ListGoalRegistrationProposalsResponse { proposals }))
+  }
+}
+
+/// 回答の入力から takt の `answer` オブジェクトを組み立てる。
+///
+/// 質問は `text`、作業の依頼は `report` を使います。判断待ちの種別が分かる場合は種別と回答の
+/// 種類を照合し、取り違え・同時指定は入力の誤りとして拒否します。種別が分からない場合は、
+/// どちらか一方だけが指定されていればそれを使います。どちらも無い回答は拒否します。
+fn answer_payload(
+  kind: Option<model::InquiryKind>,
+  text: Option<String>,
+  report: Option<i32>,
+) -> Result<serde_json::Value, Status> {
+  match kind {
+    | Some(model::InquiryKind::Question) => {
+      if report.is_some() {
+        return Err(Status::invalid_argument("質問への回答には text を使い、report は使えません。"));
+      }
+      let text = text.ok_or_else(|| Status::invalid_argument("質問への回答には text が必要です。"))?;
+      Ok(serde_json::json!({ "text": text }))
+    },
+    | Some(model::InquiryKind::OperationRequest) => {
+      if text.is_some() {
+        return Err(Status::invalid_argument("作業の依頼への回答には report を使い、text は使えません。"));
+      }
+      report_payload(report)
+    },
+    | None => match (text, report) {
+      | (Some(_), Some(_)) => {
+        Err(Status::invalid_argument("回答には text か report のどちらか一方だけを指定してください。"))
+      },
+      | (Some(text), None) => Ok(serde_json::json!({ "text": text })),
+      | (None, Some(_)) => report_payload(report),
+      | (None, None) => Err(Status::invalid_argument("回答には text か report のどちらかが必要です。")),
+    },
+  }
+}
+
+/// operation_request への回答 `report` を takt の `answer` オブジェクトへ変換する。
+fn report_payload(report: Option<i32>) -> Result<serde_json::Value, Status> {
+  let report = report.ok_or_else(|| Status::invalid_argument("作業の依頼への回答には report が必要です。"))?;
+  let report =
+    OperationAnswerReport::try_from(report).map_err(|_| Status::invalid_argument("report が未知の値です。"))?;
+  let report = match report {
+    | OperationAnswerReport::Completed => "completed",
+    | OperationAnswerReport::Unable => "unable",
+    | OperationAnswerReport::Unspecified => {
+      return Err(Status::invalid_argument("report が指定されていません。"));
+    },
+  };
+  Ok(serde_json::json!({ "report": report }))
 }
 
 /// 状態ストアと activity のクエリから DashboardState を組み立てる。

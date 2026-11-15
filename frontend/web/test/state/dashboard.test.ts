@@ -4,7 +4,7 @@
 // 閾値は proto の AnomalyThresholds から取り、240/10 を実装側へ直書きさせない。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
+import { PendingDecisionType, InquiryKind, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { createDashboardState, NOW } from "../support/fixtures.ts";
 import {
   buildOverviewView,
@@ -45,6 +45,35 @@ test("判断待ちの件数を問い合わせとマージ待ちに分けて数�
   assert.equal(counts.total, 2);
   assert.equal(counts.inquiries, 1);
   assert.equal(counts.awaitingMerge, 1);
+});
+
+test("承認待ちを独立の区分として数え、内訳の和を total に一致させる", () => {
+  const state = createDashboardState();
+  const goalRegistration: PendingDecision = {
+    type: PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION,
+    serverId: "mini",
+    project: "esa",
+    inquiryKind: InquiryKind.INQUIRY_KIND_UNSPECIFIED,
+    createdAt: new Date(NOW.getTime() - 60 * 60_000),
+    body: "新しいゴール",
+    options: [],
+    stale: false,
+    revision: 3,
+  };
+  const counts = summarizePendingDecisions(
+    sortPendingDecisions([...state.pendingDecisions, goalRegistration], NOW),
+  );
+  assert.equal(counts.total, 3);
+  assert.equal(counts.inquiries, 1);
+  assert.equal(counts.awaitingMerge, 1);
+  assert.equal(counts.goalRegistration, 1);
+  assert.equal(counts.inquiries + counts.awaitingMerge + counts.goalRegistration, counts.total);
+});
+
+test("承認待ちが無いときは既存2種の数え方が変わらない", () => {
+  const counts = summarizePendingDecisions(sortPendingDecisions(createDashboardState().pendingDecisions, NOW));
+  assert.equal(counts.goalRegistration, 0);
+  assert.equal(counts.inquiries + counts.awaitingMerge + counts.goalRegistration, counts.total);
 });
 
 test("run の状態はサーバー応答とログ無音と実行状態から決まる", () => {

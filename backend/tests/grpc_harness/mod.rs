@@ -27,6 +27,7 @@ pub struct GrpcHarness {
   _directory:   tempfile::TempDir,
   config_path:  PathBuf,
   state_path:   PathBuf,
+  calls_path:   PathBuf,
   pub store:    Arc<StateStore>,
   pub activity: Arc<ActivityStore>,
   pub changes:  tokio::sync::broadcast::Sender<()>,
@@ -81,6 +82,7 @@ impl GrpcHarnessBuilder {
       projects.into_iter().map(|project| Project { cwd: project_dir.clone(), ..project }).collect();
     let state_path = directory.path().join("state.json");
     std::fs::write(&state_path, self.state.to_string()).expect("状態ファイルを書けます");
+    let calls_path = directory.path().join("tool-calls.jsonl");
     let config_path = directory.path().join("taktdash.config.json");
     let mut mcp_servers = serde_json::Map::new();
     for server_id in servers.keys() {
@@ -88,7 +90,11 @@ impl GrpcHarnessBuilder {
         server_id.clone(),
         json!({
           "command": "node",
-          "args": [common::mock_script().display().to_string(), "--state", state_path.display().to_string()],
+          "args": [
+            common::mock_script().display().to_string(),
+            "--state", state_path.display().to_string(),
+            "--calls", calls_path.display().to_string(),
+          ],
           "env": {}
         }),
       );
@@ -117,7 +123,7 @@ impl GrpcHarnessBuilder {
     let store = Arc::new(StateStore::new(servers, projects, thresholds));
     let activity = Arc::new(ActivityStore::open_in_memory().expect("メモリ上の SQLite を開けます"));
     let (changes, _) = tokio::sync::broadcast::channel(16);
-    GrpcHarness { _directory: directory, config_path, state_path, store, activity, changes }
+    GrpcHarness { _directory: directory, config_path, state_path, calls_path, store, activity, changes }
   }
 }
 
@@ -150,6 +156,28 @@ impl GrpcHarness {
   pub fn change_receiver_count(&self) -> usize {
     self.changes.receiver_count()
   }
+
+  /// mock MCP サーバが受け取った道具呼び出しを、記録された順に返す。
+  ///
+  /// 書き込み系のハンドラが takt-mcp へ渡した引数を観測するために使います。記録が無ければ
+  /// 空の並びを返します。
+  pub fn recorded_calls(&self) -> Vec<RecordedCall> {
+    let Ok(text) = std::fs::read_to_string(&self.calls_path) else {
+      return Vec::new();
+    };
+    text
+      .lines()
+      .filter(|line| !line.trim().is_empty())
+      .map(|line| serde_json::from_str(line).expect("記録した道具呼び出しを解析できます"))
+      .collect()
+  }
+}
+
+/// mock MCP サーバが受け取った1件の道具呼び出し。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RecordedCall {
+  pub name:      String,
+  pub arguments: Value,
 }
 
 /// 起動した gRPC サーバ。ドロップで停止の合図を送り、タスクの終了を待ちます。

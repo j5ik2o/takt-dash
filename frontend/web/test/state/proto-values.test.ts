@@ -58,6 +58,10 @@ test("proto-values は生成コードの enum と一致する", () => {
 
   assert.equal(PENDING_DECISION_TYPE.INQUIRY, PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY);
   assert.equal(PENDING_DECISION_TYPE.AWAITING_MERGE, PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE);
+  assert.equal(
+    PENDING_DECISION_TYPE.GOAL_REGISTRATION,
+    PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION,
+  );
 });
 
 test("enumFromWire は生成コードの名称→数値の対応と一致する（受信した toJSON の列挙型を復元する）", () => {

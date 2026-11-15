@@ -41,6 +41,7 @@ type PendingCounts = {
   total: number;
   inquiries: number;
   awaitingMerge: number;
+  goalRegistration: number;
 };
 
 type OverviewServerView = {
@@ -90,7 +91,10 @@ export function summarizePendingDecisions(decisions: readonly PendingDecisionVie
   const awaitingMerge = decisions.filter(
     (decision) => decision.type === PENDING_DECISION_TYPE.AWAITING_MERGE,
   ).length;
-  return { total: decisions.length, inquiries, awaitingMerge };
+  const goalRegistration = decisions.filter(
+    (decision) => decision.type === PENDING_DECISION_TYPE.GOAL_REGISTRATION,
+  ).length;
+  return { total: decisions.length, inquiries, awaitingMerge, goalRegistration };
 }
 
 export function toRunView(

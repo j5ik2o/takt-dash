@@ -14,8 +14,8 @@ use chrono::{DateTime, Duration, Utc};
 use crate::{
   config::{Project, ServerMeta, Thresholds},
   model::{
-    GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot, ProjectView, RunEntry,
-    TaskEntry, TaskStatus,
+    GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot, ProjectView,
+    RegistrationProposalEntry, RunEntry, TaskEntry, TaskStatus,
   },
 };
 
@@ -164,8 +164,27 @@ impl StateStore {
       if matches!(filter, PendingDecisionFilter::All | PendingDecisionFilter::AwaitingMerge) {
         decisions.extend(merge_decisions(project, snapshot, now, stale_threshold));
       }
+      if matches!(filter, PendingDecisionFilter::All) {
+        decisions.extend(registration_decisions(project, snapshot, now));
+      }
     }
     decisions
+  }
+
+  /// ゴール登録の承認待ちを、指定したサーバー・プロジェクトの分だけ返す。
+  ///
+  /// `pending_decisions` の承認待ち射影と同じデータ源（各プロジェクトの
+  /// snapshot.proposals）を読みます。
+  pub fn registration_proposals(&self, server_id: &str, project: &str) -> Vec<RegistrationProposalEntry> {
+    let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    inner
+      .projects
+      .iter()
+      .filter(|entry| entry.server == server_id && entry.name == project)
+      .filter_map(|entry| inner.slots.get(&entry.name))
+      .filter_map(|slot| slot.snapshot.as_ref())
+      .flat_map(|snapshot| snapshot.proposals.iter().cloned())
+      .collect()
   }
 
   /// ログの無音の判定を、run ごとに返す。
@@ -203,6 +222,8 @@ fn inquiry_decisions(
         pull_request_number: None,
         pull_request_url:    None,
         stale:               wait >= stale_threshold,
+        inquiry_id:          inquiry.inquiry_id.clone(),
+        revision:            None,
       }
     })
     .collect()
@@ -235,7 +256,35 @@ fn merge_decisions(
         pull_request_number: goal.pull_request_number,
         pull_request_url: goal.pull_request_url.clone(),
         stale: wait >= stale_threshold,
+        inquiry_id: String::new(),
+        revision: None,
       }
+    })
+    .collect()
+}
+
+/// ゴール登録の承認待ちを判断待ちの一覧へ射影する。
+///
+/// 承認待ちは作成時刻を持たないため、滞留の判定はせず `created_at` は射影の時刻を、`stale`
+/// は偽を入れます。本文には提案の要約を使い、承認・却下に使う revision を持ちます。
+fn registration_decisions(project: &Project, snapshot: &ProjectSnapshot, now: DateTime<Utc>) -> Vec<PendingDecision> {
+  snapshot
+    .proposals
+    .iter()
+    .map(|proposal| PendingDecision {
+      decision_type:       PendingDecisionType::GoalRegistration,
+      server_id:           project.server.clone(),
+      project:             project.name.clone(),
+      goal_id:             None,
+      inquiry_kind:        None,
+      created_at:          now,
+      body:                proposal.summary.clone(),
+      options:             Vec::new(),
+      pull_request_number: None,
+      pull_request_url:    None,
+      stale:               false,
+      inquiry_id:          String::new(),
+      revision:            Some(proposal.revision),
     })
     .collect()
 }
