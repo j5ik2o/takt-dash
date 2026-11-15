@@ -1,8 +1,8 @@
-//! takt-mcp の読み取り道具を型付きで呼び出し、応答テキストを model 型へ解析する。
+//! takt-mcp の読み取り道具と操作道具を型付きで呼び出し、応答テキストを model 型へ解析する。
 //!
-//! 応答は `{<key>:[...], nextOffset, ...}` のページ形式です。nextOffset が null になるまで
-//! 追従して全件を集めます。道具が isError を返した場合は [`ToolError::Tool`] として扱い、
-//! 輸送エラーとは区別します。
+//! 読み取りの応答は `{<key>:[...], nextOffset, ...}` のページ形式です。nextOffset が null
+//! になるまで 追従して全件を集めます。道具が isError を返した場合は [`ToolError::Tool`]
+//! として扱い、 輸送エラーとは区別します。
 
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
@@ -55,9 +55,9 @@ impl From<CallError> for ToolError {
   }
 }
 
-/// 1プロジェクト分の状態を読み取るための道具のまとまり。
+/// 1プロジェクト分の道具のまとまり。
 ///
-/// takt-mcp の読み取り道具は入力引数に絶対パスの `cwd` を必須とするため、この道具のまとまりは
+/// takt-mcp の道具は入力引数に絶対パスの `cwd` を必須とするため、この道具のまとまりは
 /// 対象プロジェクトの `cwd` を保持し、すべての tools/call の引数へ渡します。
 pub struct ToolSet<'a> {
   client: &'a mut McpClient,
@@ -712,6 +712,103 @@ fn parse_run_detail(
     instructions,
     last_log_at,
   })
+}
+
+/// 書き込み道具が返す、ゴール登録の承認待ちの項目。
+///
+/// `project` と `server_id` は呼び出したプロジェクトの設定から補うため、ここでは持ちません。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationProposalEntry {
+  pub revision:            i64,
+  pub objective:           String,
+  pub out_of_scope:        Vec<String>,
+  pub acceptance_criteria: Vec<String>,
+  pub constraints:         Vec<String>,
+  pub integration_branch:  String,
+}
+
+impl<'a> ToolSet<'a> {
+  /// ゴールの問い合わせへ回答する。
+  ///
+  /// `report` は完了・対応不能の報告で、本文だけで答える場合は `None` を渡して引数から省きます。
+  pub async fn answer_inquiry(
+    &mut self,
+    goal_id: &str,
+    inquiry_id: &str,
+    text: &str,
+    report: Option<&str>,
+  ) -> Result<(), ToolError> {
+    let mut answer = serde_json::Map::new();
+    answer.insert("text".to_owned(), Value::String(text.to_owned()));
+    if let Some(report) = report {
+      answer.insert("report".to_owned(), Value::String(report.to_owned()));
+    }
+    self
+      .call_json(
+        "takt_answer_goal_question",
+        json!({
+          "goalId": goal_id,
+          "questionId": inquiry_id,
+          "answer": Value::Object(answer),
+        }),
+      )
+      .await?;
+    Ok(())
+  }
+
+  /// ゴールのプルリクエストのマージを `until: "merge"` で依頼し、実行したタスク名を返す。
+  pub async fn merge_goal_pr(&mut self, goal_id: &str, pr_number: i64) -> Result<String, ToolError> {
+    let value = self
+      .call_json("takt_merge_goal_pr", json!({ "goalId": goal_id, "prNumber": pr_number, "until": "merge" }))
+      .await?;
+    Ok(optional_string(&value, "taskName").unwrap_or_default())
+  }
+
+  /// 対象プロジェクトのゴール登録の承認待ちを取得する。
+  pub async fn list_goal_registration_proposals(&mut self) -> Result<Vec<RegistrationProposalEntry>, ToolError> {
+    let value = self.call_json("takt_list_goal_registration_proposals", json!({})).await?;
+    let items = value.get("proposals").and_then(Value::as_array).cloned().unwrap_or_default();
+    items.iter().map(parse_registration_proposal).collect()
+  }
+
+  /// リビジョンを指定してゴール登録を承認し、承認したゴールの ID と目的を返す。
+  pub async fn approve_goal_registration(&mut self, revision: i64) -> Result<(String, String), ToolError> {
+    let value = self.call_json("takt_approve_goal_registration", json!({ "revision": revision })).await?;
+    let goal = value.get("goal");
+    let goal_id = goal.and_then(|goal| optional_string(goal, "id")).unwrap_or_default();
+    let objective = goal.and_then(|goal| optional_string(goal, "objective")).unwrap_or_default();
+    Ok((goal_id, objective))
+  }
+
+  /// リビジョンを指定してゴール登録を却下し、却下の通知を返す。
+  pub async fn reject_goal_registration(&mut self, revision: i64) -> Result<String, ToolError> {
+    let value = self.call_json("takt_reject_goal_registration", json!({ "revision": revision })).await?;
+    Ok(optional_string(&value, "notice").unwrap_or_default())
+  }
+}
+
+fn parse_registration_proposal(value: &Value) -> Result<RegistrationProposalEntry, ToolError> {
+  let revision = value
+    .get("revision")
+    .and_then(Value::as_i64)
+    .ok_or_else(|| ToolError::Parse("提案の revision が整数ではありません".to_owned()))?;
+  let summary = value.get("summary").cloned().unwrap_or(Value::Null);
+  Ok(RegistrationProposalEntry {
+    revision,
+    objective: optional_string(&summary, "objective").unwrap_or_default(),
+    out_of_scope: string_list(&summary, "outOfScope"),
+    acceptance_criteria: string_list(&summary, "acceptanceCriteria"),
+    constraints: string_list(&summary, "constraints"),
+    integration_branch: optional_string(&summary, "integrationBranch").unwrap_or_default(),
+  })
+}
+
+fn string_list(value: &Value, key: &str) -> Vec<String> {
+  value
+    .get(key)
+    .and_then(Value::as_array)
+    .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+    .unwrap_or_default()
 }
 
 /// 応答の stepLogs 配列から、本文を含むステップの記録を出現順に取り出す。

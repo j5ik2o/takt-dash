@@ -2,7 +2,7 @@
 //!
 //! このクレートは、proto/ の .proto から生成した gRPC の型とクライアントを公開し、
 //! takt-mcp から集約した状態を中核の状態ストアとして公開します。
-//! proto/taktdash.proto の TaktDashService（読み取り系 API と状態ストリーミング）は
+//! proto/taktdash.proto の TaktDashService（読み取り系 API・状態ストリーミング・書き込み系 API）は
 //! [`grpc`] モジュールが実装します。
 
 pub mod activity;

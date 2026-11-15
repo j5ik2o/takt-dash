@@ -278,6 +278,8 @@ pub struct PendingDecision {
   pub server_id:           String,
   pub project:             String,
   pub goal_id:             Option<String>,
+  /// 問い合わせを一意に指す ID。人のマージ待ちは持ちません。
+  pub inquiry_id:          Option<String>,
   pub inquiry_kind:        Option<InquiryKind>,
   pub created_at:          DateTime<Utc>,
   pub body:                String,

@@ -25,7 +25,7 @@ fn rpc_declarations(source: &str) -> Vec<String> {
 }
 
 #[test]
-fn proto_defines_exactly_the_six_read_rpcs() {
+fn proto_defines_the_read_and_write_rpcs() {
   let names = rpc_declarations(PROTO_SOURCE);
   let mut sorted = names.clone();
   sorted.sort();
@@ -33,19 +33,24 @@ fn proto_defines_exactly_the_six_read_rpcs() {
   assert_eq!(
     sorted,
     vec![
+      "AnswerInquiry".to_owned(),
+      "ApproveGoalRegistration".to_owned(),
+      "ApproveMerge".to_owned(),
       "GetActivity".to_owned(),
       "GetOverview".to_owned(),
       "GetPendingDecisions".to_owned(),
       "GetProjects".to_owned(),
       "GetRunDetail".to_owned(),
+      "ListGoalRegistrationProposals".to_owned(),
+      "RejectGoalRegistration".to_owned(),
       "WatchState".to_owned(),
     ],
-    "読み取り系の6 RPC だけが定義されている必要があります: {names:?}"
+    "読み取り6つと書き込み5つの RPC が定義されている必要があります: {names:?}"
   );
 }
 
 #[test]
-fn watch_state_is_a_server_streaming_rpc() {
+fn watch_state_is_the_only_server_streaming_rpc() {
   let declarations: Vec<&str> =
     PROTO_SOURCE.lines().map(str::trim).filter(|line| line.starts_with("rpc WatchState")).collect();
   assert_eq!(declarations.len(), 1, "WatchState の宣言は1つだけ必要です: {declarations:?}");
@@ -54,7 +59,18 @@ fn watch_state_is_a_server_streaming_rpc() {
     "WatchState は server streaming として宣言する必要があります: {}",
     declarations[0]
   );
-  for name in ["GetOverview", "GetProjects", "GetPendingDecisions", "GetActivity", "GetRunDetail"] {
+  for name in [
+    "GetOverview",
+    "GetProjects",
+    "GetPendingDecisions",
+    "GetActivity",
+    "GetRunDetail",
+    "AnswerInquiry",
+    "ApproveMerge",
+    "ListGoalRegistrationProposals",
+    "ApproveGoalRegistration",
+    "RejectGoalRegistration",
+  ] {
     let line = PROTO_SOURCE
       .lines()
       .map(str::trim)
@@ -134,4 +150,66 @@ fn generated_client_exposes_the_read_calls() {
     std::marker::PhantomData::<v1::GetActivityResponse>,
     std::marker::PhantomData::<v1::GetRunDetailResponse>,
   );
+}
+
+#[test]
+fn generated_client_exposes_the_write_calls() {
+  let _request_types = (
+    std::marker::PhantomData::<v1::AnswerInquiryRequest>,
+    std::marker::PhantomData::<v1::ApproveMergeRequest>,
+    std::marker::PhantomData::<v1::ListGoalRegistrationProposalsRequest>,
+    std::marker::PhantomData::<v1::ApproveGoalRegistrationRequest>,
+    std::marker::PhantomData::<v1::RejectGoalRegistrationRequest>,
+  );
+  let _response_types = (
+    std::marker::PhantomData::<v1::AnswerInquiryResponse>,
+    std::marker::PhantomData::<v1::ApproveMergeResponse>,
+    std::marker::PhantomData::<v1::ListGoalRegistrationProposalsResponse>,
+    std::marker::PhantomData::<v1::ApproveGoalRegistrationResponse>,
+    std::marker::PhantomData::<v1::RejectGoalRegistrationResponse>,
+  );
+}
+
+#[test]
+fn generated_answer_report_covers_completed_and_unable() {
+  assert_ne!(v1::AnswerReport::Unspecified as i32, v1::AnswerReport::Completed as i32);
+  assert_ne!(v1::AnswerReport::Unspecified as i32, v1::AnswerReport::Unable as i32);
+  assert_ne!(v1::AnswerReport::Completed as i32, v1::AnswerReport::Unable as i32);
+}
+
+#[test]
+fn pending_decision_carries_the_inquiry_id() {
+  // 問い合わせを一意に指せるよう、判断待ちは inquiry_id を持ちます。マージ待ちは持ちません。
+  let inquiry = v1::PendingDecision {
+    r#type: v1::PendingDecisionType::Inquiry as i32,
+    inquiry_id: Some("q-open".to_owned()),
+    ..Default::default()
+  };
+  let merge = v1::PendingDecision {
+    r#type: v1::PendingDecisionType::AwaitingMerge as i32,
+    inquiry_id: None,
+    ..Default::default()
+  };
+
+  assert_eq!(inquiry.inquiry_id.as_deref(), Some("q-open"));
+  assert_eq!(merge.inquiry_id, None);
+}
+
+#[test]
+fn registration_proposal_carries_the_summary_fields() {
+  let proposal = v1::GoalRegistrationProposal {
+    revision:            3,
+    server_id:           "mac-mini".to_owned(),
+    project:             "repo-a".to_owned(),
+    objective:           "目的A".to_owned(),
+    out_of_scope:        vec!["範囲外".to_owned()],
+    acceptance_criteria: vec!["受け入れ条件".to_owned()],
+    constraints:         vec!["制約".to_owned()],
+    integration_branch:  "takt/goal-a".to_owned(),
+  };
+
+  assert_eq!(proposal.revision, 3);
+  assert_eq!(proposal.project, "repo-a");
+  assert_eq!(proposal.objective, "目的A");
+  assert_eq!(proposal.integration_branch, "takt/goal-a");
 }

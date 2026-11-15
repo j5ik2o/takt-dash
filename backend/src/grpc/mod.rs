@@ -1,13 +1,18 @@
-//! proto/taktdash.proto の TaktDashService（読み取り系 API）の実装。
+//! proto/taktdash.proto の TaktDashService の実装。
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
 //! GetRunDetail は要求時に takt-mcp の takt_get_run を呼びます。WatchState は接続時に全件を返し、
-//! 定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
+//! 定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。書き込み系の unary は
+//! 要求時に takt-mcp の操作道具を呼びます。
 
 pub mod mapping;
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+  collections::BTreeMap,
+  path::{Path, PathBuf},
+  sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 use mapping::{
@@ -20,14 +25,17 @@ use tonic::{Request, Response, Status};
 
 use crate::{
   activity::ActivityStore,
-  config::load_config,
+  config::{load_config, Config, McpServer},
   mcp::{client_config, McpClient, ToolError, ToolSet},
   model::{self, TaskEntry},
   store::StateStore,
   takt_dash::v1::{
-    self, ActivityEvent, DashboardState, GetActivityRequest, GetActivityResponse, GetOverviewRequest,
-    GetPendingDecisionsRequest, GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse,
-    GetRunDetailRequest, GetRunDetailResponse, PendingDecision, Project, Run, RunInstruction, RunReport, Server,
+    self, ActivityEvent, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalRegistrationRequest,
+    ApproveGoalRegistrationResponse, ApproveMergeRequest, ApproveMergeResponse, DashboardState, GetActivityRequest,
+    GetActivityResponse, GetOverviewRequest, GetPendingDecisionsRequest, GetPendingDecisionsResponse,
+    GetProjectsRequest, GetProjectsResponse, GetRunDetailRequest, GetRunDetailResponse, GoalRegistrationProposal,
+    ListGoalRegistrationProposalsRequest, ListGoalRegistrationProposalsResponse, PendingDecision, Project,
+    RejectGoalRegistrationRequest, RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, Server,
     TaskStatusCounts, WatchStateRequest,
   },
 };
@@ -74,6 +82,63 @@ impl TaktDashServiceImpl {
   fn assemble_state(&self, now: DateTime<Utc>) -> DashboardState {
     assemble_state_for(self.store.as_ref(), self.activity.as_ref(), now)
   }
+
+  /// 設定から、指定したプロジェクトの takt-mcp の起動方法と cwd を解決する。
+  fn resolve_project_target(&self, project_name: &str) -> Result<(McpServer, PathBuf), Status> {
+    let config = load_config_status(&self.config_path)?;
+    let project = config
+      .projects
+      .iter()
+      .find(|project| project.name == project_name)
+      .ok_or_else(|| Status::invalid_argument(format!("プロジェクト {project_name} は設定にありません。")))?;
+    let server = resolve_server(&config, &project.server)?;
+    let cwd = project_cwd(&config, &project.name)?;
+    Ok((server, cwd))
+  }
+
+  /// 状態ストアからゴールのプロジェクトを探し、takt-mcp の起動方法と cwd とゴールを解決する。
+  fn resolve_goal_target(&self, goal_id: &str) -> Result<(McpServer, PathBuf, model::GoalEntry), Status> {
+    let view = self
+      .store
+      .project_views()
+      .into_iter()
+      .find(|view| view.goals.iter().any(|goal| goal.goal_id == goal_id))
+      .ok_or_else(|| Status::not_found(format!("ゴール {goal_id} は状態ストアにありません。")))?;
+    let goal = view
+      .goals
+      .iter()
+      .find(|goal| goal.goal_id == goal_id)
+      .cloned()
+      .ok_or_else(|| Status::not_found(format!("ゴール {goal_id} は状態ストアにありません。")))?;
+    let config = load_config_status(&self.config_path)?;
+    let server = resolve_server(&config, &view.server_id)?;
+    let cwd = project_cwd(&config, &view.name)?;
+    Ok((server, cwd, goal))
+  }
+}
+
+/// 設定を読み込み、失敗を Unavailable の Status へ写す。
+fn load_config_status(config_path: &Path) -> Result<Config, Status> {
+  load_config(config_path).map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))
+}
+
+/// 設定から、サーバー ID に対応する takt-mcp の起動方法を解決する。
+fn resolve_server(config: &Config, server_id: &str) -> Result<McpServer, Status> {
+  config
+    .servers
+    .get(server_id)
+    .cloned()
+    .ok_or_else(|| Status::unavailable(format!("サーバー {server_id} の起動方法が設定にありません。")))
+}
+
+/// 設定から、プロジェクト名に対応する cwd を解決する。
+fn project_cwd(config: &Config, project_name: &str) -> Result<PathBuf, Status> {
+  config
+    .projects
+    .iter()
+    .find(|project| project.name == project_name)
+    .map(|project| project.cwd.clone())
+    .ok_or_else(|| Status::unavailable(format!("プロジェクト {project_name} の cwd が設定にありません。")))
 }
 
 /// サーバーの接続状態と読めた時刻を、そのサーバーのプロジェクト群から組み立てる。
@@ -219,6 +284,7 @@ fn assemble_pending_decisions(store: &StateStore, now: DateTime<Utc>) -> Vec<Pen
       server_id:    decision.server_id,
       project:      decision.project,
       goal_id:      decision.goal_id,
+      inquiry_id:   decision.inquiry_id,
       inquiry_kind: inquiry_kind(decision.inquiry_kind) as i32,
       created_at:   Some(timestamp(decision.created_at)),
       body:         decision.body,
@@ -245,6 +311,18 @@ fn tool_error_status(error: ToolError) -> Status {
   match error {
     | ToolError::Parse(message) => Status::internal(format!("takt-mcp の応答を解析できませんでした: {message}")),
     | ToolError::Tool(error) => Status::unavailable(format!("takt-mcp の道具が失敗しました: {error}")),
+    | ToolError::Transport(error) => Status::unavailable(format!("takt-mcp へ接続できませんでした: {error}")),
+  }
+}
+
+/// 書き込み道具の失敗を gRPC のステータスへ変換する境界。
+///
+/// 道具自体の失敗（前提不一致など）は `FailedPrecondition` へ写します。CLI は `Unavailable` を
+/// 「backend に接続できない」と表示するため、道具の失敗を接続不能と混ぜません。
+fn write_tool_error_status(error: ToolError) -> Status {
+  match error {
+    | ToolError::Parse(message) => Status::internal(format!("takt-mcp の応答を解析できませんでした: {message}")),
+    | ToolError::Tool(error) => Status::failed_precondition(format!("takt-mcp の道具が失敗しました: {error}")),
     | ToolError::Transport(error) => Status::unavailable(format!("takt-mcp へ接続できませんでした: {error}")),
   }
 }
@@ -325,22 +403,12 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .find(|run| run.run_slug == run_slug)
       .cloned()
       .ok_or_else(|| Status::not_found(format!("runSlug {run_slug} は状態ストアにありません。")))?;
-    let config = load_config(&self.config_path)
-      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
+    let config = load_config_status(&self.config_path)?;
     let server_id = view.server_id.clone();
-    let server = config
-      .servers
-      .get(&server_id)
-      .ok_or_else(|| Status::unavailable(format!("サーバー {server_id} の起動方法が設定にありません。")))?
-      .clone();
-    let project_cwd = config
-      .projects
-      .iter()
-      .find(|project| project.name == view.name)
-      .map(|project| project.cwd.clone())
-      .ok_or_else(|| Status::unavailable(format!("プロジェクト {} の cwd が設定にありません。", view.name)))?;
-    let mut client = McpClient::new(client_config(&server, &project_cwd));
-    let detail = match ToolSet::new(&mut client, project_cwd.clone()).read_run_detail(&run_slug).await {
+    let server = resolve_server(&config, &server_id)?;
+    let cwd = project_cwd(&config, &view.name)?;
+    let mut client = McpClient::new(client_config(&server, &cwd));
+    let detail = match ToolSet::new(&mut client, cwd.clone()).read_run_detail(&run_slug).await {
       | Ok(detail) => detail,
       | Err(error) => {
         client.shutdown().await;
@@ -414,6 +482,150 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       server_connected: view.connected,
       server_last_read_at: optional_timestamp(view.last_read_at),
     }))
+  }
+
+  async fn answer_inquiry(
+    &self,
+    request: Request<AnswerInquiryRequest>,
+  ) -> Result<Response<AnswerInquiryResponse>, Status> {
+    let request = request.into_inner();
+    if request.goal_id.trim().is_empty() {
+      return Err(Status::invalid_argument("goalId が空です。"));
+    }
+    if request.inquiry_id.trim().is_empty() {
+      return Err(Status::invalid_argument("inquiryId が空です。"));
+    }
+    let report =
+      v1::AnswerReport::try_from(request.report).map_err(|_| Status::invalid_argument("report が不正な値です。"))?;
+    let report_value = match report {
+      | v1::AnswerReport::Unspecified => None,
+      | v1::AnswerReport::Completed => Some("completed"),
+      | v1::AnswerReport::Unable => Some("unable"),
+    };
+    if request.text.trim().is_empty() && report_value.is_none() {
+      return Err(Status::invalid_argument("回答の本文または報告の種類が必要です。"));
+    }
+    let (server, cwd, _goal) = self.resolve_goal_target(&request.goal_id)?;
+    let mut client = McpClient::new(client_config(&server, &cwd));
+    let result = {
+      let mut tools = ToolSet::new(&mut client, cwd);
+      tools.answer_inquiry(&request.goal_id, &request.inquiry_id, &request.text, report_value).await
+    };
+    client.shutdown().await;
+    result.map_err(write_tool_error_status)?;
+    Ok(Response::new(AnswerInquiryResponse { goal_id: request.goal_id, inquiry_id: request.inquiry_id }))
+  }
+
+  async fn approve_merge(
+    &self,
+    request: Request<ApproveMergeRequest>,
+  ) -> Result<Response<ApproveMergeResponse>, Status> {
+    let request = request.into_inner();
+    if request.goal_id.trim().is_empty() {
+      return Err(Status::invalid_argument("goalId が空です。"));
+    }
+    let (server, cwd, goal) = self.resolve_goal_target(&request.goal_id)?;
+    let pr_number = goal.pull_request_number.ok_or_else(|| {
+      Status::failed_precondition(format!("ゴール {} にはマージできるプルリクエストがありません。", request.goal_id))
+    })?;
+    let mut client = McpClient::new(client_config(&server, &cwd));
+    let result = ToolSet::new(&mut client, cwd).merge_goal_pr(&request.goal_id, pr_number).await;
+    let task_name = match result {
+      | Ok(task_name) => task_name,
+      | Err(error) => {
+        client.shutdown().await;
+        return Err(write_tool_error_status(error));
+      },
+    };
+    client.shutdown().await;
+    Ok(Response::new(ApproveMergeResponse { goal_id: request.goal_id, pr_number, task_name }))
+  }
+
+  async fn list_goal_registration_proposals(
+    &self,
+    request: Request<ListGoalRegistrationProposalsRequest>,
+  ) -> Result<Response<ListGoalRegistrationProposalsResponse>, Status> {
+    let project_filter = request.into_inner().project;
+    let config = load_config_status(&self.config_path)?;
+    let targets: Vec<_> = if project_filter.trim().is_empty() {
+      config.projects.iter().collect()
+    } else {
+      let matched: Vec<_> = config.projects.iter().filter(|project| project.name == project_filter).collect();
+      if matched.is_empty() {
+        return Err(Status::invalid_argument(format!("プロジェクト {project_filter} は設定にありません。")));
+      }
+      matched
+    };
+    let mut proposals = Vec::new();
+    for project in targets {
+      let server = resolve_server(&config, &project.server)?;
+      let cwd = project_cwd(&config, &project.name)?;
+      let mut client = McpClient::new(client_config(&server, &cwd));
+      let result = ToolSet::new(&mut client, cwd).list_goal_registration_proposals().await;
+      let entries = match result {
+        | Ok(entries) => entries,
+        | Err(error) => {
+          client.shutdown().await;
+          return Err(write_tool_error_status(error));
+        },
+      };
+      client.shutdown().await;
+      proposals.extend(entries.into_iter().map(|entry| GoalRegistrationProposal {
+        revision:            entry.revision,
+        server_id:           project.server.clone(),
+        project:             project.name.clone(),
+        objective:           entry.objective,
+        out_of_scope:        entry.out_of_scope,
+        acceptance_criteria: entry.acceptance_criteria,
+        constraints:         entry.constraints,
+        integration_branch:  entry.integration_branch,
+      }));
+    }
+    Ok(Response::new(ListGoalRegistrationProposalsResponse { proposals }))
+  }
+
+  async fn approve_goal_registration(
+    &self,
+    request: Request<ApproveGoalRegistrationRequest>,
+  ) -> Result<Response<ApproveGoalRegistrationResponse>, Status> {
+    let request = request.into_inner();
+    if request.revision <= 0 {
+      return Err(Status::invalid_argument("revision は正の整数である必要があります。"));
+    }
+    let (server, cwd) = self.resolve_project_target(&request.project)?;
+    let mut client = McpClient::new(client_config(&server, &cwd));
+    let result = ToolSet::new(&mut client, cwd).approve_goal_registration(request.revision).await;
+    let (goal_id, objective) = match result {
+      | Ok(goal) => goal,
+      | Err(error) => {
+        client.shutdown().await;
+        return Err(write_tool_error_status(error));
+      },
+    };
+    client.shutdown().await;
+    Ok(Response::new(ApproveGoalRegistrationResponse { revision: request.revision, goal_id, objective }))
+  }
+
+  async fn reject_goal_registration(
+    &self,
+    request: Request<RejectGoalRegistrationRequest>,
+  ) -> Result<Response<RejectGoalRegistrationResponse>, Status> {
+    let request = request.into_inner();
+    if request.revision <= 0 {
+      return Err(Status::invalid_argument("revision は正の整数である必要があります。"));
+    }
+    let (server, cwd) = self.resolve_project_target(&request.project)?;
+    let mut client = McpClient::new(client_config(&server, &cwd));
+    let result = ToolSet::new(&mut client, cwd).reject_goal_registration(request.revision).await;
+    let notice = match result {
+      | Ok(notice) => notice,
+      | Err(error) => {
+        client.shutdown().await;
+        return Err(write_tool_error_status(error));
+      },
+    };
+    client.shutdown().await;
+    Ok(Response::new(RejectGoalRegistrationResponse { revision: request.revision, notice }))
   }
 
   async fn watch_state(

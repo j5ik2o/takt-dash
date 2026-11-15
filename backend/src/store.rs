@@ -196,6 +196,7 @@ fn inquiry_decisions(
         server_id:           project.server.clone(),
         project:             project.name.clone(),
         goal_id:             inquiry.goal_id.clone(),
+        inquiry_id:          Some(inquiry.inquiry_id.clone()),
         inquiry_kind:        Some(inquiry.kind),
         created_at:          inquiry.created_at,
         body:                inquiry.body.clone(),
@@ -227,7 +228,8 @@ fn merge_decisions(
         server_id: project.server.clone(),
         project: project.name.clone(),
         goal_id: Some(goal.goal_id.clone()),
-        // マージ待ちは問い合わせではないため、問い合わせの種類は持たない。
+        // マージ待ちは問い合わせではないため、問い合わせの ID と種類を持たない。
+        inquiry_id: None,
         inquiry_kind: None,
         created_at,
         body: goal.objective.clone(),

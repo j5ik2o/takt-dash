@@ -1,16 +1,25 @@
 //! taktDash のコマンドラインの入口。
 //!
-//! backend の gRPC へ接続して概要に相当する状態を日本語で表示する閲覧コマンドを持ちます。
-//! 表示だけで、状態を書き換えるコマンドは持ちません。
+//! backend の gRPC へ接続し、概要の閲覧と、問い合わせへの回答・マージの依頼・ゴール登録の
+//! 承認待ちの一覧・承認・却下を行います。表示は日本語に揃えます。
 
 mod proto;
+
+#[cfg(test)]
+mod write_command_tests;
 
 use std::{env::VarError, io::Write, net::SocketAddr, path::PathBuf, time::Duration};
 
 use proto::v1::{
-  takt_dash_service_client::TaktDashServiceClient, DashboardState, GetOverviewRequest, PendingDecisionType,
+  takt_dash_service_client::TaktDashServiceClient, AnswerInquiryRequest, AnswerInquiryResponse, AnswerReport,
+  ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse, ApproveMergeRequest, ApproveMergeResponse,
+  DashboardState, GetOverviewRequest, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
+  PendingDecisionType, RejectGoalRegistrationRequest, RejectGoalRegistrationResponse,
 };
-use tonic::{transport::Endpoint, Code, Status};
+use tonic::{
+  transport::{Channel, Endpoint},
+  Code, Status,
+};
 
 /// backend の gRPC の待ち受けアドレスの既定値。backend の設定の既定値と揃えます。
 pub const DEFAULT_BACKEND_ADDR: &str = "127.0.0.1:50051";
@@ -28,8 +37,10 @@ const EXIT_FAILURE: i32 = 1;
 /// 使い方の誤りで異常終了するときの終了コード。
 const EXIT_USAGE: i32 = 2;
 
-/// 閲覧のみを持つコマンドの名前。位置引数の既定値でもあります。
+/// 既定のコマンドの名前。位置引数の既定値でもあります。
 const OVERVIEW_COMMAND: &str = "overview";
+/// ゴール登録の承認待ちの種別表示。問い合わせ（質問）とは別の語彙を使います。
+const GOAL_REGISTRATION_LABEL: &str = "ゴール登録の承認待ち";
 
 /// 接続先を解決する材料。境界で一度だけ解決するために、生の入力をまとめて受けます。
 struct AddrSources<'a> {
@@ -70,6 +81,8 @@ fn resolve_backend_addr(sources: &AddrSources<'_>) -> Result<SocketAddr, AddrErr
 enum Invocation {
   /// 概要を表示する。
   Overview(OverviewOptions),
+  /// 書き込み操作を実行する。
+  Write(WriteInvocation),
   /// 使い方を表示して正常終了する。
   Help,
 }
@@ -81,47 +94,205 @@ struct OverviewOptions {
   config: Option<PathBuf>,
 }
 
+/// 書き込みコマンドと、その接続先の解決前の入力。
+#[derive(Debug, PartialEq, Eq)]
+struct WriteInvocation {
+  command: WriteCommand,
+  addr:    Option<String>,
+  config:  Option<PathBuf>,
+}
+
+/// 書き込みコマンド。引数は解析時に検証済みです。
+#[derive(Debug, PartialEq, Eq)]
+enum WriteCommand {
+  /// 問い合わせへ回答する。
+  Answer { goal: String, question: String, text: String, report: AnswerReport },
+  /// プルリクエストのマージを依頼する。
+  Merge { goal: String },
+  /// ゴール登録の承認待ちを取得する。
+  Registrations { project: Option<String> },
+  /// ゴール登録を承認する。
+  ApproveRegistration { project: String, revision: i64 },
+  /// ゴール登録を却下する。
+  RejectRegistration { project: String, revision: i64 },
+}
+
+impl WriteCommand {
+  /// 失敗の表示に使う操作名。
+  fn operation(&self) -> &'static str {
+    match self {
+      | WriteCommand::Answer { .. } => "回答の記録",
+      | WriteCommand::Merge { .. } => "マージの依頼",
+      | WriteCommand::Registrations { .. } => "ゴール登録の承認待ちの取得",
+      | WriteCommand::ApproveRegistration { .. } => "ゴール登録の承認",
+      | WriteCommand::RejectRegistration { .. } => "ゴール登録の却下",
+    }
+  }
+}
+
 /// 引数の解釈に失敗したときに返す失敗。使い方と一緒に表示します。
 #[derive(Debug, PartialEq, Eq)]
 struct UsageError(String);
 
+/// 既知のコマンドかどうか。
+fn is_known_command(name: &str) -> bool {
+  matches!(
+    name,
+    OVERVIEW_COMMAND | "answer" | "merge" | "registrations" | "approve-registration" | "reject-registration"
+  )
+}
+
+/// そのコマンドで使えるフラグかどうか。`command` が未確定のときは共通のフラグだけを許します。
+fn flag_allowed(command: Option<&str>, flag: &str) -> bool {
+  match flag {
+    | "--addr" | "--config" => true,
+    | "--goal" => matches!(command, Some("answer") | Some("merge")),
+    | "--question" | "--text" | "--report" => command == Some("answer"),
+    | "--project" => {
+      matches!(command, Some("registrations") | Some("approve-registration") | Some("reject-registration"))
+    },
+    | "--revision" => matches!(command, Some("approve-registration") | Some("reject-registration")),
+    | "--yes" => matches!(command, Some("merge") | Some("approve-registration") | Some("reject-registration")),
+    | _ => false,
+  }
+}
+
 /// コマンドラインの引数を解釈する。
 fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
-  let mut options = OverviewOptions::default();
-  let mut command_seen = false;
+  let mut addr = None;
+  let mut config = None;
+  let mut goal = None;
+  let mut question = None;
+  let mut text = None;
+  let mut report = None;
+  let mut project = None;
+  let mut revision = None;
+  let mut yes = false;
+  let mut command: Option<&str> = None;
   let mut index = 0;
   while index < args.len() {
     let argument = args[index].as_str();
-    match argument {
-      | "--help" | "-h" => return Ok(Invocation::Help),
-      | "--addr" => {
-        let value = take_value(args, index, "--addr")?;
-        options.addr = Some(value);
-        index += 2;
-      },
-      | "--config" => {
-        let value = take_value(args, index, "--config")?;
-        options.config = Some(PathBuf::from(value));
-        index += 2;
-      },
-      | flag if flag.starts_with('-') => {
-        return Err(UsageError(format!("未知の引数です: {flag}")));
-      },
-      | position if !command_seen => {
-        if position != OVERVIEW_COMMAND {
-          return Err(UsageError(format!(
-            "未知のコマンドです: {position}。このコマンドは概要を閲覧する {OVERVIEW_COMMAND} だけを持ちます。"
-          )));
-        }
-        command_seen = true;
-        index += 1;
-      },
-      | position => {
-        return Err(UsageError(format!("概要の表示に位置引数は取れません: {position}")));
-      },
+    if argument == "--help" || argument == "-h" {
+      return Ok(Invocation::Help);
     }
+    if argument.starts_with('-') {
+      if !flag_allowed(command, argument) {
+        return Err(UsageError(format!("未知の引数です: {argument}")));
+      }
+      match argument {
+        | "--addr" => {
+          addr = Some(take_value(args, index, "--addr")?);
+          index += 2;
+        },
+        | "--config" => {
+          config = Some(PathBuf::from(take_value(args, index, "--config")?));
+          index += 2;
+        },
+        | "--goal" => {
+          goal = Some(take_value(args, index, "--goal")?);
+          index += 2;
+        },
+        | "--question" => {
+          question = Some(take_value(args, index, "--question")?);
+          index += 2;
+        },
+        | "--text" => {
+          text = Some(take_optional_empty_value(args, index, "--text")?);
+          index += 2;
+        },
+        | "--report" => {
+          report = Some(take_value(args, index, "--report")?);
+          index += 2;
+        },
+        | "--project" => {
+          project = Some(take_value(args, index, "--project")?);
+          index += 2;
+        },
+        | "--revision" => {
+          revision = Some(take_value(args, index, "--revision")?);
+          index += 2;
+        },
+        | "--yes" => {
+          yes = true;
+          index += 1;
+        },
+        | _ => return Err(UsageError(format!("未知の引数です: {argument}"))),
+      }
+      continue;
+    }
+    if command.is_none() {
+      if !is_known_command(argument) {
+        return Err(UsageError(format!("未知のコマンドです: {argument}")));
+      }
+      command = Some(argument);
+      index += 1;
+      continue;
+    }
+    return Err(UsageError(format!("{} に位置引数は取れません: {argument}", command.unwrap_or(OVERVIEW_COMMAND))));
   }
-  Ok(Invocation::Overview(options))
+  let command = command.unwrap_or(OVERVIEW_COMMAND);
+  if command == OVERVIEW_COMMAND {
+    return Ok(Invocation::Overview(OverviewOptions { addr, config }));
+  }
+  let write = |command: WriteCommand| Invocation::Write(WriteInvocation { command, addr, config });
+  match command {
+    | "answer" => {
+      let goal = goal.ok_or_else(|| UsageError("answer には --goal が必要です。".to_owned()))?;
+      let question = question.ok_or_else(|| UsageError("answer には --question が必要です。".to_owned()))?;
+      let text = text.unwrap_or_default();
+      let report = match report.as_deref() {
+        | None => AnswerReport::Unspecified,
+        | Some("completed") => AnswerReport::Completed,
+        | Some("unable") => AnswerReport::Unable,
+        | Some(other) => {
+          return Err(UsageError(format!("--report には completed か unable を指定してください: {other}")));
+        },
+      };
+      if text.trim().is_empty() && report == AnswerReport::Unspecified {
+        return Err(UsageError("answer には --text か --report が必要です。".to_owned()));
+      }
+      Ok(write(WriteCommand::Answer { goal, question, text, report }))
+    },
+    | "merge" => {
+      let goal = goal.ok_or_else(|| UsageError("merge には --goal が必要です。".to_owned()))?;
+      require_yes("merge", yes)?;
+      Ok(write(WriteCommand::Merge { goal }))
+    },
+    | "registrations" => Ok(write(WriteCommand::Registrations { project })),
+    | "approve-registration" => {
+      let project = project.ok_or_else(|| UsageError("approve-registration には --project が必要です。".to_owned()))?;
+      let revision = parse_revision(revision)?;
+      require_yes("approve-registration", yes)?;
+      Ok(write(WriteCommand::ApproveRegistration { project, revision }))
+    },
+    | "reject-registration" => {
+      let project = project.ok_or_else(|| UsageError("reject-registration には --project が必要です。".to_owned()))?;
+      let revision = parse_revision(revision)?;
+      require_yes("reject-registration", yes)?;
+      Ok(write(WriteCommand::RejectRegistration { project, revision }))
+    },
+    | other => Err(UsageError(format!("未知のコマンドです: {other}"))),
+  }
+}
+
+/// 破壊的な操作の確認フラグを要求する。
+fn require_yes(command: &str, yes: bool) -> Result<(), UsageError> {
+  if yes {
+    Ok(())
+  } else {
+    Err(UsageError(format!("{command} は破壊的な操作です。実行するには --yes を付けてください。")))
+  }
+}
+
+/// `--revision` の値を正の整数として取り出す。
+fn parse_revision(value: Option<String>) -> Result<i64, UsageError> {
+  let value = value.ok_or_else(|| UsageError("--revision には正の整数が必要です。".to_owned()))?;
+  let revision =
+    value.parse::<i64>().map_err(|_| UsageError(format!("--revision には正の整数を指定してください: {value}")))?;
+  if revision <= 0 {
+    return Err(UsageError(format!("--revision には正の整数を指定してください: {value}")));
+  }
+  Ok(revision)
 }
 
 /// `--addr` や `--config` の値を取り出す。
@@ -133,13 +304,28 @@ fn take_value(args: &[String], index: usize, flag: &str) -> Result<String, Usage
     .ok_or_else(|| UsageError(format!("{flag} には値が必要です。")))
 }
 
+/// 空文字を未指定として扱うフラグの値を取り出す。`--text` は本文だけで答える場合に省けるため、
+/// 空文字を許して呼び出し側で未指定として扱います。
+fn take_optional_empty_value(args: &[String], index: usize, flag: &str) -> Result<String, UsageError> {
+  args.get(index + 1).cloned().ok_or_else(|| UsageError(format!("{flag} には値が必要です。")))
+}
+
 /// 使い方の説明。未知の引数・未知のコマンドのときに stderr へ出します。
 fn usage() -> String {
   [
-    "使い方: takt-dash-cli overview [--addr <待ち受けアドレス>] [--config <設定ファイル>]",
-    "位置引数を省略した場合も overview として動作し、backend の gRPC から概要を取得して表示します。",
+    "使い方: takt-dash-cli [overview] [--addr <待ち受けアドレス>] [--config <設定ファイル>]",
+    "  overview                            backend の gRPC から概要を取得して表示します（既定）",
+    "  answer --goal <ID> --question <ID> (--text <本文> | --report completed|unable)",
+    "                                      問い合わせへ回答します",
+    "  merge --goal <ID> --yes            プルリクエストのマージを依頼します",
+    "  registrations [--project <名前>]    ゴール登録の承認待ちを一覧表示します",
+    "  approve-registration --project <名前> --revision <n> --yes",
+    "                                      ゴール登録を承認します",
+    "  reject-registration --project <名前> --revision <n> --yes",
+    "                                      ゴール登録を却下します",
     "--addr      接続先の待ち受けアドレス（例: 127.0.0.1:50051）",
     "--config    backend と同じ形式の設定ファイルのパス。listen を接続先に使います",
+    "--yes       破壊的な操作（merge・approve-registration・reject-registration）に必要です",
     "--help      この使い方を表示します",
   ]
   .join("\n")
@@ -186,19 +372,21 @@ fn is_connection_failure(code: Code) -> bool {
   matches!(code, Code::Unavailable | Code::DeadlineExceeded | Code::Cancelled | Code::Unknown)
 }
 
+/// backend へ gRPC で接続する。接続できないときは表示用のメッセージを返す。
+async fn connect(addr: SocketAddr) -> Result<Channel, String> {
+  let endpoint = Endpoint::from_shared(format!("http://{addr}"))
+    .map_err(|error| format!("接続先 {addr} の指定が不正です: {error}"))?
+    .connect_timeout(CONNECT_TIMEOUT)
+    .timeout(CONNECT_TIMEOUT);
+  endpoint.connect().await.map_err(|error| format!("接続先 {addr} に接続できません: {error}"))
+}
+
 /// backend の `GetOverview` で概要を取得する。
 ///
 /// 接続成否の判定はこの関数だけが行います。`Endpoint::connect()` の失敗と、`GetOverview` が返す
 /// `Status` を同じ分類（接続不能か、backend が応答したうえでの失敗か）へ写します。
 async fn fetch_overview(addr: SocketAddr) -> Result<DashboardState, OverviewError> {
-  let endpoint = Endpoint::from_shared(format!("http://{addr}"))
-    .map_err(|error| OverviewError::Unavailable(format!("接続先 {addr} の指定が不正です: {error}")))?
-    .connect_timeout(CONNECT_TIMEOUT)
-    .timeout(CONNECT_TIMEOUT);
-  let channel = endpoint
-    .connect()
-    .await
-    .map_err(|error| OverviewError::Unavailable(format!("接続先 {addr} に接続できません: {error}")))?;
+  let channel = connect(addr).await.map_err(OverviewError::Unavailable)?;
   let mut client = TaktDashServiceClient::new(channel);
   let response = client.get_overview(GetOverviewRequest {}).await.map_err(|status| {
     if is_connection_failure(status.code()) {
@@ -210,10 +398,93 @@ async fn fetch_overview(addr: SocketAddr) -> Result<DashboardState, OverviewErro
   Ok(response.into_inner())
 }
 
+/// 書き込みコマンドの実行に失敗した理由。
+#[derive(Debug)]
+enum WriteError {
+  /// backend に接続できない、または backend が gRPC として応答しない（`is_connection_failure`）。
+  Unavailable(String),
+  /// backend は応答したが、接続不能以外の理由で失敗した。
+  Call(Status),
+}
+
+/// 書き込み RPC の失敗を、接続不能と backend の失敗に分類する。
+fn write_call_error(addr: SocketAddr, operation: &str, status: Status) -> WriteError {
+  if is_connection_failure(status.code()) {
+    WriteError::Unavailable(format!("接続先 {addr} から{operation}に失敗しました: {}", status.message()))
+  } else {
+    WriteError::Call(status)
+  }
+}
+
+/// 書き込みコマンドを 1 つ実行し、成功時の表示を返す。
+async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<String, WriteError> {
+  let channel = connect(addr).await.map_err(WriteError::Unavailable)?;
+  let mut client = TaktDashServiceClient::new(channel);
+  let operation = command.operation();
+  match command {
+    | WriteCommand::Answer { goal, question, text, report } => {
+      let response = client
+        .answer_inquiry(AnswerInquiryRequest {
+          goal_id:    goal.clone(),
+          inquiry_id: question.clone(),
+          text:       text.clone(),
+          report:     *report as i32,
+        })
+        .await
+        .map_err(|status| write_call_error(addr, operation, status))?
+        .into_inner();
+      Ok(render_answer(&response))
+    },
+    | WriteCommand::Merge { goal } => {
+      let response = client
+        .approve_merge(ApproveMergeRequest { goal_id: goal.clone() })
+        .await
+        .map_err(|status| write_call_error(addr, operation, status))?
+        .into_inner();
+      Ok(render_merge(&response))
+    },
+    | WriteCommand::Registrations { project } => {
+      let response = client
+        .list_goal_registration_proposals(ListGoalRegistrationProposalsRequest {
+          project: project.clone().unwrap_or_default(),
+        })
+        .await
+        .map_err(|status| write_call_error(addr, operation, status))?
+        .into_inner();
+      Ok(render_registrations(&response.proposals))
+    },
+    | WriteCommand::ApproveRegistration { project, revision } => {
+      let response = client
+        .approve_goal_registration(ApproveGoalRegistrationRequest { project: project.clone(), revision: *revision })
+        .await
+        .map_err(|status| write_call_error(addr, operation, status))?
+        .into_inner();
+      Ok(render_approve_registration(&response))
+    },
+    | WriteCommand::RejectRegistration { project, revision } => {
+      let response = client
+        .reject_goal_registration(RejectGoalRegistrationRequest { project: project.clone(), revision: *revision })
+        .await
+        .map_err(|status| write_call_error(addr, operation, status))?
+        .into_inner();
+      Ok(render_reject_registration(&response))
+    },
+  }
+}
+
+/// `run_with` が実行する処理。
+enum Action {
+  /// 概要を表示する。
+  Overview,
+  /// 書き込みコマンドを実行する。
+  Write(WriteCommand),
+}
+
 /// 概要を標準出力へ表示する。
 ///
-/// 引数を解釈し、接続先を解決し、概要を取得して表示します。出力とエラーは指定された writer へ
-/// 書き、終了コードを返します。`run` とテストの両方がこの関数を通して観測します。
+/// 引数を解釈し、接続先を解決し、概要の取得または書き込みコマンドを実行して表示します。出力と
+/// エラーは指定された writer へ書き、終了コードを返します。`run` とテストの両方がこの関数を
+/// 通して観測します。
 fn run_with(
   args: &[String],
   env_addr: Result<String, VarError>,
@@ -227,14 +498,15 @@ fn run_with(
       return EXIT_USAGE;
     },
   };
-  let options = match invocation {
+  let (addr_option, config_option, action) = match invocation {
     | Invocation::Help => {
       let _ = writeln!(stdout, "{}", usage());
       return EXIT_OK;
     },
-    | Invocation::Overview(options) => options,
+    | Invocation::Overview(options) => (options.addr, options.config, Action::Overview),
+    | Invocation::Write(write) => (write.addr, write.config, Action::Write(write.command)),
   };
-  let config_path = options.config.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+  let config_path = config_option.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
   let config_listen = match read_config_listen(&config_path) {
     | Ok(listen) => listen,
     | Err(message) => {
@@ -242,7 +514,7 @@ fn run_with(
       return EXIT_FAILURE;
     },
   };
-  let sources = AddrSources { cli_addr: options.addr.as_deref(), env_addr, config_listen: config_listen.as_deref() };
+  let sources = AddrSources { cli_addr: addr_option.as_deref(), env_addr, config_listen: config_listen.as_deref() };
   let addr = match resolve_backend_addr(&sources) {
     | Ok(addr) => addr,
     | Err(AddrError::Invalid { source, value }) => {
@@ -257,18 +529,40 @@ fn run_with(
       return EXIT_FAILURE;
     },
   };
-  match runtime.block_on(fetch_overview(addr)) {
-    | Ok(state) => {
-      let _ = writeln!(stdout, "{}", render_overview(&state));
-      EXIT_OK
+  match action {
+    | Action::Overview => match runtime.block_on(fetch_overview(addr)) {
+      | Ok(state) => {
+        let _ = writeln!(stdout, "{}", render_overview(&state));
+        EXIT_OK
+      },
+      | Err(OverviewError::Unavailable(message)) => {
+        let _ = writeln!(stderr, "backend に接続できません。{message}");
+        EXIT_FAILURE
+      },
+      | Err(OverviewError::Call(status)) => {
+        let _ = writeln!(stderr, "backend から概要を取得できませんでした（{}）。{}", status.code(), status.message());
+        EXIT_FAILURE
+      },
     },
-    | Err(OverviewError::Unavailable(message)) => {
-      let _ = writeln!(stderr, "backend に接続できません。{message}");
-      EXIT_FAILURE
-    },
-    | Err(OverviewError::Call(status)) => {
-      let _ = writeln!(stderr, "backend から概要を取得できませんでした（{}）。{}", status.code(), status.message());
-      EXIT_FAILURE
+    | Action::Write(command) => match runtime.block_on(execute_write(addr, &command)) {
+      | Ok(text) => {
+        let _ = writeln!(stdout, "{text}");
+        EXIT_OK
+      },
+      | Err(WriteError::Unavailable(message)) => {
+        let _ = writeln!(stderr, "backend に接続できません。{message}");
+        EXIT_FAILURE
+      },
+      | Err(WriteError::Call(status)) => {
+        let _ = writeln!(
+          stderr,
+          "backend から{}に失敗しました（{}）。{}",
+          command.operation(),
+          status.code(),
+          status.message()
+        );
+        EXIT_FAILURE
+      },
     },
   }
 }
@@ -334,7 +628,25 @@ fn render_overview(state: &DashboardState) -> String {
       } else {
         "問い合わせ（質問）"
       };
-      format!("- {}/{}: {} {}", decision.project, decision.server_id, kind, decision.body)
+      // 回答・マージ依頼の対象を決められるよう、ゴールに属する判断待ちにはゴール ID を出す。
+      let goal_id = decision
+        .goal_id
+        .as_deref()
+        .filter(|goal_id| !goal_id.is_empty())
+        .map(|goal_id| format!(" ゴールID: {goal_id}"))
+        .unwrap_or_default();
+      // 回答コマンドは問い合わせ ID を必要とするため、問い合わせの行だけに ID を出す。
+      let inquiry_id = if decision.r#type == PendingDecisionType::Inquiry as i32 {
+        decision
+          .inquiry_id
+          .as_deref()
+          .filter(|inquiry_id| !inquiry_id.is_empty())
+          .map(|inquiry_id| format!(" 問い合わせID: {inquiry_id}"))
+          .unwrap_or_default()
+      } else {
+        String::new()
+      };
+      format!("- {}/{}: {} {}{}{}", decision.project, decision.server_id, kind, decision.body, goal_id, inquiry_id)
     })
     .collect();
   let thresholds = state.thresholds.unwrap_or_default();
@@ -392,6 +704,51 @@ fn format_timestamp(timestamp: Option<&prost_types::Timestamp>) -> String {
   }
 }
 
+/// 問い合わせへの回答の結果を表示する。
+fn render_answer(response: &AnswerInquiryResponse) -> String {
+  format!("回答を記録しました。\nゴール: {}\n問い合わせ: {}", response.goal_id, response.inquiry_id)
+}
+
+/// マージの依頼の結果を表示する。
+fn render_merge(response: &ApproveMergeResponse) -> String {
+  format!(
+    "マージを依頼しました。\nゴール: {}\nプルリクエスト: #{}\nタスク: {}",
+    response.goal_id, response.pr_number, response.task_name
+  )
+}
+
+/// ゴール登録の承認待ちの一覧を表示する。
+fn render_registrations(proposals: &[GoalRegistrationProposal]) -> String {
+  let lines: Vec<String> = proposals
+    .iter()
+    .map(|proposal| {
+      format!(
+        "- [{GOAL_REGISTRATION_LABEL}] {}（{}）リビジョン {}: {}",
+        proposal.project, proposal.server_id, proposal.revision, proposal.objective
+      )
+    })
+    .collect();
+  format!("ゴール登録の承認待ち: {}件\n{}", proposals.len(), join_lines(&lines))
+}
+
+/// ゴール登録の承認の結果を表示する。
+fn render_approve_registration(response: &ApproveGoalRegistrationResponse) -> String {
+  format!(
+    "ゴール登録を承認しました。\nリビジョン: {}\nゴール: {}「{}」",
+    response.revision, response.goal_id, response.objective
+  )
+}
+
+/// ゴール登録の却下の結果を表示する。
+fn render_reject_registration(response: &RejectGoalRegistrationResponse) -> String {
+  let mut text = format!("ゴール登録を却下しました。\nリビジョン: {}", response.revision);
+  if !response.notice.trim().is_empty() {
+    text.push('\n');
+    text.push_str(&response.notice);
+  }
+  text
+}
+
 fn main() {
   let args: Vec<String> = std::env::args().skip(1).collect();
   std::process::exit(run(&args));
@@ -418,8 +775,9 @@ mod tests {
   use tonic::{transport::Server, Code, Request, Response, Status};
 
   use super::{
-    is_connection_failure, parse_arguments, proto, render_overview, resolve_backend_addr, run_with, AddrError,
-    AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
+    is_connection_failure, parse_arguments, proto, read_config_listen, render_overview, resolve_backend_addr, run_with,
+    AddrError, AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK,
+    EXIT_USAGE,
   };
 
   // proto の列挙値は生成コードの数値をそのまま使う。
@@ -539,6 +897,46 @@ mod tests {
     ) -> Result<Response<v1::GetRunDetailResponse>, Status> {
       self.record("GetRunDetail");
       Err(Status::unimplemented("このダミーサーバーは GetRunDetail を提供しません。"))
+    }
+
+    async fn answer_inquiry(
+      &self,
+      _request: Request<v1::AnswerInquiryRequest>,
+    ) -> Result<Response<v1::AnswerInquiryResponse>, Status> {
+      self.record("AnswerInquiry");
+      Err(Status::unimplemented("このダミーサーバーは AnswerInquiry を提供しません。"))
+    }
+
+    async fn approve_merge(
+      &self,
+      _request: Request<v1::ApproveMergeRequest>,
+    ) -> Result<Response<v1::ApproveMergeResponse>, Status> {
+      self.record("ApproveMerge");
+      Err(Status::unimplemented("このダミーサーバーは ApproveMerge を提供しません。"))
+    }
+
+    async fn list_goal_registration_proposals(
+      &self,
+      _request: Request<v1::ListGoalRegistrationProposalsRequest>,
+    ) -> Result<Response<v1::ListGoalRegistrationProposalsResponse>, Status> {
+      self.record("ListGoalRegistrationProposals");
+      Err(Status::unimplemented("このダミーサーバーは ListGoalRegistrationProposals を提供しません。"))
+    }
+
+    async fn approve_goal_registration(
+      &self,
+      _request: Request<v1::ApproveGoalRegistrationRequest>,
+    ) -> Result<Response<v1::ApproveGoalRegistrationResponse>, Status> {
+      self.record("ApproveGoalRegistration");
+      Err(Status::unimplemented("このダミーサーバーは ApproveGoalRegistration を提供しません。"))
+    }
+
+    async fn reject_goal_registration(
+      &self,
+      _request: Request<v1::RejectGoalRegistrationRequest>,
+    ) -> Result<Response<v1::RejectGoalRegistrationResponse>, Status> {
+      self.record("RejectGoalRegistration");
+      Err(Status::unimplemented("このダミーサーバーは RejectGoalRegistration を提供しません。"))
     }
 
     async fn watch_state(
@@ -687,6 +1085,7 @@ mod tests {
           server_id:    "mini".to_owned(),
           project:      "taktdash-cli".to_owned(),
           goal_id:      Some("goal-cli".to_owned()),
+          inquiry_id:   Some("q-cli".to_owned()),
           inquiry_kind: INQUIRY_KIND_QUESTION,
           created_at:   Some(ts(1_731_300_000)),
           body:         "表示の並び順はどれがよいですか。".to_owned(),
@@ -699,6 +1098,7 @@ mod tests {
           server_id:    "mini".to_owned(),
           project:      "taktdash-cli".to_owned(),
           goal_id:      Some("goal-cli".to_owned()),
+          inquiry_id:   None,
           inquiry_kind: v1::InquiryKind::Unspecified as i32,
           created_at:   Some(ts(1_731_400_000)),
           body:         "プルリクエスト 42 をマージしてください。".to_owned(),
@@ -761,6 +1161,7 @@ mod tests {
       server_id:    "mini".to_owned(),
       project:      "taktdash-cli".to_owned(),
       goal_id:      None,
+      inquiry_id:   None,
       inquiry_kind: INQUIRY_KIND_OPERATION_REQUEST,
       created_at:   Some(ts(1_731_300_000)),
       body:         "ログを取得してください。".to_owned(),
@@ -858,23 +1259,8 @@ mod tests {
   }
 
   // ----------------------------------------------------------------------------
-  // CLI-NO-WRITE: 書き込み操作のコマンドを持たない（要件 9）
+  // CLI-USAGE: 未知の引数の扱い（要件 9）
   // ----------------------------------------------------------------------------
-
-  #[test]
-  fn write_command_is_rejected_with_usage() {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-
-    let code = run_with(&["answer".to_owned()], Ok(DEFAULT_BACKEND_ADDR.to_owned()), &mut stdout, &mut stderr);
-
-    let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
-    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-    assert_eq!(code, EXIT_USAGE, "未知のコマンドは使い方を出して異常終了する必要があります");
-    assert!(stderr.contains("未知のコマンドです: answer"), "未知のコマンドであることを示す必要があります: {stderr}");
-    assert!(stderr.contains("使い方: takt-dash-cli overview"), "使い方を示す必要があります: {stderr}");
-    assert!(stdout.is_empty(), "使い方の誤りで標準出力へ出してはいけません: {stdout}");
-  }
 
   #[test]
   fn unknown_flag_is_rejected_with_usage() {
@@ -886,19 +1272,6 @@ mod tests {
     let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
     assert_eq!(code, EXIT_USAGE);
     assert!(stderr.contains("未知の引数です: --merge"), "未知の引数であることを示す必要があります: {stderr}");
-  }
-
-  #[test]
-  fn generated_service_exposes_only_read_rpcs() {
-    // proto のサービス定義は読み取りの 6 つだけで、書き込み系の RPC を持たない。
-    let rpcs = ["GetOverview", "GetProjects", "GetPendingDecisions", "GetActivity", "GetRunDetail", "WatchState"];
-    assert_eq!(rpcs.len(), 6);
-    for forbidden in ["Answer", "Merge", "Approve", "Reject", "Update", "Delete"] {
-      assert!(
-        !rpcs.iter().any(|rpc| rpc.contains(forbidden)),
-        "読み取りの RPC の集合に書き込み操作 {forbidden} が現れています: {rpcs:?}"
-      );
-    }
   }
 
   #[test]
@@ -1030,7 +1403,10 @@ mod tests {
   #[test]
   fn config_listen_overrides_default_for_connection() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
-    let config = write_config(&dir, r#"{"listen":"127.0.0.1:59999"}"#);
+    // 空きポートを確保してすぐ手放し、待ち受けの無い接続先を実行時に作る。固定ポートの空きに
+    // 依存すると、ホストで稼働しているサービスとの衝突でテスト結果が変わってしまう。
+    let closed = reserve_closed_addr();
+    let config = write_config(&dir, &format!(r#"{{"listen":"{closed}"}}"#));
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -1044,7 +1420,7 @@ mod tests {
     let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
     // 設定の listen が使われ（既定値ではない）、待ち受けが無いため接続不能で終わる。
     assert_eq!(code, EXIT_FAILURE, "設定の listen に待ち受けが無いため失敗する必要があります");
-    assert!(stderr.contains("127.0.0.1:59999"), "設定の listen を接続先に使う必要があります: {stderr}");
+    assert!(stderr.contains(&closed.to_string()), "設定の listen を接続先に使う必要があります: {stderr}");
     assert!(!stderr.contains(DEFAULT_BACKEND_ADDR), "既定値へ戻ってはいけません: {stderr}");
   }
 
@@ -1052,19 +1428,22 @@ mod tests {
   fn missing_config_file_falls_through_to_default() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
     let missing = dir.path().join("does-not-exist.json");
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
 
-    let code = run_with(
-      &["--config".to_owned(), missing.display().to_string()],
-      Err(std::env::VarError::NotPresent),
-      &mut stdout,
-      &mut stderr,
+    // 設定ファイルが無いときは listen を提供せず、接続先の解決が既定値へ進むことを、実際の
+    // 待ち受けに依存せず観測する。既定ポートで待ち受けが動いている環境でも結果が変わらない。
+    let config_listen = read_config_listen(&missing).expect("存在しない設定ファイルは未設定として扱う必要があります");
+    assert_eq!(config_listen, None, "存在しない設定ファイルは listen を提供してはいけません");
+
+    let sources = AddrSources {
+      cli_addr:      None,
+      env_addr:      Err(std::env::VarError::NotPresent),
+      config_listen: config_listen.as_deref(),
+    };
+    assert_eq!(
+      resolve_backend_addr(&sources),
+      Ok(DEFAULT_BACKEND_ADDR.parse().expect("既定の待ち受けアドレスは解釈できる必要があります")),
+      "設定ファイルが無いときは既定値へ進む必要があります"
     );
-
-    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-    assert_eq!(code, EXIT_FAILURE);
-    assert!(stderr.contains(DEFAULT_BACKEND_ADDR), "設定ファイルが無いときは既定値へ進む必要があります: {stderr}");
   }
 
   // ----------------------------------------------------------------------------

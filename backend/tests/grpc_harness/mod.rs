@@ -27,6 +27,8 @@ pub struct GrpcHarness {
   _directory:   tempfile::TempDir,
   config_path:  PathBuf,
   state_path:   PathBuf,
+  calls_path:   PathBuf,
+  project_dirs: BTreeMap<String, PathBuf>,
   pub store:    Arc<StateStore>,
   pub activity: Arc<ActivityStore>,
   pub changes:  tokio::sync::broadcast::Sender<()>,
@@ -62,6 +64,13 @@ impl GrpcHarnessBuilder {
     self
   }
 
+  /// 同じサーバーに2つ目以降のプロジェクトを加える。状態ファイルは共有します。
+  pub fn with_project(mut self, project: Project, server: ServerMeta) -> Self {
+    self.servers.entry(project.server.clone()).or_insert(server);
+    self.projects.push(project);
+    self
+  }
+
   pub fn build(self) -> GrpcHarness {
     let servers = if self.servers.is_empty() {
       let mut servers = BTreeMap::new();
@@ -73,14 +82,21 @@ impl GrpcHarnessBuilder {
     let projects = self.projects;
     let thresholds = self.thresholds;
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-    let project_dir = directory.path().join("project");
-    std::fs::create_dir_all(&project_dir).expect("プロジェクトの cwd を作れます");
-    // mock の子プロセスを起動する cwd は実在する必要があるため、渡された cwd
-    // を実在のディレクトリへ置き換える。
-    let projects: Vec<Project> =
-      projects.into_iter().map(|project| Project { cwd: project_dir.clone(), ..project }).collect();
+    // mock の子プロセスを起動する cwd は実在する必要があります。プロジェクト名ごとに
+    // 別の実在ディレクトリを割り当て、cwd がどのプロジェクトのものかをテストから観測できる
+    // ようにします。
+    let mut project_dirs = BTreeMap::new();
+    let mut rewritten = Vec::with_capacity(projects.len());
+    for project in projects {
+      let cwd = directory.path().join("projects").join(&project.name);
+      std::fs::create_dir_all(&cwd).expect("プロジェクトの cwd を作れます");
+      project_dirs.insert(project.name.clone(), cwd.clone());
+      rewritten.push(Project { cwd, ..project });
+    }
+    let projects = rewritten;
     let state_path = directory.path().join("state.json");
     std::fs::write(&state_path, self.state.to_string()).expect("状態ファイルを書けます");
+    let calls_path = directory.path().join("calls.jsonl");
     let config_path = directory.path().join("taktdash.config.json");
     let mut mcp_servers = serde_json::Map::new();
     for server_id in servers.keys() {
@@ -88,7 +104,11 @@ impl GrpcHarnessBuilder {
         server_id.clone(),
         json!({
           "command": "node",
-          "args": [common::mock_script().display().to_string(), "--state", state_path.display().to_string()],
+          "args": [
+            common::mock_script().display().to_string(),
+            "--state", state_path.display().to_string(),
+            "--calls", calls_path.display().to_string(),
+          ],
           "env": {}
         }),
       );
@@ -117,7 +137,7 @@ impl GrpcHarnessBuilder {
     let store = Arc::new(StateStore::new(servers, projects, thresholds));
     let activity = Arc::new(ActivityStore::open_in_memory().expect("メモリ上の SQLite を開けます"));
     let (changes, _) = tokio::sync::broadcast::channel(16);
-    GrpcHarness { _directory: directory, config_path, state_path, store, activity, changes }
+    GrpcHarness { _directory: directory, config_path, state_path, calls_path, project_dirs, store, activity, changes }
   }
 }
 
@@ -130,8 +150,28 @@ impl GrpcHarness {
     &self.config_path
   }
 
+  /// テストが構成したプロジェクト名に対応する、実在の cwd を返す。
+  pub fn project_cwd(&self, name: &str) -> &Path {
+    self.project_dirs.get(name).unwrap_or_else(|| panic!("プロジェクト {name} の cwd がハーネスにありません")).as_path()
+  }
+
   pub fn rewrite_state(&self, state: Value) {
     std::fs::write(&self.state_path, state.to_string()).expect("状態ファイルを書けます");
+  }
+
+  /// mock MCP サーバが記録した道具呼び出しを、呼び出し順に返す。
+  ///
+  /// 各 RPC は要求ごとに mock の子プロセスを起動するため、記録は1呼び出し1行の JSON です。
+  /// まだ1度も呼ばれていなければ空を返します。
+  pub fn calls(&self) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(&self.calls_path) else {
+      return Vec::new();
+    };
+    text
+      .lines()
+      .filter(|line| !line.trim().is_empty())
+      .map(|line| serde_json::from_str(line).expect("記録された道具呼び出しは JSON です"))
+      .collect()
   }
 
   /// 設定ファイルの閾値を書き換える。poller の次の読み取りサイクルで state store へ反映されます。

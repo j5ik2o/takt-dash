@@ -390,6 +390,48 @@ export function pendingDecisionTypeToJSON(object: PendingDecisionType): string {
   }
 }
 
+/** 問い合わせへの回答の種類を表す。 */
+export enum AnswerReport {
+  ANSWER_REPORT_UNSPECIFIED = 0,
+  /** ANSWER_REPORT_COMPLETED - 完了の報告 */
+  ANSWER_REPORT_COMPLETED = 1,
+  /** ANSWER_REPORT_UNABLE - 対応できない報告 */
+  ANSWER_REPORT_UNABLE = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function answerReportFromJSON(object: any): AnswerReport {
+  switch (object) {
+    case 0:
+    case "ANSWER_REPORT_UNSPECIFIED":
+      return AnswerReport.ANSWER_REPORT_UNSPECIFIED;
+    case 1:
+    case "ANSWER_REPORT_COMPLETED":
+      return AnswerReport.ANSWER_REPORT_COMPLETED;
+    case 2:
+    case "ANSWER_REPORT_UNABLE":
+      return AnswerReport.ANSWER_REPORT_UNABLE;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return AnswerReport.UNRECOGNIZED;
+  }
+}
+
+export function answerReportToJSON(object: AnswerReport): string {
+  switch (object) {
+    case AnswerReport.ANSWER_REPORT_UNSPECIFIED:
+      return "ANSWER_REPORT_UNSPECIFIED";
+    case AnswerReport.ANSWER_REPORT_COMPLETED:
+      return "ANSWER_REPORT_COMPLETED";
+    case AnswerReport.ANSWER_REPORT_UNABLE:
+      return "ANSWER_REPORT_UNABLE";
+    case AnswerReport.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 /** 集約対象のサーバーを表す。 */
 export interface Server {
   /** 識別子 */
@@ -560,6 +602,8 @@ export interface PendingDecision {
     | undefined;
   /** 滞留の判定済みフラグ */
   stale: boolean;
+  /** 問い合わせを一意に指す ID（マージ待ちは省略する） */
+  inquiryId?: string | undefined;
 }
 
 /** 異常判定の基準を表す。 */
@@ -793,6 +837,108 @@ export interface GetRunDetailResponse {
 
 /** 状態ストリーミングの接続を要求する。 */
 export interface WatchStateRequest {
+}
+
+/** 問い合わせへの回答を要求する。 */
+export interface AnswerInquiryRequest {
+  /** ゴール ID */
+  goalId: string;
+  /** 問い合わせ ID */
+  inquiryId: string;
+  /** 回答の本文 */
+  text: string;
+  /** 完了・対応不能の報告（本文だけで答える場合は省略する） */
+  report: AnswerReport;
+}
+
+/** 問い合わせへの回答への応答を表す。 */
+export interface AnswerInquiryResponse {
+  /** ゴール ID */
+  goalId: string;
+  /** 問い合わせ ID */
+  inquiryId: string;
+}
+
+/** プルリクエストのマージ承認を要求する。 */
+export interface ApproveMergeRequest {
+  /** ゴール ID */
+  goalId: string;
+}
+
+/** プルリクエストのマージ承認への応答を表す。 */
+export interface ApproveMergeResponse {
+  /** ゴール ID */
+  goalId: string;
+  /** プルリクエストの番号 */
+  prNumber: number;
+  /** 実行した仕上げタスクの名前 */
+  taskName: string;
+}
+
+/** ゴール登録の承認待ちの取得を要求する。 */
+export interface ListGoalRegistrationProposalsRequest {
+  /** 対象プロジェクト（省略すると設定の全プロジェクト） */
+  project: string;
+}
+
+/** ゴール登録の承認待ちの項目を表す。 */
+export interface GoalRegistrationProposal {
+  /** 提案のリビジョン */
+  revision: number;
+  /** サーバー */
+  serverId: string;
+  /** プロジェクト */
+  project: string;
+  /** 目的 */
+  objective: string;
+  /** 対象外 */
+  outOfScope: string[];
+  /** 受け入れ条件 */
+  acceptanceCriteria: string[];
+  /** 制約 */
+  constraints: string[];
+  /** 統合ブランチ */
+  integrationBranch: string;
+}
+
+/** ゴール登録の承認待ちの取得への応答を表す。 */
+export interface ListGoalRegistrationProposalsResponse {
+  /** 承認待ちの一覧 */
+  proposals: GoalRegistrationProposal[];
+}
+
+/** ゴール登録の承認を要求する。 */
+export interface ApproveGoalRegistrationRequest {
+  /** プロジェクト */
+  project: string;
+  /** 提案のリビジョン */
+  revision: number;
+}
+
+/** ゴール登録の承認への応答を表す。 */
+export interface ApproveGoalRegistrationResponse {
+  /** 提案のリビジョン */
+  revision: number;
+  /** 承認したゴールの ID */
+  goalId: string;
+  /** 承認したゴールの目的 */
+  objective: string;
+}
+
+/** ゴール登録の却下を要求する。 */
+export interface RejectGoalRegistrationRequest {
+  /** プロジェクト */
+  project: string;
+  /** 提案のリビジョン */
+  revision: number;
+}
+
+/** ゴール登録の却下への応答を表す。 */
+export interface RejectGoalRegistrationResponse {
+  /** 提案のリビジョン */
+  revision: number;
+  /** 却下の通知 */
+  notice: string;
 }
 
 function createBaseServer(): Server {
@@ -2154,6 +2300,7 @@ function createBasePendingDecision(): PendingDecision {
     options: [],
     pullRequest: undefined,
     stale: false,
+    inquiryId: undefined,
   };
 }
 
@@ -2188,6 +2335,9 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     }
     if (message.stale !== false) {
       writer.uint32(80).bool(message.stale);
+    }
+    if (message.inquiryId !== undefined) {
+      writer.uint32(90).string(message.inquiryId);
     }
     return writer;
   },
@@ -2285,6 +2435,14 @@ export const PendingDecision: MessageFns<PendingDecision> = {
             message.stale = reader.bool();
             continue;
           }
+          case 11: {
+            if (tag !== 90) {
+              break;
+            }
+
+            message.inquiryId = reader.string();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -2331,6 +2489,11 @@ export const PendingDecision: MessageFns<PendingDecision> = {
         ? PullRequest.fromJSON(object.pull_request)
         : undefined,
       stale: isSet(object.stale) ? globalThis.Boolean(object.stale) : false,
+      inquiryId: isSet(object.inquiryId)
+        ? globalThis.String(object.inquiryId)
+        : isSet(object.inquiry_id)
+        ? globalThis.String(object.inquiry_id)
+        : undefined,
     };
   },
 
@@ -2366,6 +2529,9 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     if (message.stale !== false) {
       obj.stale = message.stale;
     }
+    if (message.inquiryId !== undefined) {
+      obj.inquiryId = message.inquiryId;
+    }
     return obj;
   },
 
@@ -2386,6 +2552,7 @@ export const PendingDecision: MessageFns<PendingDecision> = {
       ? PullRequest.fromPartial(object.pullRequest)
       : undefined;
     message.stale = object.stale ?? false;
+    message.inquiryId = object.inquiryId ?? undefined;
     return message;
   },
 };
@@ -4554,9 +4721,1135 @@ export const WatchStateRequest: MessageFns<WatchStateRequest> = {
   },
 };
 
+function createBaseAnswerInquiryRequest(): AnswerInquiryRequest {
+  return { goalId: "", inquiryId: "", text: "", report: 0 };
+}
+
+export const AnswerInquiryRequest: MessageFns<AnswerInquiryRequest> = {
+  encode(message: AnswerInquiryRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.goalId !== "") {
+      writer.uint32(10).string(message.goalId);
+    }
+    if (message.inquiryId !== "") {
+      writer.uint32(18).string(message.inquiryId);
+    }
+    if (message.text !== "") {
+      writer.uint32(26).string(message.text);
+    }
+    if (message.report !== 0) {
+      writer.uint32(32).int32(message.report);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AnswerInquiryRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseAnswerInquiryRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.goalId = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.inquiryId = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.text = reader.string();
+            continue;
+          }
+          case 4: {
+            if (tag !== 32) {
+              break;
+            }
+
+            message.report = reader.int32() as any;
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): AnswerInquiryRequest {
+    return {
+      goalId: isSet(object.goalId)
+        ? globalThis.String(object.goalId)
+        : isSet(object.goal_id)
+        ? globalThis.String(object.goal_id)
+        : "",
+      inquiryId: isSet(object.inquiryId)
+        ? globalThis.String(object.inquiryId)
+        : isSet(object.inquiry_id)
+        ? globalThis.String(object.inquiry_id)
+        : "",
+      text: isSet(object.text) ? globalThis.String(object.text) : "",
+      report: isSet(object.report) ? answerReportFromJSON(object.report) : 0,
+    };
+  },
+
+  toJSON(message: AnswerInquiryRequest): unknown {
+    const obj: any = {};
+    if (message.goalId !== "") {
+      obj.goalId = message.goalId;
+    }
+    if (message.inquiryId !== "") {
+      obj.inquiryId = message.inquiryId;
+    }
+    if (message.text !== "") {
+      obj.text = message.text;
+    }
+    if (message.report !== 0) {
+      obj.report = answerReportToJSON(message.report);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AnswerInquiryRequest>, I>>(base?: I): AnswerInquiryRequest {
+    return AnswerInquiryRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AnswerInquiryRequest>, I>>(object: I): AnswerInquiryRequest {
+    const message = createBaseAnswerInquiryRequest();
+    message.goalId = object.goalId ?? "";
+    message.inquiryId = object.inquiryId ?? "";
+    message.text = object.text ?? "";
+    message.report = object.report ?? 0;
+    return message;
+  },
+};
+
+function createBaseAnswerInquiryResponse(): AnswerInquiryResponse {
+  return { goalId: "", inquiryId: "" };
+}
+
+export const AnswerInquiryResponse: MessageFns<AnswerInquiryResponse> = {
+  encode(message: AnswerInquiryResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.goalId !== "") {
+      writer.uint32(10).string(message.goalId);
+    }
+    if (message.inquiryId !== "") {
+      writer.uint32(18).string(message.inquiryId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AnswerInquiryResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseAnswerInquiryResponse();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.goalId = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.inquiryId = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): AnswerInquiryResponse {
+    return {
+      goalId: isSet(object.goalId)
+        ? globalThis.String(object.goalId)
+        : isSet(object.goal_id)
+        ? globalThis.String(object.goal_id)
+        : "",
+      inquiryId: isSet(object.inquiryId)
+        ? globalThis.String(object.inquiryId)
+        : isSet(object.inquiry_id)
+        ? globalThis.String(object.inquiry_id)
+        : "",
+    };
+  },
+
+  toJSON(message: AnswerInquiryResponse): unknown {
+    const obj: any = {};
+    if (message.goalId !== "") {
+      obj.goalId = message.goalId;
+    }
+    if (message.inquiryId !== "") {
+      obj.inquiryId = message.inquiryId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AnswerInquiryResponse>, I>>(base?: I): AnswerInquiryResponse {
+    return AnswerInquiryResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AnswerInquiryResponse>, I>>(object: I): AnswerInquiryResponse {
+    const message = createBaseAnswerInquiryResponse();
+    message.goalId = object.goalId ?? "";
+    message.inquiryId = object.inquiryId ?? "";
+    return message;
+  },
+};
+
+function createBaseApproveMergeRequest(): ApproveMergeRequest {
+  return { goalId: "" };
+}
+
+export const ApproveMergeRequest: MessageFns<ApproveMergeRequest> = {
+  encode(message: ApproveMergeRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.goalId !== "") {
+      writer.uint32(10).string(message.goalId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApproveMergeRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseApproveMergeRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.goalId = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ApproveMergeRequest {
+    return {
+      goalId: isSet(object.goalId)
+        ? globalThis.String(object.goalId)
+        : isSet(object.goal_id)
+        ? globalThis.String(object.goal_id)
+        : "",
+    };
+  },
+
+  toJSON(message: ApproveMergeRequest): unknown {
+    const obj: any = {};
+    if (message.goalId !== "") {
+      obj.goalId = message.goalId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApproveMergeRequest>, I>>(base?: I): ApproveMergeRequest {
+    return ApproveMergeRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApproveMergeRequest>, I>>(object: I): ApproveMergeRequest {
+    const message = createBaseApproveMergeRequest();
+    message.goalId = object.goalId ?? "";
+    return message;
+  },
+};
+
+function createBaseApproveMergeResponse(): ApproveMergeResponse {
+  return { goalId: "", prNumber: 0, taskName: "" };
+}
+
+export const ApproveMergeResponse: MessageFns<ApproveMergeResponse> = {
+  encode(message: ApproveMergeResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.goalId !== "") {
+      writer.uint32(10).string(message.goalId);
+    }
+    if (message.prNumber !== 0) {
+      writer.uint32(16).int64(message.prNumber);
+    }
+    if (message.taskName !== "") {
+      writer.uint32(26).string(message.taskName);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApproveMergeResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseApproveMergeResponse();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.goalId = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.prNumber = longToNumber(reader.int64());
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.taskName = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ApproveMergeResponse {
+    return {
+      goalId: isSet(object.goalId)
+        ? globalThis.String(object.goalId)
+        : isSet(object.goal_id)
+        ? globalThis.String(object.goal_id)
+        : "",
+      prNumber: isSet(object.prNumber)
+        ? globalThis.Number(object.prNumber)
+        : isSet(object.pr_number)
+        ? globalThis.Number(object.pr_number)
+        : 0,
+      taskName: isSet(object.taskName)
+        ? globalThis.String(object.taskName)
+        : isSet(object.task_name)
+        ? globalThis.String(object.task_name)
+        : "",
+    };
+  },
+
+  toJSON(message: ApproveMergeResponse): unknown {
+    const obj: any = {};
+    if (message.goalId !== "") {
+      obj.goalId = message.goalId;
+    }
+    if (message.prNumber !== 0) {
+      obj.prNumber = Math.round(message.prNumber);
+    }
+    if (message.taskName !== "") {
+      obj.taskName = message.taskName;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApproveMergeResponse>, I>>(base?: I): ApproveMergeResponse {
+    return ApproveMergeResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApproveMergeResponse>, I>>(object: I): ApproveMergeResponse {
+    const message = createBaseApproveMergeResponse();
+    message.goalId = object.goalId ?? "";
+    message.prNumber = object.prNumber ?? 0;
+    message.taskName = object.taskName ?? "";
+    return message;
+  },
+};
+
+function createBaseListGoalRegistrationProposalsRequest(): ListGoalRegistrationProposalsRequest {
+  return { project: "" };
+}
+
+export const ListGoalRegistrationProposalsRequest: MessageFns<ListGoalRegistrationProposalsRequest> = {
+  encode(message: ListGoalRegistrationProposalsRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.project !== "") {
+      writer.uint32(10).string(message.project);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ListGoalRegistrationProposalsRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseListGoalRegistrationProposalsRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.project = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ListGoalRegistrationProposalsRequest {
+    return { project: isSet(object.project) ? globalThis.String(object.project) : "" };
+  },
+
+  toJSON(message: ListGoalRegistrationProposalsRequest): unknown {
+    const obj: any = {};
+    if (message.project !== "") {
+      obj.project = message.project;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ListGoalRegistrationProposalsRequest>, I>>(
+    base?: I,
+  ): ListGoalRegistrationProposalsRequest {
+    return ListGoalRegistrationProposalsRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ListGoalRegistrationProposalsRequest>, I>>(
+    object: I,
+  ): ListGoalRegistrationProposalsRequest {
+    const message = createBaseListGoalRegistrationProposalsRequest();
+    message.project = object.project ?? "";
+    return message;
+  },
+};
+
+function createBaseGoalRegistrationProposal(): GoalRegistrationProposal {
+  return {
+    revision: 0,
+    serverId: "",
+    project: "",
+    objective: "",
+    outOfScope: [],
+    acceptanceCriteria: [],
+    constraints: [],
+    integrationBranch: "",
+  };
+}
+
+export const GoalRegistrationProposal: MessageFns<GoalRegistrationProposal> = {
+  encode(message: GoalRegistrationProposal, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.revision !== 0) {
+      writer.uint32(8).int64(message.revision);
+    }
+    if (message.serverId !== "") {
+      writer.uint32(18).string(message.serverId);
+    }
+    if (message.project !== "") {
+      writer.uint32(26).string(message.project);
+    }
+    if (message.objective !== "") {
+      writer.uint32(34).string(message.objective);
+    }
+    for (const v of message.outOfScope) {
+      writer.uint32(42).string(v!);
+    }
+    for (const v of message.acceptanceCriteria) {
+      writer.uint32(50).string(v!);
+    }
+    for (const v of message.constraints) {
+      writer.uint32(58).string(v!);
+    }
+    if (message.integrationBranch !== "") {
+      writer.uint32(66).string(message.integrationBranch);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GoalRegistrationProposal {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGoalRegistrationProposal();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.revision = longToNumber(reader.int64());
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.serverId = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.project = reader.string();
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.objective = reader.string();
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.outOfScope.push(reader.string());
+            continue;
+          }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.acceptanceCriteria.push(reader.string());
+            continue;
+          }
+          case 7: {
+            if (tag !== 58) {
+              break;
+            }
+
+            message.constraints.push(reader.string());
+            continue;
+          }
+          case 8: {
+            if (tag !== 66) {
+              break;
+            }
+
+            message.integrationBranch = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GoalRegistrationProposal {
+    return {
+      revision: isSet(object.revision) ? globalThis.Number(object.revision) : 0,
+      serverId: isSet(object.serverId)
+        ? globalThis.String(object.serverId)
+        : isSet(object.server_id)
+        ? globalThis.String(object.server_id)
+        : "",
+      project: isSet(object.project) ? globalThis.String(object.project) : "",
+      objective: isSet(object.objective) ? globalThis.String(object.objective) : "",
+      outOfScope: globalThis.Array.isArray(object?.outOfScope)
+        ? object.outOfScope.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.out_of_scope)
+        ? object.out_of_scope.map((e: any) => globalThis.String(e))
+        : [],
+      acceptanceCriteria: globalThis.Array.isArray(object?.acceptanceCriteria)
+        ? object.acceptanceCriteria.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.acceptance_criteria)
+        ? object.acceptance_criteria.map((e: any) => globalThis.String(e))
+        : [],
+      constraints: globalThis.Array.isArray(object?.constraints)
+        ? object.constraints.map((e: any) => globalThis.String(e))
+        : [],
+      integrationBranch: isSet(object.integrationBranch)
+        ? globalThis.String(object.integrationBranch)
+        : isSet(object.integration_branch)
+        ? globalThis.String(object.integration_branch)
+        : "",
+    };
+  },
+
+  toJSON(message: GoalRegistrationProposal): unknown {
+    const obj: any = {};
+    if (message.revision !== 0) {
+      obj.revision = Math.round(message.revision);
+    }
+    if (message.serverId !== "") {
+      obj.serverId = message.serverId;
+    }
+    if (message.project !== "") {
+      obj.project = message.project;
+    }
+    if (message.objective !== "") {
+      obj.objective = message.objective;
+    }
+    if (message.outOfScope?.length) {
+      obj.outOfScope = message.outOfScope;
+    }
+    if (message.acceptanceCriteria?.length) {
+      obj.acceptanceCriteria = message.acceptanceCriteria;
+    }
+    if (message.constraints?.length) {
+      obj.constraints = message.constraints;
+    }
+    if (message.integrationBranch !== "") {
+      obj.integrationBranch = message.integrationBranch;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GoalRegistrationProposal>, I>>(base?: I): GoalRegistrationProposal {
+    return GoalRegistrationProposal.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GoalRegistrationProposal>, I>>(object: I): GoalRegistrationProposal {
+    const message = createBaseGoalRegistrationProposal();
+    message.revision = object.revision ?? 0;
+    message.serverId = object.serverId ?? "";
+    message.project = object.project ?? "";
+    message.objective = object.objective ?? "";
+    message.outOfScope = object.outOfScope?.map((e) => e) || [];
+    message.acceptanceCriteria = object.acceptanceCriteria?.map((e) => e) || [];
+    message.constraints = object.constraints?.map((e) => e) || [];
+    message.integrationBranch = object.integrationBranch ?? "";
+    return message;
+  },
+};
+
+function createBaseListGoalRegistrationProposalsResponse(): ListGoalRegistrationProposalsResponse {
+  return { proposals: [] };
+}
+
+export const ListGoalRegistrationProposalsResponse: MessageFns<ListGoalRegistrationProposalsResponse> = {
+  encode(message: ListGoalRegistrationProposalsResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.proposals) {
+      GoalRegistrationProposal.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ListGoalRegistrationProposalsResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseListGoalRegistrationProposalsResponse();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.proposals.push(GoalRegistrationProposal.decode(reader, reader.uint32()));
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ListGoalRegistrationProposalsResponse {
+    return {
+      proposals: globalThis.Array.isArray(object?.proposals)
+        ? object.proposals.map((e: any) => GoalRegistrationProposal.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: ListGoalRegistrationProposalsResponse): unknown {
+    const obj: any = {};
+    if (message.proposals?.length) {
+      obj.proposals = message.proposals.map((e) => GoalRegistrationProposal.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ListGoalRegistrationProposalsResponse>, I>>(
+    base?: I,
+  ): ListGoalRegistrationProposalsResponse {
+    return ListGoalRegistrationProposalsResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ListGoalRegistrationProposalsResponse>, I>>(
+    object: I,
+  ): ListGoalRegistrationProposalsResponse {
+    const message = createBaseListGoalRegistrationProposalsResponse();
+    message.proposals = object.proposals?.map((e) => GoalRegistrationProposal.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseApproveGoalRegistrationRequest(): ApproveGoalRegistrationRequest {
+  return { project: "", revision: 0 };
+}
+
+export const ApproveGoalRegistrationRequest: MessageFns<ApproveGoalRegistrationRequest> = {
+  encode(message: ApproveGoalRegistrationRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.project !== "") {
+      writer.uint32(10).string(message.project);
+    }
+    if (message.revision !== 0) {
+      writer.uint32(16).int64(message.revision);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApproveGoalRegistrationRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseApproveGoalRegistrationRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.project = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.revision = longToNumber(reader.int64());
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ApproveGoalRegistrationRequest {
+    return {
+      project: isSet(object.project) ? globalThis.String(object.project) : "",
+      revision: isSet(object.revision) ? globalThis.Number(object.revision) : 0,
+    };
+  },
+
+  toJSON(message: ApproveGoalRegistrationRequest): unknown {
+    const obj: any = {};
+    if (message.project !== "") {
+      obj.project = message.project;
+    }
+    if (message.revision !== 0) {
+      obj.revision = Math.round(message.revision);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApproveGoalRegistrationRequest>, I>>(base?: I): ApproveGoalRegistrationRequest {
+    return ApproveGoalRegistrationRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApproveGoalRegistrationRequest>, I>>(
+    object: I,
+  ): ApproveGoalRegistrationRequest {
+    const message = createBaseApproveGoalRegistrationRequest();
+    message.project = object.project ?? "";
+    message.revision = object.revision ?? 0;
+    return message;
+  },
+};
+
+function createBaseApproveGoalRegistrationResponse(): ApproveGoalRegistrationResponse {
+  return { revision: 0, goalId: "", objective: "" };
+}
+
+export const ApproveGoalRegistrationResponse: MessageFns<ApproveGoalRegistrationResponse> = {
+  encode(message: ApproveGoalRegistrationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.revision !== 0) {
+      writer.uint32(8).int64(message.revision);
+    }
+    if (message.goalId !== "") {
+      writer.uint32(18).string(message.goalId);
+    }
+    if (message.objective !== "") {
+      writer.uint32(26).string(message.objective);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ApproveGoalRegistrationResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseApproveGoalRegistrationResponse();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.revision = longToNumber(reader.int64());
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.goalId = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.objective = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ApproveGoalRegistrationResponse {
+    return {
+      revision: isSet(object.revision) ? globalThis.Number(object.revision) : 0,
+      goalId: isSet(object.goalId)
+        ? globalThis.String(object.goalId)
+        : isSet(object.goal_id)
+        ? globalThis.String(object.goal_id)
+        : "",
+      objective: isSet(object.objective) ? globalThis.String(object.objective) : "",
+    };
+  },
+
+  toJSON(message: ApproveGoalRegistrationResponse): unknown {
+    const obj: any = {};
+    if (message.revision !== 0) {
+      obj.revision = Math.round(message.revision);
+    }
+    if (message.goalId !== "") {
+      obj.goalId = message.goalId;
+    }
+    if (message.objective !== "") {
+      obj.objective = message.objective;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ApproveGoalRegistrationResponse>, I>>(base?: I): ApproveGoalRegistrationResponse {
+    return ApproveGoalRegistrationResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ApproveGoalRegistrationResponse>, I>>(
+    object: I,
+  ): ApproveGoalRegistrationResponse {
+    const message = createBaseApproveGoalRegistrationResponse();
+    message.revision = object.revision ?? 0;
+    message.goalId = object.goalId ?? "";
+    message.objective = object.objective ?? "";
+    return message;
+  },
+};
+
+function createBaseRejectGoalRegistrationRequest(): RejectGoalRegistrationRequest {
+  return { project: "", revision: 0 };
+}
+
+export const RejectGoalRegistrationRequest: MessageFns<RejectGoalRegistrationRequest> = {
+  encode(message: RejectGoalRegistrationRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.project !== "") {
+      writer.uint32(10).string(message.project);
+    }
+    if (message.revision !== 0) {
+      writer.uint32(16).int64(message.revision);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RejectGoalRegistrationRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseRejectGoalRegistrationRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.project = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.revision = longToNumber(reader.int64());
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): RejectGoalRegistrationRequest {
+    return {
+      project: isSet(object.project) ? globalThis.String(object.project) : "",
+      revision: isSet(object.revision) ? globalThis.Number(object.revision) : 0,
+    };
+  },
+
+  toJSON(message: RejectGoalRegistrationRequest): unknown {
+    const obj: any = {};
+    if (message.project !== "") {
+      obj.project = message.project;
+    }
+    if (message.revision !== 0) {
+      obj.revision = Math.round(message.revision);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RejectGoalRegistrationRequest>, I>>(base?: I): RejectGoalRegistrationRequest {
+    return RejectGoalRegistrationRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RejectGoalRegistrationRequest>, I>>(
+    object: I,
+  ): RejectGoalRegistrationRequest {
+    const message = createBaseRejectGoalRegistrationRequest();
+    message.project = object.project ?? "";
+    message.revision = object.revision ?? 0;
+    return message;
+  },
+};
+
+function createBaseRejectGoalRegistrationResponse(): RejectGoalRegistrationResponse {
+  return { revision: 0, notice: "" };
+}
+
+export const RejectGoalRegistrationResponse: MessageFns<RejectGoalRegistrationResponse> = {
+  encode(message: RejectGoalRegistrationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.revision !== 0) {
+      writer.uint32(8).int64(message.revision);
+    }
+    if (message.notice !== "") {
+      writer.uint32(18).string(message.notice);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RejectGoalRegistrationResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseRejectGoalRegistrationResponse();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.revision = longToNumber(reader.int64());
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.notice = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): RejectGoalRegistrationResponse {
+    return {
+      revision: isSet(object.revision) ? globalThis.Number(object.revision) : 0,
+      notice: isSet(object.notice) ? globalThis.String(object.notice) : "",
+    };
+  },
+
+  toJSON(message: RejectGoalRegistrationResponse): unknown {
+    const obj: any = {};
+    if (message.revision !== 0) {
+      obj.revision = Math.round(message.revision);
+    }
+    if (message.notice !== "") {
+      obj.notice = message.notice;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RejectGoalRegistrationResponse>, I>>(base?: I): RejectGoalRegistrationResponse {
+    return RejectGoalRegistrationResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RejectGoalRegistrationResponse>, I>>(
+    object: I,
+  ): RejectGoalRegistrationResponse {
+    const message = createBaseRejectGoalRegistrationResponse();
+    message.revision = object.revision ?? 0;
+    message.notice = object.notice ?? "";
+    return message;
+  },
+};
+
 /**
- * taktDash の読み取り系 API を提供する。
- * このサービスは状態を返すだけで、状態を書き換える操作は提供しない。
+ * taktDash の API を提供する。
+ * 状態を返す読み取り系と、問い合わせ・マージ・ゴール登録を操作する書き込み系を持ちます。
  */
 export type TaktDashServiceService = typeof TaktDashServiceService;
 export const TaktDashServiceService = {
@@ -4623,6 +5916,68 @@ export const TaktDashServiceService = {
     responseSerialize: (value: DashboardState): Buffer => Buffer.from(DashboardState.encode(value).finish()),
     responseDeserialize: (value: Buffer): DashboardState => DashboardState.decode(value),
   },
+  /** 問い合わせへ回答する。 */
+  answerInquiry: {
+    path: "/takt_dash.v1.TaktDashService/AnswerInquiry" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AnswerInquiryRequest): Buffer => Buffer.from(AnswerInquiryRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AnswerInquiryRequest => AnswerInquiryRequest.decode(value),
+    responseSerialize: (value: AnswerInquiryResponse): Buffer =>
+      Buffer.from(AnswerInquiryResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AnswerInquiryResponse => AnswerInquiryResponse.decode(value),
+  },
+  /** ゴールのプルリクエストのマージを依頼する。 */
+  approveMerge: {
+    path: "/takt_dash.v1.TaktDashService/ApproveMerge" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ApproveMergeRequest): Buffer => Buffer.from(ApproveMergeRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ApproveMergeRequest => ApproveMergeRequest.decode(value),
+    responseSerialize: (value: ApproveMergeResponse): Buffer =>
+      Buffer.from(ApproveMergeResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ApproveMergeResponse => ApproveMergeResponse.decode(value),
+  },
+  /** ゴール登録の承認待ちを返す。 */
+  listGoalRegistrationProposals: {
+    path: "/takt_dash.v1.TaktDashService/ListGoalRegistrationProposals" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ListGoalRegistrationProposalsRequest): Buffer =>
+      Buffer.from(ListGoalRegistrationProposalsRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ListGoalRegistrationProposalsRequest =>
+      ListGoalRegistrationProposalsRequest.decode(value),
+    responseSerialize: (value: ListGoalRegistrationProposalsResponse): Buffer =>
+      Buffer.from(ListGoalRegistrationProposalsResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ListGoalRegistrationProposalsResponse =>
+      ListGoalRegistrationProposalsResponse.decode(value),
+  },
+  /** ゴール登録を承認する。 */
+  approveGoalRegistration: {
+    path: "/takt_dash.v1.TaktDashService/ApproveGoalRegistration" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ApproveGoalRegistrationRequest): Buffer =>
+      Buffer.from(ApproveGoalRegistrationRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ApproveGoalRegistrationRequest => ApproveGoalRegistrationRequest.decode(value),
+    responseSerialize: (value: ApproveGoalRegistrationResponse): Buffer =>
+      Buffer.from(ApproveGoalRegistrationResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ApproveGoalRegistrationResponse =>
+      ApproveGoalRegistrationResponse.decode(value),
+  },
+  /** ゴール登録を却下する。 */
+  rejectGoalRegistration: {
+    path: "/takt_dash.v1.TaktDashService/RejectGoalRegistration" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: RejectGoalRegistrationRequest): Buffer =>
+      Buffer.from(RejectGoalRegistrationRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): RejectGoalRegistrationRequest => RejectGoalRegistrationRequest.decode(value),
+    responseSerialize: (value: RejectGoalRegistrationResponse): Buffer =>
+      Buffer.from(RejectGoalRegistrationResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): RejectGoalRegistrationResponse =>
+      RejectGoalRegistrationResponse.decode(value),
+  },
 } as const;
 
 export interface TaktDashServiceServer extends UntypedServiceImplementation {
@@ -4638,6 +5993,19 @@ export interface TaktDashServiceServer extends UntypedServiceImplementation {
   getRunDetail: handleUnaryCall<GetRunDetailRequest, GetRunDetailResponse>;
   /** 接続時に即時に全件を返し、その後は状態が変わるたびに送る。 */
   watchState: handleServerStreamingCall<WatchStateRequest, DashboardState>;
+  /** 問い合わせへ回答する。 */
+  answerInquiry: handleUnaryCall<AnswerInquiryRequest, AnswerInquiryResponse>;
+  /** ゴールのプルリクエストのマージを依頼する。 */
+  approveMerge: handleUnaryCall<ApproveMergeRequest, ApproveMergeResponse>;
+  /** ゴール登録の承認待ちを返す。 */
+  listGoalRegistrationProposals: handleUnaryCall<
+    ListGoalRegistrationProposalsRequest,
+    ListGoalRegistrationProposalsResponse
+  >;
+  /** ゴール登録を承認する。 */
+  approveGoalRegistration: handleUnaryCall<ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse>;
+  /** ゴール登録を却下する。 */
+  rejectGoalRegistration: handleUnaryCall<RejectGoalRegistrationRequest, RejectGoalRegistrationResponse>;
 }
 
 export interface TaktDashServiceClient extends Client {
@@ -4728,6 +6096,86 @@ export interface TaktDashServiceClient extends Client {
     metadata?: Metadata,
     options?: Partial<CallOptions>,
   ): ClientReadableStream<DashboardState>;
+  /** 問い合わせへ回答する。 */
+  answerInquiry(
+    request: AnswerInquiryRequest,
+    callback: (error: ServiceError | null, response: AnswerInquiryResponse) => void,
+  ): ClientUnaryCall;
+  answerInquiry(
+    request: AnswerInquiryRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AnswerInquiryResponse) => void,
+  ): ClientUnaryCall;
+  answerInquiry(
+    request: AnswerInquiryRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AnswerInquiryResponse) => void,
+  ): ClientUnaryCall;
+  /** ゴールのプルリクエストのマージを依頼する。 */
+  approveMerge(
+    request: ApproveMergeRequest,
+    callback: (error: ServiceError | null, response: ApproveMergeResponse) => void,
+  ): ClientUnaryCall;
+  approveMerge(
+    request: ApproveMergeRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ApproveMergeResponse) => void,
+  ): ClientUnaryCall;
+  approveMerge(
+    request: ApproveMergeRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ApproveMergeResponse) => void,
+  ): ClientUnaryCall;
+  /** ゴール登録の承認待ちを返す。 */
+  listGoalRegistrationProposals(
+    request: ListGoalRegistrationProposalsRequest,
+    callback: (error: ServiceError | null, response: ListGoalRegistrationProposalsResponse) => void,
+  ): ClientUnaryCall;
+  listGoalRegistrationProposals(
+    request: ListGoalRegistrationProposalsRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ListGoalRegistrationProposalsResponse) => void,
+  ): ClientUnaryCall;
+  listGoalRegistrationProposals(
+    request: ListGoalRegistrationProposalsRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ListGoalRegistrationProposalsResponse) => void,
+  ): ClientUnaryCall;
+  /** ゴール登録を承認する。 */
+  approveGoalRegistration(
+    request: ApproveGoalRegistrationRequest,
+    callback: (error: ServiceError | null, response: ApproveGoalRegistrationResponse) => void,
+  ): ClientUnaryCall;
+  approveGoalRegistration(
+    request: ApproveGoalRegistrationRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ApproveGoalRegistrationResponse) => void,
+  ): ClientUnaryCall;
+  approveGoalRegistration(
+    request: ApproveGoalRegistrationRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ApproveGoalRegistrationResponse) => void,
+  ): ClientUnaryCall;
+  /** ゴール登録を却下する。 */
+  rejectGoalRegistration(
+    request: RejectGoalRegistrationRequest,
+    callback: (error: ServiceError | null, response: RejectGoalRegistrationResponse) => void,
+  ): ClientUnaryCall;
+  rejectGoalRegistration(
+    request: RejectGoalRegistrationRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: RejectGoalRegistrationResponse) => void,
+  ): ClientUnaryCall;
+  rejectGoalRegistration(
+    request: RejectGoalRegistrationRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: RejectGoalRegistrationResponse) => void,
+  ): ClientUnaryCall;
 }
 
 export const TaktDashServiceClient = makeGenericClientConstructor(

@@ -20,10 +20,15 @@
 //                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
 //                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
+//     "registrationProposals": [ {"revision","repositoryDirectory","summary":{...}} ],
+//     "mergeTaskName": "仕上げタスク",       // takt_merge_goal_pr の応答に使う（省略時は既定値）。
+//     "approvedGoalId": "g-approved",      // takt_approve_goal_registration の応答に使う。
+//     "approvedObjective": "承認した目的",
+//     "rejectNotice": "登録を取り下げました。",
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
 //   }
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isAbsolute } from "node:path";
 
@@ -35,6 +40,7 @@ const option = (name) => {
 
 const behavior = option("--behavior") ?? "ok";
 const statePath = option("--state");
+const callsPath = option("--calls");
 // 実 takt-mcp と同じページサイズ（limit 既定 50）。
 const PAGE_SIZE = 50;
 
@@ -73,6 +79,11 @@ const TOOL_ARGUMENTS = {
   takt_list_standalone_inquiries: { required: ["cwd"], optional: ["offset", "limit"] },
   takt_get_run: { required: ["cwd", "runSlug"], optional: ["offset", "limit", "view", "stepIndex", "instructionId", "report", "maxBytes"] },
   takt_get_goal: { required: ["cwd", "goalId"], optional: ["path", "offset", "limit"] },
+  takt_answer_goal_question: { required: ["cwd", "goalId", "questionId", "answer"], optional: [] },
+  takt_merge_goal_pr: { required: ["cwd", "goalId", "prNumber", "until"], optional: [] },
+  takt_list_goal_registration_proposals: { required: ["cwd"], optional: [] },
+  takt_approve_goal_registration: { required: ["cwd", "revision"], optional: [] },
+  takt_reject_goal_registration: { required: ["cwd", "revision"], optional: [] },
 };
 
 // 引数の検証。実契約と同じく cwd 必須・絶対パス、未知キーは拒否する。
@@ -148,6 +159,9 @@ const runResponse = (state, args) => {
 
 const handleToolCall = (name, args) => {
   const state = loadState();
+  if (callsPath !== undefined) {
+    appendFileSync(callsPath, `${JSON.stringify({ name, arguments: args })}\n`);
+  }
   const isError = new Set(state.isError ?? []);
   // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug>" の限定キーで対象を絞れる。
   const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? ""}`;
@@ -170,6 +184,24 @@ const handleToolCall = (name, args) => {
         return asText(paged((state.notifications ?? {})[args.goalId] ?? [], "items", args.offset));
       }
       return asText({});
+    case "takt_answer_goal_question":
+      return asText({ goalId: args.goalId, questionId: args.questionId, status: "answered" });
+    case "takt_merge_goal_pr":
+      return asText({
+        goalId: args.goalId,
+        prNumber: args.prNumber,
+        until: args.until,
+        taskName: state.mergeTaskName ?? "仕上げタスク",
+      });
+    case "takt_list_goal_registration_proposals":
+      return asText({ proposals: state.registrationProposals ?? [] });
+    case "takt_approve_goal_registration":
+      return asText({
+        revision: args.revision,
+        goal: { id: state.approvedGoalId ?? "g-approved", objective: state.approvedObjective ?? "承認した目的" },
+      });
+    case "takt_reject_goal_registration":
+      return asText({ revision: args.revision, notice: state.rejectNotice ?? "登録を取り下げました。" });
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };
   }

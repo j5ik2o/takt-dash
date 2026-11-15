@@ -4,8 +4,8 @@ package takt_dash.v1;
 
 import "google/protobuf/timestamp.proto";
 
-// taktDash の読み取り系 API を提供する。
-// このサービスは状態を返すだけで、状態を書き換える操作は提供しない。
+// taktDash の API を提供する。
+// 状態を返す読み取り系と、問い合わせ・マージ・ゴール登録を操作する書き込み系を持ちます。
 service TaktDashService {
   // すべての集約対象の今の状態を返す。
   rpc GetOverview(GetOverviewRequest) returns (DashboardState);
@@ -24,6 +24,21 @@ service TaktDashService {
 
   // 接続時に即時に全件を返し、その後は状態が変わるたびに送る。
   rpc WatchState(WatchStateRequest) returns (stream DashboardState);
+
+  // 問い合わせへ回答する。
+  rpc AnswerInquiry(AnswerInquiryRequest) returns (AnswerInquiryResponse);
+
+  // ゴールのプルリクエストのマージを依頼する。
+  rpc ApproveMerge(ApproveMergeRequest) returns (ApproveMergeResponse);
+
+  // ゴール登録の承認待ちを返す。
+  rpc ListGoalRegistrationProposals(ListGoalRegistrationProposalsRequest) returns (ListGoalRegistrationProposalsResponse);
+
+  // ゴール登録を承認する。
+  rpc ApproveGoalRegistration(ApproveGoalRegistrationRequest) returns (ApproveGoalRegistrationResponse);
+
+  // ゴール登録を却下する。
+  rpc RejectGoalRegistration(RejectGoalRegistrationRequest) returns (RejectGoalRegistrationResponse);
 }
 
 // ゴールの状態を表す。
@@ -88,6 +103,13 @@ enum PendingDecisionType {
   PENDING_DECISION_TYPE_UNSPECIFIED = 0;
   PENDING_DECISION_TYPE_INQUIRY = 1;
   PENDING_DECISION_TYPE_AWAITING_MERGE = 2;
+}
+
+// 問い合わせへの回答の種類を表す。
+enum AnswerReport {
+  ANSWER_REPORT_UNSPECIFIED = 0;
+  ANSWER_REPORT_COMPLETED = 1;  // 完了の報告
+  ANSWER_REPORT_UNABLE = 2;     // 対応できない報告
 }
 
 // 集約対象のサーバーを表す。
@@ -183,6 +205,7 @@ message PendingDecision {
   repeated string options = 8;            // 選択肢
   PullRequest pull_request = 9;           // マージ待ちのプルリクエスト
   bool stale = 10;                        // 滞留の判定済みフラグ
+  optional string inquiry_id = 11;         // 問い合わせを一意に指す ID（マージ待ちは省略する）
 }
 
 // 異常判定の基準を表す。
@@ -317,3 +340,76 @@ message GetRunDetailResponse {
 
 // 状態ストリーミングの接続を要求する。
 message WatchStateRequest {}
+
+// 問い合わせへの回答を要求する。
+message AnswerInquiryRequest {
+  string goal_id = 1;       // ゴール ID
+  string inquiry_id = 2;    // 問い合わせ ID
+  string text = 3;          // 回答の本文
+  AnswerReport report = 4;  // 完了・対応不能の報告（本文だけで答える場合は省略する）
+}
+
+// 問い合わせへの回答への応答を表す。
+message AnswerInquiryResponse {
+  string goal_id = 1;     // ゴール ID
+  string inquiry_id = 2;  // 問い合わせ ID
+}
+
+// プルリクエストのマージ承認を要求する。
+message ApproveMergeRequest {
+  string goal_id = 1;  // ゴール ID
+}
+
+// プルリクエストのマージ承認への応答を表す。
+message ApproveMergeResponse {
+  string goal_id = 1;    // ゴール ID
+  int64 pr_number = 2;   // プルリクエストの番号
+  string task_name = 3;  // 実行した仕上げタスクの名前
+}
+
+// ゴール登録の承認待ちの取得を要求する。
+message ListGoalRegistrationProposalsRequest {
+  string project = 1;  // 対象プロジェクト（省略すると設定の全プロジェクト）
+}
+
+// ゴール登録の承認待ちの項目を表す。
+message GoalRegistrationProposal {
+  int64 revision = 1;                 // 提案のリビジョン
+  string server_id = 2;               // サーバー
+  string project = 3;                 // プロジェクト
+  string objective = 4;               // 目的
+  repeated string out_of_scope = 5;   // 対象外
+  repeated string acceptance_criteria = 6;  // 受け入れ条件
+  repeated string constraints = 7;    // 制約
+  string integration_branch = 8;      // 統合ブランチ
+}
+
+// ゴール登録の承認待ちの取得への応答を表す。
+message ListGoalRegistrationProposalsResponse {
+  repeated GoalRegistrationProposal proposals = 1;  // 承認待ちの一覧
+}
+
+// ゴール登録の承認を要求する。
+message ApproveGoalRegistrationRequest {
+  string project = 1;  // プロジェクト
+  int64 revision = 2;  // 提案のリビジョン
+}
+
+// ゴール登録の承認への応答を表す。
+message ApproveGoalRegistrationResponse {
+  int64 revision = 1;   // 提案のリビジョン
+  string goal_id = 2;   // 承認したゴールの ID
+  string objective = 3; // 承認したゴールの目的
+}
+
+// ゴール登録の却下を要求する。
+message RejectGoalRegistrationRequest {
+  string project = 1;  // プロジェクト
+  int64 revision = 2;  // 提案のリビジョン
+}
+
+// ゴール登録の却下への応答を表す。
+message RejectGoalRegistrationResponse {
+  int64 revision = 1;  // 提案のリビジョン
+  string notice = 2;   // 却下の通知
+}
