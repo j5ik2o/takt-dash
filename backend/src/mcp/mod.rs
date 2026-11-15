@@ -5,8 +5,10 @@
 //! 道具が isError を返した場合は道具エラーとして区別します。
 
 mod client;
+mod metrics;
 mod protocol;
 pub mod tools;
 
 pub use client::{CallError, McpClient, McpClientConfig, ToolCallError, TransportError};
+pub use metrics::{ToolCallMetrics, ToolCallOutcome, ToolCallStat};
 pub use tools::{client_config, ToolError, ToolSet};

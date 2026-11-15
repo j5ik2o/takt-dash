@@ -1052,19 +1052,26 @@ mod tests {
   fn missing_config_file_falls_through_to_default() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
     let missing = dir.path().join("does-not-exist.json");
+    // 既定の接続先へ落ちること自体は `default_addr_used_when_nothing_configured` が
+    // 決定的に固定する。このテストは設定ファイルの欠落が読み込みの失敗にならず接続段階まで
+    // 進むことを観測するため、待ち受けの有無が結果を左右しない未接続のポートを明示する。
+    let closed = reserve_closed_addr();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
     let code = run_with(
-      &["--config".to_owned(), missing.display().to_string()],
+      &["--config".to_owned(), missing.display().to_string(), "--addr".to_owned(), closed.to_string()],
       Err(std::env::VarError::NotPresent),
       &mut stdout,
       &mut stderr,
     );
 
     let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-    assert_eq!(code, EXIT_FAILURE);
-    assert!(stderr.contains(DEFAULT_BACKEND_ADDR), "設定ファイルが無いときは既定値へ進む必要があります: {stderr}");
+    assert_eq!(code, EXIT_FAILURE, "設定ファイルの欠落は読み込みでは止まらず、接続の失敗として終わる必要があります");
+    assert!(
+      stderr.contains(&closed.to_string()),
+      "設定ファイルが無くても明示した接続先まで進む必要があります: {stderr}"
+    );
   }
 
   // ----------------------------------------------------------------------------

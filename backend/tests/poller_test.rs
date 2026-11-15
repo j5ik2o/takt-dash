@@ -5,8 +5,9 @@ mod common;
 
 use std::{
   collections::BTreeMap,
+  io::Write,
   path::{Path, PathBuf},
-  sync::Arc,
+  sync::{Arc, Mutex},
 };
 
 use common::*;
@@ -69,6 +70,60 @@ impl Harness {
   fn rewrite_state(&self, state: Value) {
     write_json(&self.state_path, &state);
   }
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+  fn contents(&self) -> String {
+    let bytes = self.0.lock().expect("ログのバッファを取得できます").clone();
+    String::from_utf8(bytes).expect("ログは UTF-8 です")
+  }
+}
+
+impl Write for CapturedLogs {
+  fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+    self.0.lock().expect("ログのバッファを取得できます").extend_from_slice(buffer);
+    Ok(buffer.len())
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
+  }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+  type Writer = CapturedLogs;
+
+  fn make_writer(&'a self) -> Self::Writer {
+    self.clone()
+  }
+}
+
+fn capture_logs() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+  let logs = CapturedLogs::default();
+  let subscriber =
+    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).with_ansi(false).with_writer(logs.clone()).finish();
+  let guard = tracing::subscriber::set_default(subscriber);
+  (logs, guard)
+}
+
+fn single_cycle_log_line(logs: &CapturedLogs) -> String {
+  let output = logs.contents();
+  let lines: Vec<&str> = output.lines().filter(|line| line.contains("cycle_ms=")).collect();
+  assert_eq!(lines.len(), 1, "1周期につき集計ログを1本だけ出します: {output}");
+  lines[0].to_owned()
+}
+
+/// 周期ログの `tools=` から、指定した道具1件分のエントリを取り出す。
+fn tool_entry(line: &str, tool: &str) -> String {
+  let prefix = format!("{tool}(");
+  let start = line.find(&prefix).unwrap_or_else(|| panic!("道具 {tool} のエントリがありません: {line}"));
+  let entry = &line[start..];
+  // 複数あるときは `), ` の直前まで、最後の1件は行末までがエントリです。
+  let end = entry.find("), ").map_or(entry.len(), |index| index + 1);
+  entry[..end].to_owned()
 }
 
 #[tokio::test]
@@ -463,4 +518,57 @@ async fn change_notification_is_sent_when_a_project_becomes_unreachable() {
 
   assert!(changes.try_recv().is_ok(), "接続断への変化も通知します");
   poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn cycle_log_reports_duration_projects_and_per_tool_call_counts() {
+  let harness = Harness::new(state_with_goal("g1"));
+  let (logs, _guard) = capture_logs();
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1サイクルを実行できます");
+  poller.shutdown().await;
+
+  let line = single_cycle_log_line(&logs);
+  assert!(line.contains("cycle_ms="), "周期の所要時間を出します: {line}");
+  assert!(line.contains("projects=1"), "設定上のプロジェクト数を出します: {line}");
+  assert!(line.contains("tool_calls=5"), "道具呼び出しの総数を出します: {line}");
+  assert!(line.contains("tool_timeouts=0"), "タイムアウト件数を出します: {line}");
+  assert!(line.contains("takt_list_goals(calls=1,"), "道具名ごとの回数を出します: {line}");
+  assert!(line.contains("takt_get_goal(calls=1,"), "道具名ごとの回数を出します: {line}");
+
+  let goals = tool_entry(&line, "takt_list_goals");
+  assert!(goals.contains("calls=1,"), "道具エントリに回数を出します: {goals}");
+  assert!(goals.contains("failures=0,"), "道具エントリに失敗件数を出します: {goals}");
+  assert!(goals.contains("timeouts=0,"), "道具エントリにタイムアウト件数を出します: {goals}");
+  assert!(goals.contains("total_ms="), "道具エントリに合計時間を出します: {goals}");
+  assert!(goals.contains("max_ms="), "道具エントリに最大時間を出します: {goals}");
+  assert!(goals.contains("p95_ms="), "道具エントリに p95 を出します: {goals}");
+}
+
+#[tokio::test]
+async fn cycle_log_records_failed_tool_calls_and_separates_projects_from_projects_read() {
+  let harness = Harness::new(json!({ "goals": [], "isError": ["takt_list_goals"] }));
+  let (logs, _guard) = capture_logs();
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+  poller.shutdown().await;
+
+  let line = single_cycle_log_line(&logs);
+  assert!(line.contains("projects=1"), "設定上のプロジェクト数を出します: {line}");
+  assert!(line.contains("projects_read=0"), "読み取り成功数と区別します: {line}");
+  assert!(line.contains("projects_failed=1"), "失敗したプロジェクト数を出します: {line}");
+  assert!(line.contains("tool_calls=1"), "失敗した呼び出しも1回として記録します: {line}");
+  assert!(line.contains("takt_list_goals(calls=1,"), "失敗した呼び出しも道具名ごとに記録します: {line}");
+  assert!(line.contains("failures=1"), "失敗した呼び出しを失敗として数えます: {line}");
+
+  assert!(line.contains("tool_failures=1"), "周期全体の失敗件数を出します: {line}");
+  let goals = tool_entry(&line, "takt_list_goals");
+  assert!(goals.contains("calls=1,"), "道具エントリに回数を出します: {goals}");
+  assert!(goals.contains("failures=1,"), "道具別の失敗件数を出します: {goals}");
+  assert!(goals.contains("timeouts=0,"), "道具エントリにタイムアウト件数を出します: {goals}");
+  assert!(goals.contains("total_ms="), "道具エントリに合計時間を出します: {goals}");
+  assert!(goals.contains("max_ms="), "道具エントリに最大時間を出します: {goals}");
+  assert!(goals.contains("p95_ms="), "道具エントリに p95 を出します: {goals}");
 }

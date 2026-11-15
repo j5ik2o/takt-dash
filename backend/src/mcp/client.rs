@@ -107,7 +107,10 @@ impl McpClient {
     id
   }
 
-  async fn ensure_started(&mut self) -> Result<(), TransportError> {
+  /// 子プロセスが未起動なら起動して initialize まで済ませる。
+  ///
+  /// 道具呼び出しの計時から起動・初期化を除くため、呼び出し側が計時前に準備だけを進められます。
+  pub(crate) async fn ensure_started(&mut self) -> Result<(), TransportError> {
     if self.process.is_none() {
       let process = self.spawn().await?;
       self.process = Some(process);

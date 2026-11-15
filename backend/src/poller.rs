@@ -5,7 +5,12 @@
 //! 偽とし、他のプロジェクトを止めません。 読み取りのたびに前回の状態との差分から出来事を検出し、
 //! SQLite へ記録します。
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+  collections::BTreeMap,
+  path::PathBuf,
+  sync::Arc,
+  time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::broadcast;
@@ -14,7 +19,7 @@ use crate::{
   activity::ActivityStore,
   config::{load_config, Config, Project, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
-  mcp::{client_config, McpClient, ToolError, ToolSet},
+  mcp::{client_config, McpClient, ToolCallMetrics, ToolError, ToolSet},
   model::ProjectSnapshot,
   store::StateStore,
 };
@@ -67,6 +72,7 @@ impl Poller {
   /// 設定ファイルを再読み込みし、プロジェクト一覧の変化（追加・削除）を状態ストアと clients へ
   /// 追随させます。読み取り間隔もこのサイクルで解決し、[`CycleReport::interval`] で返します。
   pub async fn read_cycle_once(&mut self) -> Result<CycleReport, crate::config::ConfigError> {
+    let started = Instant::now();
     let config = load_config(&self.config_path)?;
     let before = StoreSignature::capture(&self.store);
     self.store.set_thresholds(config.thresholds);
@@ -78,11 +84,12 @@ impl Poller {
       events_recorded: 0,
       interval:        Duration::from_secs(config.interval_seconds),
     };
+    let mut metrics = ToolCallMetrics::default();
     for project in &config.projects {
       let read_at = Utc::now();
       let prev = self.previous.get(&project.name).cloned();
       let prev_connected = self.previous_connected.get(&project.name).copied().unwrap_or(false);
-      match self.read_one(project, prev.as_ref()).await {
+      match self.read_one(project, prev.as_ref(), &mut metrics).await {
         | Ok(snapshot) => {
           let events = detect(&project.server, &project.name, prev.as_ref(), prev_connected, true, &snapshot, read_at);
           self.store.record_success(&project.name, snapshot.clone(), read_at);
@@ -108,6 +115,18 @@ impl Poller {
     if StoreSignature::capture(&self.store) != before {
       let _ = self.changes.send(());
     }
+    tracing::info!(
+      cycle_ms = started.elapsed().as_millis(),
+      projects = config.projects.len(),
+      projects_read = report.projects_read,
+      projects_failed = report.projects_failed,
+      events_recorded = report.events_recorded,
+      tool_calls = metrics.total_calls(),
+      tool_failures = metrics.total_failures(),
+      tool_timeouts = metrics.total_timeouts(),
+      tools = %metrics,
+      "定期読み取りの1サイクルを終えました。"
+    );
     Ok(report)
   }
 
@@ -147,11 +166,15 @@ impl Poller {
     &mut self,
     project: &Project,
     prev: Option<&ProjectSnapshot>,
+    metrics: &mut ToolCallMetrics,
   ) -> Result<ProjectSnapshot, ToolError> {
     let Some(client) = self.clients.get_mut(&project.name) else {
       return Err(ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name)));
     };
-    ToolSet::new(client, project.cwd.clone()).read_snapshot(prev).await
+    let mut tools = ToolSet::new(client, project.cwd.clone());
+    let snapshot = tools.read_snapshot(prev).await;
+    metrics.merge(tools.take_metrics());
+    snapshot
   }
 }
 
@@ -184,15 +207,7 @@ where
   while !stop() {
     let started = Utc::now();
     let interval = match poller.read_cycle_once().await {
-      | Ok(report) => {
-        tracing::debug!(
-          projects_read = report.projects_read,
-          projects_failed = report.projects_failed,
-          events_recorded = report.events_recorded,
-          "定期読み取りの1サイクルを終えました。"
-        );
-        report.interval
-      },
+      | Ok(report) => report.interval,
       | Err(error) => {
         tracing::warn!(error = %error, "定期読み取りの1サイクルで設定を読み込めませんでした。");
         Duration::from_secs(DEFAULT_INTERVAL_SECONDS)

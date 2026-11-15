@@ -4,12 +4,19 @@
 //! 追従して全件を集めます。道具が isError を返した場合は [`ToolError::Tool`] として扱い、
 //! 輸送エラーとは区別します。
 
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{
+  collections::BTreeMap,
+  path::PathBuf,
+  time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use super::client::{CallError, McpClient, McpClientConfig};
+use super::{
+  client::{CallError, McpClient, McpClientConfig, TransportError},
+  metrics::{ToolCallMetrics, ToolCallOutcome},
+};
 use crate::{
   config::McpServer,
   model::{
@@ -60,8 +67,9 @@ impl From<CallError> for ToolError {
 /// takt-mcp の読み取り道具は入力引数に絶対パスの `cwd` を必須とするため、この道具のまとまりは
 /// 対象プロジェクトの `cwd` を保持し、すべての tools/call の引数へ渡します。
 pub struct ToolSet<'a> {
-  client: &'a mut McpClient,
-  cwd:    PathBuf,
+  client:  &'a mut McpClient,
+  cwd:     PathBuf,
+  metrics: ToolCallMetrics,
 }
 
 /// ページ形式の一覧を全件集めるための上限。無限追従を避けます。
@@ -69,7 +77,12 @@ const MAX_PAGES: usize = 100;
 
 impl<'a> ToolSet<'a> {
   pub fn new(client: &'a mut McpClient, cwd: PathBuf) -> Self {
-    ToolSet { client, cwd }
+    ToolSet { client, cwd, metrics: ToolCallMetrics::default() }
+  }
+
+  /// この道具のまとまりが記録した呼び出しの集計を取り出す。
+  pub(crate) fn take_metrics(&mut self) -> ToolCallMetrics {
+    std::mem::take(&mut self.metrics)
   }
 
   /// `cwd` を含む tools/call の引数を組み立てる。
@@ -108,7 +121,12 @@ impl<'a> ToolSet<'a> {
 
   async fn call_json(&mut self, name: &str, extra: Value) -> Result<Value, ToolError> {
     let arguments = self.arguments(extra);
-    let text = self.client.call_tool(name, arguments).await?;
+    // 子プロセスの起動と initialize は道具呼び出しではないため、計時を始める前に済ませます。
+    self.client.ensure_started().await?;
+    let started = Instant::now();
+    let result = self.client.call_tool(name, arguments).await;
+    self.metrics.record(name, started.elapsed(), call_outcome(&result));
+    let text = result?;
     serde_json::from_str(&text).map_err(|error| ToolError::Parse(format!("{name}: {error}")))
   }
 
@@ -330,6 +348,17 @@ impl<'a> ToolSet<'a> {
       }
     }
     Err(ToolError::Parse("takt_get_goal の notices 追従が上限に達しました".to_owned()))
+  }
+}
+
+/// 道具呼び出しの結果を集計用の結果へ分類する。応答の解析エラーは道具呼び出し自体の結果では
+/// ないため、ここでは扱いません。
+fn call_outcome(result: &Result<String, CallError>) -> ToolCallOutcome {
+  match result {
+    | Ok(_) => ToolCallOutcome::Succeeded,
+    | Err(CallError::Tool(_)) => ToolCallOutcome::Failed,
+    | Err(CallError::Transport(TransportError::Timeout(_))) => ToolCallOutcome::TimedOut,
+    | Err(CallError::Transport(_)) => ToolCallOutcome::Failed,
   }
 }
 
@@ -733,4 +762,139 @@ fn step_log_entries(value: &Value) -> Vec<StepLogEntry> {
         .collect()
     })
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+  //! 道具呼び出しの計時境界と、結果分類を固定する。
+  //!
+  //! 計時境界は mock MCP サーバの起動と initialize を遅らせ、読み取り全体の経過時間と
+  //! 道具別の所要時間を同時に観測して確かめます。
+
+  use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+  };
+
+  use super::{call_outcome, ToolError, ToolSet};
+  use crate::mcp::{
+    client::{CallError, McpClient, McpClientConfig, ToolCallError, TransportError},
+    metrics::{ToolCallMetrics, ToolCallOutcome},
+  };
+
+  fn mock_script() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("mock_mcp_server.mjs")
+  }
+
+  fn write_state(directory: &Path) -> PathBuf {
+    let path = directory.join("state.json");
+    std::fs::write(&path, "{}").expect("状態ファイルを書けます");
+    path
+  }
+
+  fn config(directory: &Path, command: &str, args: Vec<String>, timeout_secs: u64) -> McpClientConfig {
+    McpClientConfig {
+      command: command.to_owned(),
+      args,
+      env: Default::default(),
+      cwd: directory.to_path_buf(),
+      request_timeout: Duration::from_secs(timeout_secs),
+    }
+  }
+
+  fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+  }
+
+  /// mock サーバの起動と initialize を `delay` 秒遅らせる設定を作る。
+  fn delayed_config(directory: &Path, delay: &str) -> McpClientConfig {
+    let state = write_state(directory);
+    let script = mock_script();
+    let command = format!(
+      "sleep {delay}; exec node {} --state {}",
+      shell_quote(&script.display().to_string()),
+      shell_quote(&state.display().to_string())
+    );
+    config(directory, "sh", vec!["-c".to_owned(), command], 5)
+  }
+
+  #[tokio::test]
+  async fn initial_call_duration_excludes_process_start_and_initialize() {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let mut client = McpClient::new(delayed_config(directory.path(), "1.5"));
+    let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
+
+    let started = Instant::now();
+    tools.read_snapshot(None).await.expect("起動の遅延後も読み取れます");
+    let elapsed = started.elapsed();
+    let metrics = tools.take_metrics();
+    drop(tools);
+
+    let goals = metrics.stats("takt_list_goals").expect("takt_list_goals の集計があります");
+    assert_eq!(goals.calls, 1);
+    assert!(elapsed >= Duration::from_millis(1500), "起動と initialize の遅延を含む経過時間です: {elapsed:?}");
+    assert!(goals.max < Duration::from_millis(1000), "道具呼び出しの計時に起動と initialize を含めません: {goals:?}");
+    client.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn start_failure_is_not_recorded_as_a_tool_call() {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let config = config(directory.path(), "this-command-does-not-exist", Vec::new(), 1);
+    let mut client = McpClient::new(config);
+    let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
+
+    let error = tools.read_snapshot(None).await.expect_err("起動できない client は読み取れません");
+    let metrics = tools.take_metrics();
+    drop(tools);
+
+    assert!(
+      matches!(error, ToolError::Transport(TransportError::Spawn(_) | TransportError::Io(_))),
+      "起動失敗は輸送エラーです: {error}"
+    );
+    assert_eq!(metrics.total_calls(), 0, "起動失敗を道具呼び出しとして記録しません");
+    assert_eq!(metrics.total_failures(), 0);
+  }
+
+  #[tokio::test]
+  async fn start_timeout_is_not_recorded_as_a_tool_call() {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let config = config(directory.path(), "sh", vec!["-c".to_owned(), "exec sleep 5".to_owned()], 1);
+    let mut client = McpClient::new(config);
+    let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
+
+    let error = tools.read_snapshot(None).await.expect_err("initialize に応答がなければ読み取れません");
+    let metrics = tools.take_metrics();
+    drop(tools);
+
+    assert!(
+      matches!(error, ToolError::Transport(TransportError::Timeout(_))),
+      "起動のタイムアウトは輸送エラーです: {error}"
+    );
+    assert_eq!(metrics.total_calls(), 0, "起動のタイムアウトを道具呼び出しとして記録しません");
+    assert_eq!(metrics.total_timeouts(), 0, "起動のタイムアウトを道具のタイムアウトとして記録しません");
+  }
+
+  #[test]
+  fn classifies_tool_call_results_into_success_failure_and_timeout() {
+    assert_eq!(call_outcome(&Ok("{}".to_owned())), ToolCallOutcome::Succeeded);
+    assert_eq!(
+      call_outcome(&Err(CallError::Tool(ToolCallError {
+        tool:    "takt_list_goals".to_owned(),
+        message: "失敗しました".to_owned(),
+      }))),
+      ToolCallOutcome::Failed
+    );
+    assert_eq!(call_outcome(&Err(CallError::Transport(TransportError::Timeout(15)))), ToolCallOutcome::TimedOut);
+    assert_eq!(
+      call_outcome(&Err(CallError::Transport(TransportError::Io("切断".to_owned())))),
+      ToolCallOutcome::Failed
+    );
+
+    let mut metrics = ToolCallMetrics::default();
+    let timeout = Err(CallError::Transport(TransportError::Timeout(15)));
+    metrics.record("takt_list_goals", Duration::from_millis(4), call_outcome(&timeout));
+    assert_eq!(metrics.total_timeouts(), 1);
+    assert_eq!(metrics.total_failures(), 0, "タイムアウトを失敗に混ぜません");
+  }
 }
