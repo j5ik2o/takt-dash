@@ -34,11 +34,23 @@ const kindLabel = (kind: ActivityKind): string => {
   }
 };
 
-const isAttention = (kind: ActivityKind): boolean =>
-  kind === ACTIVITY_KIND.INQUIRY ||
-  kind === ACTIVITY_KIND.AWAITING_MERGE ||
-  kind === ACTIVITY_KIND.BLOCKED ||
-  kind === ACTIVITY_KIND.CONNECTION_LOST;
+// 種類ごとの状態色。実行中・完了・復帰は live、人の判断や異常は warn、
+// 登録・一時停止は idle にする。
+const kindState = (kind: ActivityKind): "live" | "warn" | "idle" => {
+  switch (kind) {
+    case ACTIVITY_KIND.RUN_STARTED:
+    case ACTIVITY_KIND.TASK_COMPLETED:
+    case ACTIVITY_KIND.CONNECTION_RESTORED:
+      return "live";
+    case ACTIVITY_KIND.INQUIRY:
+    case ACTIVITY_KIND.AWAITING_MERGE:
+    case ACTIVITY_KIND.BLOCKED:
+    case ACTIVITY_KIND.CONNECTION_LOST:
+      return "warn";
+    default:
+      return "idle";
+  }
+};
 
 const eventTime = (event: ActivityEvent): number => (event.occurredAt ? event.occurredAt.getTime() : 0);
 
@@ -74,14 +86,16 @@ export function ActivityContent({ response, now }: ActivityContentProps): ReactE
             {groups.map((group, index) => {
               const newest = group.newest;
               const single = group.count === 1;
-              const attention = group.events.some((event) => isAttention(event.kind));
+              const rowState = kindState(newest.kind);
+              const attention = rowState === "warn";
               const clockOf = (event: ActivityEvent): string =>
                 event.occurredAt ? formatClock(event.occurredAt) : "—";
               const timeText = single ? clockOf(newest) : `${clockOf(group.oldest)} 〜 ${clockOf(newest)}`;
               return (
                 <li className={`ev ${attention ? "warn" : ""}`} key={`${newest.serverId}-${index}`}>
                   <time>{timeText}</time>
-                  <span className="kind">
+                  <span className={attention ? "kl warn" : "kl"}>
+                    <span className={`dot ${rowState}`} aria-hidden="true" />
                     {single ? kindLabel(newest.kind) : `${kindLabel(newest.kind)}（${group.count}件）`}
                   </span>
                   <span className="msg">

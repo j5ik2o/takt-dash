@@ -6,6 +6,7 @@ import { serverHref } from "../state/anchors";
 type SidebarProps = {
   servers: Server[];
   pendingCount: number;
+  currentPath?: string;
 };
 
 const PAGES = [
@@ -15,7 +16,12 @@ const PAGES = [
   { href: "/activity", label: "アクティビティ" },
 ] as const;
 
-export function Sidebar({ servers, pendingCount }: SidebarProps): ReactElement {
+// 現在のパスと一致するナビだけを現在ページにする。前方一致にすると "/" が
+// すべてのページで一致してしまうため、完全一致で判定する。
+export const isCurrentPath = (currentPath: string | undefined, href: string): boolean =>
+  currentPath !== undefined && currentPath === href;
+
+export function Sidebar({ servers, pendingCount, currentPath }: SidebarProps): ReactElement {
   return (
     <nav className="sidebar" aria-label="画面と集約対象のサーバー">
       <Link className="brand" href="/">
@@ -38,12 +44,21 @@ export function Sidebar({ servers, pendingCount }: SidebarProps): ReactElement {
       <div className="side-block">
         <p className="side-title">ページ</p>
         <ul className="nav">
-          {PAGES.map((page) => (
-            <li key={page.href}>
-              <Link href={page.href}>{page.label}</Link>
-              {page.href === "/decisions" && pendingCount > 0 ? <span className="badge">{pendingCount}件</span> : null}
-            </li>
-          ))}
+          {PAGES.map((page) => {
+            const current = isCurrentPath(currentPath, page.href);
+            return (
+              <li key={page.href}>
+                <Link
+                  href={page.href}
+                  className={current ? "on" : undefined}
+                  aria-current={current ? "page" : undefined}
+                >
+                  {page.label}
+                </Link>
+                {page.href === "/decisions" && pendingCount > 0 ? <span className="badge">{pendingCount}件</span> : null}
+              </li>
+            );
+          })}
         </ul>
       </div>
     </nav>
