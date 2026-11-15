@@ -706,6 +706,37 @@ async fn unchanged_client_settings_keep_the_baseline_and_emit_no_duplicate_event
 }
 
 #[tokio::test]
+async fn unchanged_client_settings_reuse_the_child_process_between_cycles() {
+  // 設定を変えないサイクルでは同じ子プロセスを再利用する。毎サイクル起動し直す実装では、
+  // 起動時にだけ書かれる PID ファイルが2サイクル目に再生成され、ここで検出できる。
+  let harness = Harness::new(state_with_goal("g1"));
+  let pid_path = harness._directory.path().join("mock.pid");
+  let pid_for_config = pid_path.clone();
+  harness.rewrite_config(|value| {
+    let args = value["mcpServers"]["mac-mini"]["args"].as_array_mut().expect("起動引数があります");
+    args.push(json!("--pid-file"));
+    args.push(json!(pid_for_config.display().to_string()));
+  });
+
+  let mut poller = harness.poller();
+  let first = poller.read_cycle_once().await.expect("1回目のサイクルを実行できます");
+  assert_eq!(first.projects_read, 1, "1回目は子プロセスを起動して読み取ります");
+  let pid = read_pid_file(&pid_path);
+
+  // mock は起動時にしか PID
+  // ファイルを書かない。消しておけば、2サイクル目の再生成が再起動の証拠になる。
+  std::fs::remove_file(&pid_path).expect("PID ファイルを消せます");
+
+  let second = poller.read_cycle_once().await.expect("設定を変えない2回目のサイクルを実行できます");
+  assert_eq!(second.projects_read, 1, "再利用した子プロセスからも読み取れます");
+  assert_eq!(second.projects_failed, 0, "2回目の読み取りは失敗しません");
+  assert!(!pid_path.exists(), "設定が同じなら子プロセスを起動し直しません");
+  assert!(process_is_running(pid), "1回目に起動した子プロセスが同じ PID のまま動いています: pid={pid}");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
 async fn failed_event_record_keeps_the_baseline_and_records_the_event_once_after_recovery() {
   // 読み取りは成功したが出来事の記録に失敗したサイクルでは、差分基準を進めません。
   // 記録が回復した後のサイクルで、未記録だった変化をちょうど1回だけ記録します。
