@@ -23,4 +23,5 @@ jobs:
         with:
           version: "36.2"
       - run: make done
-      - run: python3 tools/aislop-gate/aislop_gate.py --root .
+      - run: npm ci
+      - run: node scripts/aislop-check-bootstrap.mjs check
