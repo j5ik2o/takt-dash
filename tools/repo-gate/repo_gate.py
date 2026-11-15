@@ -16,7 +16,10 @@
                        nightly（rustfmt）と Node をセットアップする。
   workflow-machine-gate taktdash-change に make done を実行する mode が system の
                        ステップがあり、develop の後ろに置かれ、make done の出力を修正
-                       ステップへ渡し、成功で完了・失敗で修正へ回る遷移を持つ。
+                       ステップへ渡し、成功で公開ステップ・失敗で修正へ回る遷移を持つ。
+                       公開ステップは commit / push / pr / status の 4 段階を publish.py
+                       で実行し、commit / push / pr の成功だけを完了条件にし、失敗は
+                       再試行または修正へ回し、ABORT へは遷移しない。
   gitignore-rules      .gitignore が Rust と Node とローカルデータの生成物を除外する。
   stable-toolchain     rust-toolchain.toml のチャネルが stable のままである。
 
@@ -393,6 +396,26 @@ def transition(rules, predicate):
     return None
 
 
+PUBLISH_STAGES = ("commit", "push", "pr", "status")
+PUBLISH_SUCCESS_STAGES = ("commit", "push", "pr")
+
+
+def publish_stages(step):
+    """公開ステップが実行する publish.py の段階を、{段階名: as 名} で返す。"""
+    stages = {}
+    for item in step.get("system_inputs") or []:
+        if not isinstance(item, dict) or item.get("type") != "command":
+            continue
+        tokens = [token for token in str(item.get("command", "")).split() if token]
+        for index, token in enumerate(tokens):
+            if not token.endswith("publish.py") or index + 1 >= len(tokens):
+                continue
+            stage = tokens[index + 1]
+            if stage in PUBLISH_STAGES:
+                stages.setdefault(stage, item.get("as"))
+    return stages
+
+
 def check_workflow_machine_gate(root):
     path = root / ".takt/workflows/taktdash-change.yaml"
     workflow = read_workflow(path)
@@ -416,13 +439,36 @@ def check_workflow_machine_gate(root):
     if order.index("develop") > order.index(gate_name):
         raise GateError(f"{gate_name} が develop より前の位置にあります")
 
+    publishers = [
+        step
+        for step in steps
+        if isinstance(step, dict) and publish_stages(step)
+    ]
+    if not publishers:
+        raise GateError("publish.py で公開を実行する mode: system のステップがありません")
+    publisher = max(publishers, key=lambda step: len(publish_stages(step)))
+    publish_name = publisher["name"]
+    if publisher.get("mode") != "system":
+        raise GateError(f"公開ステップ {publish_name} が mode: system ではありません")
+
+    stages = publish_stages(publisher)
+    missing = [stage for stage in PUBLISH_STAGES if stage not in stages]
+    if missing:
+        raise GateError(
+            f"公開ステップ {publish_name} に {' / '.join(missing)} の入力（publish.py <段階>）がありません"
+        )
+    for stage in PUBLISH_STAGES:
+        if stages[stage] != stage:
+            raise GateError(
+                f"公開ステップ {publish_name} の {stage} 入力の as が {stage} ではありません: {stages[stage]!r}"
+            )
+
     gate_rules = rules_of(gate)
-    exit_code_next = transition(
-        gate_rules,
-        lambda rule: "exit_code" in str(rule.get("condition", "")) and rule.get("next") == "COMPLETE",
-    )
-    if exit_code_next != "COMPLETE":
-        raise GateError("機械ゲートの成功（exit_code == 0）で COMPLETE へ遷移していません")
+    success_next = transition(gate_rules, lambda rule: "exit_code" in str(rule.get("condition", "")))
+    if success_next != publish_name:
+        raise GateError(
+            f"機械ゲートの成功が公開ステップ {publish_name} へ遷移していません: {success_next!r}"
+        )
     failure_next = transition(gate_rules, lambda rule: rule.get("condition") == "when(true)")
     if failure_next is None:
         raise GateError("機械ゲートに失敗時の遷移（when(true)）がありません")
@@ -439,10 +485,71 @@ def check_workflow_machine_gate(root):
     if transition(rules_of(fix), lambda rule: rule.get("next") == gate_name) != gate_name:
         raise GateError(f"{failure_next} から {gate_name} へ戻る遷移がありません")
 
+    publish_rules = rules_of(publisher)
+    publish_failure_next = transition(publish_rules, lambda rule: rule.get("condition") == "when(true)")
+    if publish_failure_next is None:
+        raise GateError(f"公開ステップ {publish_name} に失敗時の遷移（when(true)）がありません")
+    retry = named.get(publish_failure_next)
+    if publish_failure_next == "COMPLETE" or retry is None:
+        raise GateError(
+            f"公開の失敗時の遷移が修正ステップ（fix_publish）へ行っていません: {publish_failure_next!r}"
+        )
+
+    complete_rules = [rule for rule in publish_rules if rule.get("next") == "COMPLETE"]
+    if len(complete_rules) != 1:
+        raise GateError(
+            f"公開ステップ {publish_name} で COMPLETE へ遷移する rule が1件ではありません: {len(complete_rules)} 件"
+        )
+    success_condition = str(complete_rules[0].get("condition", "")).strip()
+    if not (success_condition.startswith("when(") and success_condition.endswith(")")):
+        raise GateError(
+            f"公開ステップ {publish_name} の完了条件が when(...) ではありません: {success_condition!r}"
+        )
+    inner = success_condition[len("when(") : -1]
+    if "||" in inner:
+        raise GateError(
+            f"公開ステップ {publish_name} の完了条件に || があります。commit / push / pr を && で結合してください"
+        )
+    if f"{publish_name}.status.exit_code" in inner:
+        raise GateError("公開の成功条件に status の exit_code を含めています（Status の失敗は非致命です）")
+    if "!=" in inner:
+        raise GateError(
+            f"公開ステップ {publish_name} の完了条件が exit_code == 0 ではありません: {success_condition!r}"
+        )
+    parts = [part.strip() for part in inner.split("&&")]
+    for stage in PUBLISH_SUCCESS_STAGES:
+        if f"context.{publish_name}.{stage}.exit_code == 0" not in parts:
+            raise GateError(f"公開の成功条件に {stage} の exit_code がありません")
+    expected = [f"context.{publish_name}.{stage}.exit_code == 0" for stage in PUBLISH_SUCCESS_STAGES]
+    if sorted(parts) != sorted(expected):
+        raise GateError(
+            f"公開ステップ {publish_name} の完了条件は commit / push / pr の exit_code == 0 を"
+            f"単一の when(...) 内で && 結合する必要があります: {success_condition!r}"
+        )
+
+    retry_rules = rules_of(retry)
+    retry_nexts = [rule.get("next") for rule in retry_rules]
+    if "ABORT" in retry_nexts:
+        raise GateError(f"{publish_failure_next} の遷移に ABORT があります")
+    if publish_name not in retry_nexts:
+        raise GateError(f"{publish_failure_next} から {publish_name} へ戻る遷移がありません")
+    retry_instruction = retry.get("instruction")
+    retry_text = (
+        "\n".join(retry_instruction)
+        if isinstance(retry_instruction, list)
+        else str(retry_instruction or "")
+    )
+    if f"context:{publish_name}." not in retry_text:
+        raise GateError(
+            f"{publish_failure_next} の instruction に公開ステップの出力の参照がありません"
+        )
+
     return {
         "gate": gate_name,
         "failure_step": failure_next,
         "develop_complete": complete_next,
+        "publish": publish_name,
+        "publish_failure_step": publish_failure_next,
         "max_steps": workflow.get("max_steps"),
     }
 
