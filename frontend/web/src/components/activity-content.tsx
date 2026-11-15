@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import type { ActivityEvent, ActivityKind, GetActivityResponse } from "../proto/taktdash";
+import type { ActivityEvent, ActivityKind, DailySummary, GetActivityResponse } from "../proto/taktdash";
 import { ACTIVITY_KIND } from "../state/proto-values";
 import { formatClock } from "../state/format";
 
@@ -43,10 +43,15 @@ const eventTime = (event: ActivityEvent): number => (event.occurredAt ? event.oc
 const toNewestFirst = (events: readonly ActivityEvent[]): ActivityEvent[] =>
   [...events].sort((a, b) => eventTime(b) - eventTime(a));
 
+// backend は日次集計を古い日から返すが、画面では新しい日を先頭に表示する。
+const toNewestDayFirst = (days: readonly DailySummary[]): DailySummary[] =>
+  [...days].sort((a, b) => b.date.localeCompare(a.date));
+
 export function ActivityContent({ response, now }: ActivityContentProps): ReactElement {
   const state = response.state;
   const serverNames = new Map((state?.servers ?? []).map((server) => [server.serverId, server.name]));
   const events = toNewestFirst(response.events);
+  const dailySummaries = toNewestDayFirst(response.dailySummaries);
 
   return (
     <main className="page">
@@ -57,12 +62,32 @@ export function ActivityContent({ response, now }: ActivityContentProps): ReactE
         </div>
       </header>
 
+      <section aria-label="出来事の一覧">
+        {events.length === 0 ? (
+          <p className="note">出来事はありません。</p>
+        ) : (
+          <ul className="events">
+            {events.map((event, index) => (
+              <li className={`ev ${isAttention(event.kind) ? "warn" : ""}`} key={`${event.serverId}-${index}`}>
+                <time>{event.occurredAt ? formatClock(event.occurredAt) : "—"}</time>
+                <span className="kind">{kindLabel(event.kind)}</span>
+                <span className="msg">
+                  {event.project ? <b>{event.project}：</b> : null}
+                  {event.body}
+                </span>
+                <span className="sv">{serverNames.get(event.serverId) ?? event.serverId}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       <section aria-labelledby="h-daily">
         <h2 className="sec" id="h-daily">
           日ごとの出来事
         </h2>
         <ul className="daily">
-          {response.dailySummaries.map((day) => (
+          {dailySummaries.map((day) => (
             <li key={day.date} className={day.attention > 0 ? "warn" : ""}>
               <span className="day">{day.date}</span>
               <span className="total">{day.total}件</span>
@@ -84,26 +109,6 @@ export function ActivityContent({ response, now }: ActivityContentProps): ReactE
             </li>
           ))}
         </ul>
-      </section>
-
-      <section aria-label="出来事の一覧">
-        {events.length === 0 ? (
-          <p className="note">出来事はありません。</p>
-        ) : (
-          <ul className="events">
-            {events.map((event, index) => (
-              <li className={`ev ${isAttention(event.kind) ? "warn" : ""}`} key={`${event.serverId}-${index}`}>
-                <time>{event.occurredAt ? formatClock(event.occurredAt) : "—"}</time>
-                <span className="kind">{kindLabel(event.kind)}</span>
-                <span className="msg">
-                  {event.project ? <b>{event.project}：</b> : null}
-                  {event.body}
-                </span>
-                <span className="sv">{serverNames.get(event.serverId) ?? event.serverId}</span>
-              </li>
-            ))}
-          </ul>
-        )}
       </section>
     </main>
   );

@@ -410,11 +410,50 @@ test("アクティビティページは出来事を新しい順に並べ、7日�
         assert.match(html, /2026-11-07/);
         assert.match(html, /2026-11-13/);
         assert.match(html, /Mac mini/);
+
+        const newestRowStart = html.lastIndexOf("<li", html.indexOf("ゴール「採用ページのレイアウトを直す」が人のマージ待ちになりました。"));
+        const newestRow = html.slice(newestRowStart, html.indexOf("</li>", newestRowStart));
+        assert.match(newestRow, /class="ev warn"/);
+        assert.match(newestRow, /16:25/);
+        assert.match(newestRow, /人のマージ待ち/);
+        assert.match(newestRow, /Mac mini/);
       } finally {
         await client.close();
       }
     });
   } finally {
     await server.shutdown();
+  }
+});
+
+test("アクティビティページは最新の出来事の一覧を見出しの直後に描画する", () => {
+  const html = renderPage(ActivityPage, { response: createActivityResponse(), now: NOW });
+
+  const eventsIndex = html.indexOf("出来事の一覧");
+  const dailyIndex = html.indexOf("日ごとの出来事");
+  const todayIndex = html.indexOf("今日の出来事");
+  assert.ok(eventsIndex >= 0 && dailyIndex >= 0 && todayIndex >= 0);
+  assert.ok(eventsIndex < dailyIndex, "出来事の一覧が日ごとの出来事より先に現れる");
+  assert.ok(dailyIndex < todayIndex, "日ごとの出来事が今日の出来事より先に現れる");
+});
+
+test("アクティビティページは日ごとの出来事を新しい日から並べる", () => {
+  const html = renderPage(ActivityPage, { response: createActivityResponse(), now: NOW });
+
+  const orderedDates = [
+    "2026-11-13",
+    "2026-11-12",
+    "2026-11-11",
+    "2026-11-10",
+    "2026-11-09",
+    "2026-11-08",
+    "2026-11-07",
+  ];
+  const positions = orderedDates.map((date) => html.indexOf(date));
+  for (const [index, position] of positions.entries()) {
+    assert.ok(position >= 0, `${orderedDates[index]} が描画される`);
+    if (index > 0) {
+      assert.ok(positions[index - 1] < position, `${orderedDates[index - 1]} が ${orderedDates[index]} より先に現れる`);
+    }
   }
 });
