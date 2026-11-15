@@ -8,21 +8,27 @@ use std::{
   io::Write,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
+  time::{Duration, Instant},
 };
 
 use common::*;
 use serde_json::{json, Value};
 use takt_dash_backend::{
-  activity::ActivityStore, config::Thresholds, model::EventKind, poller::Poller, store::StateStore,
+  activity::ActivityStore,
+  config::Thresholds,
+  model::{EventKind, ProjectSnapshot},
+  poller::Poller,
+  store::StateStore,
 };
 
 struct Harness {
-  _directory:  tempfile::TempDir,
-  config_path: PathBuf,
-  state_path:  PathBuf,
-  activity:    Arc<ActivityStore>,
-  store:       Arc<StateStore>,
-  changes:     tokio::sync::broadcast::Sender<()>,
+  _directory:    tempfile::TempDir,
+  config_path:   PathBuf,
+  state_path:    PathBuf,
+  call_log_path: PathBuf,
+  activity:      Arc<ActivityStore>,
+  store:         Arc<StateStore>,
+  changes:       tokio::sync::broadcast::Sender<()>,
 }
 
 fn write_json(path: &Path, value: &Value) {
@@ -33,6 +39,21 @@ fn state_with_goal(goal_id: &str) -> Value {
   json!({ "goals": [ { "id": goal_id, "status": "created", "executionStatus": "active", "objective": format!("ゴール {goal_id}"), "integrationBranch": format!("takt/{goal_id}") } ] })
 }
 
+fn state_with_goals(count: usize, status: &str, execution_status: &str) -> Value {
+  let goals: Vec<Value> = (0..count)
+    .map(|index| {
+      json!({
+        "id": format!("g{index}"),
+        "status": status,
+        "executionStatus": execution_status,
+        "objective": format!("ゴール {index}"),
+        "integrationBranch": format!("takt/g{index}")
+      })
+    })
+    .collect();
+  json!({ "goals": goals })
+}
+
 impl Harness {
   fn new(state: Value) -> Self {
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
@@ -40,11 +61,12 @@ impl Harness {
     let state_path = directory.path().join("state.json");
     let project_dir = directory.path().join("project");
     std::fs::create_dir_all(&project_dir).expect("プロジェクトの cwd を作れます");
+    let call_log_path = directory.path().join("calls.log");
     write_json(&state_path, &state);
     write_json(
       &config_path,
       &json!({
-        "mcpServers": { "mac-mini": { "command": "node", "args": [mock_script().display().to_string(), "--state", state_path.display().to_string()], "env": {} } },
+        "mcpServers": { "mac-mini": { "command": "node", "args": [mock_script().display().to_string(), "--state", state_path.display().to_string(), "--call-log", call_log_path.display().to_string()], "env": {} } },
         "servers": { "mac-mini": { "name": "j5ik2o-mac-mini", "kind": "Mac mini", "concurrency": 4 } },
         "projects": [ { "name": "takt-dash", "server": "mac-mini", "about": "説明", "cwd": project_dir.display().to_string() } ],
         "intervalSeconds": 30,
@@ -60,7 +82,7 @@ impl Harness {
     }));
     let activity = Arc::new(ActivityStore::open_in_memory().expect("メモリ上の SQLite を開けます"));
     let (changes, _) = tokio::sync::broadcast::channel(16);
-    Harness { _directory: directory, config_path, state_path, activity, store, changes }
+    Harness { _directory: directory, config_path, state_path, call_log_path, activity, store, changes }
   }
 
   fn poller(&self) -> Poller {
@@ -69,6 +91,40 @@ impl Harness {
 
   fn rewrite_state(&self, state: Value) {
     write_json(&self.state_path, &state);
+  }
+
+  fn calls(&self) -> Vec<String> {
+    recorded_calls(&self.call_log_path)
+  }
+
+  fn clear_calls(&self) {
+    clear_recorded_calls(&self.call_log_path);
+  }
+
+  /// 追加のプロジェクトを専用のサーバーと状態ファイルで設定へ加える。
+  fn add_project_with_state(&self, name: &str, state: &Value) -> PathBuf {
+    let directory = self._directory.path();
+    let project_dir = directory.join(name);
+    std::fs::create_dir_all(&project_dir).expect("追加プロジェクトの cwd を作れます");
+    let state_path = directory.join(format!("{name}-state.json"));
+    write_json(&state_path, state);
+    let server_key = format!("server-{name}");
+    let mut config: Value = serde_json::from_str(&std::fs::read_to_string(&self.config_path).expect("設定を読めます"))
+      .expect("設定を解析できます");
+    config["mcpServers"][&server_key] = json!({
+      "command": "node",
+      "args": [mock_script().display().to_string(), "--state", state_path.display().to_string()],
+      "env": {}
+    });
+    config["servers"][&server_key] = json!({ "name": format!("j5ik2o-{name}"), "kind": "Mac mini", "concurrency": 4 });
+    config["projects"].as_array_mut().expect("プロジェクト一覧があります").push(json!({
+      "name": name,
+      "server": server_key,
+      "about": format!("{name} の説明"),
+      "cwd": project_dir.display().to_string()
+    }));
+    write_json(&self.config_path, &config);
+    state_path
   }
 }
 
@@ -114,6 +170,46 @@ fn single_cycle_log_line(logs: &CapturedLogs) -> String {
   let lines: Vec<&str> = output.lines().filter(|line| line.contains("cycle_ms=")).collect();
   assert_eq!(lines.len(), 1, "1周期につき集計ログを1本だけ出します: {output}");
   lines[0].to_owned()
+}
+
+/// 指定した順番（0 始まり）の周期ログ行を取り出す。
+fn nth_cycle_log_line(logs: &CapturedLogs, index: usize) -> String {
+  let output = logs.contents();
+  let lines: Vec<&str> = output.lines().filter(|line| line.contains("cycle_ms=")).collect();
+  assert!(lines.len() > index, "{index} 番目の周期ログがありません: {output}");
+  lines[index].to_owned()
+}
+
+/// 周期ログの `tool_calls=<数>` を数値で取り出す。
+fn tool_calls_value(line: &str) -> usize {
+  let prefix = "tool_calls=";
+  let start = line.find(prefix).unwrap_or_else(|| panic!("tool_calls がありません: {line}")) + prefix.len();
+  let digits: String = line[start..].chars().take_while(|character| character.is_ascii_digit()).collect();
+  digits.parse().expect("tool_calls の値が数値ではありません")
+}
+
+struct TwoCycleObservation {
+  first_calls:  Vec<String>,
+  second_calls: Vec<String>,
+  second_line:  String,
+  snapshot:     ProjectSnapshot,
+}
+
+/// 同じ Harness で 2 周期読み取り、1 周期目と 2 周期目の呼び出し・2 周期目のログ行・
+/// 最終スナップショットを返す。
+async fn run_two_cycles(state: Value) -> TwoCycleObservation {
+  let harness = Harness::new(state);
+  let (logs, _guard) = capture_logs();
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+  let first_calls = harness.calls();
+  harness.clear_calls();
+  poller.read_cycle_once().await.expect("2周期目を実行できます");
+  let second_calls = harness.calls();
+  let second_line = nth_cycle_log_line(&logs, 1);
+  let snapshot = harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).expect("スナップショットがあります");
+  poller.shutdown().await;
+  TwoCycleObservation { first_calls, second_calls, second_line, snapshot }
 }
 
 /// 周期ログの `tools=` から、指定した道具1件分のエントリを取り出す。
@@ -571,4 +667,187 @@ async fn cycle_log_records_failed_tool_calls_and_separates_projects_from_project
   assert!(goals.contains("total_ms="), "道具エントリに合計時間を出します: {goals}");
   assert!(goals.contains("max_ms="), "道具エントリに最大時間を出します: {goals}");
   assert!(goals.contains("p95_ms="), "道具エントリに p95 を出します: {goals}");
+}
+
+#[tokio::test]
+async fn completed_goals_do_not_increase_tool_calls_between_cycles() {
+  let without_goals = run_two_cycles(state_with_goals(0, "completed", "active")).await;
+  let with_completed = run_two_cycles(state_with_goals(20, "completed", "active")).await;
+
+  assert_eq!(
+    tool_calls_value(&without_goals.second_line),
+    tool_calls_value(&with_completed.second_line),
+    "完了ゴールが 20 件あっても、状態が変わらない 2 周期目の呼び出し回数は 0 件のときと同じです"
+  );
+  assert!(with_completed.second_line.contains("projects_read=1"), "{}", with_completed.second_line);
+  assert_eq!(with_completed.snapshot.goals.len(), 20, "20 件の完了ゴールを保持します");
+
+  let first_questions = with_completed.first_calls.iter().filter(|call| *call == "takt_list_goal_questions").count();
+  assert_eq!(first_questions, 20, "1 周期目は各ゴールの質問を読んで基準化します: {:?}", with_completed.first_calls);
+  assert!(
+    with_completed.first_calls.iter().any(|call| call == "takt_get_goal"),
+    "1 周期目は各ゴールの通知を読んで基準化します: {:?}",
+    with_completed.first_calls
+  );
+
+  assert!(
+    !with_completed.second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "状態が変わらない完了ゴールの質問は 2 周期目に読みません: {:?}",
+    with_completed.second_calls
+  );
+  assert!(
+    !with_completed.second_calls.iter().any(|call| call == "takt_get_goal"),
+    "状態が変わらない完了ゴールの通知は 2 周期目に読みません: {:?}",
+    with_completed.second_calls
+  );
+}
+
+#[tokio::test]
+async fn terminal_goal_skips_aux_reads_and_keeps_pending_items_without_new_events() {
+  let state = json!({
+    "goals": [ { "id": "g1", "status": "completed", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ],
+    "goalQuestions": { "g1": [ { "id": "q1", "status": "pending", "kind": "question", "body": "どうしますか", "createdAt": "2026-11-13T09:00:00Z" } ] },
+    "notifications": { "g1": [ { "id": "n-blocked", "kind": "blocked", "body": "依存解決に失敗しました", "recordedAt": "2026-11-13T09:30:00Z" } ] }
+  });
+  let harness = Harness::new(state);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1 周期目を実行できます");
+  harness.clear_calls();
+  let report = poller.read_cycle_once().await.expect("2 周期目を実行できます");
+  let snapshot = harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).expect("スナップショットがあります");
+  let second_calls = harness.calls();
+  poller.shutdown().await;
+
+  assert_eq!(report.events_recorded, 0, "状態が変わらない周期では新しい出来事を記録しません");
+  assert!(
+    snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id == "q1"),
+    "スキップしたゴールの未回答問い合わせを前回値から引き継ぎます"
+  );
+  assert!(
+    snapshot.notifications.iter().any(|notification| notification.notification_id == "n-blocked"),
+    "スキップしたゴールの blocked 通知を前回値から引き継ぎます"
+  );
+  assert!(
+    !second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "完了ゴールの質問は 2 周期目に読みません: {second_calls:?}"
+  );
+  assert!(
+    !second_calls.iter().any(|call| call == "takt_get_goal"),
+    "完了ゴールの通知は 2 周期目に読みません: {second_calls:?}"
+  );
+
+  let blocked: usize =
+    harness.activity.recent_events(50).unwrap().into_iter().filter(|event| event.kind == EventKind::Blocked).count();
+  assert_eq!(blocked, 0, "引き継いだ通知を新しい出来事として重複記録しません");
+}
+
+#[tokio::test]
+async fn awaiting_merge_goal_is_read_on_every_cycle() {
+  let state = json!({
+    "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1", "pullRequest": { "number": 5, "url": "https://example.test/pr/5" } } ],
+    "goalQuestions": { "g1": [ { "id": "q1", "status": "pending", "kind": "question", "body": "どうしますか", "createdAt": "2026-11-13T09:00:00Z" } ] },
+    "notifications": { "g1": [ { "id": "n-merge", "kind": "awaiting_merge", "body": "マージ待ち", "recordedAt": "2026-11-13T09:30:00Z" } ] }
+  });
+  let harness = Harness::new(state);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1 周期目を実行できます");
+  harness.clear_calls();
+  poller.read_cycle_once().await.expect("2 周期目を実行できます");
+  let second_calls = harness.calls();
+  poller.shutdown().await;
+
+  assert!(
+    second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "人のマージ待ちは終端ではないため、2 周期目も質問を読みます: {second_calls:?}"
+  );
+  assert!(
+    second_calls.iter().any(|call| call == "takt_get_goal"),
+    "人のマージ待ちは終端ではないため、2 周期目も通知を読みます: {second_calls:?}"
+  );
+}
+
+#[tokio::test]
+async fn status_transition_to_completed_reads_auxiliary_data_again() {
+  let created = json!({
+    "goals": [ { "id": "g1", "status": "created", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ],
+    "goalQuestions": { "g1": [ { "id": "q1", "status": "pending", "kind": "question", "body": "1 周期目の質問", "createdAt": "2026-11-13T09:00:00Z" } ] },
+    "notifications": { "g1": [ { "id": "n1", "kind": "blocked", "body": "1 周期目の通知", "recordedAt": "2026-11-13T09:30:00Z" } ] }
+  });
+  let harness = Harness::new(created);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1 周期目を実行できます");
+  harness.clear_calls();
+
+  harness.rewrite_state(json!({
+    "goals": [ { "id": "g1", "status": "completed", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ],
+    "goalQuestions": { "g1": [
+      { "id": "q1", "status": "pending", "kind": "question", "body": "1 周期目の質問", "createdAt": "2026-11-13T09:00:00Z" },
+      { "id": "q2", "status": "pending", "kind": "question", "body": "2 周期目の質問", "createdAt": "2026-11-13T10:00:00Z" }
+    ] },
+    "notifications": { "g1": [ { "id": "n2", "kind": "blocked", "body": "2 周期目の通知", "recordedAt": "2026-11-13T10:30:00Z" } ] }
+  }));
+  poller.read_cycle_once().await.expect("2 周期目を実行できます");
+  let second_calls = harness.calls();
+  let snapshot = harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).expect("スナップショットがあります");
+  poller.shutdown().await;
+
+  assert!(
+    second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "終端へ変わった周期は質問を読みます: {second_calls:?}"
+  );
+  assert!(
+    second_calls.iter().any(|call| call == "takt_get_goal"),
+    "終端へ変わった周期は通知を読みます: {second_calls:?}"
+  );
+  assert!(
+    snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id == "q2"),
+    "遷移周期の新しい質問を snapshot に入れます"
+  );
+  assert!(
+    snapshot.notifications.iter().any(|notification| notification.notification_id == "n2"),
+    "遷移周期の新しい通知を snapshot に入れます"
+  );
+}
+
+#[tokio::test]
+async fn aborted_goals_do_not_increase_tool_calls_between_cycles() {
+  let without_goals = run_two_cycles(state_with_goals(0, "created", "aborted")).await;
+  let with_aborted = run_two_cycles(state_with_goals(20, "created", "aborted")).await;
+
+  assert_eq!(
+    tool_calls_value(&without_goals.second_line),
+    tool_calls_value(&with_aborted.second_line),
+    "中止ゴールが 20 件あっても、状態が変わらない 2 周期目の呼び出し回数は 0 件のときと同じです"
+  );
+  assert_eq!(with_aborted.snapshot.goals.len(), 20, "20 件の中止ゴールを保持します");
+  assert!(
+    !with_aborted.second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "状態が変わらない中止ゴールの質問は 2 周期目に読みません: {:?}",
+    with_aborted.second_calls
+  );
+  assert!(
+    !with_aborted.second_calls.iter().any(|call| call == "takt_get_goal"),
+    "状態が変わらない中止ゴールの通知は 2 周期目に読みません: {:?}",
+    with_aborted.second_calls
+  );
+}
+
+#[tokio::test]
+async fn projects_are_read_concurrently() {
+  let delayed = json!({ "delayMs": { "takt_list_goals": 1000 } });
+  let harness = Harness::new(delayed.clone());
+  harness.add_project_with_state("project-two", &delayed);
+  harness.add_project_with_state("project-three", &delayed);
+
+  let mut poller = harness.poller();
+  let started = Instant::now();
+  let report = poller.read_cycle_once().await.expect("1 サイクルを実行できます");
+  let elapsed = started.elapsed();
+  poller.shutdown().await;
+
+  assert_eq!(report.projects_read, 3, "3 プロジェクトを読み取ります");
+  assert!(
+    elapsed < Duration::from_millis(2500),
+    "プロジェクト間の読み取りを並行にします。直列なら 1 秒の遅延が 3 回で 3 秒以上かかります: {elapsed:?}"
+  );
 }
