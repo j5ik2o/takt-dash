@@ -19,6 +19,35 @@ class FakeEventSource implements EventSourceLike {
   }
 }
 
+type ScheduledReconnect = {
+  run: () => void;
+  delayMs: number;
+  cancelled: boolean;
+};
+
+/** 再接続の予約を記録し、テストが任意の時点で実行する。 */
+class FakeScheduler {
+  readonly scheduled: ScheduledReconnect[] = [];
+  readonly schedule = (run: () => void, delayMs: number): (() => void) => {
+    const entry: ScheduledReconnect = { run, delayMs, cancelled: false };
+    this.scheduled.push(entry);
+    return () => {
+      entry.cancelled = true;
+    };
+  };
+  latest(): ScheduledReconnect {
+    const entry = this.scheduled[this.scheduled.length - 1];
+    assert.ok(entry, "再接続が予約されています");
+    return entry;
+  }
+  runLatest() {
+    const entry = this.latest();
+    if (!entry.cancelled) {
+      entry.run();
+    }
+  }
+}
+
 test("同じ接続で状態を受信するたびに画面の再取得を促す", () => {
   FakeEventSource.instances = [];
   const events: string[] = [];
@@ -41,9 +70,10 @@ test("同じ接続で状態を受信するたびに画面の再取得を促す",
   stream.close();
 });
 
-test("切断時は画面の再取得を促さない", () => {
+test("切断時は画面の再取得を促さず、待機した後に再接続する", () => {
   FakeEventSource.instances = [];
   const events: string[] = [];
+  const scheduler = new FakeScheduler();
   const handlers = createStateHandlers({
     onState: () => events.push("状態"),
     onError: () => events.push("切断"),
@@ -53,12 +83,17 @@ test("切断時は画面の再取得を促さない", () => {
   const stream = openStateStream({
     url: "/api/state",
     createEventSource: (url: string) => new FakeEventSource(url),
+    scheduleReconnect: scheduler.schedule,
     ...handlers,
   });
-  const source = FakeEventSource.instances[0]!;
-  source.onerror?.({});
+  const first = FakeEventSource.instances[0]!;
+  first.onerror?.({});
 
-  assert.deepEqual(events, ["切断"]);
-  assert.equal(FakeEventSource.instances.length, 2, "切断後も再接続します");
+  assert.deepEqual(events, ["切断"], "切断時に画面の再取得を促しません");
+  assert.equal(first.closed, true, "エラーになった接続は閉じます");
+  assert.equal(FakeEventSource.instances.length, 1, "エラーの直後には再接続しません");
+  assert.equal(scheduler.latest().delayMs, 1000, "最初の再接続は1秒待ちます");
+  scheduler.runLatest();
+  assert.equal(FakeEventSource.instances.length, 2, "予約した待機の後に再接続します");
   stream.close();
 });

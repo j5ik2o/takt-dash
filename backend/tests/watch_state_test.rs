@@ -11,7 +11,7 @@ use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
-  config::Thresholds,
+  config::{ServerMeta, Thresholds},
   model::{ExecutionStatus, GoalStatus, ProjectSnapshot},
   poller::Poller,
   takt_dash::v1::WatchStateRequest,
@@ -186,6 +186,52 @@ async fn watch_state_sends_the_current_thresholds_after_a_config_change() {
     "変化通知後の閾値は変更後の値を返します（接続時の旧値ではありません）"
   );
   assert_eq!(thresholds.run_log_silent_minutes, 3, "無音の閾値も変更後に追随します");
+
+  poller.shutdown().await;
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn watch_state_sends_the_current_server_meta_after_a_config_change() {
+  // 同じ接続を開いたまま設定のサーバー表示情報を書き換え、変化通知後の第2メッセージの servers が
+  // 変更後の値になることを観測する。起動時だけ server_meta を読み込む実装では、
+  // 変化通知そのものが届かず、旧値のままになる。
+  let harness = seeded_harness();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let mut stream =
+    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+  let first = timeout(Duration::from_secs(5), stream.message())
+    .await
+    .expect("初回の全件は即時に届きます")
+    .expect("ストリームから読めます")
+    .expect("初回の状態があります");
+  assert_eq!(first.servers[0].name, "j5ik2o-mac-mini", "初回は接続時のサーバー表示情報を返します");
+
+  // 設定のサーバー表示情報を書き換え、定期読み取りの1サイクルを回す。
+  harness.rewrite_server_meta("mac-mini", ServerMeta {
+    name:        "renamed-mini".to_owned(),
+    kind:        "Mac Studio".to_owned(),
+    concurrency: 8,
+  });
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+  );
+  poller.read_cycle_once().await.expect("サーバー表示情報を変えるサイクルを実行できます");
+
+  let second = timeout(Duration::from_secs(5), stream.message())
+    .await
+    .expect("サーバー表示情報が変われば新しい状態が届きます")
+    .expect("ストリームから読めます")
+    .expect("変化後の状態があります");
+  assert_eq!(second.servers.len(), 1, "設定にあるサーバーだけを返します");
+  assert_eq!(second.servers[0].name, "renamed-mini", "変化通知後のサーバー名は変更後の値です");
+  assert_eq!(second.servers[0].kind, "Mac Studio", "種類も変更後に追随します");
+  assert_eq!(second.servers[0].concurrency, 8, "同時実行数も変更後に追随します");
 
   poller.shutdown().await;
   server.stop().await;
