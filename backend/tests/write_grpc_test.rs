@@ -449,6 +449,26 @@ fn state_with_proposal() -> serde_json::Value {
   })
 }
 
+/// 実 takt-mcp の応答形（summary がオブジェクト）を持つ承認待ち1件の mock の状態。
+fn state_with_object_summary_proposal() -> serde_json::Value {
+  json!({
+    "proposals": [
+      {
+        "revision": 6,
+        "repositoryDirectory": "/abs/takt-dash",
+        "summary": {
+          "objective": "稼働状況を一覧できるようにする",
+          "outOfScope": ["認証"],
+          "acceptanceCriteria": ["判断待ちに表示される"],
+          "constraints": ["proto を変えない"],
+          "startBranch": "main",
+          "integrationBranch": "takt/goal-6"
+        }
+      }
+    ]
+  })
+}
+
 /// goal_id を持たない未回答の問い合わせ1件だけを持つ mock の状態。
 fn state_with_standalone_inquiry() -> serde_json::Value {
   json!({
@@ -530,6 +550,86 @@ async fn goal_registration_proposal_appears_in_pending_decisions() {
   assert_eq!(listed[0].server_id, proposal.server_id);
   assert_eq!(listed[0].project, proposal.project);
   assert_eq!(listed[0].body, proposal.body);
+
+  poller.shutdown().await;
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn goal_registration_proposal_with_object_summary_appears_in_pending_decisions() {
+  // 実 takt-mcp の応答（summary がオブジェクト）でも、判断待ちの射影に登録承認項目が現れ、
+  // revision と本文の objective が写ることを観測する。
+  let (harness, mut poller) = polled_harness(state_with_object_summary_proposal()).await;
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let state = client
+    .get_pending_decisions(GetPendingDecisionsRequest {})
+    .await
+    .expect("判断待ちを取得できます")
+    .into_inner()
+    .state
+    .expect("状態があります");
+  let proposals: Vec<_> =
+    state.pending_decisions.iter().filter(|d| d.r#type == PendingDecisionType::GoalRegistration as i32).collect();
+  assert_eq!(proposals.len(), 1, "承認待ちが1件だけ一覧に現れます");
+  let proposal = proposals[0];
+  assert_eq!(proposal.server_id, "mac-mini");
+  assert_eq!(proposal.project, "takt-dash");
+  assert_eq!(proposal.revision, Some(6), "承認待ちの revision を写します");
+  assert!(
+    proposal.body.contains("稼働状況を一覧できるようにする"),
+    "本文に summary オブジェクトの objective を含みます: {}",
+    proposal.body
+  );
+
+  poller.shutdown().await;
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn malformed_proposal_response_does_not_fail_the_next_poll_cycle() {
+  // 同じ poller で「正常な提案を読むサイクル」→「提案の解析に失敗するサイクル」を続け、
+  // 2回目も周期が失敗せず、前回の提案が判断待ちの射影に残ることを一続きに観測する。
+  let harness = harness_with(json!({}));
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+  );
+  harness.rewrite_state(state_with_proposal());
+  let first = poller.read_cycle_once().await.expect("正常な提案を読むサイクルを実行できます");
+  assert_eq!(first.projects_read, 1, "1回目は提案を読めます");
+  assert_eq!(first.projects_failed, 0, "1回目は失敗しません");
+
+  harness.rewrite_state(json!({
+    "responses": {
+      "takt_list_goal_registration_proposals": {
+        "proposals": [
+          { "revision": 6, "repositoryDirectory": "/abs/takt-dash", "summary": 123 }
+        ]
+      }
+    }
+  }));
+  let second = poller.read_cycle_once().await.expect("提案の解析失敗で周期を失敗させません");
+  assert_eq!(second.projects_read, 1, "解析失敗は前回値へ縮退した読み取りとして数えます");
+  assert_eq!(second.projects_failed, 0, "解析失敗でプロジェクトの読み取りを失敗にしません");
+
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  let state = client
+    .get_pending_decisions(GetPendingDecisionsRequest {})
+    .await
+    .expect("判断待ちを取得できます")
+    .into_inner()
+    .state
+    .expect("状態があります");
+  let proposals: Vec<_> =
+    state.pending_decisions.iter().filter(|d| d.r#type == PendingDecisionType::GoalRegistration as i32).collect();
+  assert_eq!(proposals.len(), 1, "解析失敗後も前回の承認待ちが残ります");
+  assert_eq!(proposals[0].revision, Some(3), "前回の提案の revision を保持します");
+  assert!(proposals[0].body.contains("新しいゴール"), "前回の提案の本文を保持します: {}", proposals[0].body);
 
   poller.shutdown().await;
   server.stop().await;

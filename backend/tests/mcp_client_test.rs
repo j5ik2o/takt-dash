@@ -489,6 +489,209 @@ async fn write_tool_responses_missing_required_fields_are_parse_errors() {
 }
 
 #[tokio::test]
+async fn summary_object_is_composed_into_the_body() {
+  // 実 takt-mcp の応答（order.md の ac7-evidence）を模し、summary がオブジェクトでも提案を
+  // 1件取得でき、本文に各項目の値が入り、未知キーは本文へ漏れないことを観測する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            {
+              "revision": 6,
+              "repositoryDirectory": "/abs/takt-dash",
+              "summary": {
+                "objective": "稼働状況を一覧できるようにする",
+                "outOfScope": ["認証", "ネイティブ版"],
+                "acceptanceCriteria": ["判断待ちに表示される"],
+                "constraints": ["proto を変えない"],
+                "startBranch": "main",
+                "integrationBranch": "takt/goal-6",
+                "unexpectedKey": "本文に漏れてはいけない値"
+              }
+            }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let proposals = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect("summary がオブジェクトでも提案を取得できます");
+
+  assert_eq!(proposals.len(), 1, "提案を1件取得します");
+  let proposal = &proposals[0];
+  assert_eq!(proposal.revision, 6, "revision を写します");
+  assert_eq!(proposal.repository_directory, "/abs/takt-dash", "repositoryDirectory を写します");
+  for expected in [
+    "稼働状況を一覧できるようにする",
+    "認証",
+    "ネイティブ版",
+    "判断待ちに表示される",
+    "proto を変えない",
+    "main",
+    "takt/goal-6",
+  ] {
+    assert!(proposal.summary.contains(expected), "本文に存在する項目 {expected} を含みます: {}", proposal.summary);
+  }
+  assert!(!proposal.summary.contains("本文に漏れてはいけない値"), "未知のキーは本文へ含めません: {}", proposal.summary);
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn summary_object_with_missing_and_unknown_keys_is_accepted() {
+  // 任意項目の欠落と未知キーがあっても失敗させず、objective だけで本文を組み立てる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            {
+              "revision": 7,
+              "repositoryDirectory": "/abs/takt-dash",
+              "summary": { "objective": "目標だけを持つ提案", "unexpectedKey": "無視する値" }
+            }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let proposals = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect("任意項目の欠落と未知キーでは失敗しません");
+
+  assert_eq!(proposals.len(), 1, "提案を1件取得します");
+  assert!(proposals[0].summary.contains("目標だけを持つ提案"), "本文に objective を含みます: {}", proposals[0].summary);
+  assert!(!proposals[0].summary.contains("無視する値"), "未知のキーは本文へ含めません: {}", proposals[0].summary);
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn summary_string_is_kept_as_the_body() {
+  // summary が文字列の既存応答は、その文字列をそのまま本文にする。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 8, "repositoryDirectory": "/abs/takt-dash", "summary": "文字列の要約" }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let proposals = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect("summary が文字列でも提案を取得できます");
+
+  assert_eq!(proposals.len(), 1, "提案を1件取得します");
+  assert_eq!(proposals[0].summary, "文字列の要約", "文字列の summary はそのまま本文になります");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_proposal_summary_keeps_previous_proposals() {
+  // 提案1件の解析に失敗しても snapshot 全体を落とさず、前回の提案を保持する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 6, "repositoryDirectory": "/abs/takt-dash", "summary": 123 }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    proposals: vec![takt_dash_backend::model::RegistrationProposalEntry {
+      revision:             5,
+      repository_directory: "/abs/takt-dash".to_owned(),
+      summary:              "前回の提案".to_owned(),
+    }],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev))
+    .await
+    .expect("提案の解析失敗は前回の提案へ縮退します");
+
+  assert_eq!(snapshot.proposals, prev.proposals, "前回の提案を保持します");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_proposal_summary_without_previous_yields_empty_proposals() {
+  // 前回の提案が無いときの解析失敗は、提案だけを空にして周期を失敗させない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 6, "repositoryDirectory": "/abs/takt-dash", "summary": 123 }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None)
+    .await
+    .expect("前回の提案が無くても解析失敗で snapshot を落としません");
+
+  assert!(snapshot.proposals.is_empty(), "前回の提案が無ければ空へ縮退します");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn proposal_transport_error_is_not_degraded_to_the_previous_proposals() {
+  // 解析失敗だけを縮退させ、輸送エラーは従来どおり伝播させることを観測する。
+  // 子プロセスが提案の取得中に応答せず終了する状態で、前回の提案へ置き換えないことを確かめる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "transportErrors": ["takt_list_goal_registration_proposals"] }));
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    proposals: vec![takt_dash_backend::model::RegistrationProposalEntry {
+      revision:             5,
+      repository_directory: "/abs/takt-dash".to_owned(),
+      summary:              "前回の提案".to_owned(),
+    }],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let error = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev))
+    .await
+    .expect_err("輸送エラーは縮退せず伝播します");
+
+  assert!(matches!(error, ToolError::Transport(_)), "輸送エラーは解析失敗と区別します: {error}");
+  client.shutdown().await;
+}
+
+#[tokio::test]
 async fn run_with_more_than_one_page_of_step_logs_uses_the_last_step_time() {
   // 51 ステップの run。先頭ページは 50 件で、51 件目は stepLogPage.nextOffset の 2 ページ目に回る。
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
