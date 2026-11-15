@@ -5,10 +5,11 @@ import { badRequest, isNonEmptyString, readJsonObject, runWrite } from "../_shar
 // 問い合わせへの回答。text（自由記述・選択肢）と report（作業の依頼）のどちらか一方だけを
 // 受け取り、そのまま AnswerInquiry へ渡す。
 export async function POST(request: NextRequest): Promise<Response> {
-  const body = await readJsonObject(request);
-  if (body === undefined) {
-    return badRequest("リクエストの本文が JSON オブジェクトではありません。");
+  const read = await readJsonObject(request);
+  if (read.kind === "error") {
+    return read.response;
   }
+  const body = read.body;
 
   const { serverId, project, inquiryId } = body;
   if (!isNonEmptyString(serverId)) {

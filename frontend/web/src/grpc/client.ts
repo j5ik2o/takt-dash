@@ -23,6 +23,9 @@ export const BACKEND_ADDR_ENV = "TAKTDASH_BACKEND_ADDR";
 // 実環境では TAKTDASH_BACKEND_ADDR で必ず上書きできるようにする。
 export const DEFAULT_BACKEND_ADDR = "127.0.0.1:50051";
 
+// 書き込みの要求に設定する既定の期限。backend が固まっても無期限に待たないようにする。
+export const DEFAULT_WRITE_DEADLINE_MS = 30_000;
+
 export type BackendEnv = Record<string, string | undefined>;
 
 export function resolveBackendAddress(env: BackendEnv): string {
@@ -77,6 +80,8 @@ export type BackendClient = {
 
 export type CreateBackendClientOptions = {
   env?: BackendEnv;
+  // 書き込みの要求に設定する期限（ミリ秒）。読み取りには適用しない。
+  writeDeadlineMs?: number;
 };
 
 const isConnectionFailure = (error: grpc.ServiceError): boolean =>
@@ -102,12 +107,15 @@ const toBackendUnavailable = (error: grpc.ServiceError): BackendUnavailableError
 const unary = <Request, Response>(
   invoke: (
     request: Request,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
     callback: (error: grpc.ServiceError | null, response: Response) => void,
   ) => unknown,
   request: Request,
+  options: grpc.CallOptions,
 ): Promise<Response> =>
   new Promise<Response>((resolve, reject) => {
-    invoke(request, (error, response) => {
+    invoke(request, new grpc.Metadata(), options, (error, response) => {
       if (error) {
         reject(isConnectionFailure(error) ? toBackendUnavailable(error) : error);
         return;
@@ -120,14 +128,27 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
   const env = options.env ?? process.env;
   const address = resolveBackendAddress(env);
   const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
+  const writeDeadlineMs = options.writeDeadlineMs ?? DEFAULT_WRITE_DEADLINE_MS;
+  const writeOptions = (): grpc.CallOptions => ({ deadline: Date.now() + writeDeadlineMs });
 
   return {
-    getOverview: () => unary<object, DashboardState>((request, callback) => client.getOverview(request, callback), {}),
+    getOverview: () =>
+      unary<object, DashboardState>(
+        (request, metadata, callOptions, callback) => client.getOverview(request, metadata, callOptions, callback),
+        {},
+        {},
+      ),
     getProjects: () =>
-      unary<object, GetProjectsResponse>((request, callback) => client.getProjects(request, callback), {}),
+      unary<object, GetProjectsResponse>(
+        (request, metadata, callOptions, callback) => client.getProjects(request, metadata, callOptions, callback),
+        {},
+        {},
+      ),
     getPendingDecisions: async () => {
       const response = await unary<object, { state: DashboardState | undefined }>(
-        (request, callback) => client.getPendingDecisions(request, callback),
+        (request, metadata, callOptions, callback) =>
+          client.getPendingDecisions(request, metadata, callOptions, callback),
+        {},
         {},
       );
       if (response.state === undefined) {
@@ -136,11 +157,17 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       return response.state;
     },
     getActivity: () =>
-      unary<object, GetActivityResponse>((request, callback) => client.getActivity(request, callback), {}),
+      unary<object, GetActivityResponse>(
+        (request, metadata, callOptions, callback) => client.getActivity(request, metadata, callOptions, callback),
+        {},
+        {},
+      ),
     getRunDetail: async (runSlug) => {
       const detail = await unary<{ runSlug: string }, GetRunDetailResponse>(
-        (request, callback) => client.getRunDetail(request, callback),
+        (request, metadata, callOptions, callback) =>
+          client.getRunDetail(request, metadata, callOptions, callback),
         { runSlug },
+        {},
       ).catch((error: unknown) => {
         if (error instanceof BackendUnavailableError) {
           throw error;
@@ -157,21 +184,30 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
     },
     watchState: () => client.watchState({} satisfies WatchStateRequest),
     answerInquiry: (request) =>
-      unary<AnswerInquiryRequest, AnswerInquiryResponse>((req, callback) => client.answerInquiry(req, callback), request),
+      unary<AnswerInquiryRequest, AnswerInquiryResponse>(
+        (req, metadata, callOptions, callback) => client.answerInquiry(req, metadata, callOptions, callback),
+        request,
+        writeOptions(),
+      ),
     approveGoalMerge: (request) =>
       unary<ApproveGoalMergeRequest, ApproveGoalMergeResponse>(
-        (req, callback) => client.approveGoalMerge(req, callback),
+        (req, metadata, callOptions, callback) => client.approveGoalMerge(req, metadata, callOptions, callback),
         request,
+        writeOptions(),
       ),
     approveGoalRegistration: (request) =>
       unary<ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse>(
-        (req, callback) => client.approveGoalRegistration(req, callback),
+        (req, metadata, callOptions, callback) =>
+          client.approveGoalRegistration(req, metadata, callOptions, callback),
         request,
+        writeOptions(),
       ),
     rejectGoalRegistration: (request) =>
       unary<RejectGoalRegistrationRequest, RejectGoalRegistrationResponse>(
-        (req, callback) => client.rejectGoalRegistration(req, callback),
+        (req, metadata, callOptions, callback) =>
+          client.rejectGoalRegistration(req, metadata, callOptions, callback),
         request,
+        writeOptions(),
       ),
     close: () =>
       new Promise<void>((resolve) => {

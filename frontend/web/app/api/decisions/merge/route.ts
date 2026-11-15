@@ -3,10 +3,11 @@ import { badRequest, isNonEmptyString, isPositiveInteger, readJsonObject, runWri
 
 // マージの承認。until は Web の操作契約として "merge" に固定する。
 export async function POST(request: NextRequest): Promise<Response> {
-  const body = await readJsonObject(request);
-  if (body === undefined) {
-    return badRequest("リクエストの本文が JSON オブジェクトではありません。");
+  const read = await readJsonObject(request);
+  if (read.kind === "error") {
+    return read.response;
   }
+  const body = read.body;
 
   const { serverId, project, goalId, prNumber } = body;
   if (!isNonEmptyString(serverId)) {

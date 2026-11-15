@@ -15,6 +15,8 @@ import {
   decisionLabel,
   decisionTargetLabel,
   decisionTypeLabel,
+  openDecisionDialog,
+  openDecisionDialogState,
   resolveDecisionIntent,
   submitDecisionAction,
   toDecisionResult,
@@ -102,6 +104,34 @@ test("操作の結果に出す項目名はプロジェクトと種別を含む",
   assert.match(label, /人のマージ待ち/);
 });
 
+test("操作の結果に出す項目名はサーバーと対象の識別子を含み、別の対象を区別できる", () => {
+  const firstMerge: PendingDecision = {
+    ...merge(),
+    serverId: "mini",
+    pullRequest: { number: 418, url: "https://example.test/pr/418" },
+  };
+  const secondMerge: PendingDecision = {
+    ...merge(),
+    serverId: "mini",
+    pullRequest: { number: 419, url: "https://example.test/pr/419" },
+  };
+
+  const firstLabel = decisionLabel(firstMerge);
+  assert.match(firstLabel, /mini/);
+  assert.match(firstLabel, /418/);
+  assert.notEqual(firstLabel, decisionLabel(secondMerge));
+  assert.notEqual(firstLabel, decisionLabel({ ...firstMerge, serverId: "studio" }));
+
+  const inquiryLabel = decisionLabel(optionsQuestion());
+  assert.match(inquiryLabel, /mini/);
+  assert.match(inquiryLabel, /inquiry-options/);
+  assert.notEqual(inquiryLabel, decisionLabel(textQuestion()));
+
+  const registrationLabel = decisionLabel(registration());
+  assert.match(registrationLabel, /mini/);
+  assert.match(registrationLabel, /7/);
+});
+
 test("操作要素の対象名は種別ごとの識別子を含み、同じ種別でも区別できる", () => {
   assert.match(decisionTargetLabel(merge()), /PR #418/);
 
@@ -112,6 +142,14 @@ test("操作要素の対象名は種別ごとの識別子を含み、同じ種�
   assert.match(optionsLabel, /inquiry-options/);
   assert.match(optionsLabel, /リリースの日取りはどうしますか。/);
   assert.notEqual(optionsLabel, decisionTargetLabel(textQuestion()));
+});
+
+test("操作の結果の項目名と操作要素の対象名は同じ基本ラベルと識別子から作る", () => {
+  assert.equal(decisionTargetLabel(merge()), decisionLabel(merge()));
+  assert.equal(decisionTargetLabel(registration()), decisionLabel(registration()));
+
+  const inquiry = optionsQuestion();
+  assert.equal(decisionTargetLabel(inquiry), `${decisionLabel(inquiry)}（${inquiry.body}）`);
 });
 
 test("操作の形は問い合わせの選択肢・自由記述・作業依頼とマージ・ゴール登録で決まる", () => {
@@ -206,25 +244,179 @@ test("意図の解決は種別ごとに正しいダイアログを開き、開�
 });
 
 test("確定の意図はダイアログに対応する操作を選び、承認と却下を入れ替えない", () => {
-  const mergeResolution = resolveDecisionIntent(merge(), { type: "confirm", dialog: "merge" }, { text: "" });
+  const mergeTarget = openDecisionDialog(merge(), "merge");
+  const mergeResolution = resolveDecisionIntent(
+    merge(),
+    { type: "confirm", dialog: "merge" },
+    { text: "" },
+    mergeTarget,
+  );
   assert.equal(mergeResolution.kind, "submit");
   assert.equal(mergeResolution.kind === "submit" ? mergeResolution.action?.kind : undefined, "merge");
 
+  const approveTarget = openDecisionDialog(registration(), "approve-registration");
   const approveResolution = resolveDecisionIntent(
     registration(),
     { type: "confirm", dialog: "approve-registration" },
     { text: "" },
+    approveTarget,
   );
   assert.equal(approveResolution.kind, "submit");
   assert.equal(approveResolution.kind === "submit" ? approveResolution.action?.kind : undefined, "approve-registration");
 
+  const rejectTarget = openDecisionDialog(registration(), "reject-registration");
   const rejectResolution = resolveDecisionIntent(
     registration(),
     { type: "confirm", dialog: "reject-registration" },
     { text: "" },
+    rejectTarget,
   );
   assert.equal(rejectResolution.kind, "submit");
   assert.equal(rejectResolution.kind === "submit" ? rejectResolution.action?.kind : undefined, "reject-registration");
+});
+
+test("マージ確認は開いた時点の PR 番号と URL を保持し、確認時もその PR を送る", () => {
+  const target = openDecisionDialog(merge(), "merge");
+  assert.equal(target.prNumber, 418);
+  assert.equal(target.url, "https://example.test/pr/418");
+
+  const resolution = resolveDecisionIntent(
+    merge(),
+    { type: "confirm", dialog: "merge" },
+    { text: "" },
+    target,
+  );
+  assert.equal(resolution.kind, "submit");
+  const action = resolution.kind === "submit" ? resolution.action : undefined;
+  assert.ok(action);
+  assert.equal(action.kind, "merge");
+  assert.equal(action.payload.prNumber, 418);
+});
+
+test("開いた後に別の PR へ変わったら送信せず再確認を促す", () => {
+  const target = openDecisionDialog(merge(), "merge");
+  const changed: PendingDecision = {
+    ...merge(),
+    pullRequest: { number: 419, url: "https://example.test/pr/419" },
+  };
+
+  const resolution = resolveDecisionIntent(changed, { type: "confirm", dialog: "merge" }, { text: "" }, target);
+
+  assert.equal(resolution.kind, "stale");
+  assert.equal("action" in resolution, false);
+  assert.ok(resolution.kind === "stale" && resolution.message.length > 0);
+});
+
+test("確認の意図に開いた時点の対象が無ければ送信しない", () => {
+  const cases: Array<["merge" | "approve-registration" | "reject-registration", PendingDecision]> = [
+    ["merge", merge()],
+    ["approve-registration", registration()],
+    ["reject-registration", registration()],
+  ];
+
+  for (const [dialog, decision] of cases) {
+    const resolution = resolveDecisionIntent(decision, { type: "confirm", dialog }, { text: "" });
+
+    assert.equal(resolution.kind, "stale", `${dialog} は送信しない`);
+    assert.equal("action" in resolution, false, `${dialog} は送信しない`);
+  }
+});
+
+test("開いた後に revision が変わったゴール登録は送信せず再確認を促す", () => {
+  const target = openDecisionDialog(registration(), "approve-registration");
+  const changed: PendingDecision = { ...registration(), revision: 8 };
+
+  const resolution = resolveDecisionIntent(
+    changed,
+    { type: "confirm", dialog: "approve-registration" },
+    { text: "" },
+    target,
+  );
+
+  assert.equal(resolution.kind, "stale");
+  assert.equal("action" in resolution, false);
+  assert.ok(resolution.kind === "stale" && resolution.message.length > 0);
+});
+
+test("確認ダイアログを開くと対象を保持し、同じ対象の確認は送信する", () => {
+  const openedMerge = openDecisionDialogState(merge(), "merge");
+  assert.equal(openedMerge.kind, "open");
+  const mergeTarget = openedMerge.kind === "open" ? openedMerge.target ?? undefined : undefined;
+  assert.equal(mergeTarget?.kind, "merge");
+  assert.equal(mergeTarget?.kind === "merge" ? mergeTarget.prNumber : undefined, 418);
+
+  const mergeResolution = resolveDecisionIntent(
+    merge(),
+    { type: "confirm", dialog: "merge" },
+    { text: "" },
+    mergeTarget,
+  );
+  assert.equal(mergeResolution.kind, "submit");
+  const mergeAction = mergeResolution.kind === "submit" ? mergeResolution.action : undefined;
+  assert.equal(mergeAction?.kind, "merge");
+  assert.equal(mergeAction?.kind === "merge" ? mergeAction.payload.prNumber : undefined, 418);
+
+  const openedRegistration = openDecisionDialogState(registration(), "approve-registration");
+  assert.equal(openedRegistration.kind, "open");
+  const registrationTarget =
+    openedRegistration.kind === "open" ? openedRegistration.target ?? undefined : undefined;
+  assert.equal(registrationTarget?.revision, 7);
+
+  const registrationResolution = resolveDecisionIntent(
+    registration(),
+    { type: "confirm", dialog: "approve-registration" },
+    { text: "" },
+    registrationTarget,
+  );
+  assert.equal(registrationResolution.kind, "submit");
+  const registrationAction =
+    registrationResolution.kind === "submit" ? registrationResolution.action : undefined;
+  assert.equal(registrationAction?.kind, "approve-registration");
+  assert.equal(
+    registrationAction?.kind === "approve-registration" ? registrationAction.payload.revision : undefined,
+    7,
+  );
+});
+
+test("開いた後に PR が変わったら、保持した対象との確認は送信せず再確認を促す", () => {
+  const opened = openDecisionDialogState(merge(), "merge");
+  const target = opened.kind === "open" ? opened.target ?? undefined : undefined;
+  const changed: PendingDecision = {
+    ...merge(),
+    pullRequest: { number: 419, url: "https://example.test/pr/419" },
+  };
+
+  const resolution = resolveDecisionIntent(changed, { type: "confirm", dialog: "merge" }, { text: "" }, target);
+
+  assert.equal(resolution.kind, "stale");
+  assert.equal("action" in resolution, false);
+});
+
+test("開いた後に revision が変わったゴール登録は、保持した対象との確認を送信しない", () => {
+  for (const dialog of ["approve-registration", "reject-registration"] as const) {
+    const opened = openDecisionDialogState(registration(), dialog);
+    const target = opened.kind === "open" ? opened.target ?? undefined : undefined;
+    const changed: PendingDecision = { ...registration(), revision: 8 };
+
+    const resolution = resolveDecisionIntent(changed, { type: "confirm", dialog }, { text: "" }, target);
+
+    assert.equal(resolution.kind, "stale", `${dialog} は送信しない`);
+    assert.equal("action" in resolution, false, `${dialog} は送信しない`);
+  }
+});
+
+test("対象の値を欠く確認ダイアログは開くが対象を保持せず、確認しても送信しない", () => {
+  const decision: PendingDecision = { ...merge(), pullRequest: undefined };
+
+  const opened = openDecisionDialogState(decision, "merge");
+  assert.equal(opened.kind, "open");
+  assert.equal(opened.kind === "open" ? opened.target : undefined, null);
+
+  const target = opened.kind === "open" ? opened.target ?? undefined : undefined;
+  const resolution = resolveDecisionIntent(decision, { type: "confirm", dialog: "merge" }, { text: "" }, target);
+
+  assert.equal(resolution.kind, "stale");
+  assert.equal("action" in resolution, false);
 });
 
 test("選択肢の回答は選んだ文字列を text として一覧の識別子とともに送る", () => {

@@ -46,6 +46,11 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.11 未満は対象外
 WORKSPACE_MEMBERS = ["backend", "frontend/cli"]
 GATE_TARGETS = ["fmt", "clippy", "test", "typecheck", "lint"]
 AISLOP_CHECK_COMMAND = "scripts/aislop-check-bootstrap.mjs check"
+AISLOP_CHECK_INVOCATION = ["node", "scripts/aislop-check-bootstrap.mjs", "check"]
+GATE_EXIT_CODE_REFERENCE = re.compile(r"context\.([A-Za-z0-9_]+)\.result\.exit_code")
+GATE_SUCCESS_CONDITION = re.compile(
+    r"when\(\s*context\.([A-Za-z0-9_]+)\.result\.exit_code\s*==\s*0\s*\)"
+)
 
 
 class GateError(Exception):
@@ -392,13 +397,84 @@ def runs_make_done(step):
     return runs_command(step, ["make", "done"])
 
 
+def strip_shell_comments(command):
+    """シェルのコメントを、クォートとバックスラッシュを考慮して除去する。
+
+    未クォート・未エスケープの # から行末までを除去する。行の区切りを保つため改行は
+    残す。単一引用符の内側ではバックスラッシュと # をそのまま扱い、二重引用符の
+    内側ではバックスラッシュで次の 1 文字をエスケープする。shlex の comments=True と
+    同じく、語の途中にある未クォートの # もコメントの開始とみなす。
+    """
+    result = []
+    quote = None
+    escaped = False
+    in_comment = False
+    for char in str(command):
+        if in_comment:
+            if char == "\n":
+                in_comment = False
+                result.append(char)
+            continue
+        if escaped:
+            result.append(char)
+            escaped = False
+            continue
+        if quote == "'":
+            result.append(char)
+            if char == "'":
+                quote = None
+            continue
+        if quote == '"':
+            if char == "\\":
+                escaped = True
+            else:
+                quote = None if char == '"' else quote
+            result.append(char)
+            continue
+        if char == "\\":
+            escaped = True
+            result.append(char)
+            continue
+        if char in ("'", '"'):
+            quote = char
+            result.append(char)
+            continue
+        if char == "#":
+            in_comment = True
+            continue
+        result.append(char)
+    return "".join(result)
+
+
+def invokes_aislop_check(command):
+    """コマンド文字列が aislop チェックを実際に起動するかを判定する。
+
+    先にシェルのコメントを除去してから、&& / || / ; / | / 改行による単純コマンドへの
+    分割を行い、各単純コマンドの先頭が aislop チェックの起動になっているかを調べる。
+    コメントを除去してから分割することで、コメント内の演算子の後ろを独立した単純
+    コマンドとして解釈しない。echo の引数・引用符内の文字列・コメントは単純コマンドの
+    先頭にならないため、表示だけの文字列を実行とみなさない。
+    """
+    stripped = strip_shell_comments(command)
+    for simple in re.split(r"&&|\|\||[;|\n]", stripped):
+        try:
+            tokens = shlex.split(simple, comments=False)
+        except ValueError:
+            continue
+        if tokens[: len(AISLOP_CHECK_INVOCATION)] == AISLOP_CHECK_INVOCATION:
+            return True
+    return False
+
+
 def runs_aislop_gate(step):
-    """mode が system のステップで、aislop の関門を固定コマンドとして実行するかを判定する。"""
+    """mode が system のステップで、aislop の関門を実際に起動するかを判定する。"""
+    if step.get("mode") != "system":
+        return False
     return any(
-        AISLOP_CHECK_COMMAND in str(item.get("command", ""))
+        invokes_aislop_check(str(item.get("command", "")))
         for item in step.get("system_inputs") or []
         if isinstance(item, dict) and item.get("type") == "command"
-    ) and step.get("mode") == "system"
+    )
 
 
 def transition(rules, predicate):
@@ -408,16 +484,54 @@ def transition(rules, predicate):
     return None
 
 
-def check_machine_gate_step(named, name):
-    """機械ゲートの 1 ステップが、成功を次へ渡し、失敗を修正ステップへ回すかを検査する。"""
+def is_gate_success_condition(condition, name):
+    """成功条件が、そのゲート自身の exit_code だけを == 0 で見る正規形かを判定する。
+
+    条件中の exit_code 参照をすべて抽出し、自ゲート以外を参照していれば成功条件と
+    みなさない。AND/OR で別ゲートを併記した条件や、自ゲートを否定して別の
+    `== 0` を足した条件を成功として受理しないよう、条件全体も正規形に一致させる。
+    """
+    text = str(condition).strip()
+    references = GATE_EXIT_CODE_REFERENCE.findall(text)
+    if not references or any(reference != name for reference in references):
+        return False
+    match = GATE_SUCCESS_CONDITION.fullmatch(text)
+    return match is not None and match.group(1) == name
+
+
+def check_gate_rule_references(gate_rules, name):
+    """ゲートの全規則の exit_code 参照が、そのゲート自身だけを指すことを検査する。
+
+    規則は順に評価され、先に一致した条件が遷移を決める。成功条件の規則だけを検査すると、
+    別の規則に別ゲートの `exit_code == 0` を置くことで、そのゲートの成功でも次へ進めて
+    しまう。規則列全体の参照を列挙し、自ゲート以外の exit_code を見る規則を拒否する。
+    """
+    for rule in gate_rules:
+        for reference in GATE_EXIT_CODE_REFERENCE.findall(str(rule.get("condition", ""))):
+            if reference != name:
+                raise GateError(
+                    f"{name} の規則が別ゲート {reference} の exit_code を参照しています: "
+                    f"{rule.get('condition')!r}"
+                )
+
+
+def check_machine_gate_step(named, name, return_to):
+    """機械ゲートの 1 ステップが、成功を次へ渡し、失敗を修正ステップへ回すかを検査する。
+
+    成功条件は、そのゲート自身の結果（context:<name>.result.exit_code）を参照することを
+    要求する。別ゲートの exit_code を見る条件では、そのゲートが実行されていなくても
+    成功と判定できてしまうため受け付けない。失敗時の修正ステップは return_to へ戻る。
+    """
     gate = named[name]
     gate_rules = rules_of(gate)
+    check_gate_rule_references(gate_rules, name)
+    success_reference = f"context.{name}.result.exit_code"
     succeeds = transition(
         gate_rules,
-        lambda rule: "exit_code" in str(rule.get("condition", "")) and "== 0" in str(rule.get("condition", "")),
+        lambda rule: is_gate_success_condition(rule.get("condition"), name),
     )
     if succeeds is None:
-        raise GateError(f"{name} に成功（exit_code == 0）の遷移がありません")
+        raise GateError(f"{name} に成功（{success_reference} == 0）の遷移がありません")
     failure_next = transition(gate_rules, lambda rule: rule.get("condition") == "when(true)")
     if failure_next is None:
         raise GateError(f"{name} に失敗時の遷移（when(true)）がありません")
@@ -436,8 +550,8 @@ def check_machine_gate_step(named, name):
         f"context:{name}.result.stderr" not in instruction_text
     ):
         raise GateError(f"{failure_next} の instruction に {name} の出力の参照がありません")
-    if transition(rules_of(fix), lambda rule: rule.get("next") == name) != name:
-        raise GateError(f"{failure_next} から {name} へ戻る遷移がありません")
+    if transition(rules_of(fix), lambda rule: rule.get("next") == return_to) != return_to:
+        raise GateError(f"{failure_next} から {return_to} へ戻る遷移がありません")
     return succeeds, failure_next
 
 
@@ -471,11 +585,11 @@ def check_workflow_machine_gate(root):
     if order.index(gate_name) > order.index(aislop_name):
         raise GateError(f"{aislop_name} が {gate_name} より前の位置にあります")
 
-    make_done_next, make_done_fix = check_machine_gate_step(named, gate_name)
+    make_done_next, make_done_fix = check_machine_gate_step(named, gate_name, gate_name)
     if make_done_next != aislop_name:
         raise GateError(f"{gate_name} の成功が {aislop_name} へ遷移していません: {make_done_next!r}")
 
-    aislop_next, aislop_fix = check_machine_gate_step(named, aislop_name)
+    aislop_next, aislop_fix = check_machine_gate_step(named, aislop_name, gate_name)
     if aislop_next != "COMPLETE":
         raise GateError(f"{aislop_name} の成功（exit_code == 0）で COMPLETE へ遷移していません: {aislop_next!r}")
 
@@ -520,7 +634,7 @@ def check_ci(root):
                 if not isinstance(run, str):
                     continue
                 ordered_runs.append(run)
-                if AISLOP_CHECK_COMMAND not in run:
+                if not invokes_aislop_check(run):
                     continue
                 job_calls_aislop = True
                 if checkout_seen:

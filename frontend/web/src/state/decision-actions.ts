@@ -44,26 +44,48 @@ export function decisionTypeLabel(decision: PendingDecision): string {
   return resolve === undefined ? "判断待ち" : resolve(decision);
 }
 
-// 操作結果に出す項目名。どのプロジェクトの何に対する結果かが分かるようにする。
+// 操作結果に出す項目名と、操作要素の accessible name・入力欄の label の共通部分。
+// 基本ラベル（サーバー・プロジェクト・種別）と、種別ごとの識別子を一箇所で作る。
+// 種別を増やすときの更新をここだけに閉じ込め、2つの表示がずれないようにする。
+type DecisionLabelParts = {
+  base: string;
+  identifier: string;
+};
+
+const decisionLabelIdentifier = (decision: PendingDecision): string => {
+  switch (decision.type) {
+    case PENDING_DECISION_TYPE.AWAITING_MERGE:
+      return `PR #${decision.pullRequest?.number ?? "不明"}`;
+    case PENDING_DECISION_TYPE.GOAL_REGISTRATION:
+      return `revision ${decision.revision ?? "不明"}`;
+    case PENDING_DECISION_TYPE.INQUIRY:
+      return decision.inquiryId;
+    default:
+      return "";
+  }
+};
+
+const decisionLabelParts = (decision: PendingDecision): DecisionLabelParts => ({
+  base: `${decision.serverId} / ${decision.project} の${decisionTypeLabel(decision)}`,
+  identifier: decisionLabelIdentifier(decision),
+});
+
+const composeDecisionLabel = ({ base, identifier }: DecisionLabelParts): string =>
+  identifier === "" ? base : `${base} ${identifier}`;
+
 export function decisionLabel(decision: PendingDecision): string {
-  return `${decision.project} の${decisionTypeLabel(decision)}`;
+  return composeDecisionLabel(decisionLabelParts(decision));
 }
 
 // 操作要素の accessible name と入力欄の label に使う。一覧は全サーバー・全プロジェクトの
 // 判断待ちの和集合なので、同じ固定名の操作要素が複数並ぶ。種別と行固有の識別子を含めて
-// 対象を一意に識別できるようにする。
+// 対象を一意に識別できるようにする。問い合わせだけは本文も添えて区別する。
 export function decisionTargetLabel(decision: PendingDecision): string {
-  const base = decisionLabel(decision);
-  switch (decision.type) {
-    case PENDING_DECISION_TYPE.AWAITING_MERGE:
-      return `${base} PR #${decision.pullRequest?.number ?? "不明"}`;
-    case PENDING_DECISION_TYPE.GOAL_REGISTRATION:
-      return `${base} revision ${decision.revision ?? "不明"}`;
-    case PENDING_DECISION_TYPE.INQUIRY:
-      return `${base} ${decision.inquiryId}（${decision.body}）`;
-    default:
-      return base;
+  const parts = decisionLabelParts(decision);
+  if (decision.type === PENDING_DECISION_TYPE.INQUIRY) {
+    return `${parts.base} ${parts.identifier}（${decision.body}）`;
   }
+  return composeDecisionLabel(parts);
 }
 
 // 一覧に出す操作の形。必要な値が欠けた項目は操作させず、理由を表示する。
@@ -271,17 +293,73 @@ export type DecisionIntent =
   | { type: "cancel" }
   | { type: "confirm"; dialog: DecisionDialogKind };
 
-// 意図を、ダイアログを開く・閉じる・送信するのいずれかへ解決する。DOM に依存しないため、
-// どの意図がどのダイアログ・どの送信操作になるかを単体テストで確認できる。
+// 確認ダイアログを開いた時点の対象。開いた後に一覧が SSE で更新されても、確認時は
+// この値で送信し、表示もこの値を保つ。対象が変わっていれば送信しない。
+export type DecisionDialogTarget =
+  | { kind: "merge"; prNumber: number; url: string }
+  | { kind: "approve-registration"; revision: number }
+  | { kind: "reject-registration"; revision: number };
+
+export function openDecisionDialog(
+  decision: PendingDecision,
+  dialog: DecisionDialogKind,
+): DecisionDialogTarget | undefined {
+  switch (dialog) {
+    case "merge": {
+      const prNumber = decision.pullRequest?.number;
+      const url = decision.pullRequest?.url;
+      if (!isPositiveInteger(prNumber) || typeof url !== "string" || url === "") {
+        return undefined;
+      }
+      return { kind: "merge", prNumber, url };
+    }
+    case "approve-registration":
+    case "reject-registration": {
+      const revision = decision.revision;
+      if (!isPositiveInteger(revision)) {
+        return undefined;
+      }
+      return { kind: dialog, revision };
+    }
+  }
+}
+
+// 確認ダイアログの開閉と、開いた時点の対象をまとめて持つ状態。対象はダイアログを開く
+// 操作の結果としてこの状態へ入り、確認の送信可否と表示はこの値を参照して決める。
+export type DecisionDialogState =
+  | { kind: "closed" }
+  | { kind: "open"; dialog: DecisionDialogKind; target: DecisionDialogTarget | null };
+
+export const INITIAL_DECISION_DIALOG_STATE: DecisionDialogState = { kind: "closed" };
+
+// ダイアログを開き、開いた時点の対象を保持する。対象の値が欠けていてもダイアログは
+// 開くが、target は null になり、確認時は送信せず stale として扱う。
+export function openDecisionDialogState(
+  decision: PendingDecision,
+  dialog: DecisionDialogKind,
+): DecisionDialogState {
+  return { kind: "open", dialog, target: openDecisionDialog(decision, dialog) ?? null };
+}
+
+const staleTarget = (): DecisionIntentResolution => ({
+  kind: "stale",
+  message: "確認した時点の対象が変わったため送信しませんでした。もう一度操作してください。",
+});
+
+// 意図を、ダイアログを開く・閉じる・送信する・対象が変わったので送らない、のいずれかへ
+// 解決する。DOM に依存しないため、どの意図がどのダイアログ・どの送信操作になるかを
+// 単体テストで確認できる。
 export type DecisionIntentResolution =
   | { kind: "open"; dialog: DecisionDialogKind }
   | { kind: "close" }
+  | { kind: "stale"; message: string }
   | { kind: "submit"; action: DecisionAction | undefined };
 
 export function resolveDecisionIntent(
   decision: PendingDecision,
   intent: DecisionIntent,
   input: { text: string },
+  dialogTarget?: DecisionDialogTarget,
 ): DecisionIntentResolution {
   switch (intent.type) {
     case "answer-text":
@@ -294,14 +372,40 @@ export function resolveDecisionIntent(
       return { kind: "open", dialog: intent.dialog };
     case "cancel":
       return { kind: "close" };
-    case "confirm":
+    case "confirm": {
+      if (dialogTarget === undefined) {
+        return staleTarget();
+      }
+      if (intent.dialog === "merge") {
+        if (dialogTarget.kind !== "merge") {
+          return staleTarget();
+        }
+        const current = decision.pullRequest;
+        if (
+          current === undefined ||
+          current.number !== dialogTarget.prNumber ||
+          current.url !== dialogTarget.url
+        ) {
+          return staleTarget();
+        }
+        return { kind: "submit", action: buildMergeAction(decision) };
+      }
+      const targetRevision = dialogTarget.kind === "merge" ? undefined : dialogTarget.revision;
+      if (
+        targetRevision === undefined ||
+        dialogTarget.kind !== intent.dialog ||
+        targetRevision !== decision.revision
+      ) {
+        return staleTarget();
+      }
       return {
         kind: "submit",
-        action:
-          intent.dialog === "merge"
-            ? buildMergeAction(decision)
-            : buildGoalRegistrationAction(decision, intent.dialog === "approve-registration" ? "approve" : "reject"),
+        action: buildGoalRegistrationAction(
+          decision,
+          intent.dialog === "approve-registration" ? "approve" : "reject",
+        ),
       };
+    }
   }
 }
 

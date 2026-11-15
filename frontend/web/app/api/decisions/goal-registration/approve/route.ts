@@ -3,10 +3,11 @@ import { badRequest, isNonEmptyString, isPositiveInteger, readJsonObject, runWri
 
 // ゴール登録の承認。revision は判断待ち一覧の項目が持つ値をそのまま渡す。
 export async function POST(request: NextRequest): Promise<Response> {
-  const body = await readJsonObject(request);
-  if (body === undefined) {
-    return badRequest("リクエストの本文が JSON オブジェクトではありません。");
+  const read = await readJsonObject(request);
+  if (read.kind === "error") {
+    return read.response;
   }
+  const body = read.body;
 
   const { serverId, project, revision } = body;
   if (!isNonEmptyString(serverId)) {

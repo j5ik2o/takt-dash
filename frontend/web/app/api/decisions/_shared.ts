@@ -12,15 +12,63 @@ const jsonResponse = (status: number, body: unknown): Response =>
 
 export const badRequest = (message: string): Response => jsonResponse(400, { ok: false, error: message });
 
-export async function readJsonObject(request: Request): Promise<Record<string, unknown> | undefined> {
+// 本文を読む前の境界検証。ブラウザの別オリジンや cross-site からの書き込み、および
+// JSON でない本文を受け付けない。ヘッダの無い CLI 等の既存利用は許可する。
+const unsupportedMediaType = (): Response =>
+  jsonResponse(415, { ok: false, error: "Content-Type は application/json で指定してください。" });
+
+const forbiddenOrigin = (): Response =>
+  jsonResponse(403, { ok: false, error: "このオリジンからは操作できません。" });
+
+const contentTypeIsJson = (request: Request): boolean => {
+  const header = request.headers.get("content-type");
+  if (header === null) {
+    return false;
+  }
+  const [mediaType] = header.split(";");
+  return mediaType.trim().toLowerCase() === "application/json";
+};
+
+const requestOriginIsAllowed = (request: Request): boolean => {
+  if (request.headers.get("sec-fetch-site") === "cross-site") {
+    return false;
+  }
+  const origin = request.headers.get("origin");
+  if (origin === null) {
+    return true;
+  }
+  try {
+    return new URL(origin).origin === new URL(request.url).origin;
+  } catch {
+    return false;
+  }
+};
+
+export type ReadJsonObjectResult =
+  | { kind: "ok"; body: Record<string, unknown> }
+  | { kind: "error"; response: Response };
+
+export async function readJsonObject(request: Request): Promise<ReadJsonObjectResult> {
+  if (!contentTypeIsJson(request)) {
+    return { kind: "error", response: unsupportedMediaType() };
+  }
+  if (!requestOriginIsAllowed(request)) {
+    return { kind: "error", response: forbiddenOrigin() };
+  }
   try {
     const value: unknown = await request.json();
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      return undefined;
+      return {
+        kind: "error",
+        response: badRequest("リクエストの本文が JSON オブジェクトではありません。"),
+      };
     }
-    return value as Record<string, unknown>;
+    return { kind: "ok", body: value as Record<string, unknown> };
   } catch {
-    return undefined;
+    return {
+      kind: "error",
+      response: badRequest("リクエストの本文が JSON オブジェクトではありません。"),
+    };
   }
 }
 
