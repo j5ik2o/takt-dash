@@ -44,6 +44,12 @@ export const PENDING_DECISION_TYPE = {
   AWAITING_MERGE: 2,
 } as const;
 
+export const CONVERSATION_SPEAKER = {
+  USER: 1,
+  MANAGER: 2,
+  SYSTEM: 3,
+} as const;
+
 // proto の JSON 表現（DashboardState.toJSON）は列挙型を名称文字列で出す。受信側で
 // 数値へ戻すため、生成コードの *FromJSON と同じ対応を名称→数値で持つ。生成コードと
 // 一致することは test/state/proto-values.test.ts で検査する。
@@ -90,6 +96,13 @@ const ENUM_NAME_TO_NUMBER: Record<string, Record<string, number>> = {
     PENDING_DECISION_TYPE_UNSPECIFIED: 0,
     PENDING_DECISION_TYPE_INQUIRY: 1,
     PENDING_DECISION_TYPE_AWAITING_MERGE: 2,
+    UNRECOGNIZED: -1,
+  },
+  ConversationSpeaker: {
+    CONVERSATION_SPEAKER_UNSPECIFIED: 0,
+    CONVERSATION_SPEAKER_USER: 1,
+    CONVERSATION_SPEAKER_MANAGER: 2,
+    CONVERSATION_SPEAKER_SYSTEM: 3,
     UNRECOGNIZED: -1,
   },
 };

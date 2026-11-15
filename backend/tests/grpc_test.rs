@@ -7,7 +7,7 @@ mod grpc_harness;
 
 use std::path::Path;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
@@ -324,32 +324,29 @@ async fn get_projects_returns_the_state_and_recent_events_newest_first() {
 #[tokio::test]
 async fn get_activity_returns_events_daily_summaries_and_today_counts() {
   let harness = seeded_harness();
-  // 当日（JST の今日）に 2 件、24 時間前（JST の前日）に 1 件を記録する。当日判定は
-  // JST の日付境界で行われるため、種の時刻を Utc::now() からの相対で作り、今日に確実に入れる。
+  // 当日（JST の今日）に 2 件、前日（JST）に 1 件を記録する。当日判定は JST の日付境界で
+  // 行われるため、種の時刻は Utc::now() からの相対ではなく JST の当日 0 時を基準に作り、
+  // 実行時刻が 0 時に近くても今日と前日を取り違えないようにする。
   let now = Utc::now();
+  let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("JST のオフセットは固定です");
+  let today = now.with_timezone(&jst).date_naive();
+  let today_start =
+    Utc.from_utc_datetime(&(today.and_hms_opt(0, 0, 0).expect("0時は有効な時刻です") - Duration::hours(9)));
+  let elapsed_ms = (now - today_start).num_milliseconds();
+  let inquiry_at = today_start + Duration::milliseconds(elapsed_ms / 3);
+  let goal_at = today_start + Duration::milliseconds(elapsed_ms * 2 / 3);
+  let previous_at = today_start - Duration::hours(1);
   harness
     .activity
-    .record(&event(
-      &(now - Duration::minutes(5)).to_rfc3339(),
-      "mac-mini",
-      Some("takt-dash"),
-      EventKind::GoalCreated,
-      "登録",
-    ))
+    .record(&event(&goal_at.to_rfc3339(), "mac-mini", Some("takt-dash"), EventKind::GoalCreated, "登録"))
     .expect("出来事を記録できます");
   harness
     .activity
-    .record(&event(
-      &(now - Duration::minutes(10)).to_rfc3339(),
-      "mac-mini",
-      Some("takt-dash"),
-      EventKind::Inquiry,
-      "問い合わせ",
-    ))
+    .record(&event(&inquiry_at.to_rfc3339(), "mac-mini", Some("takt-dash"), EventKind::Inquiry, "問い合わせ"))
     .expect("出来事を記録できます");
   harness
     .activity
-    .record(&event(&(now - Duration::hours(24)).to_rfc3339(), "mac-studio", Some("ddd"), EventKind::RunStarted, "開始"))
+    .record(&event(&previous_at.to_rfc3339(), "mac-studio", Some("ddd"), EventKind::RunStarted, "開始"))
     .expect("出来事を記録できます");
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;

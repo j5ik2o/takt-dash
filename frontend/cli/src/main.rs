@@ -8,7 +8,8 @@ mod proto;
 use std::{env::VarError, io::Write, net::SocketAddr, path::PathBuf, time::Duration};
 
 use proto::v1::{
-  takt_dash_service_client::TaktDashServiceClient, DashboardState, GetOverviewRequest, PendingDecisionType,
+  takt_dash_service_client::TaktDashServiceClient, ConversationSkipped, DashboardState, GetConversationRequest,
+  GetConversationResponse, GetOverviewRequest, PendingDecisionType,
 };
 use tonic::{transport::Endpoint, Code, Status};
 
@@ -30,6 +31,10 @@ const EXIT_USAGE: i32 = 2;
 
 /// 閲覧のみを持つコマンドの名前。位置引数の既定値でもあります。
 const OVERVIEW_COMMAND: &str = "overview";
+/// manager の会話を閲覧するコマンドの名前。
+const CONVERSATION_COMMAND: &str = "conversation";
+/// 会話の取得で一度に調べる行数の上限。
+const CONVERSATION_LIMIT: i32 = 200;
 
 /// 接続先を解決する材料。境界で一度だけ解決するために、生の入力をまとめて受けます。
 struct AddrSources<'a> {
@@ -70,6 +75,8 @@ fn resolve_backend_addr(sources: &AddrSources<'_>) -> Result<SocketAddr, AddrErr
 enum Invocation {
   /// 概要を表示する。
   Overview(OverviewOptions),
+  /// manager の会話を表示する。
+  Conversation(ConversationOptions),
   /// 使い方を表示して正常終了する。
   Help,
 }
@@ -81,14 +88,26 @@ struct OverviewOptions {
   config: Option<PathBuf>,
 }
 
+/// 会話の表示に使う解決前の入力。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConversationOptions {
+  project: String,
+  session: Option<String>,
+  addr:    Option<String>,
+  config:  Option<PathBuf>,
+}
+
 /// 引数の解釈に失敗したときに返す失敗。使い方と一緒に表示します。
 #[derive(Debug, PartialEq, Eq)]
 struct UsageError(String);
 
 /// コマンドラインの引数を解釈する。
 fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
-  let mut options = OverviewOptions::default();
-  let mut command_seen = false;
+  let mut addr = None;
+  let mut config = None;
+  let mut session = None;
+  let mut command: Option<String> = None;
+  let mut project: Option<String> = None;
   let mut index = 0;
   while index < args.len() {
     let argument = args[index].as_str();
@@ -96,32 +115,63 @@ fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
       | "--help" | "-h" => return Ok(Invocation::Help),
       | "--addr" => {
         let value = take_value(args, index, "--addr")?;
-        options.addr = Some(value);
+        addr = Some(value);
         index += 2;
       },
       | "--config" => {
         let value = take_value(args, index, "--config")?;
-        options.config = Some(PathBuf::from(value));
+        config = Some(PathBuf::from(value));
+        index += 2;
+      },
+      | "--session" => {
+        if command.as_deref() == Some(OVERVIEW_COMMAND) {
+          return Err(UsageError("概要の表示に --session は使えません。".to_owned()));
+        }
+        let value = take_value(args, index, "--session")?;
+        session = Some(value);
         index += 2;
       },
       | flag if flag.starts_with('-') => {
         return Err(UsageError(format!("未知の引数です: {flag}")));
       },
-      | position if !command_seen => {
-        if position != OVERVIEW_COMMAND {
+      | position => match command.as_deref() {
+        | None if position == OVERVIEW_COMMAND => {
+          command = Some(OVERVIEW_COMMAND.to_owned());
+          index += 1;
+        },
+        | None if position == CONVERSATION_COMMAND => {
+          command = Some(CONVERSATION_COMMAND.to_owned());
+          index += 1;
+        },
+        | None => {
           return Err(UsageError(format!(
-            "未知のコマンドです: {position}。このコマンドは概要を閲覧する {OVERVIEW_COMMAND} だけを持ちます。"
+            "未知のコマンドです: {position}。このコマンドは概要を閲覧する {OVERVIEW_COMMAND} と会話を閲覧する \
+             {CONVERSATION_COMMAND} を持ちます。"
           )));
-        }
-        command_seen = true;
-        index += 1;
-      },
-      | position => {
-        return Err(UsageError(format!("概要の表示に位置引数は取れません: {position}")));
+        },
+        | Some(OVERVIEW_COMMAND) => {
+          return Err(UsageError(format!("概要の表示に位置引数は取れません: {position}")));
+        },
+        | Some(CONVERSATION_COMMAND) => {
+          if project.is_some() {
+            return Err(UsageError(format!("会話の表示に位置引数は1つだけ取れます: {position}")));
+          }
+          project = Some(position.to_owned());
+          index += 1;
+        },
+        | Some(_) => unreachable!("解釈済みのコマンドは overview と conversation だけです"),
       },
     }
   }
-  Ok(Invocation::Overview(options))
+
+  if command.as_deref() == Some(CONVERSATION_COMMAND) {
+    let project = project.ok_or_else(|| UsageError("会話の表示にはプロジェクト名が必要です。".to_owned()))?;
+    return Ok(Invocation::Conversation(ConversationOptions { project, session, addr, config }));
+  }
+  if session.is_some() {
+    return Err(UsageError("概要の表示に --session は使えません。".to_owned()));
+  }
+  Ok(Invocation::Overview(OverviewOptions { addr, config }))
 }
 
 /// `--addr` や `--config` の値を取り出す。
@@ -137,7 +187,11 @@ fn take_value(args: &[String], index: usize, flag: &str) -> Result<String, Usage
 fn usage() -> String {
   [
     "使い方: takt-dash-cli overview [--addr <待ち受けアドレス>] [--config <設定ファイル>]",
+    "        takt-dash-cli conversation <プロジェクト> [--session <セッション>] [--addr <待ち受けアドレス>] \
+     [--config <設定ファイル>]",
     "位置引数を省略した場合も overview として動作し、backend の gRPC から概要を取得して表示します。",
+    "conversation は指定したプロジェクトの manager の会話を、発言の時系列で表示します。",
+    "--session   会話のセッション。省略した場合は最新の manager のセッションを使います",
     "--addr      接続先の待ち受けアドレス（例: 127.0.0.1:50051）",
     "--config    backend と同じ形式の設定ファイルのパス。listen を接続先に使います",
     "--help      この使い方を表示します",
@@ -210,6 +264,89 @@ async fn fetch_overview(addr: SocketAddr) -> Result<DashboardState, OverviewErro
   Ok(response.into_inner())
 }
 
+/// backend の `GetConversation` で会話を取得する。
+///
+/// `has_more` の間は応答の `next_after_seq` を次の `after_seq` にして続きを取り、最初の応答の
+/// `session_id` を固定します。カーソルが進まない応答では、同じページを取り続けないよう止めます。
+async fn fetch_conversation(
+  addr: SocketAddr,
+  project: &str,
+  session: Option<&str>,
+) -> Result<GetConversationResponse, OverviewError> {
+  let endpoint = Endpoint::from_shared(format!("http://{addr}"))
+    .map_err(|error| OverviewError::Unavailable(format!("接続先 {addr} の指定が不正です: {error}")))?
+    .connect_timeout(CONNECT_TIMEOUT)
+    .timeout(CONNECT_TIMEOUT);
+  let channel = endpoint
+    .connect()
+    .await
+    .map_err(|error| OverviewError::Unavailable(format!("接続先 {addr} に接続できません: {error}")))?;
+  let mut client = TaktDashServiceClient::new(channel);
+
+  let mut after_seq = 0_i64;
+  let mut session_id = session.map(str::to_owned);
+  let mut merged: Option<GetConversationResponse> = None;
+  loop {
+    let request = GetConversationRequest {
+      project: project.to_owned(),
+      session_id: session_id.clone(),
+      after_seq,
+      limit: CONVERSATION_LIMIT,
+    };
+    let page = client.get_conversation(request).await.map_err(|status| {
+      if is_connection_failure(status.code()) {
+        OverviewError::Unavailable(format!("接続先 {addr} から会話を取得できません: {}", status.message()))
+      } else {
+        OverviewError::Call(status)
+      }
+    })?;
+    let page = page.into_inner();
+    if session_id.is_none() {
+      session_id = Some(page.session_id.clone());
+    }
+    let has_more = page.has_more;
+    let next_after_seq = page.next_after_seq;
+    merged = Some(match merged {
+      | None => page,
+      | Some(accumulated) => merge_conversation_pages(accumulated, page),
+    });
+    if !has_more || next_after_seq <= after_seq {
+      break;
+    }
+    after_seq = next_after_seq;
+  }
+  Ok(merged.expect("会話の取得は少なくとも1回成功します"))
+}
+
+/// 差分のページを、既に取得した会話へ足す。
+///
+/// 同じ seq は重複させず、skipped は理由ごとに合算します。会話の識別は最初の応答の値を保ち、
+/// 続きの位置と未読の有無は新しいページの値を使います。
+fn merge_conversation_pages(
+  mut base: GetConversationResponse,
+  next: GetConversationResponse,
+) -> GetConversationResponse {
+  base.messages.extend(next.messages);
+  base.messages.sort_by_key(|message| message.seq);
+  base.messages.dedup_by_key(|message| message.seq);
+
+  let mut skipped: Vec<ConversationSkipped> = Vec::new();
+  for item in base.skipped.into_iter().chain(next.skipped) {
+    if let Some(existing) = skipped.iter_mut().find(|existing| existing.reason == item.reason) {
+      existing.count += item.count;
+    } else {
+      skipped.push(item);
+    }
+  }
+  base.skipped = skipped;
+  base.next_after_seq = next.next_after_seq;
+  base.has_more = next.has_more;
+  if next.unavailable_reason.is_some() {
+    base.unavailable_reason = next.unavailable_reason;
+  }
+  base
+}
+
 /// 概要を標準出力へ表示する。
 ///
 /// 引数を解釈し、接続先を解決し、概要を取得して表示します。出力とエラーは指定された writer へ
@@ -227,35 +364,30 @@ fn run_with(
       return EXIT_USAGE;
     },
   };
-  let options = match invocation {
+  match invocation {
     | Invocation::Help => {
       let _ = writeln!(stdout, "{}", usage());
-      return EXIT_OK;
+      EXIT_OK
     },
-    | Invocation::Overview(options) => options,
-  };
-  let config_path = options.config.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
-  let config_listen = match read_config_listen(&config_path) {
-    | Ok(listen) => listen,
-    | Err(message) => {
-      let _ = writeln!(stderr, "{message}");
-      return EXIT_FAILURE;
-    },
-  };
-  let sources = AddrSources { cli_addr: options.addr.as_deref(), env_addr, config_listen: config_listen.as_deref() };
-  let addr = match resolve_backend_addr(&sources) {
+    | Invocation::Overview(options) => run_overview(&options, env_addr, stdout, stderr),
+    | Invocation::Conversation(options) => run_conversation(&options, env_addr, stdout, stderr),
+  }
+}
+
+/// 概要の表示を実行する。
+fn run_overview(
+  options: &OverviewOptions,
+  env_addr: Result<String, VarError>,
+  stdout: &mut impl Write,
+  stderr: &mut impl Write,
+) -> i32 {
+  let addr = match resolve_addr(options.addr.as_deref(), options.config.as_ref(), env_addr, stderr) {
     | Ok(addr) => addr,
-    | Err(AddrError::Invalid { source, value }) => {
-      let _ = writeln!(stderr, "{source} の値 {value} を待ち受けアドレスとして解釈できませんでした。");
-      return EXIT_USAGE;
-    },
+    | Err(code) => return code,
   };
-  let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+  let runtime = match build_runtime(stderr) {
     | Ok(runtime) => runtime,
-    | Err(error) => {
-      let _ = writeln!(stderr, "実行環境の準備に失敗しました: {error}");
-      return EXIT_FAILURE;
-    },
+    | Err(code) => return code,
   };
   match runtime.block_on(fetch_overview(addr)) {
     | Ok(state) => {
@@ -271,6 +403,70 @@ fn run_with(
       EXIT_FAILURE
     },
   }
+}
+
+/// 会話の表示を実行する。
+fn run_conversation(
+  options: &ConversationOptions,
+  env_addr: Result<String, VarError>,
+  stdout: &mut impl Write,
+  stderr: &mut impl Write,
+) -> i32 {
+  let addr = match resolve_addr(options.addr.as_deref(), options.config.as_ref(), env_addr, stderr) {
+    | Ok(addr) => addr,
+    | Err(code) => return code,
+  };
+  let runtime = match build_runtime(stderr) {
+    | Ok(runtime) => runtime,
+    | Err(code) => return code,
+  };
+  match runtime.block_on(fetch_conversation(addr, &options.project, options.session.as_deref())) {
+    | Ok(response) => {
+      let _ = writeln!(stdout, "{}", render_conversation(&response));
+      EXIT_OK
+    },
+    | Err(OverviewError::Unavailable(message)) => {
+      let _ = writeln!(stderr, "backend に接続できません。{message}");
+      EXIT_FAILURE
+    },
+    | Err(OverviewError::Call(status)) => {
+      let _ = writeln!(stderr, "backend から会話を取得できませんでした（{}）。{}", status.code(), status.message());
+      EXIT_FAILURE
+    },
+  }
+}
+
+/// `--addr` ＞ 環境変数 ＞ 設定の `listen` ＞ 既定値の順で接続先を解決する。
+fn resolve_addr(
+  addr: Option<&str>,
+  config: Option<&PathBuf>,
+  env_addr: Result<String, VarError>,
+  stderr: &mut impl Write,
+) -> Result<SocketAddr, i32> {
+  let config_path = config.cloned().unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+  let config_listen = match read_config_listen(&config_path) {
+    | Ok(listen) => listen,
+    | Err(message) => {
+      let _ = writeln!(stderr, "{message}");
+      return Err(EXIT_FAILURE);
+    },
+  };
+  let sources = AddrSources { cli_addr: addr, env_addr, config_listen: config_listen.as_deref() };
+  match resolve_backend_addr(&sources) {
+    | Ok(addr) => Ok(addr),
+    | Err(AddrError::Invalid { source, value }) => {
+      let _ = writeln!(stderr, "{source} の値 {value} を待ち受けアドレスとして解釈できませんでした。");
+      Err(EXIT_USAGE)
+    },
+  }
+}
+
+/// 非同期の処理を実行するための実行環境を準備する。
+fn build_runtime(stderr: &mut impl Write) -> Result<tokio::runtime::Runtime, i32> {
+  tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| {
+    let _ = writeln!(stderr, "実行環境の準備に失敗しました: {error}");
+    EXIT_FAILURE
+  })
 }
 
 /// 環境変数から接続先の上書きを読む。
@@ -370,6 +566,53 @@ fn render_overview(state: &DashboardState) -> String {
   )
 }
 
+/// 会話の表示内容を日本語の文字列へ組み立てる。
+///
+/// 発言は seq の昇順に並べ、発話者・時刻・本文を出す。unavailable_reason は会話が無い理由、
+/// skipped は理由と件数として表示する。
+fn render_conversation(response: &GetConversationResponse) -> String {
+  let mut lines = vec![
+    format!("会話: {}", response.project),
+    format!("セッション: {}", response.session_id),
+    format!("プロバイダ: {}", response.provider),
+  ];
+  if let Some(reason) = response.unavailable_reason.as_deref() {
+    lines.push(format!("会話を表示できません: {reason}"));
+  }
+  for skipped in &response.skipped {
+    lines.push(format!("スキップした行: {} {}件", skipped.reason, skipped.count));
+  }
+
+  let mut messages = response.messages.clone();
+  messages.sort_by_key(|message| message.seq);
+  messages.dedup_by_key(|message| message.seq);
+  if messages.is_empty() {
+    if response.unavailable_reason.is_none() {
+      lines.push("（会話はありません）".to_owned());
+    }
+  } else {
+    lines.extend(messages.iter().map(|message| {
+      format!(
+        "- [{}] {}: {}",
+        format_timestamp(message.occurred_at.as_ref()),
+        conversation_speaker_label(message.speaker),
+        message.text
+      )
+    }));
+  }
+  lines.join("\n")
+}
+
+/// 発話者の数値を表示名へ変換する。未知の値は「不明」にする。
+fn conversation_speaker_label(speaker: i32) -> &'static str {
+  match proto::v1::ConversationSpeaker::try_from(speaker) {
+    | Ok(proto::v1::ConversationSpeaker::User) => "ユーザー",
+    | Ok(proto::v1::ConversationSpeaker::Manager) => "manager",
+    | Ok(proto::v1::ConversationSpeaker::System) => "システム",
+    | _ => "不明",
+  }
+}
+
 /// 一覧を改行で連結し、空の一覧は空であることが分かる表示にする。
 fn join_lines(lines: &[String]) -> String {
   if lines.is_empty() {
@@ -405,6 +648,7 @@ mod tests {
   //! 実際の gRPC 通信は生成クライアントと本番と同じサービス定義のダミーサーバーを通して確かめる。
 
   use std::{
+    collections::VecDeque,
     net::{Ipv4Addr, SocketAddr, TcpListener},
     sync::{Arc, Mutex},
     time::Duration,
@@ -412,15 +656,16 @@ mod tests {
 
   use prost_types::Timestamp;
   use proto::v1::{
-    self, takt_dash_service_server::TaktDashServiceServer, DashboardState, GetOverviewRequest, PendingDecision,
-    PendingDecisionType, Project, Server as ServerInfo, TaskStatusCounts,
+    self, takt_dash_service_server::TaktDashServiceServer, ConversationMessage, ConversationSkipped, DashboardState,
+    GetConversationRequest, GetConversationResponse, GetOverviewRequest, PendingDecision, PendingDecisionType, Project,
+    Server as ServerInfo, TaskStatusCounts,
   };
   use tonic::{transport::Server, Code, Request, Response, Status};
 
   use super::{
-    is_connection_failure, parse_arguments, proto, read_config_listen, render_overview, resolve_backend_addr, run_with,
-    AddrError, AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK,
-    EXIT_USAGE,
+    is_connection_failure, parse_arguments, proto, read_config_listen, render_conversation, render_overview,
+    resolve_backend_addr, run_with, AddrError, AddrSources, ConversationOptions, Invocation, OverviewOptions,
+    UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
   };
 
   // proto の列挙値は生成コードの数値をそのまま使う。
@@ -441,16 +686,22 @@ mod tests {
 
   /// `start_dummy_server` が起動したダミーサーバーの起動結果。
   struct DummyServer {
-    addr:          SocketAddr,
-    seen:          Arc<Mutex<Vec<String>>>,
-    shutdown_tx:   tokio::sync::oneshot::Sender<()>,
-    server_handle: tokio::task::JoinHandle<()>,
+    addr:                  SocketAddr,
+    seen:                  Arc<Mutex<Vec<String>>>,
+    conversation_requests: Arc<Mutex<Vec<GetConversationRequest>>>,
+    shutdown_tx:           tokio::sync::oneshot::Sender<()>,
+    server_handle:         tokio::task::JoinHandle<()>,
   }
 
   impl DummyServer {
     /// 記録した RPC 名の一覧を返す。
     fn seen_calls(&self) -> Vec<String> {
       self.seen.lock().expect("RPC 名の記録を読めませんでした").clone()
+    }
+
+    /// 受け取った `GetConversation` の要求を到着順に返す。
+    fn conversation_requests(&self) -> Vec<GetConversationRequest> {
+      self.conversation_requests.lock().expect("会話の要求の記録を読めませんでした").clone()
     }
 
     /// サーバーを止め、待ち受けを解放する。
@@ -468,8 +719,30 @@ mod tests {
 
   /// 概要を固定値で返すダミーサーバーを `127.0.0.1:0` で起動する。
   async fn start_dummy_server(overview: DashboardState) -> DummyServer {
+    start_dummy_server_with_conversation(overview, Vec::new()).await
+  }
+
+  /// 会話のページを呼び出しごとに1件ずつ返すダミーサーバーを起動する。
+  async fn start_conversation_server(
+    overview: DashboardState,
+    conversation_pages: Vec<GetConversationResponse>,
+  ) -> DummyServer {
+    start_dummy_server_with_conversation(overview, conversation_pages).await
+  }
+
+  /// 概要と会話の固定応答を持つダミーサーバーを `127.0.0.1:0` で起動する。
+  async fn start_dummy_server_with_conversation(
+    overview: DashboardState,
+    conversation_pages: Vec<GetConversationResponse>,
+  ) -> DummyServer {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let service = DummyTaktDashService { overview: Arc::new(overview), seen: seen.clone() };
+    let conversation_requests = Arc::new(Mutex::new(Vec::new()));
+    let service = DummyTaktDashService {
+      overview:              Arc::new(overview),
+      seen:                  seen.clone(),
+      conversation_pages:    Arc::new(Mutex::new(VecDeque::from(conversation_pages))),
+      conversation_requests: conversation_requests.clone(),
+    };
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
       .await
       .expect("ダミーサーバーは空きポートで待ち受けできる必要があります");
@@ -483,16 +756,18 @@ mod tests {
         })
         .await;
     });
-    DummyServer { addr, seen, shutdown_tx, server_handle }
+    DummyServer { addr, seen, conversation_requests, shutdown_tx, server_handle }
   }
 
   /// 本番と同じ生成サービス定義を実装するテスト用サーバー。
   ///
-  /// 閲覧は概要の取得だけを担うため、`GetOverview` だけを意味のある形で実装し、それ以外の
-  /// 読み取り RPC と状態ストリーミングは Unimplemented を返す。
+  /// 閲覧は概要と会話の取得だけを担うため、`GetOverview` と `GetConversation` だけを意味の
+  /// ある形で実装し、それ以外の読み取り RPC と状態ストリーミングは Unimplemented を返す。
   struct DummyTaktDashService {
-    overview: Arc<DashboardState>,
-    seen:     Arc<Mutex<Vec<String>>>,
+    overview:              Arc<DashboardState>,
+    seen:                  Arc<Mutex<Vec<String>>>,
+    conversation_pages:    Arc<Mutex<VecDeque<GetConversationResponse>>>,
+    conversation_requests: Arc<Mutex<Vec<GetConversationRequest>>>,
   }
 
   impl DummyTaktDashService {
@@ -544,10 +819,16 @@ mod tests {
 
     async fn get_conversation(
       &self,
-      _request: Request<v1::GetConversationRequest>,
+      request: Request<v1::GetConversationRequest>,
     ) -> Result<Response<v1::GetConversationResponse>, Status> {
       self.record("GetConversation");
-      Err(Status::unimplemented("このダミーサーバーは GetConversation を提供しません。"))
+      let request = request.into_inner();
+      self.conversation_requests.lock().expect("会話の要求の記録を書けませんでした").push(request);
+      let page = self.conversation_pages.lock().expect("会話のページを読めませんでした").pop_front();
+      match page {
+        | Some(page) => Ok(Response::new(page)),
+        | None => Err(Status::not_found("このダミーサーバーには会話のページが残っていません。")),
+      }
     }
 
     async fn watch_state(
@@ -721,6 +1002,43 @@ mod tests {
         run_log_silent_minutes:         10,
       }),
     }
+  }
+
+  // ----------------------------------------------------------------------------
+  // ダミーサーバーが返す固定の会話
+  // ----------------------------------------------------------------------------
+
+  /// 会話の1件を組み立てる。`secs` は UNIX 時刻の秒。
+  fn conversation_message(seq: i64, secs: i64, speaker: v1::ConversationSpeaker, text: &str) -> ConversationMessage {
+    ConversationMessage { seq, occurred_at: Some(ts(secs)), speaker: speaker as i32, text: text.to_owned() }
+  }
+
+  /// 会話の1ページを組み立てる。
+  fn conversation_page(
+    project: &str,
+    session_id: &str,
+    messages: Vec<ConversationMessage>,
+    next_after_seq: i64,
+    has_more: bool,
+  ) -> GetConversationResponse {
+    GetConversationResponse {
+      project: project.to_owned(),
+      session_id: session_id.to_owned(),
+      provider: "opencode".to_owned(),
+      messages,
+      next_after_seq,
+      has_more,
+      skipped: Vec::new(),
+      unavailable_reason: None,
+    }
+  }
+
+  /// 表示に使う UTC の日時表記を、本番と同じ書式で組み立てる。
+  fn formatted_time(secs: i64) -> String {
+    chrono::DateTime::from_timestamp(secs, 0)
+      .expect("テストの秒は有効な日時である必要があります")
+      .format("%Y-%m-%d %H:%M:%S UTC")
+      .to_string()
   }
 
   // ----------------------------------------------------------------------------
@@ -899,9 +1217,17 @@ mod tests {
 
   #[test]
   fn generated_service_exposes_only_read_rpcs() {
-    // proto のサービス定義は読み取りの 6 つだけで、書き込み系の RPC を持たない。
-    let rpcs = ["GetOverview", "GetProjects", "GetPendingDecisions", "GetActivity", "GetRunDetail", "WatchState"];
-    assert_eq!(rpcs.len(), 6);
+    // proto のサービス定義は読み取りの 7 つだけで、書き込み系の RPC を持たない。
+    let rpcs = [
+      "GetOverview",
+      "GetProjects",
+      "GetPendingDecisions",
+      "GetActivity",
+      "GetRunDetail",
+      "GetConversation",
+      "WatchState",
+    ];
+    assert_eq!(rpcs.len(), 7);
     for forbidden in ["Answer", "Merge", "Approve", "Reject", "Update", "Delete"] {
       assert!(
         !rpcs.iter().any(|rpc| rpc.contains(forbidden)),
@@ -1037,6 +1363,61 @@ mod tests {
   }
 
   #[test]
+  fn parse_arguments_accepts_conversation_with_project_and_session() {
+    let args = [
+      "conversation",
+      "corporate-site",
+      "--session",
+      "session-1",
+      "--addr",
+      "127.0.0.1:50052",
+      "--config",
+      "/tmp/a.json",
+    ]
+    .map(str::to_owned);
+
+    assert_eq!(
+      parse_arguments(&args),
+      Ok(Invocation::Conversation(ConversationOptions {
+        project: "corporate-site".to_owned(),
+        session: Some("session-1".to_owned()),
+        addr:    Some("127.0.0.1:50052".to_owned()),
+        config:  Some(std::path::PathBuf::from("/tmp/a.json")),
+      }))
+    );
+  }
+
+  #[test]
+  fn parse_arguments_requires_project_for_conversation() {
+    let result = parse_arguments(&["conversation".to_owned()]);
+
+    match result {
+      | Err(UsageError(message)) => assert!(message.contains("プロジェクト"), "-- {message}"),
+      | other => panic!("会話のプロジェクト未指定は使い方の誤りにする必要があります: {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parse_arguments_rejects_extra_project_position() {
+    let args = ["conversation".to_owned(), "corporate-site".to_owned(), "esa".to_owned()];
+
+    match parse_arguments(&args) {
+      | Err(UsageError(message)) => assert!(message.contains("esa"), "-- {message}"),
+      | other => panic!("会話の2個目の位置引数は使い方の誤りにする必要があります: {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parse_arguments_rejects_session_for_overview() {
+    let args = ["overview".to_owned(), "--session".to_owned(), "session-1".to_owned()];
+
+    match parse_arguments(&args) {
+      | Err(UsageError(message)) => assert!(message.contains("--session"), "-- {message}"),
+      | other => panic!("概要に --session は使い方の誤りにする必要があります: {other:?}"),
+    }
+  }
+
+  #[test]
   fn config_listen_overrides_default_for_connection() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
     let config = write_config(&dir, r#"{"listen":"127.0.0.1:59999"}"#);
@@ -1096,5 +1477,163 @@ mod tests {
     assert_eq!(seen_calls, vec!["GetOverview".to_owned()], "取得は GetOverview だけを呼ぶ必要があります");
     assert!(stdout.contains("概要"), "--addr の接続先から取得した概要を表示する必要があります: {stdout}");
     assert!(stdout.contains("j5ik2o-mac-mini（Mac mini、接続中）"), "{stdout}");
+  }
+
+  // ----------------------------------------------------------------------------
+  // CLI-CONVERSATION: 会話の取得と表示（AC38B-3/AC38B-4）
+  // ----------------------------------------------------------------------------
+
+  #[test]
+  fn conversation_rendering_marks_empty_conversation() {
+    let rendered = render_conversation(&conversation_page("corporate-site", "session-1", Vec::new(), 0, false));
+
+    assert!(rendered.contains("会話: corporate-site"), "{rendered}");
+    assert!(
+      rendered.contains("（会話はありません）"),
+      "空の会話は空であることが分かる表示にする必要があります: {rendered}"
+    );
+  }
+
+  #[test]
+  fn conversation_command_prints_messages_in_seq_order_and_follows_has_more() {
+    let runtime =
+      tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+    let first_secs = 1_731_600_000;
+    let second_secs = 1_731_600_060;
+    let third_secs = 1_731_600_120;
+    let pages = vec![
+      {
+        let mut first_page = conversation_page(
+          "corporate-site",
+          "session-1",
+          vec![
+            conversation_message(1, first_secs, v1::ConversationSpeaker::User, "最初の発言"),
+            conversation_message(2, second_secs, v1::ConversationSpeaker::Manager, "次の発言"),
+          ],
+          4,
+          true,
+        );
+        first_page.skipped = vec![ConversationSkipped { reason: "解釈できない行".to_owned(), count: 1 }];
+        first_page
+      },
+      conversation_page(
+        "corporate-site",
+        "session-other",
+        vec![conversation_message(4, third_secs, v1::ConversationSpeaker::System, "最後の発言")],
+        4,
+        false,
+      ),
+    ];
+    let server = runtime.block_on(start_conversation_server(sample_overview(), pages));
+
+    let (code, stdout, stderr) = run_cli(&["conversation".to_owned(), "corporate-site".to_owned()], server.addr);
+    let requests = server.conversation_requests();
+    runtime.block_on(server.shutdown());
+
+    assert_eq!(code, EXIT_OK, "会話の表示は成功する必要があります。stderr: {stderr}");
+    assert!(stderr.is_empty(), "成功時に標準エラーへ出してはいけません: {stderr}");
+    assert!(stdout.contains("会話: corporate-site"), "対象プロジェクト: {stdout}");
+    assert!(
+      stdout.contains("セッション: session-1"),
+      "最初の応答の session_id を表示し、2ページ目の値で置き換えない: {stdout}"
+    );
+    assert!(stdout.contains("プロバイダ: opencode"), "プロバイダ: {stdout}");
+    assert!(stdout.contains("ユーザー"), "ユーザーの発言: {stdout}");
+    assert!(stdout.contains("manager"), "manager の発言: {stdout}");
+    assert!(stdout.contains("システム"), "システムの発言: {stdout}");
+    assert!(stdout.contains(&formatted_time(first_secs)), "発言の時刻: {stdout}");
+
+    let first = stdout.find("最初の発言").expect("最初の発言を表示する必要があります");
+    let second = stdout.find("次の発言").expect("次の発言を表示する必要があります");
+    let third = stdout.find("最後の発言").expect("最後の発言を表示する必要があります");
+    assert!(first < second && second < third, "会話は時系列で並ぶ必要があります: {stdout}");
+
+    assert_eq!(requests.len(), 2, "has_more の間は続きを取得する必要があります");
+    assert_eq!(requests[0].project, "corporate-site");
+    assert!(requests[0].session_id.is_none(), "初回は session_id を省略する");
+    assert_eq!(requests[0].after_seq, 0);
+    assert_eq!(requests[0].limit, 200);
+    assert_eq!(requests[1].session_id.as_deref(), Some("session-1"), "以降は最初の session_id を固定する");
+    assert_eq!(requests[1].after_seq, 4, "続きは末尾メッセージの seq ではなく next_after_seq から取る");
+  }
+
+  #[test]
+  fn conversation_command_passes_session_id_to_backend() {
+    let runtime =
+      tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+    let server = runtime.block_on(start_conversation_server(sample_overview(), vec![conversation_page(
+      "corporate-site",
+      "session-9",
+      Vec::new(),
+      0,
+      false,
+    )]));
+
+    let (code, _stdout, stderr) = run_cli(
+      &["conversation".to_owned(), "corporate-site".to_owned(), "--session".to_owned(), "session-9".to_owned()],
+      server.addr,
+    );
+    let requests = server.conversation_requests();
+    runtime.block_on(server.shutdown());
+
+    assert_eq!(code, EXIT_OK, "stderr: {stderr}");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].session_id.as_deref(), Some("session-9"));
+  }
+
+  #[test]
+  fn conversation_command_shows_unavailable_reason() {
+    let runtime =
+      tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+    let mut page = conversation_page("corporate-site", "session-1", Vec::new(), 0, false);
+    page.unavailable_reason = Some("会話の保存先がありません。".to_owned());
+    let server = runtime.block_on(start_conversation_server(sample_overview(), vec![page]));
+
+    let (code, stdout, stderr) = run_cli(&["conversation".to_owned(), "corporate-site".to_owned()], server.addr);
+    runtime.block_on(server.shutdown());
+
+    assert_eq!(code, EXIT_OK, "unavailable_reason は取得の成功として扱う必要があります。stderr: {stderr}");
+    assert!(
+      stdout.contains("会話を表示できません: 会話の保存先がありません。"),
+      "会話が無い理由を表示する必要があります: {stdout}"
+    );
+  }
+
+  #[test]
+  fn conversation_command_shows_skipped_rows() {
+    let runtime =
+      tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+    let mut page = conversation_page("corporate-site", "session-1", Vec::new(), 0, false);
+    page.skipped = vec![ConversationSkipped { reason: "解釈できない行".to_owned(), count: 2 }];
+    let server = runtime.block_on(start_conversation_server(sample_overview(), vec![page]));
+
+    let (code, stdout, stderr) = run_cli(&["conversation".to_owned(), "corporate-site".to_owned()], server.addr);
+    runtime.block_on(server.shutdown());
+
+    assert_eq!(code, EXIT_OK, "stderr: {stderr}");
+    assert!(
+      stdout.contains("スキップした行: 解釈できない行 2件"),
+      "スキップした行の理由と件数を表示する必要があります: {stdout}"
+    );
+  }
+
+  #[test]
+  fn conversation_command_fails_when_backend_is_down() {
+    let addr = reserve_closed_addr();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    let code = run_with(
+      &["conversation".to_owned(), "corporate-site".to_owned()],
+      Ok(format!("{addr}")),
+      &mut stdout,
+      &mut stderr,
+    );
+
+    let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
+    let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
+    assert_eq!(code, EXIT_FAILURE, "接続できないときは取得の失敗として終わる必要があります");
+    assert!(stderr.contains("backend に接続できません。"), "接続できない旨を標準エラーへ出す必要があります: {stderr}");
+    assert!(!stdout.contains("会話:"), "接続できないときは会話を表示してはいけません: {stdout}");
   }
 }
