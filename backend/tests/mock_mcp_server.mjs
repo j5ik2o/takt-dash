@@ -20,6 +20,18 @@
 //                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
 //                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
+//     "goalDetails": {
+//       "<goalId>": {
+//         "summary": {"id","status","executionStatus","branch","integrationBranch","omissions"},
+//         "objective": "長文",
+//         "outOfScope": ["..."],
+//         "acceptanceCriteria": ["..."],
+//         "constraints": ["..."],
+//         "specifications": { "<notation>": "長文" },
+//         "workLog": [ {"id","recordedAt","summary"} ],
+//         "questions": [ {"id","kind","status","body","options","answer","createdAt"} ]
+//       }
+//     },
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
 //   }
@@ -65,14 +77,33 @@ const paged = (items, key, offsetRaw) => {
   };
 };
 
+// takt_get_goal の textOffset / maxBytes によるテキストページ。実契約の既定は 4096 バイト。
+const textPage = (text, offsetRaw, maxBytesRaw) => {
+  const buffer = Buffer.from(String(text), "utf8");
+  const offset = Number(offsetRaw ?? 0);
+  const maxBytes = Number(maxBytesRaw ?? 4096);
+  const end = Math.min(offset + maxBytes, buffer.length);
+  const nextOffset = end < buffer.length ? end : null;
+  return {
+    content: buffer.subarray(offset, end).toString("utf8"),
+    totalBytes: buffer.length,
+    offset,
+    returnedBytes: end - offset,
+    direction: "forward",
+    truncated: nextOffset !== null,
+    nextOffset,
+  };
+};
+
 // 実契約（schemas.ts の strict スキーマ）に対応する、道具ごとの必須キーと許容キー。
 const TOOL_ARGUMENTS = {
   takt_list_goals: { required: ["cwd"], optional: ["offset", "limit", "view"] },
   takt_list_tasks: { required: ["cwd"], optional: ["offset", "limit", "view", "path"] },
   takt_list_goal_questions: { required: ["cwd", "goalId"], optional: ["offset", "limit"] },
+  takt_list_goal_work_log: { required: ["cwd", "goalId"], optional: ["offset", "limit"] },
   takt_list_standalone_inquiries: { required: ["cwd"], optional: ["offset", "limit"] },
   takt_get_run: { required: ["cwd", "runSlug"], optional: ["offset", "limit", "view", "stepIndex", "instructionId", "report", "maxBytes"] },
-  takt_get_goal: { required: ["cwd", "goalId"], optional: ["path", "offset", "limit"] },
+  takt_get_goal: { required: ["cwd", "goalId"], optional: ["path", "offset", "limit", "recordId", "textOffset", "maxBytes"] },
 };
 
 // 引数の検証。実契約と同じく cwd 必須・絶対パス、未知キーは拒否する。
@@ -159,17 +190,39 @@ const handleToolCall = (name, args) => {
       return asText(paged(state.goals ?? [], "goals", args.offset));
     case "takt_list_tasks":
       return asText(paged(state.tasks ?? [], "tasks", args.offset));
-    case "takt_list_goal_questions":
-      return asText({ goalId: args.goalId, ...paged((state.goalQuestions ?? {})[args.goalId] ?? [], "questions", args.offset) });
+    case "takt_list_goal_questions": {
+      const questions = (state.goalDetails ?? {})[args.goalId]?.questions ?? (state.goalQuestions ?? {})[args.goalId] ?? [];
+      return asText({ goalId: args.goalId, ...paged(questions, "questions", args.offset) });
+    }
+    case "takt_list_goal_work_log": {
+      const workLog = (state.goalDetails ?? {})[args.goalId]?.workLog ?? [];
+      return asText(paged(workLog, "workLog", args.offset));
+    }
     case "takt_list_standalone_inquiries":
       return asText(paged(state.standaloneInquiries ?? [], "inquiries", args.offset));
     case "takt_get_run":
       return asText(runResponse(state, args));
-    case "takt_get_goal":
+    case "takt_get_goal": {
       if (args.path === "notifications") {
         return asText(paged((state.notifications ?? {})[args.goalId] ?? [], "items", args.offset));
       }
+      const detail = (state.goalDetails ?? {})[args.goalId] ?? {};
+      if (args.path === undefined) {
+        return asText({ goal: detail.summary ?? {} });
+      }
+      if (String(args.path).startsWith("specifications.")) {
+        const notation = String(args.path).slice("specifications.".length);
+        return asText(textPage((detail.specifications ?? {})[notation] ?? "", args.textOffset, args.maxBytes));
+      }
+      const value = detail[args.path];
+      if (Array.isArray(value)) {
+        return asText(paged(value, "items", args.offset));
+      }
+      if (typeof value === "string") {
+        return asText(textPage(value, args.textOffset, args.maxBytes));
+      }
       return asText({});
+    }
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };
   }

@@ -13,9 +13,9 @@ use super::client::{CallError, McpClient, McpClientConfig};
 use crate::{
   config::McpServer,
   model::{
-    ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, ReportEntry,
-    RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, RunStatus, RunStepEntry, StepLogEntry, TaskEntry,
-    TaskStatus,
+    ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
+    InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, ReportEntry, RunDetail, RunEntry,
+    RunInstructionEntry, RunReportEntry, RunStatus, RunStepEntry, StepLogEntry, TaskDetail, TaskEntry, TaskStatus,
   },
 };
 
@@ -394,20 +394,40 @@ fn parse_time(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, ToolError>
   }
 }
 
+fn parse_goal_status(value: Option<&Value>) -> Result<GoalStatus, ToolError> {
+  match value.and_then(Value::as_str) {
+    | Some("created") => Ok(GoalStatus::Created),
+    | Some("awaiting_merge") => Ok(GoalStatus::AwaitingMerge),
+    | Some("completed") => Ok(GoalStatus::Completed),
+    | other => Err(ToolError::Parse(format!("未知のゴールの状態です: {other:?}"))),
+  }
+}
+
+fn parse_goal_execution_status(value: Option<&Value>) -> Result<ExecutionStatus, ToolError> {
+  match value.and_then(Value::as_str) {
+    | Some("active") => Ok(ExecutionStatus::Active),
+    | Some("paused") => Ok(ExecutionStatus::Paused),
+    | Some("aborted") => Ok(ExecutionStatus::Aborted),
+    | other => Err(ToolError::Parse(format!("未知のゴールの実行状態です: {other:?}"))),
+  }
+}
+
+fn parse_task_status(value: Option<&Value>) -> Result<TaskStatus, ToolError> {
+  match value.and_then(Value::as_str) {
+    | Some("pending") => Ok(TaskStatus::Pending),
+    | Some("running") => Ok(TaskStatus::Running),
+    | Some("completed") => Ok(TaskStatus::Completed),
+    | Some("failed") => Ok(TaskStatus::Failed),
+    | Some("exceeded") => Ok(TaskStatus::Exceeded),
+    | Some("pr_failed") => Ok(TaskStatus::PrFailed),
+    | other => Err(ToolError::Parse(format!("未知のタスクの状態です: {other:?}"))),
+  }
+}
+
 fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
   let goal_id = string_field(value, "id")?;
-  let status = match value.get("status").and_then(Value::as_str) {
-    | Some("created") => GoalStatus::Created,
-    | Some("awaiting_merge") => GoalStatus::AwaitingMerge,
-    | Some("completed") => GoalStatus::Completed,
-    | other => return Err(ToolError::Parse(format!("未知のゴールの状態です: {other:?}"))),
-  };
-  let execution_status = match value.get("executionStatus").and_then(Value::as_str) {
-    | Some("active") => ExecutionStatus::Active,
-    | Some("paused") => ExecutionStatus::Paused,
-    | Some("aborted") => ExecutionStatus::Aborted,
-    | other => return Err(ToolError::Parse(format!("未知のゴールの実行状態です: {other:?}"))),
-  };
+  let status = parse_goal_status(value.get("status"))?;
+  let execution_status = parse_goal_execution_status(value.get("executionStatus"))?;
   let pull_request = value.get("pullRequest");
   let pull_request_number = pull_request.and_then(|value| value.get("number")).and_then(Value::as_i64);
   let pull_request_url = pull_request.and_then(|value| value.get("url")).and_then(Value::as_str).map(str::to_owned);
@@ -425,15 +445,7 @@ fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
 }
 
 fn parse_task(value: &Value) -> Result<TaskEntry, ToolError> {
-  let status = match value.get("status").and_then(Value::as_str) {
-    | Some("pending") => TaskStatus::Pending,
-    | Some("running") => TaskStatus::Running,
-    | Some("completed") => TaskStatus::Completed,
-    | Some("failed") => TaskStatus::Failed,
-    | Some("exceeded") => TaskStatus::Exceeded,
-    | Some("pr_failed") => TaskStatus::PrFailed,
-    | other => return Err(ToolError::Parse(format!("未知のタスクの状態です: {other:?}"))),
-  };
+  let status = parse_task_status(value.get("status"))?;
   let started_at = parse_time(value.get("startedAt"))?;
   Ok(TaskEntry {
     name: string_field(value, "name")?,
@@ -443,6 +455,50 @@ fn parse_task(value: &Value) -> Result<TaskEntry, ToolError> {
     run_slug: optional_string(value, "runSlug"),
     current_step: optional_string(value, "currentStep"),
     merge_task: value.get("mergeTask").and_then(Value::as_bool).unwrap_or(false),
+  })
+}
+
+fn parse_goal_work_log(value: &Value) -> Result<GoalWorkLogEntry, ToolError> {
+  let recorded_at = parse_time(value.get("recordedAt"))?
+    .ok_or_else(|| ToolError::Parse("作業記録の recordedAt がありません".to_owned()))?;
+  Ok(GoalWorkLogEntry {
+    work_log_id: string_field(value, "id")?,
+    recorded_at,
+    summary: optional_string(value, "summary").unwrap_or_default(),
+  })
+}
+
+fn parse_goal_question(value: &Value) -> Result<GoalQuestionEntry, ToolError> {
+  let answer = value.get("answer");
+  let options = value
+    .get("options")
+    .and_then(Value::as_array)
+    .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+    .unwrap_or_default();
+  Ok(GoalQuestionEntry {
+    question_id: string_field(value, "id")?,
+    kind: optional_string(value, "kind").unwrap_or_default(),
+    status: optional_string(value, "status").unwrap_or_default(),
+    body: optional_string(value, "body").unwrap_or_default(),
+    options,
+    answer_text: answer.and_then(|answer| optional_string(answer, "text")),
+    answer_decision: answer.and_then(|answer| optional_string(answer, "decision")),
+    answer_report: answer.and_then(|answer| optional_string(answer, "report")),
+    created_at: parse_time(value.get("createdAt"))?,
+    answered_at: answer.map(|answer| parse_time(answer.get("answeredAt"))).transpose()?.flatten(),
+  })
+}
+
+fn parse_task_detail(project: &str, value: &Value) -> Result<TaskDetail, ToolError> {
+  Ok(TaskDetail {
+    project:             project.to_owned(),
+    task_name:           string_field(value, "name")?,
+    goal_id:             optional_string(value, "goalId"),
+    status:              parse_task_status(value.get("status"))?,
+    summary:             optional_string(value, "summary").unwrap_or_default(),
+    started_at:          parse_time(value.get("startedAt"))?,
+    run_slug:            optional_string(value, "runSlug"),
+    pull_request_number: value.get("prNumber").and_then(Value::as_i64),
   })
 }
 
@@ -622,6 +678,170 @@ fn step_log_next_offset(value: &Value) -> Option<usize> {
 }
 
 impl<'a> ToolSet<'a> {
+  /// 指定した goalId の詳細を takt_get_goal と補助道具から読み取る。
+  ///
+  /// 目的・対象外・受け入れ条件・制約・仕様は takt_get_goal の path/textOffset を全ページ追従して
+  /// 全文を集めます。作業記録と質問は専用の一覧道具を全ページ追従します。紐づくタスクは
+  /// takt_list_tasks を全ページ取得して goal_id で絞ります。
+  pub async fn read_goal_detail(&mut self, goal_id: &str) -> Result<GoalDetail, ToolError> {
+    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id })).await?;
+    let goal =
+      value.get("goal").ok_or_else(|| ToolError::Parse("takt_get_goal の応答に goal がありません".to_owned()))?;
+    let returned_id = string_field(goal, "id")?;
+    if returned_id != goal_id {
+      return Err(ToolError::Parse(format!("要求したゴール {goal_id} と応答のゴール {returned_id} が一致しません")));
+    }
+    let status = parse_goal_status(goal.get("status"))?;
+    let execution_status = parse_goal_execution_status(goal.get("executionStatus"))?;
+    let branch = optional_string(goal, "branch").unwrap_or_default();
+    let integration_branch = optional_string(goal, "integrationBranch").unwrap_or_default();
+    let objective = self.read_goal_text(goal_id, "objective").await?;
+    let out_of_scope = self.read_goal_array(goal_id, "outOfScope").await?;
+    let acceptance_criteria = self.read_goal_array(goal_id, "acceptanceCriteria").await?;
+    let constraints = self.read_goal_array(goal_id, "constraints").await?;
+    let mut specifications = BTreeMap::new();
+    if let Some(notations) =
+      goal.get("omissions").and_then(|value| value.get("specifications")).and_then(Value::as_object)
+    {
+      for notation in notations.keys() {
+        let content = self.read_goal_text(goal_id, &format!("specifications.{notation}")).await?;
+        specifications.insert(notation.clone(), content);
+      }
+    }
+    let work_log = self.read_goal_work_log(goal_id).await?;
+    let questions = self.read_goal_questions(goal_id).await?;
+    let tasks = self
+      .list_tasks()
+      .await?
+      .into_iter()
+      .filter(|task| task.goal_id.as_deref() == Some(goal_id))
+      .map(|task| GoalTaskEntry { task_name: task.name, status: task.status, run_slug: task.run_slug })
+      .collect();
+    Ok(GoalDetail {
+      goal_id: goal_id.to_owned(),
+      status,
+      execution_status,
+      objective,
+      out_of_scope,
+      acceptance_criteria,
+      constraints,
+      specifications,
+      branch,
+      integration_branch,
+      work_log,
+      questions,
+      tasks,
+    })
+  }
+
+  /// takt_get_goal の文字列フィールドを textOffset で全ページ連結する。
+  async fn read_goal_text(&mut self, goal_id: &str, path: &str) -> Result<String, ToolError> {
+    let mut content = String::new();
+    let mut offset = 0;
+    for _ in 0..MAX_PAGES {
+      let value =
+        self.call_json("takt_get_goal", json!({ "goalId": goal_id, "path": path, "textOffset": offset })).await?;
+      let chunk = value
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::Parse(format!("{path} の応答に content がありません")))?;
+      content.push_str(chunk);
+      match value.get("nextOffset").and_then(Value::as_u64) {
+        | Some(next) => offset = next,
+        | None => return Ok(content),
+      }
+    }
+    Err(ToolError::Parse(format!("takt_get_goal の {path} の追従が上限に達しました")))
+  }
+
+  /// takt_get_goal の配列フィールドを offset で全ページ集める。
+  async fn read_goal_array(&mut self, goal_id: &str, path: &str) -> Result<Vec<String>, ToolError> {
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    for _ in 0..MAX_PAGES {
+      let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id, "path": path, "offset": offset })).await?;
+      let page = Page::from_value(&value, "items")?;
+      for item in &page.items {
+        let text = item.as_str().ok_or_else(|| ToolError::Parse(format!("{path} の要素が文字列ではありません")))?;
+        entries.push(text.to_owned());
+      }
+      match page.next_offset {
+        | Some(next) => offset = next,
+        | None => return Ok(entries),
+      }
+    }
+    Err(ToolError::Parse(format!("takt_get_goal の {path} の追従が上限に達しました")))
+  }
+
+  /// takt_list_goal_work_log を全ページ追従して作業記録を集める。
+  async fn read_goal_work_log(&mut self, goal_id: &str) -> Result<Vec<GoalWorkLogEntry>, ToolError> {
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    for _ in 0..MAX_PAGES {
+      let value = self.call_json("takt_list_goal_work_log", json!({ "goalId": goal_id, "offset": offset })).await?;
+      let page = Page::from_value(&value, "workLog")?;
+      for item in &page.items {
+        entries.push(parse_goal_work_log(item)?);
+      }
+      match page.next_offset {
+        | Some(next) => offset = next,
+        | None => return Ok(entries),
+      }
+    }
+    Err(ToolError::Parse("takt_list_goal_work_log のページ追従が上限に達しました".to_owned()))
+  }
+
+  /// takt_list_goal_questions を全ページ追従して質問を集める。
+  async fn read_goal_questions(&mut self, goal_id: &str) -> Result<Vec<GoalQuestionEntry>, ToolError> {
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    for _ in 0..MAX_PAGES {
+      let value = self.call_json("takt_list_goal_questions", json!({ "goalId": goal_id, "offset": offset })).await?;
+      let page = Page::from_value(&value, "questions")?;
+      for item in &page.items {
+        entries.push(parse_goal_question(item)?);
+      }
+      match page.next_offset {
+        | Some(next) => offset = next,
+        | None => return Ok(entries),
+      }
+    }
+    Err(ToolError::Parse("takt_list_goal_questions のページ追従が上限に達しました".to_owned()))
+  }
+
+  /// takt_list_tasks を全ページ取得し、タスク名（と任意の
+  /// goalId）が一致する最初のタスク詳細を返す。
+  ///
+  /// 一致するタスクが無ければ Ok(None)、ページ追従が上限に達したら Parse エラーにします。
+  pub async fn read_task_detail(
+    &mut self,
+    project: &str,
+    task_name: &str,
+    goal_id: Option<&str>,
+  ) -> Result<Option<TaskDetail>, ToolError> {
+    let mut offset = 0;
+    for _ in 0..MAX_PAGES {
+      let value = self.call_json("takt_list_tasks", json!({ "offset": offset })).await?;
+      let page = Page::from_value(&value, "tasks")?;
+      for item in &page.items {
+        if item.get("name").and_then(Value::as_str) != Some(task_name) {
+          continue;
+        }
+        if let Some(goal_id) = goal_id {
+          if item.get("goalId").and_then(Value::as_str) != Some(goal_id) {
+            continue;
+          }
+        }
+        return Ok(Some(parse_task_detail(project, item)?));
+      }
+      match page.next_offset {
+        | Some(next) => offset = next,
+        | None => return Ok(None),
+      }
+    }
+    Err(ToolError::Parse("takt_list_tasks のページ追従が上限に達しました".to_owned()))
+  }
+
   /// 指定した runSlug の詳細を takt_get_run から読み取る。
   ///
   /// stepLogs は先頭 50 件のウィンドウで返るため、stepLogPage.nextOffset が残っていれば追加ページを

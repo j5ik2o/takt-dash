@@ -25,7 +25,7 @@ fn rpc_declarations(source: &str) -> Vec<String> {
 }
 
 #[test]
-fn proto_defines_exactly_the_six_read_rpcs() {
+fn proto_defines_exactly_the_nine_read_rpcs() {
   let names = rpc_declarations(PROTO_SOURCE);
   let mut sorted = names.clone();
   sorted.sort();
@@ -34,13 +34,16 @@ fn proto_defines_exactly_the_six_read_rpcs() {
     sorted,
     vec![
       "GetActivity".to_owned(),
+      "GetGoalDetail".to_owned(),
+      "GetGoals".to_owned(),
       "GetOverview".to_owned(),
       "GetPendingDecisions".to_owned(),
       "GetProjects".to_owned(),
       "GetRunDetail".to_owned(),
+      "GetTaskDetail".to_owned(),
       "WatchState".to_owned(),
     ],
-    "読み取り系の6 RPC だけが定義されている必要があります: {names:?}"
+    "読み取り系の9 RPC だけが定義されている必要があります: {names:?}"
   );
 }
 
@@ -54,7 +57,16 @@ fn watch_state_is_a_server_streaming_rpc() {
     "WatchState は server streaming として宣言する必要があります: {}",
     declarations[0]
   );
-  for name in ["GetOverview", "GetProjects", "GetPendingDecisions", "GetActivity", "GetRunDetail"] {
+  for name in [
+    "GetOverview",
+    "GetProjects",
+    "GetPendingDecisions",
+    "GetActivity",
+    "GetRunDetail",
+    "GetGoals",
+    "GetGoalDetail",
+    "GetTaskDetail",
+  ] {
     let line = PROTO_SOURCE
       .lines()
       .map(str::trim)
@@ -126,6 +138,9 @@ fn generated_client_exposes_the_read_calls() {
     std::marker::PhantomData::<v1::GetPendingDecisionsRequest>,
     std::marker::PhantomData::<v1::GetActivityRequest>,
     std::marker::PhantomData::<v1::GetRunDetailRequest>,
+    std::marker::PhantomData::<v1::GetGoalsRequest>,
+    std::marker::PhantomData::<v1::GetGoalDetailRequest>,
+    std::marker::PhantomData::<v1::GetTaskDetailRequest>,
     std::marker::PhantomData::<v1::WatchStateRequest>,
   );
   let _response_types = (
@@ -133,5 +148,8 @@ fn generated_client_exposes_the_read_calls() {
     std::marker::PhantomData::<v1::GetPendingDecisionsResponse>,
     std::marker::PhantomData::<v1::GetActivityResponse>,
     std::marker::PhantomData::<v1::GetRunDetailResponse>,
+    std::marker::PhantomData::<v1::GetGoalsResponse>,
+    std::marker::PhantomData::<v1::GetGoalDetailResponse>,
+    std::marker::PhantomData::<v1::GetTaskDetailResponse>,
   );
 }

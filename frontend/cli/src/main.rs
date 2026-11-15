@@ -541,6 +541,30 @@ mod tests {
       Err(Status::unimplemented("このダミーサーバーは GetRunDetail を提供しません。"))
     }
 
+    async fn get_goals(
+      &self,
+      _request: Request<v1::GetGoalsRequest>,
+    ) -> Result<Response<v1::GetGoalsResponse>, Status> {
+      self.record("GetGoals");
+      Err(Status::unimplemented("このダミーサーバーは GetGoals を提供しません。"))
+    }
+
+    async fn get_goal_detail(
+      &self,
+      _request: Request<v1::GetGoalDetailRequest>,
+    ) -> Result<Response<v1::GetGoalDetailResponse>, Status> {
+      self.record("GetGoalDetail");
+      Err(Status::unimplemented("このダミーサーバーは GetGoalDetail を提供しません。"))
+    }
+
+    async fn get_task_detail(
+      &self,
+      _request: Request<v1::GetTaskDetailRequest>,
+    ) -> Result<Response<v1::GetTaskDetailResponse>, Status> {
+      self.record("GetTaskDetail");
+      Err(Status::unimplemented("このダミーサーバーは GetTaskDetail を提供しません。"))
+    }
+
     async fn watch_state(
       &self,
       _request: Request<v1::WatchStateRequest>,

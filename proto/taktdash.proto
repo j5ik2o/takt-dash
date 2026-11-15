@@ -22,6 +22,15 @@ service TaktDashService {
   // 1つの run について、takt_get_run で取得できる範囲を返す。
   rpc GetRunDetail(GetRunDetailRequest) returns (GetRunDetailResponse);
 
+  // すべてのサーバー・すべてのプロジェクトのゴールを返す。
+  rpc GetGoals(GetGoalsRequest) returns (GetGoalsResponse);
+
+  // 1つのゴールの詳細を返す。
+  rpc GetGoalDetail(GetGoalDetailRequest) returns (GetGoalDetailResponse);
+
+  // 1つのタスクの詳細を返す。
+  rpc GetTaskDetail(GetTaskDetailRequest) returns (GetTaskDetailResponse);
+
   // 接続時に即時に全件を返し、その後は状態が変わるたびに送る。
   rpc WatchState(WatchStateRequest) returns (stream DashboardState);
 }
@@ -313,6 +322,85 @@ message GetRunDetailResponse {
   bool log_silent = 22;                         // ログの無音の判定済みフラグ
   bool server_connected = 23;                   // 読み先の応答の有無
   google.protobuf.Timestamp server_last_read_at = 24;  // 読み先から最後に読めた時刻
+}
+
+// ゴール一覧の要求。
+message GetGoalsRequest {}
+
+// ゴール一覧の応答。
+message GetGoalsResponse {
+  repeated Goal goals = 1;  // 全サーバー・全プロジェクトのゴール
+}
+
+// ゴール詳細の要求。
+message GetGoalDetailRequest {
+  string goal_id = 1;  // ゴール ID
+}
+
+// ゴールの作業記録。
+message GoalWorkLog {
+  string work_log_id = 1;                     // 記録の ID
+  google.protobuf.Timestamp recorded_at = 2;  // 記録した時刻
+  string summary = 3;                         // 記録の本文
+}
+
+// ゴールに対する manager の質問と回答。
+message GoalQuestion {
+  string question_id = 1;                            // 質問の ID
+  string kind = 2;                                   // 種類（question / operation_request / approval）
+  string status = 3;                                 // 状態（pending / answered / withdrawn）
+  string body = 4;                                   // 質問の本文
+  repeated string options = 5;                       // 選択肢
+  optional string answer_text = 6;                   // 回答の本文
+  optional string answer_decision = 7;               // 回答の判断（allow / deny）
+  optional string answer_report = 8;                 // 作業の報告（completed / unable）
+  optional google.protobuf.Timestamp created_at = 9;   // 質問した時刻
+  optional google.protobuf.Timestamp answered_at = 10; // 回答した時刻
+}
+
+// ゴールに紐づくタスク。
+message GoalTask {
+  string task_name = 1;          // タスク名
+  TaskStatus status = 2;         // 状態
+  optional string run_slug = 3;  // runSlug
+}
+
+// ゴール詳細の応答。
+message GetGoalDetailResponse {
+  string goal_id = 1;                        // ゴール ID
+  string server_id = 2;                      // サーバー
+  string project = 3;                        // プロジェクト
+  GoalStatus status = 4;                     // 状態
+  ExecutionStatus execution_status = 5;      // 実行状態
+  string objective = 6;                      // 目的
+  repeated string out_of_scope = 7;          // 対象外
+  repeated string acceptance_criteria = 8;   // 受け入れ条件
+  repeated string constraints = 9;           // 制約
+  map<string, string> specifications = 10;   // 仕様（gherkin / quint / alloy）
+  string branch = 11;                        // ゴールブランチ
+  string integration_branch = 12;            // 統合ブランチ
+  repeated GoalWorkLog work_log = 13;        // 作業記録
+  repeated GoalQuestion questions = 14;      // 質問と回答
+  repeated GoalTask tasks = 15;              // 紐づくタスク
+}
+
+// タスク詳細の要求。
+message GetTaskDetailRequest {
+  string project = 1;           // プロジェクト名
+  string task_name = 2;         // タスク名
+  optional string goal_id = 3;  // ゴール ID（指定時は一致するタスクに限る）
+}
+
+// タスク詳細の応答。
+message GetTaskDetailResponse {
+  string project = 1;                                  // プロジェクト
+  string task_name = 2;                                // タスク名
+  optional string goal_id = 3;                         // ゴール ID
+  TaskStatus status = 4;                               // 状態
+  string summary = 5;                                  // 要約
+  optional google.protobuf.Timestamp started_at = 6;   // 開始時刻
+  optional string run_slug = 7;                        // runSlug
+  optional int64 pull_request_number = 8;              // 仕上げタスクのプルリクエスト番号
 }
 
 // 状態ストリーミングの接続を要求する。
