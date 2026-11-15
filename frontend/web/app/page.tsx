@@ -9,7 +9,7 @@ export type OverviewPageProps = {
 
 export default function OverviewPage({ view }: OverviewPageProps): ReactElement {
   if (view !== undefined) {
-    return <OverviewContent view={view} />;
+    return <OverviewContent view={view} disconnected={false} />;
   }
   return <LiveOverview />;
 }

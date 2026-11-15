@@ -7,7 +7,7 @@ mod grpc_harness;
 
 use std::path::Path;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset, TimeZone, Utc};
 use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
@@ -325,27 +325,25 @@ async fn get_projects_returns_the_state_and_recent_events_newest_first() {
 async fn get_activity_returns_events_daily_summaries_and_today_counts() {
   let harness = seeded_harness();
   // 当日（JST の今日）に 2 件、24 時間前（JST の前日）に 1 件を記録する。当日判定は
-  // JST の日付境界で行われるため、種の時刻を Utc::now() からの相対で作り、今日に確実に入れる。
+  // JST の日付境界で行われるため、種の時刻は今日の JST 0 時台に固定して作る。
+  // Utc::now() からの相対で作ると、JST の日付が変わった直後は前日に落ちてしまう。
   let now = Utc::now();
+  let jst = FixedOffset::east_opt(9 * 3600).expect("JST のオフセットは固定です");
+  let today = now.with_timezone(&jst).date_naive();
+  let today_at = |hour: u32, minute: u32| {
+    jst
+      .from_local_datetime(&today.and_hms_opt(hour, minute, 0).expect("有効な時刻です"))
+      .single()
+      .expect("JST の時刻は一意です")
+      .with_timezone(&Utc)
+  };
   harness
     .activity
-    .record(&event(
-      &(now - Duration::minutes(5)).to_rfc3339(),
-      "mac-mini",
-      Some("takt-dash"),
-      EventKind::GoalCreated,
-      "登録",
-    ))
+    .record(&event(&today_at(0, 1).to_rfc3339(), "mac-mini", Some("takt-dash"), EventKind::GoalCreated, "登録"))
     .expect("出来事を記録できます");
   harness
     .activity
-    .record(&event(
-      &(now - Duration::minutes(10)).to_rfc3339(),
-      "mac-mini",
-      Some("takt-dash"),
-      EventKind::Inquiry,
-      "問い合わせ",
-    ))
+    .record(&event(&today_at(0, 0).to_rfc3339(), "mac-mini", Some("takt-dash"), EventKind::Inquiry, "問い合わせ"))
     .expect("出来事を記録できます");
   harness
     .activity
@@ -369,7 +367,6 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
 
   assert_eq!(response.daily_summaries.len(), 7, "7日分の日次集計を返します");
   let dates: Vec<&str> = response.daily_summaries.iter().map(|summary| summary.date.as_str()).collect();
-  let today = now.with_timezone(&chrono::FixedOffset::east_opt(9 * 3600).unwrap()).date_naive();
   let oldest = (today - Duration::days(6)).format("%Y-%m-%d").to_string();
   let newest = today.format("%Y-%m-%d").to_string();
   assert_eq!(dates.first().copied(), Some(oldest.as_str()), "古い日から並べます");
@@ -438,4 +435,44 @@ fn event(at: &str, server: &str, project: Option<&str>, kind: EventKind, body: &
 fn timestamp(text: &str) -> prost_types::Timestamp {
   let time = time(text);
   prost_types::Timestamp { seconds: time.timestamp(), nanos: time.timestamp_subsec_nanos() as i32 }
+}
+
+#[tokio::test]
+async fn プロジェクトごとの接続状態と最後に読めた時刻を返す() {
+  // 同じサーバーの2プロジェクトのうち片方だけが読み取りに失敗したとき、API は
+  // プロジェクトごとの成否と最後に読めた時刻を返します。サーバー単位の接続状態は
+  // 健常なプロジェクトがあるため真のままです。
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", project_dir()), server_meta(), json!({}))
+    .single_project(project("corporate-site", project_dir()), server_meta(), json!({}))
+    .build();
+  harness.store.record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T12:00:00Z"));
+  harness.store.record_success("corporate-site", ProjectSnapshot::empty(), time("2026-11-13T12:01:00Z"));
+  harness.store.record_failure("corporate-site");
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let response = client.get_projects(GetProjectsRequest {}).await.expect("プロジェクトを取得できます").into_inner();
+  let state = response.state.expect("状態があります");
+
+  let healthy = state.projects.iter().find(|entry| entry.name == "takt-dash").expect("takt-dash のプロジェクト");
+  assert!(healthy.connected, "読み取れたプロジェクトは接続ありです");
+  assert_eq!(
+    healthy.last_read_at,
+    Some(timestamp("2026-11-13T12:00:00Z")),
+    "読み取れたプロジェクトの最後に読めた時刻を返します"
+  );
+
+  let failed =
+    state.projects.iter().find(|entry| entry.name == "corporate-site").expect("corporate-site のプロジェクト");
+  assert!(!failed.connected, "読み取りに失敗したプロジェクトだけ接続なしです");
+  assert_eq!(
+    failed.last_read_at,
+    Some(timestamp("2026-11-13T12:01:00Z")),
+    "読み取りに失敗しても最後に読めた時刻を保持します"
+  );
+
+  assert!(state.servers[0].connected, "サーバー単位の接続状態は健常なプロジェクトがあれば真です");
+
+  server.stop().await;
 }

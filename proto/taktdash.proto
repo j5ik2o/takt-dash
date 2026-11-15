@@ -102,10 +102,12 @@ message Server {
 
 // 集約対象のプロジェクトを表す。
 message Project {
-  string name = 1;                  // 名前
-  string about = 2;                 // 説明
-  string server_id = 3;             // 集約設定上のサーバー
-  int32 completed_tasks_24h = 4;    // 直近24時間に完了したタスクの件数
+  string name = 1;                             // 名前
+  string about = 2;                            // 説明
+  string server_id = 3;                        // 集約設定上のサーバー
+  int32 completed_tasks_24h = 4;               // 直近24時間に完了したタスクの件数
+  bool connected = 5;                          // 応答の有無（プロジェクト単位）
+  google.protobuf.Timestamp last_read_at = 6;  // 最後に読めた時刻
 }
 
 // タスクの状態ごとの件数を表す。
