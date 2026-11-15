@@ -1,9 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { BackendUnavailableError, createBackendClient } from "@/src/grpc/client";
-import { DashboardState } from "@/src/proto/taktdash";
-import { resolveThresholds } from "@/src/state/dashboard";
-import { measurePage, type TimingSink } from "@/src/telemetry/timing";
+import { loadServerState } from "@/src/state/server-state";
+import { measurePage } from "@/src/telemetry/timing";
 import { StateStreamProvider } from "@/src/components/state-provider";
 import { Sidebar } from "@/src/components/sidebar";
 import { BackendUnavailableNotice } from "@/src/components/backend-unavailable-notice";
@@ -15,28 +13,15 @@ export const metadata: Metadata = {
 
 export const dynamic = "force-dynamic";
 
-const EMPTY_STATE = DashboardState.create({
-  thresholds: resolveThresholds(undefined),
-});
-
-async function loadInitialState(timing: TimingSink): Promise<{ state: DashboardState; unavailable: boolean }> {
-  const client = createBackendClient({ timing });
-  try {
-    return { state: await client.getOverview(), unavailable: false };
-  } catch (error) {
-    if (error instanceof BackendUnavailableError) {
-      return { state: EMPTY_STATE, unavailable: true };
-    }
-    throw error;
-  } finally {
-    await client.close();
-  }
-}
-
 export default async function RootLayout({ children }: LayoutProps<"/">) {
   // layout は全ページで実行されるため、ここで各ページのサーバー側 RPC（GetOverview）と
-  // ページ応答の内訳を page=layout の1行として記録する。
-  const { state, unavailable } = await measurePage("layout", (timing) => loadInitialState(timing));
+  // ページ応答の内訳を page=layout の1行として記録する。状態は要求内で共有し、
+  // ページ側はこれを再利用する。
+  const { state, unavailable } = await measurePage("layout", async (timing) => {
+    const loaded = await loadServerState();
+    timing.recordRpc({ rpc: "GetOverview", durationMs: loaded.rpcMs });
+    return loaded;
+  });
   return (
     <html lang="ja">
       <body>

@@ -20,6 +20,8 @@ export type ServerBehavior = {
   activity?: GetActivityResponse;
   runDetail?: GetRunDetailResponse | ServerError;
   watch?: DashboardState[];
+  // 呼ばれた RPC の名前を、呼び出し順に記録する。
+  calls?: string[];
   // ストリームを送り終えた後も接続を保ち、クライアントの切断を待つか。
   holdWatchOpen?: boolean;
   // WatchState を購読している呼び出しがキャンセルされたときに呼ばれる。
@@ -38,6 +40,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
   const server = new grpc.Server();
   server.addService(TaktDashServiceService, {
     getOverview: (_call: grpc.ServerUnaryCall<unknown, unknown>, callback: grpc.sendUnaryData<DashboardState>) => {
+      behavior.calls?.push("GetOverview");
       if (!behavior.overview) {
         callback(notFound("未設定"));
         return;
@@ -48,6 +51,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       _call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<GetProjectsResponse>,
     ) => {
+      behavior.calls?.push("GetProjects");
       if (!behavior.projects) {
         callback(notFound("未設定"));
         return;
@@ -58,6 +62,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       _call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<{ state: DashboardState }>,
     ) => {
+      behavior.calls?.push("GetPendingDecisions");
       if (!behavior.pendingDecisions) {
         callback(notFound("未設定"));
         return;
@@ -68,6 +73,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       _call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<GetActivityResponse>,
     ) => {
+      behavior.calls?.push("GetActivity");
       if (!behavior.activity) {
         callback(notFound("未設定"));
         return;
@@ -78,6 +84,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       _call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<GetRunDetailResponse>,
     ) => {
+      behavior.calls?.push("GetRunDetail");
       const result = behavior.runDetail;
       if (!result) {
         callback(notFound("run が見つかりません"));
@@ -90,6 +97,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       callback(null, result);
     },
     watchState: (call: grpc.ServerWritableStream<unknown, DashboardState>) => {
+      behavior.calls?.push("WatchState");
       let cancelled = false;
       call.on("cancelled", () => {
         cancelled = true;

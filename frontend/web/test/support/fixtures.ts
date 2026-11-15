@@ -170,12 +170,11 @@ export function createServerEventCounts(): ServerEventCount[] {
 }
 
 export function createProjectsResponse(): GetProjectsResponse {
-  return { state: createDashboardState(), recentEvents: createActivityEvents() };
+  return { recentEvents: createActivityEvents() };
 }
 
 export function createActivityResponse(): GetActivityResponse {
   return {
-    state: createDashboardState(),
     events: createActivityEvents(),
     dailySummaries: createDailySummaries(),
     todayCountsByServer: createServerEventCounts(),

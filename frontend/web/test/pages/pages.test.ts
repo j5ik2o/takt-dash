@@ -10,7 +10,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   createActivityResponse,
   createDashboardState,
-  createProjectsResponse,
   NOW,
 } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
@@ -73,25 +72,12 @@ test("概要ページは24時間のトークン消費のタイルを描画しな
   assert.doesNotMatch(html, /24時間のトークン消費/);
 });
 
-test("プロジェクトページはゴール・タスク・run・判断待ちを描画する", async () => {
-  const server = await startTaktDashServer({ projects: createProjectsResponse() });
-  try {
-    await withServerEnv(server.address, async () => {
-      const client = createBackendClient();
-      try {
-        const response = await client.getProjects();
-        const html = renderPage(ProjectsPage, { response, now: NOW });
-        assert.match(html, /corporate-site/);
-        assert.match(html, /採用ページのレイアウトを直す/);
-        assert.match(html, /run-aaa/);
-        assert.match(html, /判断待ち/);
-      } finally {
-        await client.close();
-      }
-    });
-  } finally {
-    await server.shutdown();
-  }
+test("プロジェクトページはゴール・タスク・run・判断待ちを描画する", () => {
+  const html = renderPage(ProjectsPage, { state: createDashboardState(), now: NOW });
+  assert.match(html, /corporate-site/);
+  assert.match(html, /採用ページのレイアウトを直す/);
+  assert.match(html, /run-aaa/);
+  assert.match(html, /判断待ち/);
 });
 
 test("判断待ちページは待ち時間順に描画し、滞留の項目に滞留の表示を付ける", async () => {
@@ -113,26 +99,17 @@ test("判断待ちページは回答・承認・却下の操作要素を持た�
   assert.doesNotMatch(html, /承認/);
 });
 
-test("アクティビティページは出来事を新しい順に並べ、7日分の集計とサーバー別の当日件数を描画する", async () => {
-  const server = await startTaktDashServer({ activity: createActivityResponse() });
-  try {
-    await withServerEnv(server.address, async () => {
-      const client = createBackendClient();
-      try {
-        const response = await client.getActivity();
-        const html = renderPage(ActivityPage, { response, now: NOW });
-        const mergeIndex = html.indexOf("人のマージ待ち");
-        const inquiryIndex = html.indexOf("問い合わせ");
-        assert.ok(mergeIndex >= 0 && inquiryIndex >= 0);
-        assert.ok(mergeIndex < inquiryIndex, "新しい出来事が先に現れる");
-        assert.match(html, /2026-11-07/);
-        assert.match(html, /2026-11-13/);
-        assert.match(html, /Mac mini/);
-      } finally {
-        await client.close();
-      }
-    });
-  } finally {
-    await server.shutdown();
-  }
+test("アクティビティページは出来事を新しい順に並べ、7日分の集計とサーバー別の当日件数を描画する", () => {
+  const html = renderPage(ActivityPage, {
+    state: createDashboardState(),
+    response: createActivityResponse(),
+    now: NOW,
+  });
+  const mergeIndex = html.indexOf("人のマージ待ち");
+  const inquiryIndex = html.indexOf("問い合わせ");
+  assert.ok(mergeIndex >= 0 && inquiryIndex >= 0);
+  assert.ok(mergeIndex < inquiryIndex, "新しい出来事が先に現れる");
+  assert.match(html, /2026-11-07/);
+  assert.match(html, /2026-11-13/);
+  assert.match(html, /Mac mini/);
 });

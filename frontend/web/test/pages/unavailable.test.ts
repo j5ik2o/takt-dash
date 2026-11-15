@@ -7,17 +7,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { reserveClosedAddress } from "../support/grpc-server.ts";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 import { ActivityLoader } from "../../src/components/activity-loader.tsx";
 import { ProjectsLoader } from "../../src/components/projects-loader.tsx";
 import { RunDetailLoader } from "../../src/components/run-detail-loader.tsx";
 
 const withClosedBackend = async <T>(run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const closedAddress = await reserveClosedAddress();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = closedAddress;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {

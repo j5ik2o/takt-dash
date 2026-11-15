@@ -1,17 +1,13 @@
 import type { ReactElement } from "react";
-import type { GetProjectsResponse } from "../proto/taktdash";
+import type { DashboardState } from "../proto/taktdash";
 import { executionStatusLabel, goalStatusLabel, resolveThresholds, sortPendingDecisions, toRunView } from "../state/dashboard";
 
 type ProjectsContentProps = {
-  response: GetProjectsResponse;
+  state: DashboardState;
   now: Date;
 };
 
-export function ProjectsContent({ response, now }: ProjectsContentProps): ReactElement {
-  const state = response.state;
-  if (state === undefined) {
-    return <main className="page"><p className="note">プロジェクトの状態を取得できませんでした。</p></main>;
-  }
+export function ProjectsContent({ state, now }: ProjectsContentProps): ReactElement {
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
   const thresholds = resolveThresholds(state.thresholds);
   const pending = sortPendingDecisions(state.pendingDecisions, now, {

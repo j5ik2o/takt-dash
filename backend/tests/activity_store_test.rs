@@ -57,6 +57,22 @@ fn store_opens_a_file_and_creates_parent_schema() {
 }
 
 #[test]
+fn file_backed_reads_see_events_recorded_by_the_writer() {
+  // 読み取り接続を writer と分けても、書き込み済みの出来事を同じストアから読める。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let path = directory.path().join("taktdash.sqlite");
+  let store = ActivityStore::open(Path::new(&path)).expect("ファイルの SQLite を開けます");
+  store
+    .record(&event("2026-11-13T10:00:00Z", "mac-mini", Some("p"), EventKind::GoalCreated, "登録"))
+    .expect("出来事を記録できます");
+
+  let events = store.recent_events(10).expect("同じストアから一覧を取得できます");
+
+  assert_eq!(events.len(), 1);
+  assert_eq!(events[0].body, "登録");
+}
+
+#[test]
 fn recent_events_are_newest_first_and_limited() {
   let store = ActivityStore::open_in_memory().expect("SQLite を開けます");
   store.record(&event("2026-11-13T09:00:00Z", "mac-mini", Some("p"), EventKind::GoalCreated, "古い")).unwrap();

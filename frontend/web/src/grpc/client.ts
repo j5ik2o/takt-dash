@@ -40,21 +40,20 @@ export class RunNotFoundError extends Error {
   }
 }
 
+// 計測の有無は呼び出しごとに決める。共有クライアントでも要求をまたいで計測が混ざらない。
 export type BackendClient = {
-  getOverview(): Promise<DashboardState>;
-  getProjects(): Promise<GetProjectsResponse>;
+  getOverview(timing?: TimingSink): Promise<DashboardState>;
+  getProjects(timing?: TimingSink): Promise<GetProjectsResponse>;
   // 判断待ちページは一覧だけを使うため、応答の state をそのまま返す。
-  getPendingDecisions(): Promise<DashboardState>;
-  getActivity(): Promise<GetActivityResponse>;
-  getRunDetail(runSlug: string): Promise<GetRunDetailResponse>;
+  getPendingDecisions(timing?: TimingSink): Promise<DashboardState>;
+  getActivity(timing?: TimingSink): Promise<GetActivityResponse>;
+  getRunDetail(runSlug: string, timing?: TimingSink): Promise<GetRunDetailResponse>;
   watchState(): ClientReadableStream<DashboardState>;
   close(): Promise<void>;
 };
 
 export type CreateBackendClientOptions = {
   env?: BackendEnv;
-  // 省略すると計測しない。既存の呼び出し元は従来どおり動く。
-  timing?: TimingSink;
 };
 
 const isConnectionFailure = (error: grpc.ServiceError): boolean =>
@@ -96,19 +95,18 @@ const timedUnary = async <Response>(
 export function createBackendClient(options: CreateBackendClientOptions = {}): BackendClient {
   const env = options.env ?? process.env;
   const address = resolveBackendAddress(env);
-  const timing = options.timing;
   const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
 
   return {
-    getOverview: () =>
+    getOverview: (timing) =>
       timedUnary(timing, "GetOverview", () =>
         unary<object, DashboardState>((request, callback) => client.getOverview(request, callback), {}),
       ),
-    getProjects: () =>
+    getProjects: (timing) =>
       timedUnary(timing, "GetProjects", () =>
         unary<object, GetProjectsResponse>((request, callback) => client.getProjects(request, callback), {}),
       ),
-    getPendingDecisions: async () => {
+    getPendingDecisions: async (timing) => {
       const response = await timedUnary(timing, "GetPendingDecisions", () =>
         unary<object, { state: DashboardState | undefined }>(
           (request, callback) => client.getPendingDecisions(request, callback),
@@ -120,11 +118,11 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       }
       return response.state;
     },
-    getActivity: () =>
+    getActivity: (timing) =>
       timedUnary(timing, "GetActivity", () =>
         unary<object, GetActivityResponse>((request, callback) => client.getActivity(request, callback), {}),
       ),
-    getRunDetail: async (runSlug) => {
+    getRunDetail: async (runSlug, timing) => {
       const detail = await timedUnary(timing, "GetRunDetail", () =>
         unary<{ runSlug: string }, GetRunDetailResponse>(
           (request, callback) => client.getRunDetail(request, callback),
@@ -151,4 +149,25 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
         resolve();
       }),
   };
+}
+
+// プロセスで1つのクライアントを使い回す。RSC と Route Handler は同じプロセスで動くため、
+// 要求ごとに接続を作り直さず、gRPC の接続を再利用する。
+let sharedClient: BackendClient | undefined;
+
+/** プロセス共有のバックエンドクライアントを返す。無ければ生成する。 */
+export function getBackendClient(): BackendClient {
+  if (sharedClient === undefined) {
+    sharedClient = createBackendClient();
+  }
+  return sharedClient;
+}
+
+/** プロセス共有のクライアントを破棄する。テストのリセットとプロセス終了だけが呼ぶ。 */
+export async function closeBackendClient(): Promise<void> {
+  const client = sharedClient;
+  sharedClient = undefined;
+  if (client !== undefined) {
+    await client.close();
+  }
 }

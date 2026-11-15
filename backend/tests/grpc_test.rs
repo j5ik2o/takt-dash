@@ -293,7 +293,7 @@ async fn get_pending_decisions_returns_only_unanswered_inquiries_and_human_merge
 }
 
 #[tokio::test]
-async fn get_projects_returns_the_state_and_recent_events_newest_first() {
+async fn get_projects_returns_recent_events_newest_first_without_assembling_the_state() {
   let harness = seeded_harness();
   harness
     .activity
@@ -308,10 +308,7 @@ async fn get_projects_returns_the_state_and_recent_events_newest_first() {
 
   let response = client.get_projects(GetProjectsRequest {}).await.expect("プロジェクトを取得できます").into_inner();
 
-  let state = response.state.expect("状態があります");
-  assert_eq!(state.projects.len(), 1);
-  assert_eq!(state.projects[0].name, "takt-dash");
-  assert_eq!(state.goals.len(), 4, "プロジェクトの状態にゴールを含みます");
+  assert!(response.state.is_none(), "状態は GetOverview に一本化します");
 
   let bodies: Vec<&str> = response.recent_events.iter().map(|event| event.body.as_str()).collect();
   assert_eq!(bodies, vec!["新しい出来事", "古い出来事"], "直近の出来事を新しい順に返します");
@@ -356,7 +353,7 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
 
   let response = client.get_activity(GetActivityRequest {}).await.expect("アクティビティを取得できます").into_inner();
 
-  assert!(response.state.is_some(), "状態を同梱します");
+  assert!(response.state.is_none(), "状態は GetOverview に一本化します");
   let event_bodies: Vec<&str> = response.events.iter().map(|event| event.body.as_str()).collect();
   assert_eq!(event_bodies, vec!["登録", "問い合わせ", "開始"], "出来事を新しい順に返します");
   assert_eq!(response.events[0].kind, ActivityKind::GoalCreated as i32);

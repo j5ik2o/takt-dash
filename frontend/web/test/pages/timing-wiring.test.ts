@@ -6,17 +6,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { reserveClosedAddress } from "../support/grpc-server.ts";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 import RootLayout from "../../app/layout.tsx";
 import { ActivityLoader } from "../../src/components/activity-loader.tsx";
 import { ProjectsLoader } from "../../src/components/projects-loader.tsx";
 
 const withClosedBackend = async <T>(run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const closedAddress = await reserveClosedAddress();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = closedAddress;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {
@@ -55,9 +58,9 @@ test("layout は GetOverview の往復を page=layout の行に記録する", as
   assertPageLine(lines, { page: "layout", rpcs: "GetOverview" });
 });
 
-test("プロジェクトのローダーは GetProjects の往復を page=/projects の行に記録する", async () => {
+test("プロジェクトのローダーは自身の RPC を持たず page=/projects の行に記録する", async () => {
   const lines = await withClosedBackend(() => capturePageLines(() => ProjectsLoader()));
-  assertPageLine(lines, { page: "/projects", rpcs: "GetProjects" });
+  assertPageLine(lines, { page: "/projects", rpcs: "" });
 });
 
 test("アクティビティのローダーは GetActivity の往復を page=/activity の行に記録する", async () => {
