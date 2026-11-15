@@ -99,11 +99,16 @@ impl TaktDashServiceImpl {
   ) -> Self {
     TaktDashServiceImpl { store, activity, config_path, changes, shutdown }
   }
+}
 
-  /// 状態ストアから DashboardState を組み立てる。
-  fn assemble_state(&self, now: DateTime<Utc>) -> DashboardState {
-    assemble_state_for(self.store.as_ref(), self.activity.as_ref(), now)
-  }
+/// 同期の SQLite 処理を `spawn_blocking` で実行し、待ち合わせの失敗を gRPC のステータスへ変換する。
+async fn blocking<T, F>(task: F) -> Result<T, Status>
+where
+  F: FnOnce() -> T + Send + 'static,
+  T: Send + 'static, {
+  tokio::task::spawn_blocking(task)
+    .await
+    .map_err(|error| Status::internal(format!("ブロッキング処理を完了できませんでした: {error}")))
 }
 
 /// サーバーの接続状態と読めた時刻を、そのサーバーのプロジェクト群から組み立てる。
@@ -285,20 +290,27 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
 
   async fn get_overview(&self, _request: Request<GetOverviewRequest>) -> Result<Response<DashboardState>, Status> {
     let _timing = RpcTimingGuard::start("GetOverview", &self.activity);
-    Ok(Response::new(self.assemble_state(Utc::now())))
+    let store = self.store.clone();
+    let activity = self.activity.clone();
+    let now = Utc::now();
+    let state = blocking(move || assemble_state_for(&store, &activity, now)).await?;
+    Ok(Response::new(state))
   }
 
   async fn get_projects(&self, _request: Request<GetProjectsRequest>) -> Result<Response<GetProjectsResponse>, Status> {
     let _timing = RpcTimingGuard::start("GetProjects", &self.activity);
-    let state = self.assemble_state(Utc::now());
-    let recent_events = self
-      .activity
-      .recent_events(RECENT_EVENTS_LIMIT)
-      .map_err(|error| Status::internal(format!("出来事の一覧を取得できませんでした: {error}")))?
-      .into_iter()
-      .map(activity_event)
-      .collect();
-    Ok(Response::new(GetProjectsResponse { state: Some(state), recent_events }))
+    let activity = self.activity.clone();
+    let response = blocking(move || -> Result<GetProjectsResponse, Status> {
+      let recent_events = activity
+        .recent_events(RECENT_EVENTS_LIMIT)
+        .map_err(|error| Status::internal(format!("出来事の一覧を取得できませんでした: {error}")))?
+        .into_iter()
+        .map(activity_event)
+        .collect();
+      Ok(GetProjectsResponse { state: None, recent_events })
+    })
+    .await??;
+    Ok(Response::new(response))
   }
 
   async fn get_pending_decisions(
@@ -306,39 +318,44 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     _request: Request<GetPendingDecisionsRequest>,
   ) -> Result<Response<GetPendingDecisionsResponse>, Status> {
     let _timing = RpcTimingGuard::start("GetPendingDecisions", &self.activity);
-    Ok(Response::new(GetPendingDecisionsResponse { state: Some(self.assemble_state(Utc::now())) }))
+    let store = self.store.clone();
+    let activity = self.activity.clone();
+    let now = Utc::now();
+    let state = blocking(move || assemble_state_for(&store, &activity, now)).await?;
+    Ok(Response::new(GetPendingDecisionsResponse { state: Some(state) }))
   }
 
   async fn get_activity(&self, _request: Request<GetActivityRequest>) -> Result<Response<GetActivityResponse>, Status> {
     let _timing = RpcTimingGuard::start("GetActivity", &self.activity);
+    let activity = self.activity.clone();
     let now = Utc::now();
-    let state = self.assemble_state(now);
-    let events = self
-      .activity
-      .recent_events(ACTIVITY_EVENTS_LIMIT)
-      .map_err(|error| Status::internal(format!("出来事の一覧を取得できませんでした: {error}")))?
-      .into_iter()
-      .map(activity_event)
-      .collect();
-    let daily_summaries = self
-      .activity
-      .daily_summaries(now)
-      .map_err(|error| Status::internal(format!("日次集計を取得できませんでした: {error}")))?
-      .into_iter()
-      .map(|summary| v1::DailySummary {
-        date:      summary.date,
-        total:     summary.total,
-        attention: summary.attention,
-      })
-      .collect();
-    let today_counts_by_server = self
-      .activity
-      .today_counts_by_server(now)
-      .map_err(|error| Status::internal(format!("サーバーごとの件数を取得できませんでした: {error}")))?
-      .into_iter()
-      .map(|count| v1::ServerEventCount { server_id: count.server_id, count: count.count })
-      .collect();
-    Ok(Response::new(GetActivityResponse { state: Some(state), events, daily_summaries, today_counts_by_server }))
+    let response = blocking(move || -> Result<GetActivityResponse, Status> {
+      let events = activity
+        .recent_events(ACTIVITY_EVENTS_LIMIT)
+        .map_err(|error| Status::internal(format!("出来事の一覧を取得できませんでした: {error}")))?
+        .into_iter()
+        .map(activity_event)
+        .collect();
+      let daily_summaries = activity
+        .daily_summaries(now)
+        .map_err(|error| Status::internal(format!("日次集計を取得できませんでした: {error}")))?
+        .into_iter()
+        .map(|summary| v1::DailySummary {
+          date:      summary.date,
+          total:     summary.total,
+          attention: summary.attention,
+        })
+        .collect();
+      let today_counts_by_server = activity
+        .today_counts_by_server(now)
+        .map_err(|error| Status::internal(format!("サーバーごとの件数を取得できませんでした: {error}")))?
+        .into_iter()
+        .map(|count| v1::ServerEventCount { server_id: count.server_id, count: count.count })
+        .collect();
+      Ok(GetActivityResponse { state: None, events, daily_summaries, today_counts_by_server })
+    })
+    .await??;
+    Ok(Response::new(response))
   }
 
   async fn get_run_detail(
@@ -458,7 +475,20 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     // 購読を初回の組み立てより先に取り、初回送信と変化通知の間に取りこぼしを作りません。
     let mut changes = self.changes.subscribe();
     let (tx, rx) = mpsc::channel(WATCH_CHANNEL_CAPACITY);
-    let _ = tx.send(Ok(self.assemble_state(Utc::now()))).await;
+    let initial = {
+      let store = self.store.clone();
+      let activity = self.activity.clone();
+      let now = Utc::now();
+      blocking(move || assemble_state_for(&store, &activity, now)).await
+    };
+    match initial {
+      | Ok(state) => {
+        let _ = tx.send(Ok(state)).await;
+      },
+      | Err(status) => {
+        let _ = tx.send(Err(status)).await;
+      },
+    }
     let sender = tx.clone();
     let store = self.store.clone();
     let activity = self.activity.clone();
@@ -474,8 +504,16 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
         };
         match result {
           | Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-            let state = assemble_state_for(&store, &activity, Utc::now());
-            if sender.send(Ok(state)).await.is_err() {
+            let assembled = {
+              let store = store.clone();
+              let activity = activity.clone();
+              blocking(move || assemble_state_for(&store, &activity, Utc::now())).await
+            };
+            let message = match assembled {
+              | Ok(state) => Ok(state),
+              | Err(status) => Err(status),
+            };
+            if sender.send(message).await.is_err() {
               return;
             }
           },

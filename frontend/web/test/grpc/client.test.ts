@@ -11,17 +11,39 @@ import {
   createRunDetailResponse,
 } from "../support/fixtures.ts";
 import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-server.ts";
-import { createBackendClient, resolveBackendAddress } from "../../src/grpc/client.ts";
+import {
+  closeBackendClient,
+  createBackendClient,
+  getBackendClient,
+  resolveBackendAddress,
+} from "../../src/grpc/client.ts";
 
 const withServer = async (
   behavior: Parameters<typeof startTaktDashServer>[0],
-  run: (ctx: { address: string }) => Promise<void>,
+  run: (ctx: { address: string; calls: string[] }) => Promise<void>,
 ) => {
-  const server = await startTaktDashServer(behavior);
+  const calls: string[] = [];
+  const server = await startTaktDashServer({ ...behavior, calls });
   try {
-    await run({ address: server.address });
+    await run({ address: server.address, calls });
   } finally {
     await server.shutdown();
+  }
+};
+
+const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
+  const previous = process.env.TAKTDASH_BACKEND_ADDR;
+  process.env.TAKTDASH_BACKEND_ADDR = address;
+  try {
+    return await run();
+  } finally {
+    await closeBackendClient();
+    if (previous === undefined) {
+      delete process.env.TAKTDASH_BACKEND_ADDR;
+    } else {
+      process.env.TAKTDASH_BACKEND_ADDR = previous;
+    }
   }
 };
 
@@ -100,7 +122,7 @@ test("backend に接続できないとき BackendUnavailableError として扱�
   }
 });
 
-test("unary RPC の所要時間を計測先へ名前つきで渡す", async () => {
+test("unary RPC の所要時間を呼び出しごとに計測先へ名前つきで渡す", async () => {
   await withServer(
     {
       overview: createDashboardState(),
@@ -111,25 +133,23 @@ test("unary RPC の所要時間を計測先へ名前つきで渡す", async () =
     },
     async ({ address }) => {
       const recorded: { rpc: string; durationMs: number }[] = [];
-      const client = createBackendClient({
-        env: { TAKTDASH_BACKEND_ADDR: address },
-        timing: { recordRpc: (timing: { rpc: string; durationMs: number }) => recorded.push(timing) },
-      });
+      const timing = { recordRpc: (value: { rpc: string; durationMs: number }) => recorded.push(value) };
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
       try {
-        await client.getOverview();
-        await client.getProjects();
-        await client.getPendingDecisions();
-        await client.getActivity();
-        await client.getRunDetail("run-aaa");
+        await client.getOverview(timing);
+        await client.getProjects(timing);
+        await client.getPendingDecisions(timing);
+        await client.getActivity(timing);
+        await client.getRunDetail("run-aaa", timing);
       } finally {
         await client.close();
       }
       assert.deepEqual(
-        recorded.map((timing) => timing.rpc),
+        recorded.map((value) => value.rpc),
         ["GetOverview", "GetProjects", "GetPendingDecisions", "GetActivity", "GetRunDetail"],
       );
-      for (const timing of recorded) {
-        assert.ok(timing.durationMs >= 0, `${timing.rpc} の所要時間は 0 以上です`);
+      for (const value of recorded) {
+        assert.ok(value.durationMs >= 0, `${value.rpc} の所要時間は 0 以上です`);
       }
     },
   );
@@ -138,12 +158,10 @@ test("unary RPC の所要時間を計測先へ名前つきで渡す", async () =
 test("unary RPC が失敗しても所要時間を計測先へ渡す", async () => {
   await withServer({}, async ({ address }) => {
     const recorded: { rpc: string; durationMs: number }[] = [];
-    const client = createBackendClient({
-      env: { TAKTDASH_BACKEND_ADDR: address },
-      timing: { recordRpc: (timing: { rpc: string; durationMs: number }) => recorded.push(timing) },
-    });
+    const timing = { recordRpc: (value: { rpc: string; durationMs: number }) => recorded.push(value) };
+    const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
     try {
-      await assert.rejects(client.getOverview());
+      await assert.rejects(client.getOverview(timing));
     } finally {
       await client.close();
     }
@@ -160,5 +178,28 @@ test("NOT_FOUND は BackendUnavailableError と取り違えない", async () => 
     } finally {
       await client.close();
     }
+  });
+});
+
+test("共有クライアントは同じインスタンスを返し、明示的な破棄で作り直す", async () => {
+  await closeBackendClient();
+  try {
+    const first = getBackendClient();
+    assert.equal(getBackendClient(), first, "同じプロセスでは同じインスタンスを返します");
+    await closeBackendClient();
+    const second = getBackendClient();
+    assert.notEqual(second, first, "明示的に破棄した後は新しいインスタンスを作ります");
+  } finally {
+    await closeBackendClient();
+  }
+});
+
+test("共有クライアントは要求をまたいで使い続けられる", async () => {
+  await withServer({ overview: createDashboardState() }, async ({ address, calls }) => {
+    await withServerEnv(address, async () => {
+      assert.equal((await getBackendClient().getOverview()).servers.length, 2);
+      assert.equal((await getBackendClient().getOverview()).servers.length, 2);
+    });
+    assert.deepEqual(calls, ["GetOverview", "GetOverview"], "同じクライアントで 2 回の要求を処理します");
   });
 });

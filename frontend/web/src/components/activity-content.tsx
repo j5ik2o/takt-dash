@@ -1,9 +1,10 @@
 import type { ReactElement } from "react";
-import type { ActivityEvent, ActivityKind, GetActivityResponse } from "../proto/taktdash";
+import type { ActivityEvent, ActivityKind, DashboardState, GetActivityResponse } from "../proto/taktdash";
 import { ACTIVITY_KIND } from "../state/proto-values";
 import { formatClock } from "../state/format";
 
 type ActivityContentProps = {
+  state: DashboardState;
   response: GetActivityResponse;
   now: Date;
 };
@@ -43,9 +44,8 @@ const eventTime = (event: ActivityEvent): number => (event.occurredAt ? event.oc
 const toNewestFirst = (events: readonly ActivityEvent[]): ActivityEvent[] =>
   [...events].sort((a, b) => eventTime(b) - eventTime(a));
 
-export function ActivityContent({ response, now }: ActivityContentProps): ReactElement {
-  const state = response.state;
-  const serverNames = new Map((state?.servers ?? []).map((server) => [server.serverId, server.name]));
+export function ActivityContent({ state, response, now }: ActivityContentProps): ReactElement {
+  const serverNames = new Map(state.servers.map((server) => [server.serverId, server.name]));
   const events = toNewestFirst(response.events);
 
   return (

@@ -9,17 +9,20 @@ import { renderToStaticMarkup } from "react-dom/server";
 import * as grpc from "@grpc/grpc-js";
 import { createRunDetailResponse } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 import RunDetailPage from "../../app/runs/[slug]/page.tsx";
 import { RunDetailLoader } from "../../src/components/run-detail-loader.tsx";
 
 const NOT_FOUND_DIGEST = "NEXT_HTTP_ERROR_FALLBACK;404";
 
 const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {

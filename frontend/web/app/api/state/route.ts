@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { DashboardState } from "../../../src/proto/taktdash";
-import { createBackendClient } from "../../../src/grpc/client";
+import { getBackendClient } from "../../../src/grpc/client";
 
 export const dynamic = "force-dynamic";
 
@@ -14,8 +14,8 @@ const toSseEvent = (state: DashboardState): Uint8Array =>
   new TextEncoder().encode(`data: ${JSON.stringify(DashboardState.toJSON(state))}\n\n`);
 
 export async function GET(request: NextRequest): Promise<Response> {
-  const client = createBackendClient();
-  const stream = client.watchState();
+  // 共有クライアントはストリームを閉じても破棄しない。SSE ごとに作成・close しない。
+  const stream = getBackendClient().watchState();
   const signal = request.signal;
 
   const body = new ReadableStream<Uint8Array>({
@@ -29,7 +29,6 @@ export async function GET(request: NextRequest): Promise<Response> {
         signal.removeEventListener("abort", finish);
         stream.cancel();
         stream.destroy();
-        void client.close();
         try {
           controller.close();
         } catch {
@@ -59,7 +58,6 @@ export async function GET(request: NextRequest): Promise<Response> {
           return;
         }
         finished = true;
-        void client.close();
         try {
           controller.close();
         } catch {
@@ -70,7 +68,6 @@ export async function GET(request: NextRequest): Promise<Response> {
     cancel() {
       stream.cancel();
       stream.destroy();
-      void client.close();
     },
   });
 
