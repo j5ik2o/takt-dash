@@ -295,6 +295,106 @@ test("判断待ちページは CRLF の改行も段落の区切りとして扱�
   assert.match(textParagraphs[1]!, /第2段落。/);
 });
 
+const headingBlocks = (html: string): string[] =>
+  Array.from(html.matchAll(/<div class="proj">([\s\S]*?)<\/div>/g), (match) => match[1]);
+
+const headingTexts = (html: string): string[] =>
+  headingBlocks(html).map((block) => block.replace(/<[^>]+>/g, ""));
+
+const headingTextFor = (html: string, needle: string): string => {
+  const heading = headingTexts(html).find((text) => text.includes(needle));
+  if (heading === undefined) {
+    assert.fail(`見出しに ${needle} を含む項目がある`);
+  }
+  return heading;
+};
+
+const withServerName = (name: string) => {
+  const state = createDashboardState();
+  return { ...state, servers: state.servers.map((server) => ({ ...server, name })) };
+};
+
+test("判断待ちページは各項目の見出しでプロジェクト・サーバーの表示名・種別・対象を判別できる", () => {
+  const html = renderPage(DecisionsPage, { state: withServerName("j5ik2o-mac-mini"), now: NOW });
+
+  const mergeHeading = headingTextFor(html, "corporate-site");
+  assert.match(mergeHeading, /プロジェクト: corporate-site/);
+  assert.match(mergeHeading, /サーバー: j5ik2o-mac-mini/);
+  assert.doesNotMatch(mergeHeading, /サーバー: mini/);
+  assert.match(mergeHeading, /種別: 人のマージ待ち/);
+  assert.match(mergeHeading, /#418/);
+
+  const inquiryHeading = headingTextFor(html, "esa");
+  assert.match(inquiryHeading, /プロジェクト: esa/);
+  assert.match(inquiryHeading, /サーバー: j5ik2o-mac-mini/);
+  assert.match(inquiryHeading, /種別: 問い合わせ（質問）/);
+  assert.match(inquiryHeading, /goal-2/);
+});
+
+test("判断待ちページは各項目の見出しにその項目のサーバーの表示名を出し、他のサーバーの表示名を出さない", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    servers: base.servers.map((server) =>
+      server.serverId === "mini" ? { ...server, name: "j5ik2o-mac-mini" } : { ...server, name: "studio-2" },
+    ),
+    pendingDecisions: base.pendingDecisions.map((decision) =>
+      decision.type === PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY
+        ? { ...decision, serverId: "down" }
+        : decision,
+    ),
+  };
+  const html = renderPage(DecisionsPage, { state, now: NOW });
+
+  const mergeHeading = headingTextFor(html, "corporate-site");
+  assert.match(mergeHeading, /サーバー: j5ik2o-mac-mini/);
+  assert.doesNotMatch(mergeHeading, /サーバー: studio-2/);
+  assert.doesNotMatch(mergeHeading, /サーバー: mini/);
+
+  const inquiryHeading = headingTextFor(html, "esa");
+  assert.match(inquiryHeading, /サーバー: studio-2/);
+  assert.doesNotMatch(inquiryHeading, /サーバー: j5ik2o-mac-mini/);
+  assert.doesNotMatch(inquiryHeading, /サーバー: down/);
+});
+
+test("判断待ちページは見出しのプロジェクト名を HTML エスケープする", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    pendingDecisions: base.pendingDecisions.map((decision) =>
+      decision.type === PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE
+        ? { ...decision, project: "<script>alert(1)</script>" }
+        : decision,
+    ),
+  };
+  const html = renderPage(DecisionsPage, { state, now: NOW });
+  const block = headingBlocks(html).find((candidate) => candidate.includes("&lt;script&gt;"));
+  if (block === undefined) {
+    assert.fail("エスケープされたプロジェクト名を見出しに表示する");
+  }
+  assert.match(block, /alert\(1\)/);
+  assert.doesNotMatch(block, /<script>/);
+});
+
+test("判断待ちページは対象を持たない項目の見出しに架空の ID を出さない", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    pendingDecisions: base.pendingDecisions.map((decision) => ({
+      ...decision,
+      goalId: undefined,
+      pullRequest: undefined,
+    })),
+  };
+  const html = renderPage(DecisionsPage, { state, now: NOW });
+  const headings = headingTexts(html);
+  assert.ok(headings.length > 0, "判断待ちの見出しが描画される");
+  for (const heading of headings) {
+    assert.doesNotMatch(heading, /undefined/);
+    assert.doesNotMatch(heading, /NaN/);
+  }
+});
+
 test("アクティビティページは出来事を新しい順に並べ、7日分の集計とサーバー別の当日件数を描画する", async () => {
   const server = await startTaktDashServer({ activity: createActivityResponse() });
   try {
