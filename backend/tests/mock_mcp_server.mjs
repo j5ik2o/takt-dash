@@ -168,6 +168,10 @@ const runResponse = (state, args) => {
 
 const handleToolCall = (name, args) => {
   const state = loadState();
+  // 指定した道具の呼び出しで子プロセスが応答せずに終了する輸送エラーを再現する。
+  if ((state.transportErrors ?? []).includes(name)) {
+    process.exit(4);
+  }
   const isError = new Set(state.isError ?? []);
   // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug>" の限定キーで対象を絞れる。
   const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? ""}`;

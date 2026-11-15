@@ -86,8 +86,9 @@ impl<'a> ToolSet<'a> {
   ///
   /// `prev` には前回の snapshot を渡します。補助読み取り（run・ゴール質問・通知・ゴールに
   /// 属さない問い合わせ）が道具エラーで失敗したときは、その項目だけ前回値（無ければ空）を
-  /// 保持し、プロジェクト全体を失敗にしません。コア読み取り（ゴール・タスク）の失敗と、
-  /// 補助読み取りの輸送エラー・解析エラーは全体の失敗として伝播します。
+  /// 保持し、プロジェクト全体を失敗にしません。ゴール登録提案も道具エラーと解析エラーの
+  /// ときは前回の提案（無ければ空）へ縮退し、周期を失敗させません。コア読み取り
+  /// （ゴール・タスク）の失敗と、補助読み取りの輸送エラーは全体の失敗として伝播します。
   ///
   /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知から得るため、通知を読んだ後に
   /// ゴールへ起点時刻を反映します。
@@ -105,7 +106,9 @@ impl<'a> ToolSet<'a> {
     let runs = self.get_running_runs(&tasks, prev).await?;
     let proposals = match self.list_goal_registration_proposals().await {
       | Ok(entries) => entries,
-      | Err(ToolError::Tool(_)) => prev.map(|snapshot| snapshot.proposals.clone()).unwrap_or_default(),
+      | Err(ToolError::Tool(_)) | Err(ToolError::Parse(_)) => {
+        prev.map(|snapshot| snapshot.proposals.clone()).unwrap_or_default()
+      },
       | Err(error) => return Err(error),
     };
     Ok(ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals })
@@ -706,7 +709,7 @@ impl<'a> ToolSet<'a> {
         Ok(RegistrationProposalEntry {
           revision:             required_i32(proposal, "revision")?,
           repository_directory: required_string(proposal, "repositoryDirectory")?,
-          summary:              required_string(proposal, "summary")?,
+          summary:              registration_summary_text(proposal.get("summary"))?,
         })
       })
       .collect()
@@ -754,6 +757,56 @@ pub struct ApproveGoalRegistrationResult {
 pub struct MergeGoalPrResult {
   pub task_name: String,
   pub workflow:  String,
+}
+
+/// ゴール登録提案の `summary` を表示本文へ変換する。
+///
+/// 文字列はそのまま本文にします。オブジェクトは既知の項目だけを日本語の文として組み立て、
+/// 未知のキーと欠落は無視します。どちらでもない値だけを解析エラーにします。
+fn registration_summary_text(value: Option<&Value>) -> Result<String, ToolError> {
+  match value {
+    | None | Some(Value::Null) => Ok(String::new()),
+    | Some(Value::String(text)) => Ok(text.clone()),
+    | Some(Value::Object(object)) => Ok(compose_registration_summary(object)),
+    | Some(_) => Err(ToolError::Parse("summary が文字列でもオブジェクトでもありません".to_owned())),
+  }
+}
+
+/// `summary` オブジェクトから本文へ含める既知の項目と見出し。
+const REGISTRATION_SUMMARY_FIELDS: [(&str, &str); 6] = [
+  ("objective", "目的"),
+  ("outOfScope", "対象外"),
+  ("acceptanceCriteria", "受入条件"),
+  ("constraints", "制約"),
+  ("startBranch", "開始ブランチ"),
+  ("integrationBranch", "統合ブランチ"),
+];
+
+fn compose_registration_summary(object: &serde_json::Map<String, Value>) -> String {
+  let mut lines = Vec::new();
+  for (key, label) in REGISTRATION_SUMMARY_FIELDS {
+    if let Some(text) = registration_summary_field(object.get(key)) {
+      lines.push(format!("{label}: {text}"));
+    }
+  }
+  lines.join("\n")
+}
+
+/// `summary` オブジェクトの項目値を本文用の文字列にする。文字列と文字列の配列だけを受け付け、
+/// それ以外の型と空の配列は無視します。
+fn registration_summary_field(value: Option<&Value>) -> Option<String> {
+  match value? {
+    | Value::String(text) => Some(text.clone()),
+    | Value::Array(items) => {
+      let texts: Vec<&str> = items.iter().filter_map(Value::as_str).collect();
+      if texts.is_empty() {
+        None
+      } else {
+        Some(texts.join("、"))
+      }
+    },
+    | _ => None,
+  }
 }
 
 /// 応答の必須の整数フィールドを読み取る。欠落は解析エラーにします。

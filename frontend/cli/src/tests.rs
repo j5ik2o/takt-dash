@@ -17,9 +17,9 @@ use proto::v1::{
 use tonic::{transport::Server, Code, Request, Response, Status};
 
 use super::{
-  is_connection_failure, parse_arguments, proto, render_overview, resolve_backend_addr, run_with, AddrError,
-  AddrSources, Answer, Invocation, OverviewOptions, UsageError, WriteCommand, WriteInvocation, ANSWER_COMMAND,
-  DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, UNTIL_MERGE,
+  is_connection_failure, parse_arguments, proto, read_config_listen, render_overview, resolve_backend_addr, run_with,
+  AddrError, AddrSources, Answer, Invocation, OverviewOptions, UsageError, WriteCommand, WriteInvocation,
+  ANSWER_COMMAND, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, UNTIL_MERGE,
 };
 
 // proto の列挙値は生成コードの数値をそのまま使う。
@@ -861,19 +861,36 @@ fn config_listen_overrides_default_for_connection() {
 fn missing_config_file_falls_through_to_default() {
   let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
   let missing = dir.path().join("does-not-exist.json");
+
+  // 設定ファイルが無いときは listen を未設定として扱い、解決は既定値へ進む。
+  let listen = read_config_listen(&missing).expect("存在しない設定ファイルは未設定として扱う必要があります");
+  assert_eq!(listen, None, "存在しない設定ファイルは listen を返しません");
+  let sources = AddrSources {
+    cli_addr:      None,
+    env_addr:      Err(std::env::VarError::NotPresent),
+    config_listen: listen.as_deref(),
+  };
+  assert_eq!(
+    resolve_backend_addr(&sources),
+    Ok(DEFAULT_BACKEND_ADDR.parse().unwrap()),
+    "設定ファイルが無いときは既定値へ進む必要があります"
+  );
+
+  // 接続結果は環境に依存するため、待ち受けの無い未使用ポートを明示して決定的に観測する。
+  let closed = reserve_closed_addr();
   let mut stdout = Vec::new();
   let mut stderr = Vec::new();
-
   let code = run_with(
-    &["--config".to_owned(), missing.display().to_string()],
+    &["--config".to_owned(), missing.display().to_string(), "--addr".to_owned(), closed.to_string()],
     Err(std::env::VarError::NotPresent),
     &mut stdout,
     &mut stderr,
   );
 
   let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-  assert_eq!(code, EXIT_FAILURE);
-  assert!(stderr.contains(DEFAULT_BACKEND_ADDR), "設定ファイルが無いときは既定値へ進む必要があります: {stderr}");
+  assert_eq!(code, EXIT_FAILURE, "待ち受けの無い接続先では失敗する必要があります: {stderr}");
+  assert!(stderr.contains(&closed.to_string()), "明示した接続先を使う必要があります: {stderr}");
+  assert!(!stderr.contains(DEFAULT_BACKEND_ADDR), "明示した接続先があるときは既定値へ戻ってはいけません: {stderr}");
 }
 
 // ----------------------------------------------------------------------------
