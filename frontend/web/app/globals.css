@@ -427,3 +427,71 @@ pre {
     padding: 16px;
   }
 }
+
+/* 会話ページ。既存のセレクタは変更せず、会話用のクラスだけを追記する。 */
+.conversation-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.conversation-picker select {
+  background: var(--surface);
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.conversation {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+}
+
+.conversation-message {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.conversation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.conversation-seq {
+  color: var(--muted);
+}
+
+.conversation-speaker {
+  font-weight: 600;
+}
+
+.conversation-at {
+  color: var(--muted);
+}
+
+.conversation-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.conversation-skipped {
+  margin: 0 0 16px;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 12px;
+}

@@ -4,6 +4,8 @@ import {
   TaktDashServiceClient,
   type DashboardState,
   type GetActivityResponse,
+  type GetConversationRequest,
+  type GetConversationResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
   type WatchStateRequest,
@@ -46,6 +48,7 @@ export type BackendClient = {
   getPendingDecisions(): Promise<DashboardState>;
   getActivity(): Promise<GetActivityResponse>;
   getRunDetail(runSlug: string): Promise<GetRunDetailResponse>;
+  getConversation(request: GetConversationRequest): Promise<GetConversationResponse>;
   watchState(): ClientReadableStream<DashboardState>;
   close(): Promise<void>;
 };
@@ -113,6 +116,16 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       }
       return detail;
     },
+    getConversation: (request) =>
+      unary<GetConversationRequest, GetConversationResponse>(
+        (value, callback) => client.getConversation(value, callback),
+        {
+          project: request.project,
+          sessionId: request.sessionId,
+          afterSeq: request.afterSeq,
+          limit: request.limit,
+        },
+      ),
     watchState: () => client.watchState({} satisfies WatchStateRequest),
     close: () =>
       new Promise<void>((resolve) => {

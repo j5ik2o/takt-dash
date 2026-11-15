@@ -7,6 +7,8 @@ import {
   TaktDashServiceService,
   type DashboardState,
   type GetActivityResponse,
+  type GetConversationRequest,
+  type GetConversationResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
 } from "../../src/proto/taktdash.ts";
@@ -19,6 +21,7 @@ export type ServerBehavior = {
   pendingDecisions?: { state: DashboardState };
   activity?: GetActivityResponse;
   runDetail?: GetRunDetailResponse | ServerError;
+  conversation?: GetConversationResponse | ServerError;
   watch?: DashboardState[];
   // ストリームを送り終えた後も接続を保ち、クライアントの切断を待つか。
   holdWatchOpen?: boolean;
@@ -31,11 +34,14 @@ const notFound = (details: string): ServerError => ({ code: grpc.status.NOT_FOUN
 export type RunningServer = {
   address: string;
   port: number;
+  // 受け取った GetConversation の要求を到着順に記録する。
+  conversationRequests: GetConversationRequest[];
   shutdown: () => Promise<void>;
 };
 
 export async function startTaktDashServer(behavior: ServerBehavior): Promise<RunningServer> {
   const server = new grpc.Server();
+  const conversationRequests: GetConversationRequest[] = [];
   server.addService(TaktDashServiceService, {
     getOverview: (_call: grpc.ServerUnaryCall<unknown, unknown>, callback: grpc.sendUnaryData<DashboardState>) => {
       if (!behavior.overview) {
@@ -89,6 +95,22 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       }
       callback(null, result);
     },
+    getConversation: (
+      call: grpc.ServerUnaryCall<GetConversationRequest, unknown>,
+      callback: grpc.sendUnaryData<GetConversationResponse>,
+    ) => {
+      conversationRequests.push(call.request);
+      const result = behavior.conversation;
+      if (!result) {
+        callback(notFound("会話がありません"));
+        return;
+      }
+      if ("code" in result) {
+        callback(result);
+        return;
+      }
+      callback(null, result);
+    },
     watchState: (call: grpc.ServerWritableStream<unknown, DashboardState>) => {
       let cancelled = false;
       call.on("cancelled", () => {
@@ -125,6 +147,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
   return {
     address: `127.0.0.1:${port}`,
     port,
+    conversationRequests,
     shutdown: () =>
       new Promise<void>((resolve) => {
         server.tryShutdown(() => resolve());
