@@ -133,6 +133,8 @@ const toPendingDecision = (raw: Record<string, unknown>): PendingDecision => ({
         }
       : undefined,
   stale: raw.stale === true,
+  inquiryId: String(raw.inquiryId ?? ""),
+  revision: typeof raw.revision === "number" ? raw.revision : undefined,
 });
 
 const toThresholds = (raw: unknown): AnomalyThresholds | undefined => {

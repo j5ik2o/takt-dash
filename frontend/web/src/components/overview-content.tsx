@@ -47,6 +47,10 @@ export function OverviewContent({ view, disconnected }: OverviewContentProps): R
               <span>人のマージ待ち</span>
               <b>{pendingCounts.awaitingMerge}件</b>
             </li>
+            <li>
+              <span>ゴール登録の承認待ち</span>
+              <b>{pendingCounts.goalRegistration}件</b>
+            </li>
           </ul>
         </div>
         <div className="tile">

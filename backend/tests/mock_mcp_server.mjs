@@ -20,10 +20,15 @@
 //                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
 //                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
+//     "proposals": [ {"revision","repositoryDirectory","summary"} ],
+//     "proposalsByCwd": { "<cwd>": [ {"revision","repositoryDirectory","summary"} ] },
+//     "responses": { "<道具名>": {...} },  // 指定した書き込み道具の応答を丸ごと差し替える
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
 //   }
-import { readFileSync, writeFileSync } from "node:fs";
+// --calls <path> を渡すと、受け取った tools/call を {"name","arguments"} の JSONL として追記する。
+// --processes <path> を渡すと、起動時に自分の pid を 1 行追記する。
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isAbsolute } from "node:path";
 
@@ -35,13 +40,25 @@ const option = (name) => {
 
 const behavior = option("--behavior") ?? "ok";
 const statePath = option("--state");
+// 受け取った tools/call を JSONL で追記する。テストは書き込み道具へ渡った引数を
+// ここから読み、backend が組み立てた引数を直接観測する。
+const callsPath = option("--calls");
+// 起動時に自分の pid を追記する。テストは読み取りと書き込みが同じ子プロセスを使うことを
+// この記録で観測する。
+const processesPath = option("--processes");
 // 起動時の PID の書き出し先。子プロセスの終了をテストから観測するために使う。
 const pidFile = option("--pid-file");
 // 実 takt-mcp と同じページサイズ（limit 既定 50）。
 const PAGE_SIZE = 50;
+// takt の入力契約では goalId は UUID（z.uuid()）。
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 if (behavior === "exit") {
   process.exit(3);
+}
+
+if (processesPath !== undefined) {
+  appendFileSync(processesPath, `${process.pid}\n`);
 }
 
 if (pidFile) {
@@ -79,6 +96,12 @@ const TOOL_ARGUMENTS = {
   takt_list_standalone_inquiries: { required: ["cwd"], optional: ["offset", "limit"] },
   takt_get_run: { required: ["cwd", "runSlug"], optional: ["offset", "limit", "view", "stepIndex", "instructionId", "report", "maxBytes"] },
   takt_get_goal: { required: ["cwd", "goalId"], optional: ["path", "offset", "limit"] },
+  // 書き込み系。実 takt-mcp（features/mcp/schemas.js ほか）の入力契約に合わせる。
+  takt_answer_goal_question: { required: ["cwd", "goalId", "questionId", "answer"], optional: [] },
+  takt_list_goal_registration_proposals: { required: ["cwd"], optional: [] },
+  takt_approve_goal_registration: { required: ["cwd", "revision"], optional: [] },
+  takt_reject_goal_registration: { required: ["cwd", "revision"], optional: [] },
+  takt_merge_goal_pr: { required: ["cwd", "goalId", "prNumber", "until"], optional: [] },
 };
 
 // 引数の検証。実契約と同じく cwd 必須・絶対パス、未知キーは拒否する。
@@ -104,6 +127,10 @@ const validateArguments = (name, args) => {
     if (args[key] === undefined || args[key] === null) {
       return `${key} は必須です`;
     }
+  }
+  // takt の入力契約では goalId は UUID（z.uuid()）。空文字や UUID 以外は拒否する。
+  if (name === "takt_answer_goal_question" && !UUID_PATTERN.test(args.goalId)) {
+    return "goalId は UUID で指定してください";
   }
   return undefined;
 };
@@ -154,11 +181,19 @@ const runResponse = (state, args) => {
 
 const handleToolCall = (name, args) => {
   const state = loadState();
+  // 指定した道具の呼び出しで子プロセスが応答せずに終了する輸送エラーを再現する。
+  if ((state.transportErrors ?? []).includes(name)) {
+    process.exit(4);
+  }
   const isError = new Set(state.isError ?? []);
   // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug>" の限定キーで対象を絞れる。
   const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? ""}`;
   if (isError.has(name) || isError.has(scopedKey)) {
     return { content: [{ type: "text", text: `${name} は失敗しました。` }], isError: true };
+  }
+  // 応答の差し替え。必須値の欠落を再現するために、書き込み道具の応答を丸ごと置き換える。
+  if (state.responses !== undefined && Object.prototype.hasOwnProperty.call(state.responses, name)) {
+    return asText(state.responses[name]);
   }
   switch (name) {
     case "takt_list_goals":
@@ -176,9 +211,41 @@ const handleToolCall = (name, args) => {
         return asText(paged((state.notifications ?? {})[args.goalId] ?? [], "items", args.offset));
       }
       return asText({});
+    case "takt_answer_goal_question":
+      return asText({ goalId: args.goalId, questionId: args.questionId, answer: args.answer });
+    case "takt_list_goal_registration_proposals":
+      // 実 takt-mcp と同じく、提案は最大1件の配列で返す。無ければ空配列。
+      // `proposalsByCwd` があれば、道具は cwd でプロジェクトを選ぶ契約に合わせて
+      // その cwd の提案だけを返す。無ければ `proposals` をそのまま返す。
+      if (state.proposalsByCwd !== undefined) {
+        return asText({ proposals: state.proposalsByCwd[args.cwd] ?? [] });
+      }
+      return asText({ proposals: state.proposals ?? [] });
+    case "takt_approve_goal_registration":
+      return asText({ revision: args.revision, goal: { id: `approved-${args.revision}` } });
+    case "takt_reject_goal_registration":
+      return asText({ revision: args.revision, notice: "却下しました" });
+    case "takt_merge_goal_pr":
+      return asText({
+        taskName: "merge",
+        status: "enqueued",
+        goalId: args.goalId,
+        prNumber: args.prNumber,
+        mergeTask: "merge",
+        workflow: "merge-goal-pr",
+        until: args.until,
+      });
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };
   }
+};
+
+// 受け取った道具呼び出しを記録する。記録は検証の合否に関与しない。
+const recordCall = (name, args) => {
+  if (callsPath === undefined) {
+    return;
+  }
+  appendFileSync(callsPath, `${JSON.stringify({ name, arguments: args })}\n`);
 };
 
 const onLine = (line) => {
@@ -227,6 +294,7 @@ const onLine = (line) => {
       return;
     }
     const { name, arguments: args } = message.params ?? {};
+    recordCall(name, args);
     const invalid = validateArguments(name, args);
     if (invalid !== undefined) {
       reply({ jsonrpc: "2.0", id: message.id, error: { code: -32602, message: invalid } });

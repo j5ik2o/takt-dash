@@ -23,3 +23,5 @@ jobs:
         with:
           version: "36.2"
       - run: make done
+      - run: npm ci
+      - run: node scripts/aislop-check-bootstrap.mjs check

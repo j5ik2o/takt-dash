@@ -80,6 +80,7 @@ pub fn pending_decision_type(kind: PendingDecisionType) -> v1::PendingDecisionTy
   match kind {
     | PendingDecisionType::Inquiry => v1::PendingDecisionType::Inquiry,
     | PendingDecisionType::AwaitingMerge => v1::PendingDecisionType::AwaitingMerge,
+    | PendingDecisionType::GoalRegistration => v1::PendingDecisionType::GoalRegistration,
   }
 }
 
