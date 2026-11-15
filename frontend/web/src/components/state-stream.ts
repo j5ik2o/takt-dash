@@ -24,6 +24,35 @@ export type StateStream = {
   close: () => void;
 };
 
+export type StateStreamHandlerOptions = {
+  onState: (state: DashboardState) => void;
+  onError?: () => void;
+  revalidate?: () => void;
+};
+
+export type StateStreamHandlers = {
+  onState: (state: DashboardState) => void;
+  onError?: () => void;
+};
+
+// 状態の受信と画面の再取得を一か所で組み立てる。状態を画面へ適用した直後に
+// revalidate を呼び、RSC で取得している画面（プロジェクト・アクティビティ・
+// run 詳細・サイドバー）をサーバー側の最新状態へ追従させます。切断時は状態を
+// 置き換えないため、revalidate を呼びません。
+export function createStateHandlers({
+  onState,
+  onError,
+  revalidate,
+}: StateStreamHandlerOptions): StateStreamHandlers {
+  return {
+    onState: (state) => {
+      onState(state);
+      revalidate?.();
+    },
+    onError,
+  };
+}
+
 /** 最初の再接続を待つ時間。連続失敗のたびに倍にする。 */
 const RECONNECT_BASE_DELAY_MS = 1000;
 /** 再接続の待機の上限。失敗が続いてもこの時間より長く待たない。 */

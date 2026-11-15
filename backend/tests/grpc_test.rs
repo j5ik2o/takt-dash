@@ -439,3 +439,43 @@ fn timestamp(text: &str) -> prost_types::Timestamp {
   let time = time(text);
   prost_types::Timestamp { seconds: time.timestamp(), nanos: time.timestamp_subsec_nanos() as i32 }
 }
+
+#[tokio::test]
+async fn プロジェクトごとの接続状態と最後に読めた時刻を返す() {
+  // 同じサーバーの2プロジェクトのうち片方だけが読み取りに失敗したとき、API は
+  // プロジェクトごとの成否と最後に読めた時刻を返します。サーバー単位の接続状態は
+  // 健常なプロジェクトがあるため真のままです。
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", project_dir()), server_meta(), json!({}))
+    .single_project(project("corporate-site", project_dir()), server_meta(), json!({}))
+    .build();
+  harness.store.record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T12:00:00Z"));
+  harness.store.record_success("corporate-site", ProjectSnapshot::empty(), time("2026-11-13T12:01:00Z"));
+  harness.store.record_failure("corporate-site");
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let response = client.get_projects(GetProjectsRequest {}).await.expect("プロジェクトを取得できます").into_inner();
+  let state = response.state.expect("状態があります");
+
+  let healthy = state.projects.iter().find(|entry| entry.name == "takt-dash").expect("takt-dash のプロジェクト");
+  assert!(healthy.connected, "読み取れたプロジェクトは接続ありです");
+  assert_eq!(
+    healthy.last_read_at,
+    Some(timestamp("2026-11-13T12:00:00Z")),
+    "読み取れたプロジェクトの最後に読めた時刻を返します"
+  );
+
+  let failed =
+    state.projects.iter().find(|entry| entry.name == "corporate-site").expect("corporate-site のプロジェクト");
+  assert!(!failed.connected, "読み取りに失敗したプロジェクトだけ接続なしです");
+  assert_eq!(
+    failed.last_read_at,
+    Some(timestamp("2026-11-13T12:01:00Z")),
+    "読み取りに失敗しても最後に読めた時刻を保持します"
+  );
+
+  assert!(state.servers[0].connected, "サーバー単位の接続状態は健常なプロジェクトがあれば真です");
+
+  server.stop().await;
+}
