@@ -6,7 +6,7 @@ mod common;
 use std::io::Write;
 
 use common::*;
-use serde_json::json;
+use serde_json::{json, Value};
 use takt_dash_backend::{
   mcp::{CallError, ToolError, TransportError},
   model::{GoalStatus, TaskStatus},
@@ -860,5 +860,109 @@ async fn goal_question_tool_error_inherits_only_that_goal_and_leaves_the_healthy
   let q2 = snapshot.inquiries.iter().find(|entry| entry.inquiry_id == "q2").expect("健常な g2 の質問は今回値です");
   assert_eq!(q2.goal_id.as_deref(), Some("g2"));
   assert_eq!(q2.body, "g2 の質問", "健常なゴールの質問は今回値を採ります");
+  client.shutdown().await;
+}
+
+// ----------------------------------------------------------------------------
+// takt から受け取る整数の範囲検査
+// ----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revision_at_the_i32_maximum_is_accepted() {
+  // i32 の上限はそのまま受理し、切り詰めません。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 2147483647, "repositoryDirectory": "/abs/takt-dash", "summary": "上限の提案" }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let proposals = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect("i32 の上限の revision は受理します");
+
+  assert_eq!(proposals.len(), 1);
+  assert_eq!(proposals[0].revision, i32::MAX, "i32 の上限をそのまま返します");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn revision_beyond_i32_is_a_parse_error() {
+  // 4294967297 を `as i32` で切り詰めると 1 になる。切り詰めずに解析エラーにする。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 4294967297i64, "repositoryDirectory": "/abs/takt-dash", "summary": "範囲外の提案" }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let error = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect_err("i32 の範囲外の revision は受理しません");
+
+  assert!(matches!(error, ToolError::Parse(_)), "範囲外の revision は解析エラーです: {error}");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn instruction_id_beyond_i32_is_a_parse_error_and_is_not_sent_truncated() {
+  // run の指示書が i32 の範囲外の instructionId を持つ場合、2 に切り詰めて
+  // takt_get_run を呼ばずに解析エラーにする。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+      "runs": {
+        "r1": {
+          "runSlug": "r1",
+          "startedAt": "2026-11-13T10:00:00Z",
+          "instructions": [
+            { "instructionId": 4294967298i64, "issuedAt": "2026-11-13T10:05:00Z", "state": "issued", "content": "指示書" }
+          ]
+        }
+      }
+    }),
+  );
+  let calls_path = directory.path().join("tool-calls.jsonl");
+  let mut client = mock_client(mock_config_with_calls(directory.path(), &state, &calls_path));
+
+  let error = tool_set(&mut client, directory.path())
+    .read_run_detail("r1")
+    .await
+    .expect_err("i32 の範囲外の instructionId は受理しません");
+
+  assert!(matches!(error, ToolError::Parse(_)), "範囲外の instructionId は解析エラーです: {error}");
+
+  let recorded: Vec<Value> = match std::fs::read_to_string(&calls_path) {
+    | Ok(text) => {
+      text.lines().filter(|line| !line.trim().is_empty()).filter_map(|line| serde_json::from_str(line).ok()).collect()
+    },
+    | Err(_) => Vec::new(),
+  };
+  assert!(
+    recorded
+      .iter()
+      .all(|call| !(call["name"] == json!("takt_get_run") && call["arguments"]["instructionId"] == json!(2))),
+    "instructionId を 2 に切り詰めた takt_get_run を記録しません: {recorded:?}"
+  );
   client.shutdown().await;
 }

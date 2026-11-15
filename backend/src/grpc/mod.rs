@@ -21,7 +21,7 @@ use tonic::{Request, Response, Status};
 use crate::{
   activity::ActivityStore,
   config::load_config,
-  mcp::{client_config, McpClient, ToolError, ToolSet},
+  mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
   model::{self, TaskEntry},
   store::StateStore,
   takt_dash::v1::{
@@ -49,7 +49,12 @@ pub struct TaktDashServiceImpl {
   config_path: PathBuf,
   changes:     broadcast::Sender<()>,
   shutdown:    watch::Receiver<bool>,
+  registry:    McpClientRegistry,
+  clock:       Clock,
 }
+
+/// サービスの現在時刻を返す関数。テストは固定時計を注入します。
+pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 impl TaktDashServiceImpl {
   /// 状態ストアと activity と設定のパスと、共有する購読・停止のチャネルからサービスを作る。
@@ -61,6 +66,9 @@ impl TaktDashServiceImpl {
   /// 開いたままのストリームを待って止まれません。生成責務を呼び出し元へ寄せ、両方を必須引数
   /// にして、シャットダウン配線の省略がコンパイルエラーになるようにします。
   ///
+  /// `registry` は Poller と共有する takt-mcp のクライアントのレジストリです。書き込み RPC は
+  /// 同じレジストリから同じプロジェクトの子プロセスを取得します。
+  ///
   /// GetRunDetail は要求のたびに設定のパスから対象サーバーの起動方法と cwd を解決し、
   /// takt-mcp の子プロセスを起動して takt_get_run を呼びます。
   pub fn new(
@@ -69,8 +77,27 @@ impl TaktDashServiceImpl {
     config_path: PathBuf,
     changes: broadcast::Sender<()>,
     shutdown: watch::Receiver<bool>,
+    registry: McpClientRegistry,
   ) -> Self {
-    TaktDashServiceImpl { store, activity, config_path, changes, shutdown }
+    Self::with_clock(store, activity, config_path, changes, shutdown, registry, Arc::new(Utc::now))
+  }
+
+  /// 現在時刻を返す関数を注入してサービスを作る。既定は実時計です。
+  pub fn with_clock(
+    store: Arc<StateStore>,
+    activity: Arc<ActivityStore>,
+    config_path: PathBuf,
+    changes: broadcast::Sender<()>,
+    shutdown: watch::Receiver<bool>,
+    registry: McpClientRegistry,
+    clock: Clock,
+  ) -> Self {
+    TaktDashServiceImpl { store, activity, config_path, changes, shutdown, registry, clock }
+  }
+
+  /// サービスが今回の要求で使う現在時刻を返す。
+  fn now(&self) -> DateTime<Utc> {
+    (self.clock)()
   }
 
   /// 状態ストアから DashboardState を組み立てる。
@@ -258,6 +285,7 @@ fn tool_error_status(error: ToolError) -> Status {
 /// 設定から解決した、対象サーバーの起動方法とプロジェクトの cwd。
 struct ResolvedProject {
   server_id:     String,
+  project:       String,
   client_config: crate::mcp::McpClientConfig,
   cwd:           PathBuf,
 }
@@ -280,19 +308,12 @@ impl TaktDashServiceImpl {
       .find(|entry| entry.name == project && entry.server == server_id)
       .map(|entry| entry.cwd.clone())
       .ok_or_else(|| Status::unavailable(format!("プロジェクト {project} の cwd が設定にありません。")))?;
-    Ok(ResolvedProject { server_id: server_id.to_owned(), client_config: client_config(&server, &cwd), cwd })
-  }
-
-  /// 対象プロジェクトの takt-mcp を起動する。呼び出し側は道具を呼んだ後に必ず
-  /// [`Self::finish_tools`] で子プロセスを停止します。
-  fn start_tools(resolved: &ResolvedProject) -> (McpClient, PathBuf) {
-    (McpClient::new(resolved.client_config.clone()), resolved.cwd.clone())
-  }
-
-  /// 道具呼び出しの結果を gRPC の応答へ写し、子プロセスを停止する。
-  async fn finish_tools<T>(mut client: McpClient, result: Result<T, ToolError>) -> Result<T, Status> {
-    client.shutdown().await;
-    result.map_err(tool_error_status)
+    Ok(ResolvedProject {
+      server_id: server_id.to_owned(),
+      project: project.to_owned(),
+      client_config: client_config(&server, &cwd),
+      cwd,
+    })
   }
 
   /// 書き込み RPC の共通の入口。`server_id` と `project` の空文字を拒否し、対象を解決する。
@@ -312,11 +333,11 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
   type WatchStateStream = ReceiverStream<Result<DashboardState, Status>>;
 
   async fn get_overview(&self, _request: Request<GetOverviewRequest>) -> Result<Response<DashboardState>, Status> {
-    Ok(Response::new(self.assemble_state(Utc::now())))
+    Ok(Response::new(self.assemble_state(self.now())))
   }
 
   async fn get_projects(&self, _request: Request<GetProjectsRequest>) -> Result<Response<GetProjectsResponse>, Status> {
-    let state = self.assemble_state(Utc::now());
+    let state = self.assemble_state(self.now());
     let recent_events = self
       .activity
       .recent_events(RECENT_EVENTS_LIMIT)
@@ -331,11 +352,11 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     &self,
     _request: Request<GetPendingDecisionsRequest>,
   ) -> Result<Response<GetPendingDecisionsResponse>, Status> {
-    Ok(Response::new(GetPendingDecisionsResponse { state: Some(self.assemble_state(Utc::now())) }))
+    Ok(Response::new(GetPendingDecisionsResponse { state: Some(self.assemble_state(self.now())) }))
   }
 
   async fn get_activity(&self, _request: Request<GetActivityRequest>) -> Result<Response<GetActivityResponse>, Status> {
-    let now = Utc::now();
+    let now = self.now();
     let state = self.assemble_state(now);
     let events = self
       .activity
@@ -415,7 +436,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
         steps:                   Vec::new(),
         reports:                 Vec::new(),
       },
-      Utc::now(),
+      self.now(),
     );
     Ok(Response::new(GetRunDetailResponse {
       run_slug: detail.run_slug,
@@ -469,10 +490,11 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     // 購読を初回の組み立てより先に取り、初回送信と変化通知の間に取りこぼしを作りません。
     let mut changes = self.changes.subscribe();
     let (tx, rx) = mpsc::channel(WATCH_CHANNEL_CAPACITY);
-    let _ = tx.send(Ok(self.assemble_state(Utc::now()))).await;
+    let _ = tx.send(Ok(self.assemble_state(self.now()))).await;
     let sender = tx.clone();
     let store = self.store.clone();
     let activity = self.activity.clone();
+    let clock = self.clock.clone();
     let mut shutdown = self.shutdown.clone();
     tokio::spawn(async move {
       loop {
@@ -485,7 +507,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
         };
         match result {
           | Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-            let state = assemble_state_for(&store, &activity, Utc::now());
+            let state = assemble_state_for(&store, &activity, (clock)());
             if sender.send(Ok(state)).await.is_err() {
               return;
             }
@@ -505,28 +527,56 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     if request.inquiry_id.trim().is_empty() {
       return Err(Status::invalid_argument("inquiry_id が空です。"));
     }
-    let pending = self
+    // 保留項目は (server_id, project, inquiry_id) の3条件一致で引き当てる。同じ id が別の
+    // プロジェクトや別のサーバーにあっても、対象の判断だけを選ぶ。
+    let matches: Vec<model::PendingDecision> = self
       .store
-      .pending_decisions(Utc::now(), model::PendingDecisionFilter::Inquiry)
+      .pending_decisions(self.now(), model::PendingDecisionFilter::Inquiry)
       .into_iter()
-      .find(|decision| decision.inquiry_id == request.inquiry_id);
+      .filter(|decision| {
+        decision.server_id == request.server_id
+          && decision.project == request.project
+          && decision.inquiry_id == request.inquiry_id
+      })
+      .collect();
+    let pending = match matches.len() {
+      | 0 => None,
+      | 1 => matches.into_iter().next(),
+      | _ => {
+        return Err(Status::invalid_argument(format!(
+          "問い合わせ {} はサーバー {} のプロジェクト {} 内で一意に特定できません。",
+          request.inquiry_id, request.server_id, request.project
+        )));
+      },
+    };
     let inquiry_kind = pending.as_ref().and_then(|decision| decision.inquiry_kind);
     let answer = answer_payload(inquiry_kind, request.text, request.report)?;
-    // takt_answer_goal_question の入力契約では goalId は必須（UUID）です。回答は一覧の
-    // 判断待ちからゴールを引き当てて送り、引き当てられない場合は takt を呼ばずに拒否します。
+    // 保留項目を引き当てられない問い合わせは、要求がゴールを明示していても回答しません。
+    // 回答本文の検証を先に済ませることで、空の回答は入力の誤りとして扱います。
+    let Some(pending) = pending else {
+      return Err(Status::not_found(format!(
+        "問い合わせ {} はサーバー {} のプロジェクト {} にありません。",
+        request.inquiry_id, request.server_id, request.project
+      )));
+    };
+    // takt_answer_goal_question の入力契約では goalId は必須（UUID）です。要求が明示した
+    // ゴールを優先し、無ければ引き当てた判断待ちのゴールを使います。
     let goal_id = request
       .goal_id
       .clone()
-      .or_else(|| pending.as_ref().and_then(|decision| decision.goal_id.clone()))
+      .or_else(|| pending.goal_id.clone())
       .filter(|goal_id| !goal_id.trim().is_empty())
       .ok_or_else(|| {
         Status::invalid_argument("goal_id を特定できません。ゴールに属さない問い合わせには回答できません。")
       })?;
     let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
     let question_id = request.inquiry_id.clone();
-    let (mut client, cwd) = Self::start_tools(&resolved);
-    let result = ToolSet::new(&mut client, cwd).answer_goal_question(&goal_id, &request.inquiry_id, answer).await;
-    Self::finish_tools(client, result).await?;
+    let client = self.registry.client(&resolved.server_id, &resolved.project, || resolved.client_config.clone());
+    let mut client = client.lock().await;
+    ToolSet::new(&mut client, resolved.cwd.clone())
+      .answer_goal_question(&goal_id, &request.inquiry_id, answer)
+      .await
+      .map_err(tool_error_status)?;
     Ok(Response::new(AnswerInquiryResponse { inquiry_id: question_id }))
   }
 
@@ -545,10 +595,12 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       return Err(Status::invalid_argument("until は \"prepare\" か \"merge\" を指定してください。"));
     }
     let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
-    let (mut client, cwd) = Self::start_tools(&resolved);
-    let result =
-      ToolSet::new(&mut client, cwd).merge_goal_pr(&request.goal_id, request.pr_number, &request.until).await;
-    let result = Self::finish_tools(client, result).await?;
+    let client = self.registry.client(&resolved.server_id, &resolved.project, || resolved.client_config.clone());
+    let mut client = client.lock().await;
+    let result = ToolSet::new(&mut client, resolved.cwd.clone())
+      .merge_goal_pr(&request.goal_id, request.pr_number, &request.until)
+      .await
+      .map_err(tool_error_status)?;
     Ok(Response::new(ApproveGoalMergeResponse { task_name: result.task_name, workflow: result.workflow }))
   }
 
@@ -561,9 +613,12 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
     }
     let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
-    let (mut client, cwd) = Self::start_tools(&resolved);
-    let result = ToolSet::new(&mut client, cwd).approve_goal_registration(request.revision).await;
-    let result = Self::finish_tools(client, result).await?;
+    let client = self.registry.client(&resolved.server_id, &resolved.project, || resolved.client_config.clone());
+    let mut client = client.lock().await;
+    let result = ToolSet::new(&mut client, resolved.cwd.clone())
+      .approve_goal_registration(request.revision)
+      .await
+      .map_err(tool_error_status)?;
     Ok(Response::new(ApproveGoalRegistrationResponse { revision: result.revision, goal_id: result.goal_id }))
   }
 
@@ -576,9 +631,12 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
     }
     let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
-    let (mut client, cwd) = Self::start_tools(&resolved);
-    let result = ToolSet::new(&mut client, cwd).reject_goal_registration(request.revision).await;
-    let rejected = Self::finish_tools(client, result).await?;
+    let client = self.registry.client(&resolved.server_id, &resolved.project, || resolved.client_config.clone());
+    let mut client = client.lock().await;
+    let rejected = ToolSet::new(&mut client, resolved.cwd.clone())
+      .reject_goal_registration(request.revision)
+      .await
+      .map_err(tool_error_status)?;
     Ok(Response::new(RejectGoalRegistrationResponse { revision: rejected }))
   }
 

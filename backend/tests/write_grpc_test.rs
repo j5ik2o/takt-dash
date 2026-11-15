@@ -150,6 +150,15 @@ async fn answered_inquiry_is_absent_from_pending_decisions() {
 #[tokio::test]
 async fn answer_inquiry_sends_free_text_in_the_answer_object() {
   let harness = harness_with(json!({}));
+  harness.store.record_success(
+    "takt-dash",
+    snapshot_with(vec![inquiry_entry(
+      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e",
+      "11111111-1111-4111-8111-111111111111",
+      InquiryKind::Question,
+    )]),
+    time("2026-11-13T12:00:00Z"),
+  );
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -171,7 +180,11 @@ async fn answer_inquiry_sends_free_text_in_the_answer_object() {
   let calls = calls_named(&harness, "takt_answer_goal_question");
   assert_eq!(calls.len(), 1, "回答の道具を1回だけ呼びます: {calls:?}");
   let arguments = &calls[0];
-  assert_eq!(arguments["goalId"], json!("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11"));
+  assert_eq!(
+    arguments["goalId"],
+    json!("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11"),
+    "一致1件では要求が明示したゴールを優先します"
+  );
   assert_eq!(arguments["questionId"], json!("8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e"));
   assert_eq!(arguments["answer"], json!({ "text": "はい" }), "answer はオブジェクトで text を持つ必要があります");
 
@@ -181,6 +194,15 @@ async fn answer_inquiry_sends_free_text_in_the_answer_object() {
 #[tokio::test]
 async fn answer_inquiry_sends_unable_for_an_operation_request() {
   let harness = harness_with(json!({}));
+  harness.store.record_success(
+    "takt-dash",
+    snapshot_with(vec![inquiry_entry(
+      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e",
+      "3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11",
+      InquiryKind::OperationRequest,
+    )]),
+    time("2026-11-13T12:00:00Z"),
+  );
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -394,6 +416,7 @@ async fn list_goal_registration_proposals_projects_the_pending_list_shape() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   harness.rewrite_state(json!({
     "proposals": [
@@ -434,6 +457,7 @@ async fn polled_harness(state: serde_json::Value) -> (GrpcHarness, Poller) {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   harness.rewrite_state(state);
   poller.read_cycle_once().await.expect("状態を取り込むサイクルを実行できます");
@@ -597,6 +621,7 @@ async fn malformed_proposal_response_does_not_fail_the_next_poll_cycle() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   harness.rewrite_state(state_with_proposal());
   let first = poller.read_cycle_once().await.expect("正常な提案を読むサイクルを実行できます");
@@ -685,6 +710,7 @@ async fn watch_state_delivers_a_goal_registration_proposal_on_the_same_stream() 
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   harness.rewrite_state(state_with_proposal());
   poller.read_cycle_once().await.expect("状態を変えるサイクルを実行できます");
@@ -886,6 +912,7 @@ async fn list_goal_registration_proposals_selects_by_the_resolved_cwd() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   harness.rewrite_state(json!({ "proposalsByCwd": proposals_by_cwd }));
   poller.read_cycle_once().await.expect("状態を取り込むサイクルを実行できます");
@@ -973,6 +1000,247 @@ async fn a_project_missing_from_the_config_is_unavailable_without_calling_takt()
 
   assert_eq!(status, Code::Unavailable);
   assert!(calls_named(&harness, "takt_approve_goal_registration").is_empty(), "解決できない対象では takt を呼びません");
+
+  server.stop().await;
+}
+
+// ----------------------------------------------------------------------------
+// 問い合わせの解決を (server_id, project, inquiry_id) でスコープする
+// ----------------------------------------------------------------------------
+
+/// 同じ `inquiry_id` を持ちうる2プロジェクトの土台。設定の順は B → A にして、
+/// `inquiry_id` だけで引く実装が B を先に選ぶ状況を作る。
+fn scope_harness() -> GrpcHarness {
+  GrpcHarness::builder()
+    .project(project("B", std::path::Path::new("/abs/B")))
+    .project(project("A", std::path::Path::new("/abs/A")))
+    .build()
+}
+
+/// 問い合わせだけを持つプロジェクトの snapshot。
+fn snapshot_with(inquiries: Vec<InquiryEntry>) -> ProjectSnapshot {
+  ProjectSnapshot { inquiries, ..ProjectSnapshot::empty() }
+}
+
+/// ゴールに属する未回答の問い合わせ1件。
+fn inquiry_entry(inquiry_id: &str, goal_id: &str, kind: InquiryKind) -> InquiryEntry {
+  InquiryEntry {
+    inquiry_id: inquiry_id.to_owned(),
+    goal_id: Some(goal_id.to_owned()),
+    kind,
+    body: "確認をお願いします".to_owned(),
+    options: vec!["はい".to_owned(), "いいえ".to_owned()],
+    answered: false,
+    created_at: time("2026-11-13T07:00:00Z"),
+  }
+}
+
+#[tokio::test]
+async fn answer_inquiry_uses_only_the_matching_project_inquiry() {
+  // 同じ inquiry_id "q-1" が A（質問）と B（作業の依頼）にあり、設定順で B が先でも、
+  // A への回答は A のゴールと A の cwd で takt を1回だけ呼ぶ。
+  let harness = scope_harness();
+  let goal_a = "11111111-1111-4111-8111-111111111111";
+  let goal_b = "22222222-2222-4222-8222-222222222222";
+  harness.store.record_success(
+    "A",
+    snapshot_with(vec![inquiry_entry("q-1", goal_a, InquiryKind::Question)]),
+    time("2026-11-13T12:00:00Z"),
+  );
+  harness.store.record_success(
+    "B",
+    snapshot_with(vec![inquiry_entry("q-1", goal_b, InquiryKind::OperationRequest)]),
+    time("2026-11-13T12:00:00Z"),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let response = client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "A".to_owned(),
+      goal_id:    None,
+      inquiry_id: "q-1".to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect("対象プロジェクトの問い合わせには回答できます")
+    .into_inner();
+  assert_eq!(response.inquiry_id, "q-1");
+
+  let calls = calls_named(&harness, "takt_answer_goal_question");
+  assert_eq!(calls.len(), 1, "対象プロジェクトの回答だけを1回呼びます: {calls:?}");
+  assert_eq!(calls[0]["goalId"], json!(goal_a), "対象プロジェクト A のゴールへ回答します");
+  assert_eq!(calls[0]["questionId"], json!("q-1"));
+  assert_eq!(calls[0]["answer"], json!({ "text": "はい" }));
+  assert_eq!(
+    calls[0]["cwd"],
+    json!(harness.project_cwd("A").display().to_string()),
+    "対象プロジェクト A の cwd で takt を呼びます"
+  );
+  assert_ne!(calls[0]["goalId"], json!(goal_b), "別プロジェクト B のゴールへ書き込みません");
+  assert_eq!(harness.recorded_processes().len(), 1, "回答のために起動する takt-mcp は1つだけです");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn answer_inquiry_rejects_inquiry_id_of_another_project_without_calling_takt() {
+  // inquiry_id "q-1" は B にだけある。A への回答はその id を引き当てられず、NOT_FOUND で
+  // 拒否し、takt を呼ばない。
+  let harness = scope_harness();
+  harness.store.record_success("A", snapshot_with(vec![]), time("2026-11-13T12:00:00Z"));
+  harness.store.record_success(
+    "B",
+    snapshot_with(vec![inquiry_entry("q-1", "22222222-2222-4222-8222-222222222222", InquiryKind::Question)]),
+    time("2026-11-13T12:00:00Z"),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "A".to_owned(),
+      goal_id:    None,
+      inquiry_id: "q-1".to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect_err("別プロジェクトにしかない識別子は引き当てられません")
+    .code();
+
+  assert_eq!(status, Code::NotFound, "対象プロジェクトに無い問い合わせは not_found です");
+  assert!(calls_named(&harness, "takt_answer_goal_question").is_empty(), "引き当て失敗では takt を呼びません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn answer_inquiry_rejects_a_missing_inquiry_with_an_explicit_goal_without_calling_takt() {
+  // 対象プロジェクトに問い合わせが無ければ、要求が goal_id を明示していても NOT_FOUND で
+  // 拒否し、takt を呼ばず、takt-mcp の子プロセスも起動しない。
+  let harness = scope_harness();
+  harness.store.record_success("A", snapshot_with(vec![]), time("2026-11-13T12:00:00Z"));
+  harness.store.record_success(
+    "B",
+    snapshot_with(vec![inquiry_entry("q-404", "22222222-2222-4222-8222-222222222222", InquiryKind::Question)]),
+    time("2026-11-13T12:00:00Z"),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "A".to_owned(),
+      goal_id:    Some("22222222-2222-4222-8222-222222222222".to_owned()),
+      inquiry_id: "q-404".to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect_err("対象プロジェクトに無い問い合わせは回答できません")
+    .code();
+
+  assert_eq!(status, Code::NotFound, "一致0件は goal_id の明示に関わらず not_found です");
+  assert!(calls_named(&harness, "takt_answer_goal_question").is_empty(), "一致0件では takt を呼びません");
+  assert_eq!(harness.recorded_processes().len(), 0, "一致0件では takt-mcp の子プロセスを起動しません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn answer_inquiry_rejects_ambiguous_inquiry_id_without_calling_takt() {
+  // A の2つのゴールが同じ inquiry_id "q-1" を持つ。どちらか一方を選べないため
+  // INVALID_ARGUMENT で拒否し、takt を呼ばない。
+  let harness = scope_harness();
+  harness.store.record_success(
+    "A",
+    snapshot_with(vec![
+      inquiry_entry("q-1", "11111111-1111-4111-8111-111111111111", InquiryKind::Question),
+      inquiry_entry("q-1", "33333333-3333-4333-8333-333333333333", InquiryKind::Question),
+    ]),
+    time("2026-11-13T12:00:00Z"),
+  );
+  harness.store.record_success("B", snapshot_with(vec![]), time("2026-11-13T12:00:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "A".to_owned(),
+      goal_id:    None,
+      inquiry_id: "q-1".to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect_err("同じプロジェクト内で重複する識別子は選べません")
+    .code();
+
+  assert_eq!(status, Code::InvalidArgument, "曖昧な問い合わせは invalid_argument です");
+  assert!(calls_named(&harness, "takt_answer_goal_question").is_empty(), "曖昧な識別子では takt を呼びません");
+
+  server.stop().await;
+}
+
+/// 指定した pid のプロセスが存在するか。停止後の子プロセスの後始末を観測するために使う。
+fn process_exists(pid: u32) -> bool {
+  std::process::Command::new("ps")
+    .arg("-p")
+    .arg(pid.to_string())
+    .output()
+    .map(|output| output.status.success())
+    .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn write_rpcs_reuse_the_poller_mcp_process() {
+  // 読み取り1サイクルで起動した子プロセスを、続く AnswerInquiry がそのまま使う。
+  // pid の記録が増えないことで、書き込みごとに新しい接続を作っていないことを観測する。
+  let harness = harness_with(json!({}));
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+    harness.registry.clone(),
+  );
+  harness.rewrite_state(state_with_goal_inquiry("question"));
+  poller.read_cycle_once().await.expect("状態を取り込むサイクルを実行できます");
+
+  let processes_after_read = harness.recorded_processes();
+  assert_eq!(processes_after_read.len(), 1, "読み取りで takt-mcp を1つ起動します");
+  let pid = processes_after_read[0];
+
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "takt-dash".to_owned(),
+      goal_id:    None,
+      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect("同じ子プロセスで回答できます");
+
+  let calls = calls_named(&harness, "takt_answer_goal_question");
+  assert_eq!(calls.len(), 1, "回答の道具を1回だけ呼びます: {calls:?}");
+  assert_eq!(
+    harness.recorded_processes(),
+    processes_after_read,
+    "書き込みでも読み取りと同じ takt-mcp の子プロセスを使います"
+  );
+
+  poller.shutdown().await;
+  assert!(!process_exists(pid), "停止後は共有していた子プロセスが残りません");
 
   server.stop().await;
 }

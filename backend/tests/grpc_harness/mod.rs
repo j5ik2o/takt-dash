@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use takt_dash_backend::{
   activity::ActivityStore,
   config::{Project, ServerMeta, Thresholds},
+  mcp::McpClientRegistry,
   store::StateStore,
 };
 
@@ -24,13 +25,16 @@ use super::common;
 
 /// 1テスト分の gRPC サーバと、その土台の状態。
 pub struct GrpcHarness {
-  _directory:   tempfile::TempDir,
-  config_path:  PathBuf,
-  state_path:   PathBuf,
-  calls_path:   PathBuf,
-  pub store:    Arc<StateStore>,
-  pub activity: Arc<ActivityStore>,
-  pub changes:  tokio::sync::broadcast::Sender<()>,
+  _directory:     tempfile::TempDir,
+  config_path:    PathBuf,
+  state_path:     PathBuf,
+  calls_path:     PathBuf,
+  processes_path: PathBuf,
+  cwd_by_project: BTreeMap<String, PathBuf>,
+  pub store:      Arc<StateStore>,
+  pub activity:   Arc<ActivityStore>,
+  pub changes:    tokio::sync::broadcast::Sender<()>,
+  pub registry:   McpClientRegistry,
 }
 
 /// gRPC サーバの土台を作るための設定。
@@ -63,6 +67,16 @@ impl GrpcHarnessBuilder {
     self
   }
 
+  /// プロジェクトを追加する。サーバーの表示情報は未登録なら既定値で補います。
+  ///
+  /// 複数プロジェクトを1つの土台へ載せるときに使います。プロジェクトごとに cwd が異なる
+  /// ディレクトリを割り当てるため、mock は道具呼び出しの cwd で対象を区別できます。
+  pub fn project(mut self, project: Project) -> Self {
+    self.servers.entry(project.server.clone()).or_insert_with(common::server_meta);
+    self.projects.push(project);
+    self
+  }
+
   pub fn build(self) -> GrpcHarness {
     let servers = if self.servers.is_empty() {
       let mut servers = BTreeMap::new();
@@ -71,18 +85,25 @@ impl GrpcHarnessBuilder {
     } else {
       self.servers
     };
-    let projects = self.projects;
+    let configured_projects = self.projects;
     let thresholds = self.thresholds;
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-    let project_dir = directory.path().join("project");
-    std::fs::create_dir_all(&project_dir).expect("プロジェクトの cwd を作れます");
-    // mock の子プロセスを起動する cwd は実在する必要があるため、渡された cwd
-    // を実在のディレクトリへ置き換える。
-    let projects: Vec<Project> =
-      projects.into_iter().map(|project| Project { cwd: project_dir.clone(), ..project }).collect();
+    // mock の子プロセスを起動する cwd は実在する必要があるため、渡された cwd を実在の
+    // ディレクトリへ置き換える。プロジェクトごとに別のディレクトリを割り当て、道具呼び出しの
+    // cwd から対象プロジェクトを区別できるようにする。
+    let mut cwd_by_project = BTreeMap::new();
+    let mut projects: Vec<Project> = Vec::with_capacity(configured_projects.len());
+    for project in configured_projects {
+      let project_dir = directory.path().join(format!("project-{}", project.name));
+      std::fs::create_dir_all(&project_dir).expect("プロジェクトの cwd を作れます");
+      cwd_by_project.insert(project.name.clone(), project_dir.clone());
+      projects.push(Project { cwd: project_dir, ..project });
+    }
+    let state = self.state;
     let state_path = directory.path().join("state.json");
-    std::fs::write(&state_path, self.state.to_string()).expect("状態ファイルを書けます");
+    std::fs::write(&state_path, state.to_string()).expect("状態ファイルを書けます");
     let calls_path = directory.path().join("tool-calls.jsonl");
+    let processes_path = directory.path().join("mcp-processes.txt");
     let config_path = directory.path().join("taktdash.config.json");
     let mut mcp_servers = serde_json::Map::new();
     for server_id in servers.keys() {
@@ -94,6 +115,7 @@ impl GrpcHarnessBuilder {
             common::mock_script().display().to_string(),
             "--state", state_path.display().to_string(),
             "--calls", calls_path.display().to_string(),
+            "--processes", processes_path.display().to_string(),
           ],
           "env": {}
         }),
@@ -123,7 +145,18 @@ impl GrpcHarnessBuilder {
     let store = Arc::new(StateStore::new(servers, projects, thresholds));
     let activity = Arc::new(ActivityStore::open_in_memory().expect("メモリ上の SQLite を開けます"));
     let (changes, _) = tokio::sync::broadcast::channel(16);
-    GrpcHarness { _directory: directory, config_path, state_path, calls_path, store, activity, changes }
+    GrpcHarness {
+      _directory: directory,
+      config_path,
+      state_path,
+      calls_path,
+      processes_path,
+      cwd_by_project,
+      store,
+      activity,
+      changes,
+      registry: McpClientRegistry::new(),
+    }
   }
 }
 
@@ -134,6 +167,11 @@ impl GrpcHarness {
 
   pub fn config_path(&self) -> &Path {
     &self.config_path
+  }
+
+  /// プロジェクトに割り当てた cwd。mock へ渡る cwd を期待値として使います。
+  pub fn project_cwd(&self, project: &str) -> PathBuf {
+    self.cwd_by_project.get(project).cloned().unwrap_or_else(|| panic!("プロジェクト {project} の cwd がありません"))
   }
 
   pub fn rewrite_state(&self, state: Value) {
@@ -171,6 +209,21 @@ impl GrpcHarness {
       .map(|line| serde_json::from_str(line).expect("記録した道具呼び出しを解析できます"))
       .collect()
   }
+
+  /// mock MCP サーバが起動した子プロセスの pid を、起動した順に返す。
+  ///
+  /// 読み取りと書き込みが同じ子プロセスを使うことを観測するために使います。起動が無ければ
+  /// 空の並びを返します。
+  pub fn recorded_processes(&self) -> Vec<u32> {
+    let Ok(text) = std::fs::read_to_string(&self.processes_path) else {
+      return Vec::new();
+    };
+    text
+      .lines()
+      .filter(|line| !line.trim().is_empty())
+      .map(|line| line.trim().parse().expect("記録した子プロセスの pid を解析できます"))
+      .collect()
+  }
 }
 
 /// mock MCP サーバが受け取った1件の道具呼び出し。
@@ -198,18 +251,25 @@ impl RunningServer {
 /// 空きポートを選び、harness の土台を持つ gRPC サーバを起動する。
 ///
 /// 状態ストアの記録と poller の起動はテストが必要に応じて行い、サーバはその土台の状態を
-/// そのまま読み取ります。
+/// そのまま読み取ります。takt-mcp のクライアントは harness のレジストリを共有します。
 pub async fn start_server(harness: &GrpcHarness) -> RunningServer {
+  start_server_at(harness, Arc::new(chrono::Utc::now)).await
+}
+
+/// 現在時刻を返す関数を注入して gRPC サーバを起動する。固定時計のテストで使います。
+pub async fn start_server_at(harness: &GrpcHarness, clock: takt_dash_backend::grpc::Clock) -> RunningServer {
   let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("空きポートを確保できます");
   let address = listener.local_addr().expect("待ち受けアドレスを取得できます");
   let (stop, _) = tokio::sync::watch::channel(false);
   let stop_rx = stop.subscribe();
-  let service = takt_dash_backend::grpc::TaktDashServiceImpl::new(
+  let service = takt_dash_backend::grpc::TaktDashServiceImpl::with_clock(
     harness.store.clone(),
     harness.activity.clone(),
     harness.config_path().to_path_buf(),
     harness.changes.clone(),
     stop_rx.clone(),
+    harness.registry.clone(),
+    clock,
   );
   let task = tokio::spawn(async move {
     let _ = takt_dash_backend::grpc::serve_with_listener(listener, service, stop_rx).await;

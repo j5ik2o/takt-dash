@@ -68,6 +68,7 @@ async fn watch_state_sends_the_current_state_immediately_then_follows_changes_on
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   harness.rewrite_state(goal_state("g2"));
   poller.read_cycle_once().await.expect("状態を変えるサイクルを実行できます");
@@ -104,6 +105,7 @@ async fn watch_state_does_not_resend_when_a_cycle_leaves_the_state_unchanged() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   poller.read_cycle_once().await.expect("状態を変えないサイクルを実行できます");
 
@@ -173,6 +175,7 @@ async fn watch_state_sends_the_current_thresholds_after_a_config_change() {
     harness.activity.clone(),
     harness.store.clone(),
     harness.changes.clone(),
+    harness.registry.clone(),
   );
   poller.read_cycle_once().await.expect("閾値を変えるサイクルを実行できます");
 

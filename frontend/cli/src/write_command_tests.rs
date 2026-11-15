@@ -8,11 +8,13 @@
 //! （実 backend が待ち受けていることがある 127.0.0.1:50051）には依存しません。
 
 use std::{
+  collections::BTreeMap,
   net::{Ipv4Addr, SocketAddr},
   sync::{Arc, Mutex},
   time::Duration,
 };
 
+use prost_types::Timestamp;
 use tonic::{transport::Server, Request, Response, Status};
 use v1::takt_dash_service_server::TaktDashServiceServer;
 
@@ -64,6 +66,8 @@ struct DummyConfig {
   merge_workflow:    String,
   approve_goal_id:   String,
   proposals:         Vec<v1::GoalRegistrationProposal>,
+  pending:           Option<v1::DashboardState>,
+  delays:            BTreeMap<&'static str, Duration>,
   error:             Option<(&'static str, Status)>,
 }
 
@@ -75,6 +79,8 @@ impl Default for DummyConfig {
       merge_workflow:    "goal-finish".to_owned(),
       approve_goal_id:   "3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned(),
       proposals:         Vec::new(),
+      pending:           None,
+      delays:            BTreeMap::new(),
       error:             None,
     }
   }
@@ -83,6 +89,13 @@ impl Default for DummyConfig {
 impl DummyConfig {
   fn error_for(&self, method: &str) -> Option<Status> {
     self.error.as_ref().filter(|(name, _)| *name == method).map(|(_, status)| status.clone())
+  }
+
+  /// 指定した RPC 名の遅延を再現する。
+  async fn delay_for(&self, method: &str) {
+    if let Some(delay) = self.delays.get(method) {
+      tokio::time::sleep(*delay).await;
+    }
   }
 }
 
@@ -100,9 +113,9 @@ impl DummyServer {
 
   async fn shutdown(self) {
     let _ = self.shutdown_tx.send(());
-    tokio::time::timeout(Duration::from_secs(5), self.server_handle)
+    tokio::time::timeout(Duration::from_secs(15), self.server_handle)
       .await
-      .expect("ダミーサーバーは5秒以内に停止する必要があります")
+      .expect("ダミーサーバーは15秒以内に停止する必要があります")
       .expect("ダミーサーバーのタスクが異常終了しました");
   }
 }
@@ -145,7 +158,11 @@ impl v1::takt_dash_service_server::TaktDashService for DummyService {
     &self,
     _request: Request<v1::GetOverviewRequest>,
   ) -> Result<Response<v1::DashboardState>, Status> {
-    Err(Status::unimplemented("このダミーサーバーは GetOverview を提供しません。"))
+    if let Some(status) = self.config.error_for("GetOverview") {
+      return Err(status);
+    }
+    self.config.delay_for("GetOverview").await;
+    Ok(Response::new(self.config.pending.clone().unwrap_or_default()))
   }
 
   async fn get_projects(
@@ -159,7 +176,11 @@ impl v1::takt_dash_service_server::TaktDashService for DummyService {
     &self,
     _request: Request<v1::GetPendingDecisionsRequest>,
   ) -> Result<Response<v1::GetPendingDecisionsResponse>, Status> {
-    Err(Status::unimplemented("このダミーサーバーは GetPendingDecisions を提供しません。"))
+    if let Some(status) = self.config.error_for("GetPendingDecisions") {
+      return Err(status);
+    }
+    self.config.delay_for("GetPendingDecisions").await;
+    Ok(Response::new(v1::GetPendingDecisionsResponse { state: self.config.pending.clone() }))
   }
 
   async fn get_activity(
@@ -190,6 +211,7 @@ impl v1::takt_dash_service_server::TaktDashService for DummyService {
     if let Some(status) = self.config.error_for("AnswerInquiry") {
       return Err(status);
     }
+    self.config.delay_for("AnswerInquiry").await;
     let request = request.into_inner();
     self.record(Recorded::Answer {
       server_id:  request.server_id,
@@ -613,4 +635,281 @@ fn connection_failure_is_reported_without_panicking() {
 
   assert_eq!(code, EXIT_FAILURE, "接続できないときは異常終了する必要があります");
   assert!(String::from_utf8_lossy(&stderr).contains("接続できません"), "接続不能であることを表示する必要があります");
+}
+
+// ----------------------------------------------------------------------------
+// decisions --server <名前> --project <名前>
+// ----------------------------------------------------------------------------
+
+/// 固定ラベルの行から値を取り出す。見つからなければテストを失敗させる。
+fn value_line(stdout: &str, label: &str) -> String {
+  stdout
+    .lines()
+    .find_map(|line| line.strip_prefix(label))
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(str::to_owned)
+    .unwrap_or_else(|| panic!("出力に {label} の行がありません: {stdout}"))
+}
+
+fn timestamp(seconds: i64) -> Timestamp {
+  Timestamp { seconds, nanos: 0 }
+}
+
+/// 問い合わせ・マージ待ち・別プロジェクトの問い合わせを含む判断待ちの状態。
+fn pending_state() -> v1::DashboardState {
+  v1::DashboardState {
+    read_at:           Some(timestamp(1_700_000_000)),
+    servers:           Vec::new(),
+    projects:          Vec::new(),
+    goals:             Vec::new(),
+    runs:              Vec::new(),
+    pending_decisions: vec![
+      v1::PendingDecision {
+        r#type:       v1::PendingDecisionType::Inquiry as i32,
+        server_id:    "mac-mini".to_owned(),
+        project:      "takt-dash".to_owned(),
+        goal_id:      Some("33333333-3333-4333-8333-333333333333".to_owned()),
+        inquiry_kind: v1::InquiryKind::Question as i32,
+        created_at:   Some(timestamp(1_700_000_000)),
+        body:         "続けてよいですか".to_owned(),
+        options:      vec!["yes".to_owned(), "no".to_owned()],
+        pull_request: None,
+        stale:        false,
+        inquiry_id:   "q-1".to_owned(),
+        revision:     None,
+      },
+      v1::PendingDecision {
+        r#type:       v1::PendingDecisionType::AwaitingMerge as i32,
+        server_id:    "mac-mini".to_owned(),
+        project:      "takt-dash".to_owned(),
+        goal_id:      Some("33333333-3333-4333-8333-333333333333".to_owned()),
+        inquiry_kind: v1::InquiryKind::Unspecified as i32,
+        created_at:   Some(timestamp(1_700_000_000)),
+        body:         "マージ待ちのゴール".to_owned(),
+        options:      Vec::new(),
+        pull_request: Some(v1::PullRequest { number: 12, url: "https://example.test/pr/12".to_owned() }),
+        stale:        false,
+        inquiry_id:   String::new(),
+        revision:     None,
+      },
+      v1::PendingDecision {
+        r#type:       v1::PendingDecisionType::Inquiry as i32,
+        server_id:    "other-server".to_owned(),
+        project:      "other".to_owned(),
+        goal_id:      Some("44444444-4444-4444-8444-444444444444".to_owned()),
+        inquiry_kind: v1::InquiryKind::Question as i32,
+        created_at:   Some(timestamp(1_700_000_000)),
+        body:         "別プロジェクトの問い合わせ".to_owned(),
+        options:      Vec::new(),
+        pull_request: None,
+        stale:        false,
+        inquiry_id:   "q-other".to_owned(),
+        revision:     None,
+      },
+    ],
+    thresholds:        Some(v1::AnomalyThresholds {
+      pending_decision_stale_minutes: 240,
+      run_log_silent_minutes:         10,
+    }),
+  }
+}
+
+/// 判断待ち一覧の表示テスト用に、登録提案（承認待ち）を加えた状態を作る。
+///
+/// 共有の `pending_state()` は他のテストと共有しているため変更せず、承認待ちの種別表示と
+/// リビジョンの描画を検証できるよう、登録提案を追加した複製を返します。
+fn decisions_pending_state() -> v1::DashboardState {
+  let mut state = pending_state();
+  state.pending_decisions.push(v1::PendingDecision {
+    r#type:       v1::PendingDecisionType::GoalRegistration as i32,
+    server_id:    "mac-mini".to_owned(),
+    project:      "takt-dash".to_owned(),
+    goal_id:      None,
+    inquiry_kind: v1::InquiryKind::Unspecified as i32,
+    created_at:   Some(timestamp(1_700_000_000)),
+    body:         "API を追加".to_owned(),
+    options:      Vec::new(),
+    pull_request: None,
+    stale:        false,
+    inquiry_id:   String::new(),
+    revision:     Some(7),
+  });
+  state
+}
+
+/// 一覧のうち、指定した種別ラベルで始まる項目の表示ブロックを返す。
+fn decision_block<'a>(stdout: &'a str, kind_label: &str) -> Vec<&'a str> {
+  let header = format!("- {kind_label}: ");
+  let mut block = Vec::new();
+  let mut in_block = false;
+  for line in stdout.lines() {
+    if line.starts_with("- ") {
+      if in_block {
+        break;
+      }
+      in_block = line.starts_with(&header);
+    }
+    if in_block {
+      block.push(line);
+    }
+  }
+  if block.is_empty() {
+    panic!("出力に {kind_label} の項目がありません: {stdout}");
+  }
+  block
+}
+
+#[test]
+fn decisions_shows_ids_that_answer_and_merge_accept() {
+  let rt = runtime();
+  let server =
+    rt.block_on(start_dummy_server(DummyConfig { pending: Some(decisions_pending_state()), ..DummyConfig::default() }));
+
+  let (code, stdout, stderr) = run_against(&server, &["decisions", "--server", "mac-mini", "--project", "takt-dash"]);
+  assert_eq!(code, EXIT_OK, "判断待ちの一覧は成功する必要があります: {stderr}");
+  assert!(!stdout.contains("q-other"), "絞り込んだサーバー・プロジェクト以外の判断を表示しません: {stdout}");
+
+  let inquiry_id = value_line(&stdout, "問い合わせID: ");
+  let goal_id = value_line(&stdout, "ゴールID: ");
+  let pr_number = value_line(&stdout, "プルリクエスト番号: ");
+  assert_eq!(inquiry_id, "q-1", "問い合わせ ID を表示する必要があります: {stdout}");
+  assert_eq!(goal_id, "33333333-3333-4333-8333-333333333333", "ゴール ID を表示する必要があります: {stdout}");
+  assert_eq!(pr_number, "12", "プルリクエスト番号を表示する必要があります: {stdout}");
+
+  let inquiry = decision_block(&stdout, "問い合わせ（質問）");
+  assert!(inquiry.contains(&"選択肢: yes、no"), "問い合わせの選択肢を完全一致で表示する必要があります: {inquiry:?}");
+  assert!(
+    inquiry.contains(&"作成時刻: 2023-11-14 22:13:20 UTC"),
+    "問い合わせの作成時刻を表示する必要があります: {inquiry:?}"
+  );
+  assert!(
+    inquiry.contains(&"滞留期限: 2023-11-15 02:13:20 UTC"),
+    "問い合わせの滞留期限を作成時刻と滞留分数から表示する必要があります: {inquiry:?}"
+  );
+
+  let approval = decision_block(&stdout, "承認待ち");
+  assert!(approval.contains(&"リビジョン: 7"), "登録提案のリビジョンを表示する必要があります: {approval:?}");
+  assert!(
+    approval.iter().all(|line| !line.starts_with("作成時刻: ") && !line.starts_with("滞留期限: ")),
+    "承認待ちに架空の期限行を出してはいけません: {approval:?}"
+  );
+
+  let (answer_code, _answer_stdout, answer_stderr) = run_against(&server, &[
+    "answer",
+    "--server",
+    "mac-mini",
+    "--project",
+    "takt-dash",
+    "--goal",
+    goal_id.as_str(),
+    "--question",
+    inquiry_id.as_str(),
+    "--text",
+    "yes",
+  ]);
+  assert_eq!(answer_code, EXIT_OK, "表示した問い合わせ ID をそのまま回答に使える必要があります: {answer_stderr}");
+
+  let (merge_code, _merge_stdout, merge_stderr) = run_against(&server, &[
+    "merge",
+    "--server",
+    "mac-mini",
+    "--project",
+    "takt-dash",
+    "--goal",
+    goal_id.as_str(),
+    "--pr",
+    pr_number.as_str(),
+    "--until",
+    "merge",
+  ]);
+  assert_eq!(
+    merge_code, EXIT_OK,
+    "表示したゴール ID と PR 番号をそのままマージ承認に使える必要があります: {merge_stderr}"
+  );
+
+  let recorded = server.recorded();
+  rt.block_on(server.shutdown());
+
+  assert_eq!(
+    recorded,
+    vec![
+      Recorded::Answer {
+        server_id:  "mac-mini".to_owned(),
+        project:    "takt-dash".to_owned(),
+        goal_id:    Some(goal_id.clone()),
+        inquiry_id: inquiry_id.clone(),
+        text:       Some("yes".to_owned()),
+        report:     None,
+      },
+      Recorded::Merge {
+        server_id: "mac-mini".to_owned(),
+        project:   "takt-dash".to_owned(),
+        goal_id:   goal_id.clone(),
+        pr_number: 12,
+        until:     "merge".to_owned(),
+      },
+    ],
+    "表示した値をそのまま書き込み要求へ渡す必要があります"
+  );
+}
+
+#[test]
+fn decisions_requires_server_and_project() {
+  let rt = runtime();
+  let server =
+    rt.block_on(start_dummy_server(DummyConfig { pending: Some(pending_state()), ..DummyConfig::default() }));
+
+  let (code, _stdout, _stderr) = run_against(&server, &["decisions"]);
+  let recorded = server.recorded();
+  rt.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_USAGE, "--server と --project の無い decisions は使い方の誤りで終わる必要があります");
+  assert!(recorded.is_empty(), "使い方の誤りでは backend を呼んではいけません: {recorded:?}");
+}
+
+// ----------------------------------------------------------------------------
+// 読み取りと書き込みの期限
+// ----------------------------------------------------------------------------
+
+#[test]
+fn answer_succeeds_after_connect_timeout_with_the_write_deadline() {
+  // 接続期限は5秒のまま。書き込みは別の期限（60秒）で実行するため、6秒遅れても成功する。
+  let rt = runtime();
+  let mut delays = BTreeMap::new();
+  delays.insert("AnswerInquiry", Duration::from_secs(6));
+  let server = rt.block_on(start_dummy_server(DummyConfig { delays, ..DummyConfig::default() }));
+
+  let (code, _stdout, stderr) = run_against(&server, &[
+    "answer",
+    "--server",
+    "mac-mini",
+    "--project",
+    "takt-dash",
+    "--goal",
+    "g-1",
+    "--question",
+    "q-1",
+    "--text",
+    "はい",
+  ]);
+  let recorded = server.recorded();
+  rt.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_OK, "接続期限を超えても書き込み期限の内なら成功する必要があります: {stderr}");
+  assert_eq!(recorded.len(), 1, "応答が遅れても回答は1回だけ送る必要があります: {recorded:?}");
+}
+
+#[test]
+fn overview_keeps_the_read_deadline() {
+  // 読み取りの期限は5秒のまま。6秒遅れる GetOverview は期限超過で失敗する。
+  let rt = runtime();
+  let mut delays = BTreeMap::new();
+  delays.insert("GetOverview", Duration::from_secs(6));
+  let server = rt.block_on(start_dummy_server(DummyConfig { delays, ..DummyConfig::default() }));
+
+  let (code, _stdout, stderr) = run_against(&server, &["overview"]);
+  rt.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_FAILURE, "読み取りは5秒の期限を超えると失敗する必要があります: {stderr}");
 }

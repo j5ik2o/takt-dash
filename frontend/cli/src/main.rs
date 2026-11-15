@@ -10,10 +10,10 @@ use std::{env::VarError, io::Write, net::SocketAddr, path::PathBuf, time::Durati
 use proto::v1::{
   takt_dash_service_client::TaktDashServiceClient, AnswerInquiryRequest, AnswerInquiryResponse,
   ApproveGoalMergeRequest, ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse,
-  DashboardState, GetOverviewRequest, GoalRegistrationProposal, OperationAnswerReport, PendingDecisionType,
-  RejectGoalRegistrationRequest, RejectGoalRegistrationResponse,
+  DashboardState, GetOverviewRequest, GetPendingDecisionsRequest, GoalRegistrationProposal, OperationAnswerReport,
+  PendingDecisionType, RejectGoalRegistrationRequest, RejectGoalRegistrationResponse,
 };
-use tonic::{transport::Endpoint, Code, Status};
+use tonic::{transport::Endpoint, Code, Request, Status};
 
 /// backend の gRPC の待ち受けアドレスの既定値。backend の設定の既定値と揃えます。
 pub const DEFAULT_BACKEND_ADDR: &str = "127.0.0.1:50051";
@@ -23,6 +23,10 @@ pub const BACKEND_ADDR_ENV: &str = "TAKTDASH_BACKEND_ADDR";
 pub const DEFAULT_CONFIG_PATH: &str = "taktdash.config.json";
 /// 接続の試行に許す時間。応答のないアドレスでいつまでも待たないためです。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// 読み取り RPC に許す時間。書き込みの期限とは分け、既存の待ち時間を変えません。
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// 書き込み RPC に許す時間。backend の初期化・道具実行・停止を見込みます。
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 正常終了の終了コード。
 const EXIT_OK: i32 = 0;
@@ -40,6 +44,8 @@ const ANSWER_COMMAND: &str = "answer";
 const MERGE_COMMAND: &str = "merge";
 /// ゴール登録の承認待ちを一覧表示するコマンド。
 const REGISTRATIONS_COMMAND: &str = "registrations";
+/// 判断待ちの操作対象を一覧表示するコマンド。
+const DECISIONS_COMMAND: &str = "decisions";
 /// ゴール登録を承認するコマンド。
 const APPROVE_REGISTRATION_COMMAND: &str = "approve-registration";
 /// ゴール登録を却下するコマンド。
@@ -88,10 +94,21 @@ fn resolve_backend_addr(sources: &AddrSources<'_>) -> Result<SocketAddr, AddrErr
 enum Invocation {
   /// 概要を表示する。
   Overview(OverviewOptions),
+  /// 判断待ちの操作対象を表示する。
+  Decisions(DecisionsOptions),
   /// 書き込み操作を実行する。
   Write(WriteInvocation),
   /// 使い方を表示して正常終了する。
   Help,
+}
+
+/// 判断待ちの一覧の表示に使う解決前の入力。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DecisionsOptions {
+  server_id: String,
+  project:   String,
+  addr:      Option<String>,
+  config:    Option<PathBuf>,
 }
 
 /// 概要の表示に使う解決前の入力。
@@ -156,6 +173,7 @@ fn is_known_command(name: &str) -> bool {
       | ANSWER_COMMAND
       | MERGE_COMMAND
       | REGISTRATIONS_COMMAND
+      | DECISIONS_COMMAND
       | APPROVE_REGISTRATION_COMMAND
       | REJECT_REGISTRATION_COMMAND
   )
@@ -171,6 +189,7 @@ fn flag_allowed(command: Option<&str>, flag: &str) -> bool {
         Some(ANSWER_COMMAND)
           | Some(MERGE_COMMAND)
           | Some(REGISTRATIONS_COMMAND)
+          | Some(DECISIONS_COMMAND)
           | Some(APPROVE_REGISTRATION_COMMAND)
           | Some(REJECT_REGISTRATION_COMMAND)
       )
@@ -269,6 +288,11 @@ fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
   let command = command.unwrap_or(OVERVIEW_COMMAND);
   if command == OVERVIEW_COMMAND {
     return Ok(Invocation::Overview(OverviewOptions { addr, config }));
+  }
+  if command == DECISIONS_COMMAND {
+    let server_id = require_flag(server, DECISIONS_COMMAND, "--server")?;
+    let project = require_flag(project, DECISIONS_COMMAND, "--project")?;
+    return Ok(Invocation::Decisions(DecisionsOptions { server_id, project, addr, config }));
   }
   let write = |command: WriteCommand| Invocation::Write(WriteInvocation { command, addr, config });
   match command {
@@ -386,6 +410,8 @@ fn usage() -> String {
     "                                      プルリクエストのマージを承認します",
     "  registrations --server <名前> --project <名前>",
     "                                      ゴール登録の承認待ちを一覧表示します",
+    "  decisions --server <名前> --project <名前>",
+    "                                      判断待ちの操作対象と識別子を一覧表示します",
     "  approve-registration --server <名前> --project <名前> --revision <n>",
     "                                      ゴール登録を承認します",
     "  reject-registration --server <名前> --project <名前> --revision <n>",
@@ -415,9 +441,9 @@ fn read_config_listen(path: &PathBuf) -> Result<Option<String>, String> {
   Ok(parsed.listen)
 }
 
-/// 概要の取得に失敗した理由。
+/// 読み取り系 API の取得に失敗した理由。
 #[derive(Debug)]
-enum OverviewError {
+enum ReadError {
   /// backend に接続できない、または backend が gRPC として応答しない（`is_connection_failure`）。
   Unavailable(String),
   /// backend は応答したが、接続不能以外の理由で失敗した。
@@ -440,28 +466,48 @@ fn is_connection_failure(code: Code) -> bool {
 
 /// backend へ gRPC で接続する。接続できないときは表示用のメッセージを返す。
 async fn connect(addr: SocketAddr) -> Result<tonic::transport::Channel, String> {
+  // Endpoint の timeout は RPC ごとの期限の上限になるため設定しません。RPC の期限は
+  // Request::set_timeout で読み取りと書き込みに分けて指定します。
   let endpoint = Endpoint::from_shared(format!("http://{addr}"))
     .map_err(|error| format!("接続先 {addr} の指定が不正です: {error}"))?
-    .connect_timeout(CONNECT_TIMEOUT)
-    .timeout(CONNECT_TIMEOUT);
+    .connect_timeout(CONNECT_TIMEOUT);
   endpoint.connect().await.map_err(|error| format!("接続先 {addr} に接続できません: {error}"))
+}
+
+/// 読み取り RPC の失敗を、接続不能と backend の失敗に分類する。
+fn read_call_error(addr: SocketAddr, operation: &str, status: Status) -> ReadError {
+  if is_connection_failure(status.code()) {
+    ReadError::Unavailable(format!("接続先 {addr} から{operation}に失敗しました: {}", status.message()))
+  } else {
+    ReadError::Call(status)
+  }
 }
 
 /// backend の `GetOverview` で概要を取得する。
 ///
 /// 接続成否の判定はこの関数だけが行います。`Endpoint::connect()` の失敗と、`GetOverview` が返す
 /// `Status` を同じ分類（接続不能か、backend が応答したうえでの失敗か）へ写します。
-async fn fetch_overview(addr: SocketAddr) -> Result<DashboardState, OverviewError> {
-  let channel = connect(addr).await.map_err(OverviewError::Unavailable)?;
+async fn fetch_overview(addr: SocketAddr) -> Result<DashboardState, ReadError> {
+  let channel = connect(addr).await.map_err(ReadError::Unavailable)?;
   let mut client = TaktDashServiceClient::new(channel);
-  let response = client.get_overview(GetOverviewRequest {}).await.map_err(|status| {
-    if is_connection_failure(status.code()) {
-      OverviewError::Unavailable(format!("接続先 {addr} から概要を取得できません: {}", status.message()))
-    } else {
-      OverviewError::Call(status)
-    }
-  })?;
+  let mut request = Request::new(GetOverviewRequest {});
+  request.set_timeout(READ_TIMEOUT);
+  let response = client.get_overview(request).await.map_err(|status| read_call_error(addr, "概要の取得", status))?;
   Ok(response.into_inner())
+}
+
+/// backend の `GetPendingDecisions` で判断待ちの状態を取得する。
+async fn fetch_decisions(addr: SocketAddr) -> Result<DashboardState, ReadError> {
+  let channel = connect(addr).await.map_err(ReadError::Unavailable)?;
+  let mut client = TaktDashServiceClient::new(channel);
+  let mut request = Request::new(GetPendingDecisionsRequest {});
+  request.set_timeout(READ_TIMEOUT);
+  let response =
+    client.get_pending_decisions(request).await.map_err(|status| read_call_error(addr, "判断待ちの取得", status))?;
+  response
+    .into_inner()
+    .state
+    .ok_or_else(|| ReadError::Call(Status::internal("backend が判断待ちの状態を返しませんでした。")))
 }
 
 /// 書き込みコマンドの実行に失敗した理由。
@@ -493,64 +539,71 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
         | Answer::Text(text) => (Some(text.clone()), None),
         | Answer::Report(report) => (None, Some(*report as i32)),
       };
-      let response = client
-        .answer_inquiry(AnswerInquiryRequest {
-          server_id: server_id.clone(),
-          project: project.clone(),
-          goal_id: goal_id.clone(),
-          inquiry_id: inquiry_id.clone(),
-          text,
-          report,
-        })
-        .await
-        .map_err(|status| write_call_error(addr, operation, status))?
-        .into_inner();
+      let mut request = Request::new(AnswerInquiryRequest {
+        server_id: server_id.clone(),
+        project: project.clone(),
+        goal_id: goal_id.clone(),
+        inquiry_id: inquiry_id.clone(),
+        text,
+        report,
+      });
+      request.set_timeout(WRITE_TIMEOUT);
+      let response =
+        client.answer_inquiry(request).await.map_err(|status| write_call_error(addr, operation, status))?.into_inner();
       Ok(render_answer(&response))
     },
     | WriteCommand::Merge { server_id, project, goal_id, pr_number, until } => {
+      let mut request = Request::new(ApproveGoalMergeRequest {
+        server_id: server_id.clone(),
+        project:   project.clone(),
+        goal_id:   goal_id.clone(),
+        pr_number: *pr_number,
+        until:     until.clone(),
+      });
+      request.set_timeout(WRITE_TIMEOUT);
       let response = client
-        .approve_goal_merge(ApproveGoalMergeRequest {
-          server_id: server_id.clone(),
-          project:   project.clone(),
-          goal_id:   goal_id.clone(),
-          pr_number: *pr_number,
-          until:     until.clone(),
-        })
+        .approve_goal_merge(request)
         .await
         .map_err(|status| write_call_error(addr, operation, status))?
         .into_inner();
       Ok(render_merge(&response))
     },
     | WriteCommand::Registrations { server_id, project } => {
+      let mut request = Request::new(proto::v1::ListGoalRegistrationProposalsRequest {
+        server_id: server_id.clone(),
+        project:   project.clone(),
+      });
+      request.set_timeout(READ_TIMEOUT);
       let response = client
-        .list_goal_registration_proposals(proto::v1::ListGoalRegistrationProposalsRequest {
-          server_id: server_id.clone(),
-          project:   project.clone(),
-        })
+        .list_goal_registration_proposals(request)
         .await
         .map_err(|status| write_call_error(addr, operation, status))?
         .into_inner();
       Ok(render_registrations(&response.proposals))
     },
     | WriteCommand::ApproveRegistration { server_id, project, revision } => {
+      let mut request = Request::new(ApproveGoalRegistrationRequest {
+        server_id: server_id.clone(),
+        project:   project.clone(),
+        revision:  *revision,
+      });
+      request.set_timeout(WRITE_TIMEOUT);
       let response = client
-        .approve_goal_registration(ApproveGoalRegistrationRequest {
-          server_id: server_id.clone(),
-          project:   project.clone(),
-          revision:  *revision,
-        })
+        .approve_goal_registration(request)
         .await
         .map_err(|status| write_call_error(addr, operation, status))?
         .into_inner();
       Ok(render_approve_registration(&response))
     },
     | WriteCommand::RejectRegistration { server_id, project, revision } => {
+      let mut request = Request::new(RejectGoalRegistrationRequest {
+        server_id: server_id.clone(),
+        project:   project.clone(),
+        revision:  *revision,
+      });
+      request.set_timeout(WRITE_TIMEOUT);
       let response = client
-        .reject_goal_registration(RejectGoalRegistrationRequest {
-          server_id: server_id.clone(),
-          project:   project.clone(),
-          revision:  *revision,
-        })
+        .reject_goal_registration(request)
         .await
         .map_err(|status| write_call_error(addr, operation, status))?
         .into_inner();
@@ -582,6 +635,9 @@ fn run_with(
       return EXIT_OK;
     },
     | Invocation::Overview(options) => (options.addr, options.config, Action::Overview),
+    | Invocation::Decisions(options) => {
+      (options.addr, options.config, Action::Decisions { server_id: options.server_id, project: options.project })
+    },
     | Invocation::Write(write) => (write.addr, write.config, Action::Write(write.command)),
   };
   let config_path = config_option.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
@@ -613,12 +669,27 @@ fn run_with(
         let _ = writeln!(stdout, "{}", render_overview(&state));
         EXIT_OK
       },
-      | Err(OverviewError::Unavailable(message)) => {
+      | Err(ReadError::Unavailable(message)) => {
         let _ = writeln!(stderr, "backend に接続できません。{message}");
         EXIT_FAILURE
       },
-      | Err(OverviewError::Call(status)) => {
+      | Err(ReadError::Call(status)) => {
         let _ = writeln!(stderr, "backend から概要を取得できませんでした（{}）。{}", status.code(), status.message());
+        EXIT_FAILURE
+      },
+    },
+    | Action::Decisions { server_id, project } => match runtime.block_on(fetch_decisions(addr)) {
+      | Ok(state) => {
+        let _ = writeln!(stdout, "{}", render_decisions(&state, &server_id, &project));
+        EXIT_OK
+      },
+      | Err(ReadError::Unavailable(message)) => {
+        let _ = writeln!(stderr, "backend に接続できません。{message}");
+        EXIT_FAILURE
+      },
+      | Err(ReadError::Call(status)) => {
+        let _ =
+          writeln!(stderr, "backend から判断待ちを取得できませんでした（{}）。{}", status.code(), status.message());
         EXIT_FAILURE
       },
     },
@@ -649,6 +720,8 @@ fn run_with(
 enum Action {
   /// 概要を表示する。
   Overview,
+  /// 判断待ちの操作対象を表示する。
+  Decisions { server_id: String, project: String },
   /// 書き込みコマンドを実行する。
   Write(WriteCommand),
 }
@@ -756,6 +829,68 @@ fn render_overview(state: &DashboardState) -> String {
     thresholds.pending_decision_stale_minutes,
     thresholds.run_log_silent_minutes,
   )
+}
+
+/// 判断待ちの一覧を、指定したサーバーとプロジェクトに絞って表示する。
+///
+/// 回答・マージの承認へそのまま渡せる識別子（問い合わせ ID・ゴール ID・プルリクエスト番号・
+/// リビジョン）を固定ラベルで出す。滞留期限は proto に専用フィールドが無いため、作成時刻と
+/// 設定の滞留分数から算出して併記します。承認待ちの登録提案は backend が作成時刻を射影時刻で
+/// 返すため、滞留期限の算出対象にしません。
+fn render_decisions(state: &DashboardState, server_id: &str, project: &str) -> String {
+  let stale_minutes = state.thresholds.unwrap_or_default().pending_decision_stale_minutes;
+  let decisions: Vec<&proto::v1::PendingDecision> = state
+    .pending_decisions
+    .iter()
+    .filter(|decision| decision.server_id == server_id && decision.project == project)
+    .collect();
+  let lines: Vec<String> = decisions.iter().map(|decision| render_decision(decision, stale_minutes)).collect();
+  format!("判断待ち: {}件（{}/{}）\n{}", decisions.len(), server_id, project, join_lines(&lines))
+}
+
+/// 判断待ち1件の表示を作る。該当しない項目の行は出さない。
+fn render_decision(decision: &proto::v1::PendingDecision, stale_minutes: i32) -> String {
+  let kind = if decision.r#type == PendingDecisionType::AwaitingMerge as i32 {
+    "人のマージ待ち"
+  } else if decision.r#type == PendingDecisionType::GoalRegistration as i32 {
+    "承認待ち"
+  } else if decision.inquiry_kind == proto::v1::InquiryKind::OperationRequest as i32 {
+    "問い合わせ（作業の依頼）"
+  } else {
+    "問い合わせ（質問）"
+  };
+  let mut lines = vec![format!("- {kind}: {}", decision.body)];
+  if !decision.inquiry_id.is_empty() {
+    lines.push(format!("問い合わせID: {}", decision.inquiry_id));
+  }
+  if let Some(goal_id) = decision.goal_id.as_deref().filter(|goal_id| !goal_id.is_empty()) {
+    lines.push(format!("ゴールID: {goal_id}"));
+  }
+  if let Some(pull_request) = &decision.pull_request {
+    lines.push(format!("プルリクエスト番号: {}", pull_request.number));
+  }
+  if let Some(revision) = decision.revision {
+    lines.push(format!("リビジョン: {revision}"));
+  }
+  if decision.r#type != PendingDecisionType::GoalRegistration as i32 {
+    lines.push(format!("作成時刻: {}", format_timestamp(decision.created_at.as_ref())));
+    lines.push(format!("滞留期限: {}", stale_deadline(decision.created_at.as_ref(), stale_minutes)));
+  }
+  if !decision.options.is_empty() {
+    lines.push(format!("選択肢: {}", decision.options.join("、")));
+  }
+  lines.join("\n")
+}
+
+/// 判断待ちの滞留期限（作成時刻 + 滞留分数）を表示用の文字列にする。
+fn stale_deadline(created_at: Option<&prost_types::Timestamp>, stale_minutes: i32) -> String {
+  let Some(created_at) = created_at else {
+    return "不明".to_owned();
+  };
+  let Some(at) = chrono::DateTime::from_timestamp(created_at.seconds, 0) else {
+    return "不明".to_owned();
+  };
+  (at + chrono::Duration::minutes(i64::from(stale_minutes))).format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
 /// 一覧を改行で連結し、空の一覧は空であることが分かる表示にする。

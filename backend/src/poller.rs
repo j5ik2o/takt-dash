@@ -14,7 +14,7 @@ use crate::{
   activity::ActivityStore,
   config::{load_config, Config, Project, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
-  mcp::{client_config, McpClient, ToolError, ToolSet},
+  mcp::{client_config, McpClientRegistry, ToolError, ToolSet},
   model::ProjectSnapshot,
   store::StateStore,
 };
@@ -24,7 +24,7 @@ pub struct Poller {
   config_path:        PathBuf,
   activity:           Arc<ActivityStore>,
   store:              Arc<StateStore>,
-  clients:            BTreeMap<String, McpClient>,
+  registry:           McpClientRegistry,
   previous:           BTreeMap<String, ProjectSnapshot>,
   previous_connected: BTreeMap<String, bool>,
   changes:            broadcast::Sender<()>,
@@ -50,12 +50,13 @@ impl Poller {
     activity: Arc<ActivityStore>,
     store: Arc<StateStore>,
     changes: broadcast::Sender<()>,
+    registry: McpClientRegistry,
   ) -> Self {
     Poller {
       config_path,
       activity,
       store,
-      clients: BTreeMap::new(),
+      registry,
       previous: BTreeMap::new(),
       previous_connected: BTreeMap::new(),
       changes,
@@ -64,8 +65,9 @@ impl Poller {
 
   /// 1サイクル分、全プロジェクトの状態を読み取って差し替え、出来事を記録する。
   ///
-  /// 設定ファイルを再読み込みし、プロジェクト一覧の変化（追加・削除）を状態ストアと clients へ
-  /// 追随させます。読み取り間隔もこのサイクルで解決し、[`CycleReport::interval`] で返します。
+  /// 設定ファイルを再読み込みし、プロジェクト一覧の変化（追加・削除）を状態ストアと
+  /// takt-mcp のクライアントのレジストリへ追随させます。読み取り間隔もこのサイクルで解決し、
+  /// [`CycleReport::interval`] で返します。
   pub async fn read_cycle_once(&mut self) -> Result<CycleReport, crate::config::ConfigError> {
     let config = load_config(&self.config_path)?;
     let before = StoreSignature::capture(&self.store);
@@ -123,20 +125,18 @@ impl Poller {
 
   /// すべてのプロジェクトの子プロセスを終了する。
   pub async fn shutdown(&mut self) {
-    for client in self.clients.values_mut() {
-      client.shutdown().await;
-    }
-    self.clients.clear();
+    self.registry.shutdown_all().await;
   }
 
-  fn sync_clients(&mut self, config: &Config) {
-    let wanted: Vec<&str> = config.projects.iter().map(|project| project.name.as_str()).collect();
-    self.clients.retain(|project, _| wanted.contains(&project.as_str()));
+  fn sync_clients(&self, config: &Config) {
+    let wanted: Vec<(String, String)> =
+      config.projects.iter().map(|project| (project.server.clone(), project.name.clone())).collect();
+    self.registry.retain(&wanted);
     for project in &config.projects {
       let Some(server) = config.servers.get(&project.server) else {
         continue;
       };
-      self.clients.entry(project.name.clone()).or_insert_with(|| McpClient::new(client_config(server, &project.cwd)));
+      self.registry.client(&project.server, &project.name, || client_config(server, &project.cwd));
     }
   }
 
@@ -148,10 +148,11 @@ impl Poller {
     project: &Project,
     prev: Option<&ProjectSnapshot>,
   ) -> Result<ProjectSnapshot, ToolError> {
-    let Some(client) = self.clients.get_mut(&project.name) else {
+    let Some(client) = self.registry.get(&project.server, &project.name) else {
       return Err(ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name)));
     };
-    ToolSet::new(client, project.cwd.clone()).read_snapshot(prev).await
+    let mut client = client.lock().await;
+    ToolSet::new(&mut client, project.cwd.clone()).read_snapshot(prev).await
   }
 }
 

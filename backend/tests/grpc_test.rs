@@ -5,11 +5,11 @@
 mod common;
 mod grpc_harness;
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use common::*;
-use grpc_harness::{client, start_server, GrpcHarness};
+use grpc_harness::{client, start_server, start_server_at, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
   model::{
@@ -326,23 +326,17 @@ async fn get_projects_returns_the_state_and_recent_events_newest_first() {
 #[tokio::test]
 async fn get_activity_returns_events_daily_summaries_and_today_counts() {
   let harness = seeded_harness();
-  // 当日（JST の今日）に 2 件、24 時間前（JST の前日）に 1 件を記録する。当日判定は
-  // JST の日付境界で行われるため、種の時刻を Utc::now() からの相対で作り、今日に確実に入れる。
-  let now = Utc::now();
+  // 固定 now は JST 2026-11-16 00:02。当日判定が JST の日付境界で行われるため、now と
+  // 種時刻・期待日付をすべて同じ固定 now から作り、深夜境界でも決定的にする。
+  let now = time("2026-11-15T15:02:00Z");
   harness
     .activity
-    .record(&event(
-      &(now - Duration::minutes(5)).to_rfc3339(),
-      "mac-mini",
-      Some("takt-dash"),
-      EventKind::GoalCreated,
-      "登録",
-    ))
+    .record(&event(&now.to_rfc3339(), "mac-mini", Some("takt-dash"), EventKind::GoalCreated, "登録"))
     .expect("出来事を記録できます");
   harness
     .activity
     .record(&event(
-      &(now - Duration::minutes(10)).to_rfc3339(),
+      &(now - Duration::minutes(1)).to_rfc3339(),
       "mac-mini",
       Some("takt-dash"),
       EventKind::Inquiry,
@@ -353,7 +347,7 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
     .activity
     .record(&event(&(now - Duration::hours(24)).to_rfc3339(), "mac-studio", Some("ddd"), EventKind::RunStarted, "開始"))
     .expect("出来事を記録できます");
-  let server = start_server(&harness).await;
+  let server = start_server_at(&harness, Arc::new(move || now)).await;
   let mut client = client(server.address).await;
 
   let response = client.get_activity(GetActivityRequest {}).await.expect("アクティビティを取得できます").into_inner();
