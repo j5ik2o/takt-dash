@@ -169,7 +169,8 @@ jobs:
         with:
           node-version: 22
       - run: make done
-      - run: python3 tools/aislop-gate/aislop_gate.py --root .
+      - run: npm ci
+      - run: node scripts/aislop-check-bootstrap.mjs check
 """
 
 WORKFLOW = """\
@@ -205,8 +206,8 @@ steps:
     system_inputs:
       - type: command
         as: result
-        command: python3 tools/aislop-gate/aislop_gate.py --root .
-        timeout_ms: 300000
+        command: npm ci && node scripts/aislop-check-bootstrap.mjs check
+        timeout_ms: 900000
     rules:
       - condition: when(context.aislop_gate.result.exit_code == 0)
         next: COMPLETE
@@ -540,8 +541,8 @@ def test_workflow_requires_aislop_gate_step() -> None:
     system_inputs:
       - type: command
         as: result
-        command: python3 tools/aislop-gate/aislop_gate.py --root .
-        timeout_ms: 300000
+        command: npm ci && node scripts/aislop-check-bootstrap.mjs check
+        timeout_ms: 900000
     rules:
       - condition: when(context.aislop_gate.result.exit_code == 0)
         next: COMPLETE
@@ -611,15 +612,16 @@ def test_ci_must_run_make_done_with_toolchains() -> None:
 
 def test_ci_must_call_aislop_gate() -> None:
     """CI から aislop のゲートを呼ぶ。チェックアウトの前に呼ぶ構成も失敗にする。"""
+    aislop_run = "      - run: node scripts/aislop-check-bootstrap.mjs check\n"
     cases = {
         "aislop ゲートを呼ばない": (
-            CI.replace("      - run: python3 tools/aislop-gate/aislop_gate.py --root .\n", ""),
+            CI.replace(aislop_run, ""),
             "aislop",
         ),
         "チェックアウトの前に aislop を呼ぶ": (
-            CI.replace("      - run: python3 tools/aislop-gate/aislop_gate.py --root .\n", "").replace(
+            CI.replace(aislop_run, "").replace(
                 "      - uses: actions/checkout@v5\n",
-                "      - run: python3 tools/aislop-gate/aislop_gate.py --root .\n      - uses: actions/checkout@v5\n",
+                aislop_run + "      - uses: actions/checkout@v5\n",
             ),
             "aislop",
         ),
@@ -643,7 +645,7 @@ def test_ci_checkout_order_is_per_job() -> None:
         "  extra:\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
-        "      - run: python3 tools/aislop-gate/aislop_gate.py --root .\n"
+        "      - run: node scripts/aislop-check-bootstrap.mjs check\n"
     )
     cases = {
         "aislop を呼ぶジョブに checkout が無い": (
@@ -658,7 +660,7 @@ def test_ci_checkout_order_is_per_job() -> None:
             + "    runs-on: ubuntu-latest\n"
             + "    steps:\n"
             + "      - uses: actions/checkout@v5\n"
-            + "      - run: python3 tools/aislop-gate/aislop_gate.py --root .\n",
+            + "      - run: node scripts/aislop-check-bootstrap.mjs check\n",
             None,
         ),
         "make done を持たないジョブが混在しても結果が変わらない": (

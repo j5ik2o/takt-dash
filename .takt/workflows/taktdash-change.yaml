@@ -90,8 +90,8 @@ steps:
     system_inputs:
       - type: command
         as: result
-        command: python3 tools/aislop-gate/aislop_gate.py --root .
-        timeout_ms: 300000
+        command: npm ci && node scripts/aislop-check-bootstrap.mjs check
+        timeout_ms: 900000
     rules:
       - condition: when(context.aislop_gate.result.exit_code == 0)
         next: COMPLETE
@@ -127,7 +127,7 @@ steps:
       - aislop の指摘を直す
       - |
         次の aislop の判定を確認してください。指摘は修正するか、理由を述べて
-        .aislop/ci-baseline.json へ登録してください。
+        scripts/aislop-accepted.json へ登録してください。
         {context:aislop_gate.result.stdout}
         {context:aislop_gate.result.stderr}
     rules:

@@ -45,6 +45,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.11 未満は対象外
 
 WORKSPACE_MEMBERS = ["backend", "frontend/cli"]
 GATE_TARGETS = ["fmt", "clippy", "test", "typecheck", "lint"]
+AISLOP_CHECK_COMMAND = "scripts/aislop-check-bootstrap.mjs check"
 
 
 class GateError(Exception):
@@ -392,9 +393,9 @@ def runs_make_done(step):
 
 
 def runs_aislop_gate(step):
-    """mode が system のステップで、aislop-gate の関門を固定コマンドとして実行するかを判定する。"""
+    """mode が system のステップで、aislop の関門を固定コマンドとして実行するかを判定する。"""
     return any(
-        "tools/aislop-gate/aislop_gate.py" in str(item.get("command", ""))
+        AISLOP_CHECK_COMMAND in str(item.get("command", ""))
         for item in step.get("system_inputs") or []
         if isinstance(item, dict) and item.get("type") == "command"
     ) and step.get("mode") == "system"
@@ -519,7 +520,7 @@ def check_ci(root):
                 if not isinstance(run, str):
                     continue
                 ordered_runs.append(run)
-                if "tools/aislop-gate/aislop_gate.py" not in run:
+                if AISLOP_CHECK_COMMAND not in run:
                     continue
                 job_calls_aislop = True
                 if checkout_seen:
@@ -551,7 +552,7 @@ def check_ci(root):
         if not has_node_action or not node_versions:
             problems.append("Node をセットアップしていません")
         if not aislop_called:
-            problems.append("aislop のゲート（tools/aislop-gate/aislop_gate.py）を呼んでいません")
+            problems.append(f"aislop のゲート（node {AISLOP_CHECK_COMMAND}）を呼んでいません")
         elif aislop_misordered_jobs:
             problems.append("aislop のゲートをチェックアウトより前に呼んでいます")
         found.append({"file": str(path.relative_to(root)), "problems": problems})
