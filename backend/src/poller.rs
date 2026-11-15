@@ -70,6 +70,7 @@ impl Poller {
     let config = load_config(&self.config_path)?;
     let before = StoreSignature::capture(&self.store);
     self.store.set_thresholds(config.thresholds);
+    self.store.set_servers(config.server_meta.clone());
     self.store.set_projects(config.projects.clone());
     let rebuilt = self.sync_clients(&config).await;
     self.reset_rebuilt_projects(&rebuilt);
@@ -202,19 +203,20 @@ impl Poller {
 /// サイクルの前後で観測可能な状態が変わったかを判定するための指紋。
 ///
 /// WatchState
-/// は「状態が変わるたび送る」ため、プロジェクトの並び・読み取り成否・状態・閾値のいずれかが
-/// 変わったサイクルだけを変化とみなします。読めた時刻（last_read_at）は読み取りのたびに進むため、
-/// 内容が同じサイクルを変化として扱わないよう指紋から除きます。
+/// は「状態が変わるたび送る」ため、プロジェクトの並び・読み取り成否・状態・閾値・サーバーの
+/// 表示情報のいずれかが変わったサイクルだけを変化とみなします。読めた時刻（last_read_at）は
+/// 読み取りのたびに進むため、内容が同じサイクルを変化として扱わないよう指紋から除きます。
 #[derive(Debug, PartialEq, Eq)]
 struct StoreSignature {
   thresholds: Thresholds,
+  servers:    BTreeMap<String, crate::config::ServerMeta>,
   projects:   Vec<(String, bool, Option<ProjectSnapshot>)>,
 }
 
 impl StoreSignature {
   fn capture(store: &StateStore) -> Self {
     let projects = store.project_views().into_iter().map(|view| (view.name, view.connected, view.snapshot)).collect();
-    StoreSignature { thresholds: store.thresholds(), projects }
+    StoreSignature { thresholds: store.thresholds(), servers: store.servers(), projects }
   }
 }
 

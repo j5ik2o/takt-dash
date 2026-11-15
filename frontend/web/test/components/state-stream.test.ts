@@ -36,12 +36,44 @@ type StreamHandlers = {
   onError?: () => void;
 };
 
-const open = (Ctor: typeof FakeEventSource, handlers: StreamHandlers) =>
+type ScheduledReconnect = {
+  run: () => void;
+  delayMs: number;
+  cancelled: boolean;
+};
+
+type ReconnectScheduler = (run: () => void, delayMs: number) => () => void;
+
+/** 再接続の予約を記録し、テストが任意の時点で実行する。 */
+class FakeScheduler {
+  readonly scheduled: ScheduledReconnect[] = [];
+  readonly schedule: ReconnectScheduler = (run, delayMs) => {
+    const entry: ScheduledReconnect = { run, delayMs, cancelled: false };
+    this.scheduled.push(entry);
+    return () => {
+      entry.cancelled = true;
+    };
+  };
+  latest(): ScheduledReconnect {
+    const entry = this.scheduled[this.scheduled.length - 1];
+    assert.ok(entry, "再接続が予約されています");
+    return entry;
+  }
+  runLatest() {
+    const entry = this.latest();
+    if (!entry.cancelled) {
+      entry.run();
+    }
+  }
+}
+
+const open = (Ctor: typeof FakeEventSource, handlers: StreamHandlers, scheduler?: FakeScheduler) =>
   openStateStream({
     url: "/api/state",
     createEventSource: (url: string) => new Ctor(url),
     onState: handlers.onState ?? (() => {}),
     onError: handlers.onError ?? (() => {}),
+    ...(scheduler === undefined ? {} : { scheduleReconnect: scheduler.schedule }),
   });
 
 test("受信した状態で画面の状態を置き換える", () => {
@@ -100,24 +132,67 @@ test("proto の JSON（時刻は ISO 文字列、列挙型は名称文字列）�
   stream.close();
 });
 
-test("切断（エラー）時は接続を捨てて再接続する", () => {
+test("切断（エラー）時は接続を捨て、待機してから同じ URL へ再接続する", () => {
   const Ctor = freshFakes();
+  const scheduler = new FakeScheduler();
   let state = "initial";
-  const stream = open(Ctor, {
-    onState: () => {
-      state = "updated";
+  const stream = open(
+    Ctor,
+    {
+      onState: () => {
+        state = "updated";
+      },
+      onError: () => {
+        state = "disconnected";
+      },
     },
-    onError: () => {
-      state = "disconnected";
-    },
-  });
+    scheduler,
+  );
   const first = Ctor.instances[0]!;
   first.onerror?.({});
   assert.equal(state, "disconnected");
   assert.equal(first.closed, true, "古い接続を閉じる");
-  assert.equal(Ctor.instances.length, 2, "新しい接続を作って再接続する");
+  assert.equal(Ctor.instances.length, 1, "エラーの直後には新しい接続を作らない");
+  assert.equal(scheduler.latest().delayMs, 1000, "最初の再接続は1秒待つ");
+
+  scheduler.runLatest();
+  assert.equal(Ctor.instances.length, 2, "予約した待機の後に新しい接続を作る");
   assert.equal(Ctor.instances[1]!.url, "/api/state");
   stream.close();
+});
+
+test("再接続の待機は連続失敗で倍になり、受信に成功すると初期値へ戻る", () => {
+  const Ctor = freshFakes();
+  const scheduler = new FakeScheduler();
+  const stream = open(Ctor, {}, scheduler);
+
+  Ctor.instances[0]!.onerror?.({});
+  assert.equal(scheduler.latest().delayMs, 1000);
+  scheduler.runLatest();
+
+  Ctor.instances[1]!.onerror?.({});
+  assert.equal(scheduler.latest().delayMs, 2000, "連続失敗では待機を倍にする");
+  scheduler.runLatest();
+
+  Ctor.instances[2]!.onmessage?.({ data: JSON.stringify({ servers: [] }) });
+  Ctor.instances[2]!.onerror?.({});
+  assert.equal(scheduler.latest().delayMs, 1000, "受信に成功したら待機を初期値へ戻す");
+  stream.close();
+});
+
+test("close は予約済みの再接続を取り消す", () => {
+  const Ctor = freshFakes();
+  const scheduler = new FakeScheduler();
+  const stream = open(Ctor, {}, scheduler);
+  Ctor.instances[0]!.onerror?.({});
+  const scheduled = scheduler.latest();
+
+  stream.close();
+  assert.equal(scheduled.cancelled, true, "予約済みの再接続を取り消す");
+
+  // 取り消しの連絡が届く前にタイマーが発火しても、閉じた接続を再開しない。
+  scheduled.run();
+  assert.equal(Ctor.instances.length, 1);
 });
 
 test("受信前の状態は上書きされず、受信後に置き換わる", () => {

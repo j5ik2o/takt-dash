@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
-import { createDashboardState, NOW } from "../support/fixtures.ts";
+import { createDashboardState, NOW, SILENT_MINUTES } from "../support/fixtures.ts";
 import {
   buildOverviewView,
   DEFAULT_ANOMALY_THRESHOLDS,
@@ -51,18 +51,41 @@ test("run の状態はサーバー応答とログ無音と実行状態から決�
   const state = createDashboardState();
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
 
-  const live = toRunView(state.runs[0]!, serverById, state.thresholds!, NOW);
+  const live = toRunView(state.runs[0]!, serverById, NOW);
   assert.equal(live.connected, true);
   assert.equal(live.label, "実行中");
 
-  const disconnected = toRunView(
-    { ...state.runs[0]!, serverId: "down" },
-    serverById,
-    state.thresholds!,
-    NOW,
-  );
+  const disconnected = toRunView({ ...state.runs[0]!, serverId: "down" }, serverById, NOW);
   assert.equal(disconnected.connected, false);
   assert.match(disconnected.label, /時点/);
+});
+
+test("バックエンドが無音と判定した run は閾値直後でも警告になり、サーバー別の run 行にも出る", () => {
+  const state = createDashboardState();
+  const base = state.runs[0]!;
+  // 閾値の10分を1秒だけ超えた時点。画面側の丸め直しが残っていると 10 > 10 で警告を落とす。
+  const justOverThreshold = new Date(NOW.getTime() - (SILENT_MINUTES * 60_000 + 1_000));
+  const silentState = {
+    ...state,
+    runs: [{ ...base, logSilent: true, lastLogAt: justOverThreshold }],
+  };
+
+  const overview = buildOverviewView(silentState, NOW);
+
+  assert.equal(overview.runs[0]?.label, "ログが止まっています", "バックエンドの無音判定をそのまま表示します");
+  assert.match(overview.runs[0]?.note ?? "", /ログが .*出ていません。/, "無音の説明を添えます");
+  const mini = overview.servers.find((item) => item.server.serverId === "mini");
+  assert.ok(mini, "run の所属サーバーが概要にあります");
+  assert.equal(mini.runs[0]?.label, "ログが止まっています", "サーバー別の run 行にも同じ警告を出します");
+});
+
+test("logSilent が偽の run は経過時間だけでは警告にしない", () => {
+  const state = createDashboardState();
+  const base = state.runs[0]!;
+  const staleLog = new Date(NOW.getTime() - (SILENT_MINUTES * 60_000 + 60_000));
+  const overview = buildOverviewView({ ...state, runs: [{ ...base, logSilent: false, lastLogAt: staleLog }] }, NOW);
+
+  assert.equal(overview.runs[0]?.label, "実行中", "バックエンドが無音と判定していなければ警告にしません");
 });
 
 test("概要の集計は proto の閾値をそのまま表示用に運ぶ", () => {

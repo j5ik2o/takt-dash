@@ -519,6 +519,62 @@ async fn changed_client_settings_are_applied_on_the_same_poller() {
 }
 
 #[tokio::test]
+async fn server_meta_change_is_applied_on_the_same_running_poller() {
+  // 同じ Poller 実体と状態ストアのまま、サーバーの表示情報を改名・追加する。
+  // 起動時だけ server_meta を読み込む実装では、稼働中の変更が投影へ反映されない。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut changes = harness.changes.subscribe();
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  let _ = changes.try_recv();
+  assert_eq!(harness.store.servers().get("mac-mini").expect("サーバーの表示情報があります").name, "j5ik2o-mac-mini");
+
+  harness.rewrite_config(|value| {
+    value["servers"]["mac-mini"]["name"] = json!("renamed-mini");
+    value["servers"]["mac-mini"]["kind"] = json!("Mac Studio");
+    value["servers"]["mac-mini"]["concurrency"] = json!(8);
+    value["servers"]["mac-studio"] = json!({ "name": "j5ik2o-mac-studio", "kind": "Mac Studio", "concurrency": 2 });
+  });
+  poller.read_cycle_once().await.expect("サーバー表示情報を変えたサイクルを実行できます");
+
+  let servers = harness.store.servers();
+  let mini = servers.get("mac-mini").expect("改名後もサーバーがあります");
+  assert_eq!(mini.name, "renamed-mini", "稼働中でも改名を同じストアへ反映します");
+  assert_eq!(mini.kind, "Mac Studio", "種類の変更も反映します");
+  assert_eq!(mini.concurrency, 8, "同時実行数の変更も反映します");
+  assert_eq!(
+    servers.get("mac-studio").expect("追加したサーバーがあります").name,
+    "j5ik2o-mac-studio",
+    "追加したサーバーも同じストアへ反映します"
+  );
+  assert!(changes.try_recv().is_ok(), "サーバー表示情報だけが変わったサイクルでも変化を通知します");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn changed_cwd_rebuilds_the_client_and_reads_from_the_new_directory() {
+  // 同じ Poller 実体のまま、プロジェクトの cwd を存在しないディレクトリへ変える。
+  // cwd を比較しない実装では旧クライアントを再利用して成功し続けるため、
+  // 次のサイクルの失敗で検出する。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  let missing = harness._directory.path().join("missing-project-dir");
+  harness.rewrite_config(|value| {
+    value["projects"][0]["cwd"] = json!(missing.display().to_string());
+  });
+  let report = poller.read_cycle_once().await.expect("cwd を変えたサイクルは完了します");
+  poller.shutdown().await;
+
+  assert_eq!(report.projects_failed, 1, "存在しない cwd では子プロセスを起動できず失敗します");
+  let slot = harness.store.slot("takt-dash").expect("スロットがあります");
+  assert!(!slot.connected, "新しい cwd で読めない間は connected 偽です");
+  assert!(slot.snapshot.is_none(), "旧 cwd の状態を新しい所属へ持ち越しません");
+}
+
+#[tokio::test]
 async fn changed_server_settings_read_new_state_without_stale_slot_on_failure() {
   // 接続設定を変えた直後の読み取りが失敗しても、旧サーバー由来の snapshot をスロットに残さない。
   // 差分基準とスロットをリセットしない実装では、旧サーバーの状態が新接続先の所属のまま残る。
