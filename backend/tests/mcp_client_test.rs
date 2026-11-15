@@ -204,7 +204,9 @@ async fn awaiting_merge_at_comes_from_the_awaiting_merge_notification_recorded_a
 }
 
 #[tokio::test]
-async fn goal_without_awaiting_merge_notification_keeps_no_wait_start() {
+async fn goal_without_awaiting_merge_notification_gets_first_observed_wait_start() {
+  // 初回読み取り（prev=None）でも、awaiting_merge 通知が無いゴールは観測時刻を起点に確定する。
+  // 起点を持たせないと、以降の投影で待ち時間が読み取りごとに現在時刻へリセットされ滞留しなくなる。
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let state = write_state(
     directory.path(),
@@ -217,7 +219,96 @@ async fn goal_without_awaiting_merge_notification_keeps_no_wait_start() {
 
   let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
 
-  assert_eq!(snapshot.goals[0].awaiting_merge_at, None, "awaiting_merge 通知がないゴールは起点を持ちません");
+  assert!(
+    snapshot.goals[0].awaiting_merge_at.is_some(),
+    "初回読み取りでも awaiting_merge 通知がないゴールは観測時刻を起点に確定します"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn awaiting_merge_goal_without_notification_mechanism_keeps_previous_wait_start() {
+  // awaiting_merge 通知が無いゴールでも、前回の起点時刻を引き継ぐ。都度読み取り時刻へ
+  // 起点を既定化すると、待ち時間が毎サイクル 0 に戻り滞留しなくなる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "目標", "integrationBranch": "takt/g1" } ],
+      "notifications": { "g1": [ { "id": "n-progress", "kind": "progress", "body": "進捗", "recordedAt": "2026-11-13T08:00:00Z" } ] }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let mut previous_goal = goal("g1", GoalStatus::AwaitingMerge, takt_dash_backend::model::ExecutionStatus::Active);
+  previous_goal.awaiting_merge_at = Some(time("2026-11-13T01:00:00Z"));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    goals: vec![previous_goal],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
+
+  assert_eq!(
+    snapshot.goals[0].awaiting_merge_at,
+    Some(time("2026-11-13T01:00:00Z")),
+    "awaiting_merge 通知が無いゴールは前回の起点時刻を引き継ぎます"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn awaiting_merge_goal_new_to_awaiting_merge_gets_a_first_observed_start() {
+  // 前回は awaiting_merge でなかったゴールが今回 awaiting_merge に入り、通知も無い場合は、
+  // 初回観測の時刻を起点にする。起点なし（None）で滞留判定を保留にはしない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "目標", "integrationBranch": "takt/g1" } ]
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    goals: vec![goal("g1", GoalStatus::Created, takt_dash_backend::model::ExecutionStatus::Active)],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
+
+  assert!(
+    snapshot.goals[0].awaiting_merge_at.is_some(),
+    "通知のない新しい人のマージ待ちは初回観測の時刻を起点にします"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn awaiting_merge_wait_start_is_resolved_per_goal_without_reusing_another_goals_start() {
+  // 前回の起点はゴール ID で識別する。前回 snapshot に同じゴール g2 の起点があればそれを引き継ぎ、
+  // 別ゴール g1 の起点は使わない。不等式だけでは任意の起点を返す誤実装を検出できないため、
+  // g2 の起点を等値で観測する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "goals": [ { "id": "g2", "status": "awaiting_merge", "executionStatus": "active", "objective": "目標 g2", "integrationBranch": "takt/g2" } ]
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let mut g1_start = goal("g1", GoalStatus::AwaitingMerge, takt_dash_backend::model::ExecutionStatus::Active);
+  g1_start.awaiting_merge_at = Some(time("2026-11-13T01:00:00Z"));
+  let mut g2_start = goal("g2", GoalStatus::AwaitingMerge, takt_dash_backend::model::ExecutionStatus::Active);
+  g2_start.awaiting_merge_at = Some(time("2026-11-13T02:00:00Z"));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    goals: vec![g1_start, g2_start],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
+
+  let g2 = snapshot.goals.iter().find(|goal| goal.goal_id == "g2").expect("g2 を含みます");
+  assert_eq!(g2.awaiting_merge_at, Some(time("2026-11-13T02:00:00Z")), "g2 は同じゴール ID の前回起点を引き継ぎます");
+  assert_ne!(g2.awaiting_merge_at, Some(time("2026-11-13T01:00:00Z")), "g1 の起点時刻を g2 へ使い回しません");
   client.shutdown().await;
 }
 

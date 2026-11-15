@@ -182,6 +182,29 @@ fn awaiting_merge_uses_notification_recorded_at_for_wait_start() {
 }
 
 #[test]
+fn awaiting_merge_wait_start_stays_fixed_and_becomes_stale_as_time_passes() {
+  // 起点が決まった後は、同じ snapshot を同じ store に保持したまま投影時刻だけが進んでも、
+  // created_at は起点のまま固定され、閾値を超えた時点で stale になる。
+  let start = minutes_before(now(), 100);
+  let mut goal = merge_goal("g-merge", 7);
+  goal.awaiting_merge_at = Some(start);
+  let store = store_with(240, 10);
+  store.record_success(
+    "takt-dash",
+    snapshot(vec![goal], vec![task_for_goal("merge", "g-merge", TaskStatus::Completed, true)], vec![], vec![], vec![]),
+    now(),
+  );
+
+  let early = store.pending_decisions(now(), PendingDecisionFilter::AwaitingMerge);
+  assert_eq!(early[0].created_at, start, "投影しても起点は変わりません");
+  assert!(!early[0].stale, "240分以内は滞留ではありません");
+
+  let later = store.pending_decisions(now() + chrono::Duration::minutes(200), PendingDecisionFilter::AwaitingMerge);
+  assert_eq!(later[0].created_at, start, "時刻が進んでも起点は固定されたままです");
+  assert!(later[0].stale, "起点から240分を超えた待ちは滞留です");
+}
+
+#[test]
 fn log_silent_uses_configured_threshold() {
   let store = store_with(240, 10);
   let silent_run = run("r1", "a", minutes_before(now(), 30));
