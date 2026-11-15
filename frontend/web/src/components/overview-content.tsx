@@ -1,6 +1,8 @@
 import type { ReactElement } from "react";
+import Link from "next/link";
 import type { OverviewView } from "../state/dashboard";
 import { formatClock, formatDateTime } from "../state/format";
+import { projectHref, serverAnchorId } from "../state/anchors";
 
 type OverviewContentProps = {
   view: OverviewView;
@@ -72,10 +74,12 @@ export function OverviewContent({ view }: OverviewContentProps): ReactElement {
         </h2>
         <ul className="cards">
           {view.projects.map((project) => (
-            <li className="card" key={project.name}>
-              <h3>{project.name}</h3>
-              <p className="about">{project.about}</p>
-              <p>直近24時間に完了したタスクは {project.completedTasks24h}件です。</p>
+            <li key={project.name}>
+              <Link className="card card-link" href={projectHref(project.name)}>
+                <h3>{project.name}</h3>
+                <p className="about">{project.about}</p>
+                <p>直近24時間に完了したタスクは {project.completedTasks24h}件です。</p>
+              </Link>
             </li>
           ))}
         </ul>
@@ -87,7 +91,11 @@ export function OverviewContent({ view }: OverviewContentProps): ReactElement {
         </h2>
         <div className="scards">
           {view.servers.map(({ server, state, stateLabel, runs }) => (
-            <article className={`scard ${state === "down" ? "down" : ""}`} key={server.serverId}>
+            <article
+              id={serverAnchorId(server.serverId)}
+              className={`scard ${state === "down" ? "down" : ""}`}
+              key={server.serverId}
+            >
               <div className="sc-head">
                 <h3>
                   <span className={`dot ${state}`} aria-hidden="true" />

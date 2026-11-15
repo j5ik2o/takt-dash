@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import type { GetProjectsResponse } from "../proto/taktdash";
+import { projectAnchorId } from "../state/anchors";
 import { executionStatusLabel, goalStatusLabel, resolveThresholds, sortPendingDecisions, toRunView } from "../state/dashboard";
 
 type ProjectsContentProps = {
@@ -32,7 +33,7 @@ export function ProjectsContent({ response, now }: ProjectsContentProps): ReactE
           const runs = state.runs.filter((run) => run.project === project.name);
           const projectPending = pending.filter((decision) => decision.project === project.name);
           return (
-            <article className="card" key={project.name}>
+            <article className="card" id={projectAnchorId(project.name)} key={project.name}>
               <div className="card-head">
                 <h3>{project.name}</h3>
                 <span className="about">{project.about}</span>

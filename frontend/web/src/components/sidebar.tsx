@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import Link from "next/link";
 import type { Server } from "../proto/taktdash";
+import { serverHref } from "../state/anchors";
 
 type SidebarProps = {
   servers: Server[];
@@ -17,14 +18,18 @@ const PAGES = [
 export function Sidebar({ servers, pendingCount }: SidebarProps): ReactElement {
   return (
     <nav className="sidebar" aria-label="画面と集約対象のサーバー">
-      <p className="brand">taktDash</p>
+      <Link className="brand" href="/">
+        taktDash
+      </Link>
       <div className="side-block">
         <p className="side-title">サーバー</p>
         <ul className="srv-list">
           {servers.map((server) => (
             <li key={server.serverId}>
               <span className={`dot ${server.connected ? "live" : "down"}`} aria-hidden="true" />
-              <span className="nm">{server.name}</span>
+              <Link className="nm" href={serverHref(server.serverId)}>
+                {server.name}
+              </Link>
               <span className="srv-state">{server.connected ? "動作中" : "応答なし"}</span>
             </li>
           ))}
