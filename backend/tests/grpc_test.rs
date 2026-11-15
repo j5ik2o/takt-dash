@@ -7,7 +7,7 @@ mod grpc_harness;
 
 use std::path::Path;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset, TimeZone, Utc};
 use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
@@ -325,27 +325,25 @@ async fn get_projects_returns_the_state_and_recent_events_newest_first() {
 async fn get_activity_returns_events_daily_summaries_and_today_counts() {
   let harness = seeded_harness();
   // 当日（JST の今日）に 2 件、24 時間前（JST の前日）に 1 件を記録する。当日判定は
-  // JST の日付境界で行われるため、種の時刻を Utc::now() からの相対で作り、今日に確実に入れる。
+  // JST の日付境界で行われるため、種の時刻は今日の JST 0 時台に固定して作る。
+  // Utc::now() からの相対で作ると、JST の日付が変わった直後は前日に落ちてしまう。
   let now = Utc::now();
+  let jst = FixedOffset::east_opt(9 * 3600).expect("JST のオフセットは固定です");
+  let today = now.with_timezone(&jst).date_naive();
+  let today_at = |hour: u32, minute: u32| {
+    jst
+      .from_local_datetime(&today.and_hms_opt(hour, minute, 0).expect("有効な時刻です"))
+      .single()
+      .expect("JST の時刻は一意です")
+      .with_timezone(&Utc)
+  };
   harness
     .activity
-    .record(&event(
-      &(now - Duration::minutes(5)).to_rfc3339(),
-      "mac-mini",
-      Some("takt-dash"),
-      EventKind::GoalCreated,
-      "登録",
-    ))
+    .record(&event(&today_at(0, 1).to_rfc3339(), "mac-mini", Some("takt-dash"), EventKind::GoalCreated, "登録"))
     .expect("出来事を記録できます");
   harness
     .activity
-    .record(&event(
-      &(now - Duration::minutes(10)).to_rfc3339(),
-      "mac-mini",
-      Some("takt-dash"),
-      EventKind::Inquiry,
-      "問い合わせ",
-    ))
+    .record(&event(&today_at(0, 0).to_rfc3339(), "mac-mini", Some("takt-dash"), EventKind::Inquiry, "問い合わせ"))
     .expect("出来事を記録できます");
   harness
     .activity
@@ -369,7 +367,6 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
 
   assert_eq!(response.daily_summaries.len(), 7, "7日分の日次集計を返します");
   let dates: Vec<&str> = response.daily_summaries.iter().map(|summary| summary.date.as_str()).collect();
-  let today = now.with_timezone(&chrono::FixedOffset::east_opt(9 * 3600).unwrap()).date_naive();
   let oldest = (today - Duration::days(6)).format("%Y-%m-%d").to_string();
   let newest = today.format("%Y-%m-%d").to_string();
   assert_eq!(dates.first().copied(), Some(oldest.as_str()), "古い日から並べます");

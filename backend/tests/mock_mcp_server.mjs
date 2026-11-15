@@ -207,6 +207,19 @@ const onLine = (line) => {
       process.stdout.write("これは JSON ではありません\n");
       return;
     }
+    if (behavior === "drip") {
+      // tools/call に対して、全体の期限より十分に長い間、途中経過だけを細切れに返し続ける。
+      // 行ごとのタイムアウトは満たすが、呼び出し全体は終わらないサーバーを模す。
+      const drip = (remaining) => {
+        if (remaining <= 0) {
+          return;
+        }
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } }) + "\n");
+        setTimeout(() => drip(remaining - 1), 100);
+      };
+      drip(100);
+      return;
+    }
     const { name, arguments: args } = message.params ?? {};
     const invalid = validateArguments(name, args);
     if (invalid !== undefined) {

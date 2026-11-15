@@ -418,8 +418,9 @@ mod tests {
   use tonic::{transport::Server, Code, Request, Response, Status};
 
   use super::{
-    is_connection_failure, parse_arguments, proto, render_overview, resolve_backend_addr, run_with, AddrError,
-    AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
+    is_connection_failure, parse_arguments, proto, read_config_listen, render_overview, resolve_backend_addr, run_with,
+    AddrError, AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK,
+    EXIT_USAGE,
   };
 
   // proto の列挙値は生成コードの数値をそのまま使う。
@@ -1049,22 +1050,47 @@ mod tests {
   }
 
   #[test]
-  fn missing_config_file_falls_through_to_default() {
+  fn missing_config_file_is_treated_as_unset_and_falls_through_to_default() {
+    // 設定ファイルが無いときは未設定として扱い、既定値の解決へ進む。既定値そのものの決定は
+    // default_addr_used_when_nothing_configured が外部の待ち受けに依存せず検証する。
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
     let missing = dir.path().join("does-not-exist.json");
+
+    let config_listen = read_config_listen(&missing).expect("設定ファイルが無いときは未設定として扱う必要があります");
+    assert_eq!(config_listen, None);
+
+    let sources = AddrSources {
+      cli_addr:      None,
+      env_addr:      Err(std::env::VarError::NotPresent),
+      config_listen: config_listen.as_deref(),
+    };
+    assert_eq!(resolve_backend_addr(&sources), Ok(DEFAULT_BACKEND_ADDR.parse().unwrap()));
+  }
+
+  #[test]
+  fn missing_config_file_proceeds_to_connection_failure() {
+    // 設定ファイルが無くても読み込みで中断せず、指定した接続先への接続を試みる。既定ポートで
+    // 待ち受ける backend の有無に依存しないよう、未接続の一時ポートを明示する。
+    let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
+    let missing = dir.path().join("does-not-exist.json");
+    let closed = reserve_closed_addr();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
     let code = run_with(
-      &["--config".to_owned(), missing.display().to_string()],
+      &["--config".to_owned(), missing.display().to_string(), "--addr".to_owned(), closed.to_string()],
       Err(std::env::VarError::NotPresent),
       &mut stdout,
       &mut stderr,
     );
 
+    let stdout = String::from_utf8(stdout).expect("標準出力は UTF-8 である必要があります");
     let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-    assert_eq!(code, EXIT_FAILURE);
-    assert!(stderr.contains(DEFAULT_BACKEND_ADDR), "設定ファイルが無いときは既定値へ進む必要があります: {stderr}");
+    assert_eq!(code, EXIT_FAILURE, "未接続の接続先へは失敗する必要があります");
+    assert!(stdout.is_empty(), "接続に失敗したときは標準出力へ表示してはいけません: {stdout}");
+    assert!(stderr.contains("backend に接続できません。"), "接続不能として終わる必要があります: {stderr}");
+    assert!(stderr.contains(&closed.to_string()), "接続先を標準エラーで示す必要があります: {stderr}");
+    assert!(!stderr.contains("設定ファイル"), "設定ファイルが無いだけで中断してはいけません: {stderr}");
   }
 
   // ----------------------------------------------------------------------------

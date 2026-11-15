@@ -88,6 +88,15 @@ impl StateStore {
     inner.projects = projects;
   }
 
+  /// 稼働中に再読み込みした設定のサーバー情報を反映する。
+  ///
+  /// 追加されたサーバーは投影に載り、削除されたサーバーは投影から消えます。既存サーバーの
+  /// 表示情報と並列度は新しい設定で置き換えます。プロジェクトの一覧とスロットは変更しません。
+  pub fn set_servers(&self, servers: BTreeMap<String, ServerMeta>) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    inner.servers = servers;
+  }
+
   /// 接続先の設定が変わったプロジェクトのスロットを未読へ戻す。
   ///
   /// 旧接続先の snapshot・読めた時刻・接続状態を新接続先へ持ち越さないために使います。プロジェクト

@@ -38,6 +38,10 @@ const RECENT_EVENTS_LIMIT: usize = 20;
 const ACTIVITY_EVENTS_LIMIT: usize = 100;
 /// WatchState の送信元タスクとストリームの間のバッファの大きさ。
 const WATCH_CHANNEL_CAPACITY: usize = 16;
+/// 状態が変わらなくても WatchState の状態を再配信するまでの間隔。
+///
+/// 開いている画面が自動更新を確認できるよう、読み取り間隔（既定30秒）より短い15秒で再送します。
+const WATCH_RESEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// 読み取り系 API のサービス。
 pub struct TaktDashServiceImpl {
@@ -429,22 +433,33 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let activity = self.activity.clone();
     let mut shutdown = self.shutdown.clone();
     tokio::spawn(async move {
+      // 期限到達の再配信のためのタイマー。初回の即時送信の直後から数え始めます。
+      let mut resend = tokio::time::interval(WATCH_RESEND_INTERVAL);
+      resend.tick().await;
       loop {
-        let result = tokio::select! {
-          result = changes.recv() => Some(result),
-          _ = shutdown.changed() => None,
-        };
-        let Some(result) = result else {
-          return;
-        };
-        match result {
-          | Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-            let state = assemble_state_for(&store, &activity, Utc::now());
-            if sender.send(Ok(state)).await.is_err() {
+        // 終了判断（クライアント切断・停止通知・購読の終端）と、変化通知・期限到達の
+        // 送信判断を別の分岐に分けます。終了する分岐だけが return し、それ以外は
+        // そのまま下の送信へ進みます。
+        tokio::select! {
+          // クライアントがストリームを閉じたら、次の変化通知を待たずに購読を解放します。
+          _ = sender.closed() => return,
+          _ = shutdown.changed() => return,
+          _ = resend.tick() => (),
+          result = changes.recv() => match result {
+            | Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => (),
+            | Err(broadcast::error::RecvError::Closed) => return,
+          },
+        }
+        let state = assemble_state_for(&store, &activity, Utc::now());
+        // 送信の待機中も停止通知とクライアント切断を監視し、待たずに終了します。
+        tokio::select! {
+          result = sender.send(Ok(state)) => {
+            if result.is_err() {
               return;
             }
           },
-          | Err(broadcast::error::RecvError::Closed) => return,
+          _ = sender.closed() => return,
+          _ = shutdown.changed() => return,
         }
       }
     });

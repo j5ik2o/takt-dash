@@ -742,3 +742,28 @@ async fn failed_event_record_keeps_the_connection_lost_event_once_after_recovery
     .count();
   assert_eq!(lost, 0, "記録できなかった接続断を、復旧時に遡って二重に記録しません");
 }
+
+#[tokio::test]
+async fn config_server_changes_are_reflected_after_a_cycle_and_notify_watchers() {
+  // 設定のサーバー情報だけを変えたサイクルでも、状態ストアの servers が新しい内容になり、
+  // WatchState の変化通知が届く。起動時の servers を返し続ける実装や、変化指紋が servers を
+  // 見ない実装では失敗する。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  let mut watch = harness.changes.subscribe();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  let _ = watch.try_recv();
+
+  // プロジェクトと状態はそのままに、サーバーの表示情報と並列度だけを変える。
+  harness.rewrite_config(|value| {
+    value["servers"]["mac-mini"] = json!({ "name": "j5ik2o-mac-mini-renamed", "kind": "Mac mini", "concurrency": 8 });
+  });
+  poller.read_cycle_once().await.expect("サーバー情報を変えたサイクルを実行できます");
+  poller.shutdown().await;
+
+  let servers = harness.store.servers();
+  let meta = servers.get("mac-mini").expect("既存サーバーの情報があります");
+  assert_eq!(meta.name, "j5ik2o-mac-mini-renamed", "再読み込み後の servers は新しい設定の表示名になります");
+  assert_eq!(meta.concurrency, 8, "並列度の変更も状態ストアへ反映されます");
+  assert!(watch.try_recv().is_ok(), "サーバー情報だけが変わったサイクルでも変化通知を1回送ります");
+}

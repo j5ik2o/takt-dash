@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 use crate::{
   activity::ActivityStore,
-  config::{load_config, Config, Project, Thresholds, DEFAULT_INTERVAL_SECONDS},
+  config::{load_config, Config, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
   mcp::{client_config, McpClient, ToolError, ToolSet},
   model::ProjectSnapshot,
@@ -70,6 +70,7 @@ impl Poller {
     let config = load_config(&self.config_path)?;
     let before = StoreSignature::capture(&self.store);
     self.store.set_thresholds(config.thresholds);
+    self.store.set_servers(config.server_meta.clone());
     self.store.set_projects(config.projects.clone());
     let rebuilt = self.sync_clients(&config).await;
     self.reset_rebuilt_projects(&rebuilt);
@@ -208,13 +209,14 @@ impl Poller {
 #[derive(Debug, PartialEq, Eq)]
 struct StoreSignature {
   thresholds: Thresholds,
+  servers:    BTreeMap<String, ServerMeta>,
   projects:   Vec<(String, bool, Option<ProjectSnapshot>)>,
 }
 
 impl StoreSignature {
   fn capture(store: &StateStore) -> Self {
     let projects = store.project_views().into_iter().map(|view| (view.name, view.connected, view.snapshot)).collect();
-    StoreSignature { thresholds: store.thresholds(), projects }
+    StoreSignature { thresholds: store.thresholds(), servers: store.servers(), projects }
   }
 }
 
