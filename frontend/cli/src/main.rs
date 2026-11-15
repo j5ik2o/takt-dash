@@ -418,8 +418,9 @@ mod tests {
   use tonic::{transport::Server, Code, Request, Response, Status};
 
   use super::{
-    is_connection_failure, parse_arguments, proto, render_overview, resolve_backend_addr, run_with, AddrError,
-    AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
+    is_connection_failure, parse_arguments, proto, read_config_listen, render_overview, resolve_backend_addr, run_with,
+    AddrError, AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK,
+    EXIT_USAGE,
   };
 
   // proto の列挙値は生成コードの数値をそのまま使う。
@@ -1076,19 +1077,31 @@ mod tests {
   fn missing_config_file_falls_through_to_default() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
     let missing = dir.path().join("does-not-exist.json");
+
+    // 設定ファイルが無いときは未設定として扱い、接続先の候補から外す。
+    assert_eq!(read_config_listen(&missing), Ok(None));
+    let sources =
+      AddrSources { cli_addr: None, env_addr: Err(std::env::VarError::NotPresent), config_listen: None };
+    assert_eq!(resolve_backend_addr(&sources), Ok(DEFAULT_BACKEND_ADDR.parse().unwrap()));
+
+    // 接続結果に依存する部分は、待ち受けの無いポートを明示して失敗を観測する。
+    let addr = reserve_closed_addr();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
     let code = run_with(
       &["--config".to_owned(), missing.display().to_string()],
-      Err(std::env::VarError::NotPresent),
+      Ok(format!("{addr}")),
       &mut stdout,
       &mut stderr,
     );
 
     let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-    assert_eq!(code, EXIT_FAILURE);
-    assert!(stderr.contains(DEFAULT_BACKEND_ADDR), "設定ファイルが無いときは既定値へ進む必要があります: {stderr}");
+    assert_eq!(code, EXIT_FAILURE, "設定ファイルが無くても接続を試み、待ち受けが無ければ失敗する必要があります");
+    assert!(
+      stderr.contains(&addr.to_string()),
+      "設定ファイルが無いときは次の候補の接続先へ進む必要があります: {stderr}"
+    );
   }
 
   // ----------------------------------------------------------------------------

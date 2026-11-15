@@ -7,11 +7,14 @@ import * as grpc from "@grpc/grpc-js";
 import {
   createActivityResponse,
   createDashboardState,
+  createGoalDetailResponse,
   createProjectsResponse,
   createRunDetailResponse,
+  createTaskDetailResponse,
 } from "../support/fixtures.ts";
 import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-server.ts";
 import { createBackendClient, resolveBackendAddress } from "../../src/grpc/client.ts";
+import type { GetGoalDetailRequest, GetTaskDetailRequest } from "../../src/proto/taktdash.ts";
 
 const withServer = async (
   behavior: Parameters<typeof startTaktDashServer>[0],
@@ -109,4 +112,155 @@ test("NOT_FOUND は BackendUnavailableError と取り違えない", async () => 
       await client.close();
     }
   });
+});
+
+test("ゴール詳細・タスク詳細をダミーサーバーから取得できる", async () => {
+  await withServer(
+    {
+      goalDetail: createGoalDetailResponse(),
+      taskDetail: createTaskDetailResponse(),
+    },
+    async ({ address }) => {
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+      try {
+        const detail = await client.getGoalDetail("goal-1");
+        assert.equal(detail.objective, "採用ページのレイアウトを直す目的です。");
+
+        const task = await client.getTaskDetail("corporate-site", "採用ページのレイアウトを直す", "goal-1");
+        assert.equal(task.summary, "レイアウトを直して、確認を待っています。");
+      } finally {
+        await client.close();
+      }
+    },
+  );
+});
+
+test("ゴール詳細の要求は goal ID をそのまま渡す", async () => {
+  let received: GetGoalDetailRequest | undefined;
+  await withServer(
+    {
+      goalDetail: createGoalDetailResponse(),
+      onGetGoalDetail: (request) => {
+        received = request;
+      },
+    },
+    async ({ address }) => {
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+      try {
+        await client.getGoalDetail("goal-1");
+        assert.deepEqual(received, { goalId: "goal-1" });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+});
+
+test("タスク詳細の要求はプロジェクト・タスク名・任意のゴール ID をそのまま渡す", async () => {
+  let received: GetTaskDetailRequest | undefined;
+  await withServer(
+    {
+      taskDetail: createTaskDetailResponse(),
+      onGetTaskDetail: (request) => {
+        received = request;
+      },
+    },
+    async ({ address }) => {
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+      try {
+        await client.getTaskDetail("corporate-site", "採用ページのレイアウトを直す", "goal-1");
+        assert.deepEqual(received, {
+          project: "corporate-site",
+          taskName: "採用ページのレイアウトを直す",
+          goalId: "goal-1",
+        });
+
+        received = undefined;
+        await client.getTaskDetail("corporate-site", "採用ページのレイアウトを直す");
+        assert.deepEqual(received, {
+          project: "corporate-site",
+          taskName: "採用ページのレイアウトを直す",
+          goalId: undefined,
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+});
+
+test("ゴール詳細が NOT_FOUND を返すとき GoalNotFoundError として扱う", async () => {
+  await withServer({ goalDetail: { code: grpc.status.NOT_FOUND, details: "missing" } }, async ({ address }) => {
+    const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+    try {
+      await assert.rejects(client.getGoalDetail("no-such-goal"), (error: Error) => error.name === "GoalNotFoundError");
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("応答の goalId が要求と違うときも GoalNotFoundError として扱う", async () => {
+  await withServer(
+    { goalDetail: createGoalDetailResponse({ goalId: "goal-other" }) },
+    async ({ address }) => {
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+      try {
+        await assert.rejects(client.getGoalDetail("goal-1"), (error: Error) => error.name === "GoalNotFoundError");
+      } finally {
+        await client.close();
+      }
+    },
+  );
+});
+
+test("タスク詳細が NOT_FOUND を返すとき TaskNotFoundError として扱う", async () => {
+  await withServer({ taskDetail: { code: grpc.status.NOT_FOUND, details: "missing" } }, async ({ address }) => {
+    const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+    try {
+      await assert.rejects(
+        client.getTaskDetail("corporate-site", "no-such-task"),
+        (error: Error) => error.name === "TaskNotFoundError",
+      );
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("応答のタスク名・プロジェクト・ゴール ID が要求と違うときも TaskNotFoundError として扱う", async () => {
+  for (const response of [
+    createTaskDetailResponse({ taskName: "別のタスク" }),
+    createTaskDetailResponse({ project: "esa" }),
+    createTaskDetailResponse({ goalId: "goal-2" }),
+  ]) {
+    await withServer({ taskDetail: response }, async ({ address }) => {
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+      try {
+        await assert.rejects(
+          client.getTaskDetail("corporate-site", "採用ページのレイアウトを直す", "goal-1"),
+          (error: Error) => error.name === "TaskNotFoundError",
+        );
+      } finally {
+        await client.close();
+      }
+    });
+  }
+});
+
+test("バックエンドの接続失敗はゴール詳細・タスク詳細でも BackendUnavailableError として扱う", async () => {
+  const closedAddress = await reserveClosedAddress();
+  const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: closedAddress } });
+  try {
+    await assert.rejects(
+      client.getGoalDetail("goal-1"),
+      (error: Error) => error.name === "BackendUnavailableError",
+    );
+    await assert.rejects(
+      client.getTaskDetail("corporate-site", "採用ページのレイアウトを直す"),
+      (error: Error) => error.name === "BackendUnavailableError",
+    );
+  } finally {
+    await client.close();
+  }
 });

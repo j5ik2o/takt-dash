@@ -43,7 +43,9 @@ export function ProjectsContent({ response, now }: ProjectsContentProps): ReactE
                 <ul className="goals">
                   {goals.map((goal) => (
                     <li key={goal.goalId}>
-                      <p className="gn">{goal.name}</p>
+                      <p className="gn">
+                        <a href={`/goals?project=${encodeURIComponent(project.name)}`}>{goal.name}</a>
+                      </p>
                       <p className="gs">
                         ゴールは{goalStatusLabel(goal.status)}で、実行状態は{executionStatusLabel(goal.executionStatus)}です。
                       </p>

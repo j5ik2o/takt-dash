@@ -7,8 +7,12 @@ import {
   TaktDashServiceService,
   type DashboardState,
   type GetActivityResponse,
+  type GetGoalDetailRequest,
+  type GetGoalDetailResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
+  type GetTaskDetailRequest,
+  type GetTaskDetailResponse,
 } from "../../src/proto/taktdash.ts";
 
 export type ServerError = { code: grpc.status; details: string };
@@ -19,6 +23,10 @@ export type ServerBehavior = {
   pendingDecisions?: { state: DashboardState };
   activity?: GetActivityResponse;
   runDetail?: GetRunDetailResponse | ServerError;
+  goalDetail?: GetGoalDetailResponse | ServerError;
+  taskDetail?: GetTaskDetailResponse | ServerError;
+  onGetGoalDetail?: (request: GetGoalDetailRequest) => void;
+  onGetTaskDetail?: (request: GetTaskDetailRequest) => void;
   watch?: DashboardState[];
   // ストリームを送り終えた後も接続を保ち、クライアントの切断を待つか。
   holdWatchOpen?: boolean;
@@ -81,6 +89,38 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       const result = behavior.runDetail;
       if (!result) {
         callback(notFound("run が見つかりません"));
+        return;
+      }
+      if ("code" in result) {
+        callback(result);
+        return;
+      }
+      callback(null, result);
+    },
+    getGoalDetail: (
+      call: grpc.ServerUnaryCall<GetGoalDetailRequest, unknown>,
+      callback: grpc.sendUnaryData<GetGoalDetailResponse>,
+    ) => {
+      behavior.onGetGoalDetail?.(call.request);
+      const result = behavior.goalDetail;
+      if (!result) {
+        callback(notFound("ゴールが見つかりません"));
+        return;
+      }
+      if ("code" in result) {
+        callback(result);
+        return;
+      }
+      callback(null, result);
+    },
+    getTaskDetail: (
+      call: grpc.ServerUnaryCall<GetTaskDetailRequest, unknown>,
+      callback: grpc.sendUnaryData<GetTaskDetailResponse>,
+    ) => {
+      behavior.onGetTaskDetail?.(call.request);
+      const result = behavior.taskDetail;
+      if (!result) {
+        callback(notFound("タスクが見つかりません"));
         return;
       }
       if ("code" in result) {

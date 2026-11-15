@@ -23,6 +23,15 @@ export const RUN_STATUS = {
   FAILED: 4,
 } as const;
 
+export const TASK_STATUS = {
+  PENDING: 1,
+  RUNNING: 2,
+  COMPLETED: 3,
+  FAILED: 4,
+  EXCEEDED: 5,
+  PR_FAILED: 6,
+} as const;
+
 export const ACTIVITY_KIND = {
   GOAL_CREATED: 1,
   RUN_STARTED: 2,
