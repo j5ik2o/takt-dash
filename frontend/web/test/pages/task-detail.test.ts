@@ -93,6 +93,33 @@ test("タスク詳細は作成・開始・完了の時刻が無いとき、3項�
   assert.equal(countOf(html, "未取得"), 3);
 });
 
+test("タスク詳細は作成・開始・完了の時刻が揃えば3件とも実値を表示し、未取得を出さない", () => {
+  const createdAt = new Date("2026-11-13T06:00:00Z");
+  const startedAt = new Date("2026-11-13T06:30:00Z");
+  const completedAt = new Date("2026-11-13T07:00:00Z");
+  const html = renderDetail(createTaskDetailResponse({ createdAt, startedAt, completedAt }));
+  assert.ok(html.includes(formatDateTime(createdAt)), "作成時刻を表示する");
+  assert.ok(html.includes(formatDateTime(startedAt)), "開始時刻を表示する");
+  assert.ok(html.includes(formatDateTime(completedAt)), "完了時刻を表示する");
+  assert.ok(
+    html.indexOf(formatDateTime(createdAt)) < html.indexOf(formatDateTime(startedAt)) &&
+      html.indexOf(formatDateTime(startedAt)) < html.indexOf(formatDateTime(completedAt)),
+    "時刻は作成・開始・完了の順に表示する",
+  );
+  assert.equal(countOf(html, "未取得"), 0, "3時刻が揃っていれば未取得を出さない");
+});
+
+test("タスク詳細は sourceRunSlug 由来の run を run 詳細へのリンクとして表示する", () => {
+  const html = renderDetail(
+    createTaskDetailResponse({
+      runSlug: "run-main",
+      linkedRunSlugs: ["run-main", "20261113-164757-taktdash-no-source-run"],
+    }),
+  );
+  assert.match(html, /href="\/runs\/run-main"/);
+  assert.match(html, /href="\/runs\/20261113-164757-taktdash-no-source-run"/);
+});
+
 test("タスク詳細ページは params とクエリで本番経路を通り、詳細を描画する", async () => {
   const server = await startTaktDashServer({ taskDetail: createTaskDetailResponse() });
   try {

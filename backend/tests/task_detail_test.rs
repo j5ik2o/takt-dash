@@ -394,6 +394,170 @@ async fn get_task_detail_leaves_branch_and_pull_request_url_unset_when_the_task_
 }
 
 #[tokio::test]
+async fn get_task_detail_maps_created_started_and_completed_times() {
+  let tasks = vec![json!({
+    "name": "time-task",
+    "goalId": "g1",
+    "status": "completed",
+    "summary": "時刻を持つタスク",
+    "createdAt": "2026-11-13T08:00:00Z",
+    "startedAt": "2026-11-13T09:00:00Z",
+    "completedAt": "2026-11-13T10:00:00Z",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", Path::new("/abs/takt-dash")), server_meta(), json!({ "tasks": tasks }))
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "time-task".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect("作成・開始・完了の時刻を持つタスクも取得できます")
+    .into_inner();
+
+  assert_eq!(detail.created_at, Some(timestamp("2026-11-13T08:00:00Z")), "作成時刻を返します");
+  assert_eq!(detail.started_at, Some(timestamp("2026-11-13T09:00:00Z")), "開始時刻を返します");
+  assert_eq!(detail.completed_at, Some(timestamp("2026-11-13T10:00:00Z")), "完了時刻を返します");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_leaves_created_and_completed_unset_when_the_task_has_none() {
+  let tasks = vec![json!({
+    "name": "running-task",
+    "goalId": "g1",
+    "status": "running",
+    "summary": "実行中のタスク",
+    "startedAt": "2026-11-13T09:00:00Z",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", Path::new("/abs/takt-dash")), server_meta(), json!({ "tasks": tasks }))
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "running-task".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect("作成・完了の時刻を持たないタスクも取得できます")
+    .into_inner();
+
+  assert_eq!(detail.started_at, Some(timestamp("2026-11-13T09:00:00Z")), "開始時刻は返します");
+  assert!(detail.created_at.is_none(), "作成時刻を持たないタスクは created_at を未設定にします");
+  assert!(detail.completed_at.is_none(), "完了時刻を持たないタスクは completed_at を未設定にします");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_lists_the_source_run_slug_after_the_run_slug() {
+  let tasks = vec![json!({
+    "name": "linked-task",
+    "goalId": "g1",
+    "status": "completed",
+    "summary": "run を持つタスク",
+    "runSlug": "run-main",
+    "sourceRunSlug": "run-source",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", Path::new("/abs/takt-dash")), server_meta(), json!({ "tasks": tasks }))
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "linked-task".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect("sourceRunSlug を持つタスクも取得できます")
+    .into_inner();
+
+  assert_eq!(detail.run_slug.as_deref(), Some("run-main"), "run_slug は従来の runSlug のまま返します");
+  assert_eq!(
+    detail.linked_run_slugs,
+    vec!["run-main".to_owned(), "run-source".to_owned()],
+    "runSlug と sourceRunSlug の両方を紐づく run として返します"
+  );
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_lists_the_source_run_slug_when_the_task_has_no_run_slug() {
+  let tasks = vec![json!({
+    "name": "source-only-task",
+    "goalId": "g1",
+    "status": "completed",
+    "summary": "sourceRunSlug だけを持つタスク",
+    "sourceRunSlug": "run-source",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", Path::new("/abs/takt-dash")), server_meta(), json!({ "tasks": tasks }))
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "source-only-task".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect("sourceRunSlug だけを持つタスクも取得できます")
+    .into_inner();
+
+  assert!(detail.run_slug.is_none(), "runSlug を持たないタスクは run_slug を返しません");
+  assert_eq!(detail.linked_run_slugs, vec!["run-source".to_owned()], "sourceRunSlug を紐づく run として返します");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_deduplicates_a_source_run_slug_equal_to_the_run_slug() {
+  let tasks = vec![json!({
+    "name": "same-run-task",
+    "goalId": "g1",
+    "status": "completed",
+    "summary": "同じ slug を持つタスク",
+    "runSlug": "run-same",
+    "sourceRunSlug": "run-same",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", Path::new("/abs/takt-dash")), server_meta(), json!({ "tasks": tasks }))
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "same-run-task".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect("sourceRunSlug と runSlug が同じタスクも取得できます")
+    .into_inner();
+
+  assert_eq!(detail.linked_run_slugs, vec!["run-same".to_owned()], "同じ slug は紐づく run に重複して含めません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn get_task_detail_maps_a_goal_read_failure_to_unavailable() {
   let harness = GrpcHarness::builder()
     .single_project(

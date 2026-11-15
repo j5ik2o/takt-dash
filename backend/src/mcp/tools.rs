@@ -507,14 +507,23 @@ struct TaskLinkFields {
 
 fn parse_task_detail(project: &str, value: &Value, links: TaskLinkFields) -> Result<TaskDetail, ToolError> {
   let run_slug = optional_string(value, "runSlug");
+  let source_run_slug = optional_string(value, "sourceRunSlug");
+  let mut linked_run_slugs: Vec<String> = Vec::new();
+  for slug in run_slug.iter().chain(source_run_slug.iter()) {
+    if !linked_run_slugs.contains(slug) {
+      linked_run_slugs.push(slug.clone());
+    }
+  }
   Ok(TaskDetail {
     project: project.to_owned(),
     task_name: string_field(value, "name")?,
     goal_id: optional_string(value, "goalId"),
     status: parse_task_status(value.get("status"))?,
     summary: optional_string(value, "summary").unwrap_or_default(),
+    created_at: parse_time(value.get("createdAt"))?,
     started_at: parse_time(value.get("startedAt"))?,
-    linked_run_slugs: run_slug.iter().cloned().collect(),
+    completed_at: parse_time(value.get("completedAt"))?,
+    linked_run_slugs,
     run_slug,
     pull_request_number: value.get("prNumber").and_then(Value::as_i64),
     branch: links.branch,
