@@ -7,7 +7,7 @@
 
 pub mod mapping;
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
 use chrono::{DateTime, Utc};
 use mapping::{
@@ -38,6 +38,36 @@ const RECENT_EVENTS_LIMIT: usize = 20;
 const ACTIVITY_EVENTS_LIMIT: usize = 100;
 /// WatchState の送信元タスクとストリームの間のバッファの大きさ。
 const WATCH_CHANNEL_CAPACITY: usize = 16;
+
+/// unary ハンドラの処理時間と、その間に接続ロックを待った時間を記録する。
+///
+/// `Drop` で記録するため、成功・失敗・早期 return のどの終端でも1行が残ります。
+/// `lock_wait_us` はハンドラ開始時と終了時の累積値の差で、SQLite のクエリ実行時間は含みません。
+struct RpcTimingGuard {
+  rpc:                   &'static str,
+  activity:              Arc<ActivityStore>,
+  started_at:            Instant,
+  lock_wait_us_at_start: u64,
+}
+
+impl RpcTimingGuard {
+  fn start(rpc: &'static str, activity: &Arc<ActivityStore>) -> Self {
+    RpcTimingGuard {
+      rpc,
+      activity: activity.clone(),
+      started_at: Instant::now(),
+      lock_wait_us_at_start: activity.lock_wait_total_us(),
+    }
+  }
+}
+
+impl Drop for RpcTimingGuard {
+  fn drop(&mut self) {
+    let elapsed_us = self.started_at.elapsed().as_micros() as u64;
+    let lock_wait_us = self.activity.lock_wait_total_us().saturating_sub(self.lock_wait_us_at_start);
+    tracing::info!(rpc = %self.rpc, elapsed_us, lock_wait_us, "unary RPC を処理しました。");
+  }
+}
 
 /// 読み取り系 API のサービス。
 pub struct TaktDashServiceImpl {
@@ -254,10 +284,12 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
   type WatchStateStream = ReceiverStream<Result<DashboardState, Status>>;
 
   async fn get_overview(&self, _request: Request<GetOverviewRequest>) -> Result<Response<DashboardState>, Status> {
+    let _timing = RpcTimingGuard::start("GetOverview", &self.activity);
     Ok(Response::new(self.assemble_state(Utc::now())))
   }
 
   async fn get_projects(&self, _request: Request<GetProjectsRequest>) -> Result<Response<GetProjectsResponse>, Status> {
+    let _timing = RpcTimingGuard::start("GetProjects", &self.activity);
     let state = self.assemble_state(Utc::now());
     let recent_events = self
       .activity
@@ -273,10 +305,12 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     &self,
     _request: Request<GetPendingDecisionsRequest>,
   ) -> Result<Response<GetPendingDecisionsResponse>, Status> {
+    let _timing = RpcTimingGuard::start("GetPendingDecisions", &self.activity);
     Ok(Response::new(GetPendingDecisionsResponse { state: Some(self.assemble_state(Utc::now())) }))
   }
 
   async fn get_activity(&self, _request: Request<GetActivityRequest>) -> Result<Response<GetActivityResponse>, Status> {
+    let _timing = RpcTimingGuard::start("GetActivity", &self.activity);
     let now = Utc::now();
     let state = self.assemble_state(now);
     let events = self
@@ -311,6 +345,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     &self,
     request: Request<GetRunDetailRequest>,
   ) -> Result<Response<GetRunDetailResponse>, Status> {
+    let _timing = RpcTimingGuard::start("GetRunDetail", &self.activity);
     let run_slug = request.into_inner().run_slug;
     if run_slug.trim().is_empty() {
       return Err(Status::invalid_argument("runSlug が空です。"));

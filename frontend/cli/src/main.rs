@@ -418,8 +418,9 @@ mod tests {
   use tonic::{transport::Server, Code, Request, Response, Status};
 
   use super::{
-    is_connection_failure, parse_arguments, proto, render_overview, resolve_backend_addr, run_with, AddrError,
-    AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
+    is_connection_failure, parse_arguments, proto, read_config_listen, render_overview, resolve_backend_addr, run_with,
+    AddrError, AddrSources, Invocation, OverviewOptions, UsageError, DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK,
+    EXIT_USAGE,
   };
 
   // proto の列挙値は生成コードの数値をそのまま使う。
@@ -1050,28 +1051,37 @@ mod tests {
 
   #[test]
   fn missing_config_file_falls_through_to_default() {
+    // 既定ポート 50051 で外部の backend が待ち受けている環境でも結果が変わらないよう、
+    // 設定ファイル欠落の扱いと既定値の解決は直接確かめ、接続は未接続の空きポートで確かめる。
     let dir = tempfile::tempdir().expect("一時ディレクトリを作れませんでした");
     let missing = dir.path().join("does-not-exist.json");
-    // 既定の接続先へ落ちること自体は `default_addr_used_when_nothing_configured` が
-    // 決定的に固定する。このテストは設定ファイルの欠落が読み込みの失敗にならず接続段階まで
-    // 進むことを観測するため、待ち受けの有無が結果を左右しない未接続のポートを明示する。
-    let closed = reserve_closed_addr();
+
+    assert_eq!(read_config_listen(&missing), Ok(None), "設定ファイルが無いときは未設定として扱う必要があります");
+    let defaults =
+      AddrSources { cli_addr: None, env_addr: Err(std::env::VarError::NotPresent), config_listen: None };
+    assert_eq!(
+      resolve_backend_addr(&defaults),
+      Ok("127.0.0.1:50051".parse().unwrap()),
+      "設定ファイルが無いときは既定値へ進む必要があります"
+    );
+
+    let unreachable = {
+      let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("未接続の空きポートを確保できる必要があります");
+      listener.local_addr().expect("空きポートのアドレスを取得できませんでした")
+    };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-
     let code = run_with(
-      &["--config".to_owned(), missing.display().to_string(), "--addr".to_owned(), closed.to_string()],
-      Err(std::env::VarError::NotPresent),
+      &["--config".to_owned(), missing.display().to_string()],
+      Ok(unreachable.to_string()),
       &mut stdout,
       &mut stderr,
     );
 
     let stderr = String::from_utf8(stderr).expect("標準エラーは UTF-8 である必要があります");
-    assert_eq!(code, EXIT_FAILURE, "設定ファイルの欠落は読み込みでは止まらず、接続の失敗として終わる必要があります");
-    assert!(
-      stderr.contains(&closed.to_string()),
-      "設定ファイルが無くても明示した接続先まで進む必要があります: {stderr}"
-    );
+    assert_eq!(code, EXIT_FAILURE, "未接続の待ち受けへは接続できず失敗する必要があります: {stderr}");
+    assert!(stderr.contains(&unreachable.to_string()), "未接続の待ち受けを接続先に使う必要があります: {stderr}");
+    assert!(!stderr.contains(DEFAULT_BACKEND_ADDR), "未接続の待ち受けを指定したときは既定値を使いません: {stderr}");
   }
 
   // ----------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import "./globals.css";
 import { BackendUnavailableError, createBackendClient } from "@/src/grpc/client";
 import { DashboardState } from "@/src/proto/taktdash";
 import { resolveThresholds } from "@/src/state/dashboard";
+import { measurePage, type TimingSink } from "@/src/telemetry/timing";
 import { StateStreamProvider } from "@/src/components/state-provider";
 import { Sidebar } from "@/src/components/sidebar";
 import { BackendUnavailableNotice } from "@/src/components/backend-unavailable-notice";
@@ -18,8 +19,8 @@ const EMPTY_STATE = DashboardState.create({
   thresholds: resolveThresholds(undefined),
 });
 
-async function loadInitialState(): Promise<{ state: DashboardState; unavailable: boolean }> {
-  const client = createBackendClient();
+async function loadInitialState(timing: TimingSink): Promise<{ state: DashboardState; unavailable: boolean }> {
+  const client = createBackendClient({ timing });
   try {
     return { state: await client.getOverview(), unavailable: false };
   } catch (error) {
@@ -33,7 +34,9 @@ async function loadInitialState(): Promise<{ state: DashboardState; unavailable:
 }
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
-  const { state, unavailable } = await loadInitialState();
+  // layout は全ページで実行されるため、ここで各ページのサーバー側 RPC（GetOverview）と
+  // ページ応答の内訳を page=layout の1行として記録する。
+  const { state, unavailable } = await measurePage("layout", (timing) => loadInitialState(timing));
   return (
     <html lang="ja">
       <body>
