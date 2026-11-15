@@ -317,6 +317,57 @@ a {
   background: var(--warn-bg);
 }
 
+/* 見出し・本文・選択肢・待ち時間を縦に積み、行内で連結させない（issue #37 方針2）。 */
+.tray-item .proj,
+.tray-item .desc,
+.tray-item .opts,
+.tray-item .wait {
+  display: block;
+  width: 100%;
+}
+
+.tray-item .proj .srv,
+.tray-item .proj .kind {
+  display: block;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.tray-item .desc {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tray-item .desc p {
+  margin: 0;
+}
+
+.tray-item .desc p + p {
+  margin-top: 6px;
+}
+
+.tray-item .opts {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.tray-item .opts .opts-label {
+  font-weight: 600;
+}
+
+.tray-item .opts ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.tray-item .wait {
+  margin-top: 8px;
+}
+
 .stale-label {
   color: var(--warn);
   margin-left: 8px;

@@ -5,6 +5,8 @@
 // 描画結果は HTML 文字列として観測し、モックに沿う要素が現れることを確かめる。
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { createElement, type ComponentType, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
@@ -16,13 +18,46 @@ import {
 import { startTaktDashServer } from "../support/grpc-server.ts";
 import { createBackendClient } from "../../src/grpc/client.ts";
 import { buildOverviewView, type OverviewView } from "../../src/state/dashboard.ts";
+import { DashboardState, InquiryKind, PendingDecisionType } from "../../src/proto/taktdash.ts";
 import OverviewPage from "../../app/page.tsx";
 import ProjectsPage from "../../app/projects/page.tsx";
 import DecisionsPage from "../../app/decisions/page.tsx";
 import ActivityPage from "../../app/activity/page.tsx";
 
+const webRoot = fileURLToPath(new URL("../../", import.meta.url));
+
 const renderPage = (Page: ComponentType<never>, props: unknown): string =>
   renderToStaticMarkup(createElement(Page as ComponentType<never>, props as never) as ReactElement);
+
+// 判断待ちを1件だけ持つ状態を作る。本文と選択肢を表示の検証に必要な値だけ上書きする。
+const stateWithDecision = (
+  overrides: { body: string; options?: string[] },
+): DashboardState => {
+  const base = createDashboardState();
+  return DashboardState.create({
+    ...base,
+    pendingDecisions: [
+      {
+        type: PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY,
+        serverId: "mini",
+        project: "esa",
+        goalId: "goal-2",
+        inquiryKind: InquiryKind.INQUIRY_KIND_QUESTION,
+        createdAt: new Date(NOW.getTime() - 30 * 60_000),
+        body: overrides.body,
+        options: overrides.options ?? [],
+        stale: false,
+      },
+    ],
+  });
+};
+
+// class 属性に指定名を class トークンとして含む要素の開始タグを文書順に取り出す。
+// 部分一致（opts と opts-label など）を拾わないよう、空白か引用符で囲まれた完全なトークンで照合する。
+const elementsByClass = (html: string, className: string): string[] =>
+  html.match(new RegExp(`<[a-z]+[^>]*class="(?:[^"]*\\s)?${className}(?:\\s[^"]*)?"[^>]*>`, "g")) ?? [];
+
+const occurrences = (html: string, needle: string): number => html.split(needle).length - 1;
 
 const withServerEnv = async <T>(
   address: string,
@@ -111,6 +146,153 @@ test("判断待ちページは回答・承認・却下の操作要素を持た�
   assert.doesNotMatch(html, /<input/i);
   assert.doesNotMatch(html, /実施した/);
   assert.doesNotMatch(html, /承認/);
+});
+
+test("判断待ちページは本文と選択肢を HTML として解釈せず文字として描画する", () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "<script>alert(1)</script>", options: ["<b>今週</b>"] }),
+    now: NOW,
+  });
+  assert.ok(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), "本文を HTML として解釈しない");
+  assert.ok(!html.includes("<script>"), "script 要素を生成しない");
+  assert.ok(html.includes("&lt;b&gt;今週&lt;/b&gt;"), "選択肢を HTML として解釈しない");
+  assert.ok(!html.includes("<b>今週</b>"), "選択肢のタグを生成しない");
+});
+
+test("判断待ちページは本文の空行を段落の区切りとして描画する", () => {
+  const body = "リリースの日取りを決めたい。\n今週は手が空いています。\n\n来週は火曜だけ空いています。\n\nどちらにしますか。";
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body }),
+    now: NOW,
+  });
+  const descBlocks = elementsByClass(html, "desc");
+  assert.equal(descBlocks.length, 1, "本文は1つの本文ブロックにまとまる");
+  const descHtml = html.slice(html.indexOf(descBlocks[0]!), html.indexOf('class="wait"'));
+  const paragraphItems = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
+  assert.equal(paragraphItems.length, 3, "空行で区切られた3つの段落がそれぞれ別の要素になる");
+  assert.match(paragraphItems[0]!, /リリースの日取りを決めたい。\n今週は手が空いています。/);
+  assert.match(paragraphItems[1]!, /来週は火曜だけ空いています。/);
+  assert.match(paragraphItems[2]!, /どちらにしますか。/);
+  assert.equal(
+    paragraphItems[0]!.includes("来週は火曜だけ空いています。"),
+    false,
+    "異なる段落を1つの要素へ連結しない",
+  );
+});
+
+test("判断待ちページの本文は単一改行を畳まない CSS 指定を持つ", async () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "1行目\n2行目" }),
+    now: NOW,
+  });
+  assert.ok(elementsByClass(html, "desc")[0] !== undefined, "本文ブロックが描画される");
+  const css = await readFile(`${webRoot}app/globals.css`, "utf8");
+  assert.match(
+    css,
+    /\.tray-item\s+\.desc[^{}]*\{[^}]*white-space:\s*pre-wrap/,
+    ".tray-item .desc は改行を保持する",
+  );
+});
+
+test("判断待ちページは本文の単一改行で段落を分けない", () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "1行目\n2行目" }),
+    now: NOW,
+  });
+  const descBlock = elementsByClass(html, "desc")[0];
+  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  const paragraphs = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
+  assert.equal(paragraphs.length, 1, "単一改行では段落を分けない");
+  assert.match(paragraphs[0]!, /1行目\n2行目/, "改行は段落内に残る");
+});
+
+test("判断待ちページは選択肢を本文の塊とは別の要素に1件ずつ描画する", () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "リリースの日取りはどうしますか。", options: ["今週", "来週"] }),
+    now: NOW,
+  });
+  const descBlock = elementsByClass(html, "desc")[0];
+  const optsBlocks = elementsByClass(html, "opts");
+  assert.ok(descBlock !== undefined, "本文ブロックが描画される");
+  assert.equal(optsBlocks.length, 1, "選択肢は1つの選択肢ブロックにまとまる");
+  const descIndex = html.indexOf(descBlock);
+  const optsIndex = html.indexOf(optsBlocks[0]!);
+  assert.ok(descIndex < optsIndex, "選択肢ブロックは本文ブロックより後に現れる");
+  const between = html.slice(descIndex, optsIndex);
+  assert.doesNotMatch(between, /選択肢/, "選択肢は本文ブロックに混ざらない");
+
+  const optsHtml = html.slice(optsIndex, html.indexOf('class="wait"'));
+  const items = optsHtml.match(/<li[^>]*>[\s\S]*?<\/li>/g) ?? [];
+  assert.equal(items.length, 2, "選択肢は1件ずつ別の要素になる");
+  assert.match(items[0]!, /今週/);
+  assert.match(items[1]!, /来週/);
+});
+
+test("判断待ちページは本文中の選択肢の記述を残したまま、選択肢欄とは別に描画する", () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "候補は (a) 今週、(b) 来週 です。", options: ["今週", "来週"] }),
+    now: NOW,
+  });
+  const descBlock = elementsByClass(html, "desc")[0];
+  const optsBlocks = elementsByClass(html, "opts");
+  assert.ok(descBlock !== undefined && optsBlocks.length === 1);
+  const descIndex = html.indexOf(descBlock);
+  const optsIndex = html.indexOf(optsBlocks[0]!);
+  const descHtml = html.slice(descIndex, optsIndex);
+  assert.match(descHtml, /\(a\) 今週、\(b\) 来週/, "本文の記述はそのまま残る");
+  const optsHtml = html.slice(optsIndex, html.indexOf('class="wait"'));
+  assert.equal(occurrences(descHtml, "今週"), 1, "本文中に選択肢欄の内容が二重に現れない");
+  const items = optsHtml.match(/<li[^>]*>[\s\S]*?<\/li>/g) ?? [];
+  assert.equal(items.length, 2, "選択肢欄は本文の記述とは別に各選択肢を並べる");
+});
+
+test("判断待ちページは見出し・本文・選択肢・待ち時間をそれぞれ別のブロックとして描画する", async () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "リリースの日取りはどうしますか。", options: ["今週", "来週"] }),
+    now: NOW,
+  });
+  const projIndex = html.indexOf(elementsByClass(html, "proj")[0] ?? "");
+  const descIndex = html.indexOf(elementsByClass(html, "desc")[0] ?? "");
+  const optsIndex = html.indexOf(elementsByClass(html, "opts")[0] ?? "");
+  const waitIndex = html.indexOf(elementsByClass(html, "wait")[0] ?? "");
+  assert.ok(projIndex >= 0 && descIndex >= 0 && optsIndex >= 0 && waitIndex >= 0);
+  assert.ok(
+    projIndex < descIndex && descIndex < optsIndex && optsIndex < waitIndex,
+    "見出し・本文・選択肢・待ち時間の順に並ぶ",
+  );
+
+  const css = await readFile(`${webRoot}app/globals.css`, "utf8");
+  for (const className of ["proj", "desc", "opts", "wait"]) {
+    assert.match(
+      css,
+      new RegExp(`\\.tray-item\\s+\\.${className}[,\\s][^{}]*\\{[^}]*display:\\s*block`),
+      `.tray-item .${className} は行内に連結せずブロックとして積まれる`,
+    );
+  }
+});
+
+test("判断待ちページは本文が空白だけなら本文ブロックの段落を描画しない", () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "  \n\t\n  " }),
+    now: NOW,
+  });
+  const descBlock = elementsByClass(html, "desc")[0];
+  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  assert.equal(descHtml.match(/<p[^>]*>/g)?.length ?? 0, 0, "空の段落は描画しない");
+});
+
+test("判断待ちページは CRLF の改行も段落の区切りとして扱う", () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "第1段落。\r\n\r\n第2段落。" }),
+    now: NOW,
+  });
+  const descBlock = elementsByClass(html, "desc")[0];
+  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  const textParagraphs = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
+  assert.equal(textParagraphs.length, 2, "CRLF の空行も段落の区切りになる");
+  assert.equal(textParagraphs[0]!.includes("\r"), false, "正規化後の段落に復帰文字を残さない");
+  assert.match(textParagraphs[0]!, /第1段落。/);
+  assert.match(textParagraphs[1]!, /第2段落。/);
 });
 
 test("アクティビティページは出来事を新しい順に並べ、7日分の集計とサーバー別の当日件数を描画する", async () => {
