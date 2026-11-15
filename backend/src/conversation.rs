@@ -82,14 +82,8 @@ impl ConversationReader {
       return page;
     }
 
-    let connection = match open_read_only(&self.paths.database_path) {
-      | Ok(connection) => connection,
-      | Err(reason) => {
-        page.unavailable_reason = Some(reason);
-        return page;
-      },
-    };
-
+    // 未対応 provider の理由が opencode.db の不在で隠れないよう、記録の選択と provider 判定を DB
+    // を開く前に行う。
     let selected = match select_record(&candidates, query.session_id.as_deref()) {
       | Ok(record) => record,
       | Err(reason) => {
@@ -102,6 +96,14 @@ impl ConversationReader {
         Some(format!("provider {} の会話にはまだ対応していません", display_provider(&selected.provider)));
       return page;
     }
+
+    let connection = match open_read_only(&self.paths.database_path) {
+      | Ok(connection) => connection,
+      | Err(reason) => {
+        page.unavailable_reason = Some(reason);
+        return page;
+      },
+    };
 
     let session_directory = match session_directory(&connection, &selected.session_id) {
       | Ok(Some(directory)) => normalize(&directory),

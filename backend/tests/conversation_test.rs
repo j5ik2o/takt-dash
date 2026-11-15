@@ -812,6 +812,57 @@ fn unsupported_provider_returns_an_empty_page_with_a_reason() {
 }
 
 #[test]
+fn unsupported_provider_reason_is_not_hidden_by_a_missing_database() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  fixture.write_manager("claude", "ses_claude", &project_cwd, "claude-sdk");
+  let reader = fixture.reader();
+  std::fs::remove_file(&fixture.database).expect("DB を消せます");
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert!(page.messages.is_empty(), "未対応 provider の会話を返してはいけません");
+  let reason = page.unavailable_reason.expect("未対応 provider である理由を返す必要があります");
+  assert!(reason.contains("claude-sdk"), "理由には選択した記録の provider 名を含める必要があります: {reason}");
+  assert!(reason.contains("対応していません"), "理由は provider が未対応であることを示す必要があります: {reason}");
+  assert!(
+    !reason.contains("データベース"),
+    "opencode.db が無いことで未対応 provider の理由が隠れてはいけません: {reason}"
+  );
+}
+
+#[test]
+fn explicit_unsupported_provider_session_reason_is_not_hidden_by_a_missing_database() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  fixture.write_manager("old", "ses_old", &project_cwd, "opencode");
+  fixture.set_manager_modified("old", 1_700_000_000);
+  fixture.insert_session("ses_old", &project_cwd, 1_000);
+  fixture.write_manager("new", "ses_new", &project_cwd, "claude-sdk");
+  fixture.set_manager_modified("new", 1_700_000_600);
+  let reader = fixture.reader();
+  std::fs::remove_file(&fixture.database).expect("DB を消せます");
+
+  let page = reader.read(&ConversationQuery {
+    project:       "takt-dash".to_owned(),
+    cwd:           project_cwd.clone(),
+    project_roots: vec![project_cwd.clone()],
+    session_id:    Some("ses_new".to_owned()),
+    after_seq:     0,
+    limit:         50,
+  });
+
+  assert!(page.messages.is_empty(), "未対応 provider の会話を返してはいけません");
+  let reason = page.unavailable_reason.expect("明示指定した記録が未対応 provider である理由を返す必要があります");
+  assert!(reason.contains("claude-sdk"), "理由には選択した記録の provider 名を含める必要があります: {reason}");
+  assert!(reason.contains("対応していません"), "理由は provider が未対応であることを示す必要があります: {reason}");
+  assert!(
+    !reason.contains("データベース"),
+    "opencode.db が無いことで未対応 provider の理由が隠れてはいけません: {reason}"
+  );
+}
+
+#[test]
 fn missing_manager_record_returns_an_empty_page_with_a_reason() {
   let (_directory, fixture) = ConversationFixture::new();
   let project_cwd = fixture.project_dir("takt-dash");

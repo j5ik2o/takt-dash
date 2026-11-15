@@ -5,13 +5,12 @@ import {
   beginConversationSwitch,
   conversationFailed,
   conversationLoaded,
-  fetchConversationPages,
-  mergeConversationPages,
   restoreConversationResponse,
   type ConversationPage,
   type ConversationRequest,
   type ConversationView,
 } from "../state/conversation";
+import { createConversationFollow } from "../state/conversation-follow";
 import { ConversationContent } from "./conversation-content";
 
 type LiveConversationProps = {
@@ -45,43 +44,23 @@ export function LiveConversation({ projects, initialProject, initialPage }: Live
     page: initialPage,
     loading: false,
   });
+  const [follow] = useState(() => createConversationFollow({ initialProject, initialPage, requestPage }));
 
   // 対象プロジェクトが変わるたびに、その会話を先頭から取得し直してから追従する。
   // 初回取得が失敗しても更新ループは止めず、失敗を警告として残したまま再試行する。
   useEffect(() => {
     let active = true;
-    let current: ConversationPage | undefined;
-    let sessionId: string | undefined;
+    const follower = follow.followerFor(view.project);
 
     const poll = async (): Promise<void> => {
-      try {
-        if (current === undefined) {
-          const initial = await fetchConversationPages(requestPage, view.project);
-          if (!active) {
-            return;
-          }
-          const page = initial.page;
-          current = page;
-          sessionId = initial.sessionId;
-          setView((previous) => conversationLoaded(previous, page));
-        } else {
-          const update = await fetchConversationPages(requestPage, view.project, {
-            sessionId,
-            afterSeq: current.nextAfterSeq,
-          });
-          if (!active) {
-            return;
-          }
-          const merged = mergeConversationPages(current, update.page);
-          current = merged;
-          setView((previous) => conversationLoaded(previous, merged));
-        }
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-        const message = error instanceof Error ? error.message : String(error);
-        setView((previous) => conversationFailed(previous, message));
+      const result = await follower.poll();
+      if (!active || result === undefined) {
+        return;
+      }
+      if (result.kind === "loaded") {
+        setView((previous) => conversationLoaded(previous, result.page));
+      } else {
+        setView((previous) => conversationFailed(previous, result.error));
       }
     };
 
@@ -94,7 +73,7 @@ export function LiveConversation({ projects, initialProject, initialPage }: Live
       active = false;
       clearInterval(timer);
     };
-  }, [view.project]);
+  }, [follow, view.project]);
 
   return (
     <>
