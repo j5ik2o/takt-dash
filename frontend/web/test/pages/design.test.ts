@@ -16,7 +16,7 @@ import {
   createRunDetailResponse,
   NOW,
 } from "../support/fixtures.ts";
-import { ActivityKind, DashboardState, ExecutionStatus, type GetActivityResponse } from "../../src/proto/taktdash.ts";
+import { ActivityKind, DashboardState, ExecutionStatus, GoalStatus, type GetActivityResponse } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import { RunDetailContent } from "../../src/components/run-detail-content.tsx";
 import { Sidebar } from "../../src/components/sidebar.tsx";
@@ -109,13 +109,15 @@ const requireDeclaration = (css: string, selector: RegExp, property: string, lab
 const selectorExists = (css: string, selector: RegExp): boolean =>
   cssRules(css).some((rule) => rule.selectors.split(",").some((token) => selector.test(token.trim())));
 
-const gsBlocks = (html: string): string[] =>
-  html.match(/<p\b[^>]*class="[^"]*\bgs\b[^"]*"[^>]*>[\s\S]*?<\/p>/g) ?? [];
+const goalBadgeElements = (html: string): string[] =>
+  html.match(/<span\b[^>]*class="[^"]*\bgoal-badge\b[^"]*"[^>]*>[\s\S]*?<\/span>/g) ?? [];
 
-const gsBlockContaining = (html: string, text: string): string => {
-  const block = gsBlocks(html).find((candidate) => candidate.replace(/<[^>]+>/g, "").includes(text));
+const goalBadgeFor = (html: string, label: string): string => {
+  const block = goalBadgeElements(html).find(
+    (candidate) => candidate.replace(/<[^>]+>/g, "").trim() === label,
+  );
   if (block === undefined) {
-    assert.fail(`実行状態に ${text} を含むゴールがある`);
+    assert.fail(`ゴールのバッジに ${label} がある`);
   }
   return block;
 };
@@ -244,15 +246,59 @@ test("サーバーカードの状態バッジは状態ごとの色クラスを�
   assert.match(down, /var\(--/, "応答なしのバッジはトークンの色を持つ");
 });
 
-test("一時停止のゴールは実行状態に待機の色クラスを付け、稼働中と区別する", () => {
-  const html = renderPage(ProjectsPage, { response: createProjectsResponse(), now: NOW });
+test("ゴールの見出しは1行に収めてあふれを省略記号にし、行の最小幅を0にする", async () => {
+  const css = await readCss();
 
-  const paused = gsBlockContaining(html, "一時停止中");
-  assert.match(paused, /class="[^"]*\bidle\b[^"]*"/, "一時停止の実行状態は待機の色クラスを持つ");
+  assert.equal(requireDeclaration(css, /^\.goal-head$/, "white-space", ".goal-head"), "nowrap");
+  assert.equal(requireDeclaration(css, /^\.goal-head$/, "overflow", ".goal-head"), "hidden");
+  assert.equal(
+    requireDeclaration(css, /^\.goal-head$/, "text-overflow", ".goal-head"),
+    "ellipsis",
+  );
 
-  const active = gsBlockContaining(html, "稼働中");
-  assert.match(active, /class="[^"]*\blive\b[^"]*"/, "稼働中の実行状態は実行中の色クラスを持つ");
-  assert.doesNotMatch(active, /class="[^"]*\bidle\b[^"]*"/, "稼働中を待機の色にしない");
+  const minWidth =
+    declarationMatching(css, /^\.goals\s+li$/, "min-width") ??
+    declarationMatching(css, /^\.goal$/, "min-width");
+  assert.equal(minWidth, "0", "ゴール行の最小幅を0にしてカードの幅に収める");
+});
+
+test("PR リンクは本文と区別できるリンク色を持ち、hover で下線を付ける", async () => {
+  const css = await readCss();
+
+  assert.equal(
+    requireDeclaration(css, /^\.goal-pr\s+a$/, "color", ".goal-pr a"),
+    "var(--teal-d)",
+    "PR リンクは他のページ内リンクと同じトークン色を持つ",
+  );
+  assert.equal(
+    requireDeclaration(css, /^\.goal-pr\s+a:hover$/, "text-decoration", ".goal-pr a:hover"),
+    "underline",
+    "PR リンクは hover で下線を付けてリンクと分かる",
+  );
+});
+
+test("一時停止のゴールは待機の色のバッジを付け、進行中のゴールと区別する", () => {
+  const base = createProjectsResponse();
+  const state = DashboardState.create({
+    ...base.state!,
+    goals: base.state!.goals.map((goal) =>
+      goal.goalId === "goal-2"
+        ? goal
+        : {
+            ...goal,
+            status: GoalStatus.GOAL_STATUS_CREATED,
+            executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+          },
+    ),
+  });
+  const html = renderPage(ProjectsPage, { response: { ...base, state }, now: NOW });
+
+  const paused = goalBadgeFor(html, "一時停止");
+  assert.match(paused, /class="[^"]*\bidle\b[^"]*"/, "一時停止のバッジは待機の色クラスを持つ");
+
+  const active = goalBadgeFor(html, "進行中");
+  assert.match(active, /class="[^"]*\blive\b[^"]*"/, "進行中のバッジは実行中の色クラスを持つ");
+  assert.doesNotMatch(active, /class="[^"]*\bidle\b[^"]*"/, "進行中を待機の色にしない");
 });
 
 test("サーバーのカードは 1280px 以下で1列になり、run 行は3列の定義を保つ", async () => {
@@ -391,21 +437,24 @@ test("時刻と識別子は等幅書体になり、run 詳細の識別子に mon
   assert.match(runLink, /class="[^"]*\bmono\b[^"]*"/, "run の識別子を等幅にする");
 });
 
-test("実行状態の色クラスは状態ごとのトークンで描画色を変える", async () => {
+test("ゴールのバッジの色クラスは状態ごとのトークンで描画色を変える", async () => {
   const css = await readCss();
 
-  const colorOf = (state: string): string =>
-    requireDeclaration(css, new RegExp(`^\\.gs\\s+\\.${state}$`), "color", `.gs .${state}`);
+  const colorOf = (tone: string): string =>
+    requireDeclaration(css, new RegExp(`^\\.goal-badge\\.${tone}$`), "color", `.goal-badge.${tone}`);
   const live = colorOf("live");
   const idle = colorOf("idle");
   const warn = colorOf("warn");
   for (const value of [live, idle, warn]) {
-    assert.match(value, /var\(--/, "実行状態の色はトークンを参照する");
+    assert.match(value, /var\(--/, "ゴールのバッジの色はトークンを参照する");
   }
-  assert.notEqual(live, idle, "稼働中と一時停止中は別の色");
-  assert.notEqual(live, warn, "稼働中と中止は別の色");
-  assert.notEqual(idle, warn, "一時停止中と中止は別の色");
-  assert.equal(requireDeclaration(css, /^\.gs\s+\.warn$/, "font-weight", ".gs .warn"), "600");
+  assert.notEqual(live, idle, "進行中と一時停止は別の色");
+  assert.notEqual(live, warn, "進行中と中止は別の色");
+  assert.notEqual(idle, warn, "一時停止と中止は別の色");
+  assert.equal(
+    requireDeclaration(css, /^\.goal-badge\.warn$/, "font-weight", ".goal-badge.warn"),
+    "600",
+  );
 
   const base = createProjectsResponse();
   const state = DashboardState.create({
@@ -416,8 +465,8 @@ test("実行状態の色クラスは状態ごとのトークンで描画色を�
     })),
   });
   const html = renderPage(ProjectsPage, { response: { ...base, state }, now: NOW });
-  const aborted = gsBlockContaining(html, "中止");
-  assert.match(aborted, /class="[^"]*\bwarn\b[^"]*"/, "中止の実行状態は警告の色クラスを持つ");
+  const aborted = goalBadgeFor(html, "中止");
+  assert.match(aborted, /class="[^"]*\bwarn\b[^"]*"/, "中止のバッジは警告の色クラスを持つ");
 });
 
 test("760px 以下でもサーバーの状態テキストを隠さない", async () => {

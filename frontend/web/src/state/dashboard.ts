@@ -1,9 +1,7 @@
 import type {
   AnomalyThresholds,
   DashboardState,
-  ExecutionStatus,
   Goal,
-  GoalStatus,
   PendingDecision,
   Project,
   Run,
@@ -335,29 +333,3 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
     pendingDecisions,
   };
 }
-
-export const goalStatusLabel = (status: GoalStatus): string => {
-  switch (status) {
-    case GOAL_STATUS.CREATED:
-      return "作成済み";
-    case GOAL_STATUS.AWAITING_MERGE:
-      return "人のマージ待ち";
-    case GOAL_STATUS.COMPLETED:
-      return "完了";
-    default:
-      return "不明";
-  }
-};
-
-export const executionStatusLabel = (status: ExecutionStatus): string => {
-  switch (status) {
-    case EXECUTION_STATUS.ACTIVE:
-      return "稼働中";
-    case EXECUTION_STATUS.PAUSED:
-      return "一時停止中";
-    case EXECUTION_STATUS.ABORTED:
-      return "中止";
-    default:
-      return "不明";
-  }
-};
