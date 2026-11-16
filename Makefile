@@ -23,8 +23,13 @@ proto-gen:
 	npm --prefix frontend/web run proto:generate
 
 proto-check:
-	$(MAKE) proto-gen
-	git diff --exit-code -- frontend/web/src/proto
+	@set -e; \
+	tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$${tmp}"' EXIT; \
+	mkdir -p "$${tmp}/proto"; \
+	if [ -d frontend/web/src/proto ]; then cp -R frontend/web/src/proto/. "$${tmp}/proto/"; fi; \
+	$(MAKE) proto-gen; \
+	diff -r "$${tmp}/proto" frontend/web/src/proto
 
 done:
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
