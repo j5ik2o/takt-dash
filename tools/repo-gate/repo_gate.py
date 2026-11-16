@@ -72,7 +72,7 @@ MACHINE_GATE_COMMANDS = {
     "test": (
         "bash -c 'if [ ! -d frontend/web/node_modules ]; then "
         'bash -o pipefail -c "npm --prefix frontend/web ci 2>&1 | tail -c 4000" '
-        '|| exit $?; fi; bash -o pipefail -c "make test 2>&1 | tail -c 56000"\''
+        '|| exit $?; fi; bash -o pipefail -c "make test 2>&1 | python3 tools/test-summary/test_summary.py --max-bytes 56000"\''
     ),
     "typecheck": "bash -o pipefail -c 'make typecheck 2>&1 | tail -c 60000'",
     "lint": "bash -o pipefail -c 'make lint 2>&1 | tail -c 60000'",

@@ -229,7 +229,7 @@ TEST_INPUT = """\
       - type: command
         as: test
         command: >-
-          bash -c 'if [ ! -d frontend/web/node_modules ]; then bash -o pipefail -c "npm --prefix frontend/web ci 2>&1 | tail -c 4000" || exit $?; fi; bash -o pipefail -c "make test 2>&1 | tail -c 56000"'
+          bash -c 'if [ ! -d frontend/web/node_modules ]; then bash -o pipefail -c "npm --prefix frontend/web ci 2>&1 | tail -c 4000" || exit $?; fi; bash -o pipefail -c "make test 2>&1 | python3 tools/test-summary/test_summary.py --max-bytes 56000"'
         timeout_ms: 1800000
 """
 
@@ -1011,8 +1011,8 @@ def test_machine_gate_commands_invoke_their_make_targets() -> None:
             MACHINE_GATE_STEP.replace(
                 TEST_INPUT,
                 TEST_INPUT.replace(
-                    'bash -o pipefail -c "make test 2>&1 | tail -c 56000"',
-                    'bash -o pipefail -c "true || make test 2>&1 | tail -c 56000"',
+                    'bash -o pipefail -c "make test 2>&1 | python3 tools/test-summary/test_summary.py --max-bytes 56000"',
+                    'bash -o pipefail -c "true || make test 2>&1 | python3 tools/test-summary/test_summary.py --max-bytes 56000"',
                 ),
             ),
             "正規形",
