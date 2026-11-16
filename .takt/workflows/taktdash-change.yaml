@@ -13,8 +13,20 @@ all_steps:
     - ref: taktdash-coding-rules
       position: before_instruction
 max_steps: 70
-initial_step: develop
+initial_step: mark_in_progress
 steps:
+  - name: mark_in_progress
+    description: 開始時に対象 issue を解決し、ボードの Status を In Progress にする（失敗は非致命）
+    mode: system
+    system_inputs:
+      - type: command
+        as: status
+        command: |
+          python3 tools/project-status/publish.py status --status "In Progress"
+        timeout_ms: 120000
+    rules:
+      - condition: when(true)
+        next: develop
   - name: develop
     description: development-core で計画・テスト作成・実装・レビュー・修正・要件確認を行う
     kind: workflow_call
