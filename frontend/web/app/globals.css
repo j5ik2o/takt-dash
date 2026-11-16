@@ -49,6 +49,8 @@
   --radius-8: 8px;
   --radius-12: 12px;
   --radius-pill: 999px;
+
+  --layout-aside-width: 320px;
 }
 
 html {
@@ -1505,4 +1507,74 @@ pre {
   padding-left: var(--space-20);
   color: var(--muted);
   font-size: var(--font-size-12);
+}
+
+/* レイアウトの基本部品（使い方は docs/layout.md）。
+   画面への適用は後続のタスクで行う。部品は @media に入れず、列数は折り返しで決める。 */
+
+.l-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  min-width: 0;
+}
+
+.l-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.l-split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-24);
+}
+
+.l-split > :first-child {
+  flex: 999 1 0;
+  min-width: 50%;
+}
+
+.l-split > :last-child {
+  flex: 1 1 var(--layout-aside-width);
+  min-width: 0;
+}
+
+.l-table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-12);
+}
+
+.l-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.l-table th,
+.l-table td {
+  padding: var(--space-8) var(--space-12);
+  font-size: var(--font-size-14);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line2);
+}
+
+.l-table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.l-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+
+.l-section > h2 {
+  font-size: var(--font-size-16);
 }
