@@ -4,6 +4,7 @@
 // 配線されていない、または proto の型と食い違う状態を、型エラーとして失敗させる。
 // 画面と Route Handler は後続のタスクのため、ここでは型の存在と配線だけを観測する。
 import {
+  type BuildInfo,
   type DashboardState,
   type GetRunDetailRequest,
   type PendingDecision,
@@ -14,6 +15,7 @@ export type ProtoContract = {
   state: DashboardState;
   inquiry: PendingDecision;
   runDetail: GetRunDetailRequest;
+  buildInfo: BuildInfo;
 };
 
 export const pendingDecisionTypes: PendingDecisionType[] = [

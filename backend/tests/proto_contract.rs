@@ -39,15 +39,18 @@ fn proto_defines_the_read_and_write_rpcs() {
       "ApproveGoalRegistration".to_owned(),
       "GetActivity".to_owned(),
       "GetConversation".to_owned(),
+      "GetGoalDetail".to_owned(),
+      "GetGoals".to_owned(),
       "GetOverview".to_owned(),
       "GetPendingDecisions".to_owned(),
       "GetProjects".to_owned(),
       "GetRunDetail".to_owned(),
+      "GetTaskDetail".to_owned(),
       "ListGoalRegistrationProposals".to_owned(),
       "RejectGoalRegistration".to_owned(),
       "WatchState".to_owned(),
     ],
-    "読み取りの7 RPC と書き込みの5 RPC が定義されている必要があります: {names:?}"
+    "読み取りの9 RPC と WatchState と書き込みの5 RPC が定義されている必要があります: {names:?}"
   );
 }
 
@@ -68,6 +71,9 @@ fn watch_state_is_a_server_streaming_rpc() {
     "GetActivity",
     "GetRunDetail",
     "GetConversation",
+    "GetGoals",
+    "GetGoalDetail",
+    "GetTaskDetail",
     "AnswerInquiry",
     "ApproveGoalMerge",
     "ApproveGoalRegistration",
@@ -134,6 +140,28 @@ fn generated_dashboard_state_carries_the_read_state() {
 }
 
 #[test]
+fn proto_declares_build_info_on_dashboard_state() {
+  assert!(
+    PROTO_SOURCE.lines().any(|line| line.trim().starts_with("message BuildInfo")),
+    "proto に message BuildInfo を定義する必要があります"
+  );
+  let field = PROTO_SOURCE.lines().map(str::trim).find(|line| line.starts_with("BuildInfo build_info"));
+  assert!(field.is_some(), "DashboardState のビルド情報は BuildInfo 型の build_info として定義する必要があります");
+}
+
+#[test]
+fn generated_dashboard_state_carries_build_info() {
+  let state = v1::DashboardState {
+    build_info: Some(v1::BuildInfo { commit: "a1b2c3d".to_owned(), branch: "takt/20261116-build-info".to_owned() }),
+    ..Default::default()
+  };
+
+  let info = state.build_info.expect("build_info が設定されている");
+  assert_eq!(info.commit, "a1b2c3d");
+  assert_eq!(info.branch, "takt/20261116-build-info");
+}
+
+#[test]
 fn generated_client_exposes_the_read_and_write_calls() {
   fn client_type(
     client: v1::takt_dash_service_client::TaktDashServiceClient<tonic::transport::Channel>,
@@ -151,6 +179,9 @@ fn generated_client_exposes_the_read_and_write_calls() {
     std::marker::PhantomData::<v1::GetActivityRequest>,
     std::marker::PhantomData::<v1::GetRunDetailRequest>,
     std::marker::PhantomData::<v1::GetConversationRequest>,
+    std::marker::PhantomData::<v1::GetGoalsRequest>,
+    std::marker::PhantomData::<v1::GetGoalDetailRequest>,
+    std::marker::PhantomData::<v1::GetTaskDetailRequest>,
     std::marker::PhantomData::<v1::WatchStateRequest>,
     std::marker::PhantomData::<v1::AnswerInquiryRequest>,
     std::marker::PhantomData::<v1::ApproveGoalMergeRequest>,
@@ -164,6 +195,9 @@ fn generated_client_exposes_the_read_and_write_calls() {
     std::marker::PhantomData::<v1::GetActivityResponse>,
     std::marker::PhantomData::<v1::GetRunDetailResponse>,
     std::marker::PhantomData::<v1::GetConversationResponse>,
+    std::marker::PhantomData::<v1::GetGoalsResponse>,
+    std::marker::PhantomData::<v1::GetGoalDetailResponse>,
+    std::marker::PhantomData::<v1::GetTaskDetailResponse>,
     std::marker::PhantomData::<v1::AnswerInquiryResponse>,
     std::marker::PhantomData::<v1::ApproveGoalMergeResponse>,
     std::marker::PhantomData::<v1::ApproveGoalRegistrationResponse>,

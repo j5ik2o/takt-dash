@@ -14,9 +14,16 @@
                        関門のコマンドを実際に走らせ、終了コードで成否を導出する。
   ci-runs-make-done    .github/workflows/ の各 CI が make done を呼び、Rust の stable と
                        nightly（rustfmt）と Node をセットアップする。
-  workflow-machine-gate taktdash-change に make done を実行する mode が system の
-                       ステップがあり、develop の後ろに置かれ、make done の出力を修正
-                       ステップへ渡し、成功で完了・失敗で修正へ回る遷移を持つ。
+  workflow-machine-gate taktdash-change の machine_gate が mode: system で、
+                       proto-check・fmt・clippy・test・typecheck・lint の6検査を
+                       system_inputs の command として実行し、各検査の make ターゲットを
+                       呼ぶ。6検査の exit_code == 0 の同時成立で次のステップへ進み、
+                       検査ごとの失敗は対応する修正ステップへ回して machine_gate へ戻る。
+                       公開ステップ（publish.py）は任意で、置く場合は commit / push / pr /
+                       status の 4 段階を実行し、commit / push / pr の成功だけを完了条件に
+                       し、失敗は再試行または修正へ回し、ABORT へは遷移しない。公開ステップを
+                       置かない場合は machine_gate の成功が aislop_gate へ直結する。status
+                       だけを実行するステップは公開とみなさない。
   gitignore-rules      .gitignore が Rust と Node とローカルデータの生成物を除外する。
   stable-toolchain     rust-toolchain.toml のチャネルが stable のままである。
 
@@ -44,13 +51,68 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.11 未満は対象外
     tomllib = None
 
 WORKSPACE_MEMBERS = ["backend", "frontend/cli"]
-GATE_TARGETS = ["fmt", "clippy", "test", "typecheck", "lint"]
+GATE_TARGETS = ["fmt", "clippy", "test", "typecheck", "lint", "proto_check"]
+# machine_gate の system_input の as 名と、Makefile のターゲット名の対応。
+# proto-check は Makefile のターゲット名にハイフンを含むため、式から参照しやすい
+# as 名（proto_check）と分けて対応づける。
+GATE_MAKE_TARGETS = {"proto_check": "proto-check"}
+
+
+def gate_make_target(name):
+    return GATE_MAKE_TARGETS.get(name, name)
+
+
+# machine_gate の各検査が実行するコマンドの正規形。
+# 制御演算子で検査の実行を飛ばす変異（例: `true || make fmt`）を、単純コマンドの
+# 解析だけで受理しないよう、コマンド全文を照合する。検査のコマンドを変える場合は
+# ここも更新する（ゲートの検査そのものを変える変更としてレビュー対象にする）。
+MACHINE_GATE_COMMANDS = {
+    "fmt": "bash -o pipefail -c 'make fmt 2>&1 | tail -c 60000'",
+    "clippy": "bash -o pipefail -c 'make clippy 2>&1 | tail -c 60000'",
+    "test": (
+        "bash -c 'if [ ! -d frontend/web/node_modules ]; then "
+        'bash -o pipefail -c "npm --prefix frontend/web ci 2>&1 | tail -c 4000" '
+        '|| exit $?; fi; bash -o pipefail -c "make test 2>&1 | python3 tools/test-summary/test_summary.py --max-bytes 56000"\''
+    ),
+    "typecheck": "bash -o pipefail -c 'make typecheck 2>&1 | tail -c 60000'",
+    "lint": "bash -o pipefail -c 'make lint 2>&1 | tail -c 60000'",
+    "proto_check": "bash -o pipefail -c 'make proto-check 2>&1 | tail -c 60000'",
+}
 AISLOP_CHECK_COMMAND = "scripts/aislop-check-bootstrap.mjs check"
 AISLOP_CHECK_INVOCATION = ["node", "scripts/aislop-check-bootstrap.mjs", "check"]
+AISLOP_FAILURE_NOTE = (
+    "|| true・; true・パイプ・後続のコマンドなどでチェックの失敗を潰す記述は、"
+    "実行とみなしません"
+)
 GATE_EXIT_CODE_REFERENCE = re.compile(r"context\.([A-Za-z0-9_]+)\.result\.exit_code")
 GATE_SUCCESS_CONDITION = re.compile(
     r"when\(\s*context\.([A-Za-z0-9_]+)\.result\.exit_code\s*==\s*0\s*\)"
 )
+MACHINE_GATE_SUCCESS_TERM = re.compile(
+    r"context\.machine_gate\.([A-Za-z0-9_]+)\.exit_code\s*==\s*0"
+)
+MACHINE_GATE_FAILURE_CONDITION = re.compile(
+    r"when\(\s*context\.machine_gate\.([A-Za-z0-9_]+)\.exit_code\s*!=\s*0\s*\)"
+)
+CONTEXT_REFERENCE = re.compile(r"\{context:([^}]+)\}")
+SHELL_SEPARATORS = {";", "&", "|", "&&", "||", "(", ")", "\n"}
+SHELL_KEYWORDS = {
+    "if",
+    "then",
+    "else",
+    "elif",
+    "fi",
+    "do",
+    "done",
+    "while",
+    "until",
+    "!",
+    "{",
+    "}",
+}
+REDIRECTION = re.compile(r"^\d*[<>]")
+# shell_tokens が演算子のトークンとして切り出す文字。
+SHELL_OPERATOR_CHARS = ";&|\n()"
 
 
 class GateError(Exception):
@@ -308,7 +370,7 @@ def check_machine_gate(root, timeout_seconds):
     targets = parse_makefile(makefile)
     gate = gate_commands(targets)
 
-    missing = [name for name in GATE_TARGETS if name not in gate]
+    missing = [name for name in GATE_TARGETS if gate_make_target(name) not in gate]
     if missing:
         raise GateError(f"Makefile の done が実行しない検査があります: {missing}")
 
@@ -379,24 +441,6 @@ def rules_of(step):
     return [rule for rule in rules if isinstance(rule, dict)]
 
 
-def runs_command(step, prefix):
-    """mode が system のステップで、指定した語で始まる固定コマンドを実行するかを判定する。"""
-    if step.get("mode") != "system":
-        return False
-    for item in step.get("system_inputs") or []:
-        if not isinstance(item, dict) or item.get("type") != "command":
-            continue
-        tokens = [token for token in str(item.get("command", "")).split() if token]
-        if tokens[: len(prefix)] == prefix:
-            return True
-    return False
-
-
-def runs_make_done(step):
-    """mode が system のステップで、make done を固定コマンドとして実行するかを判定する。"""
-    return runs_command(step, ["make", "done"])
-
-
 def strip_shell_comments(command):
     """シェルのコメントを、クォートとバックスラッシュを考慮して除去する。
 
@@ -447,23 +491,85 @@ def strip_shell_comments(command):
 
 
 def invokes_aislop_check(command):
-    """コマンド文字列が aislop チェックを実際に起動するかを判定する。
+    """コマンド文字列が aislop チェックを起動し、その失敗を呼び出し元へ返すかを判定する。
 
-    先にシェルのコメントを除去してから、&& / || / ; / | / 改行による単純コマンドへの
-    分割を行い、各単純コマンドの先頭が aislop チェックの起動になっているかを調べる。
-    コメントを除去してから分割することで、コメント内の演算子の後ろを独立した単純
-    コマンドとして解釈しない。echo の引数・引用符内の文字列・コメントは単純コマンドの
-    先頭にならないため、表示だけの文字列を実行とみなさない。
+    コメントを除去してクォートを保ったままトークンへ分け、チェックの起動がコマンド
+    全体の最後の単純コマンドになっている場合だけ真を返す。直前はコマンドの先頭・&&・
+    ; ・改行に限り、直後は引数とリダイレクション、末尾の ; と改行に限る。このため、
+    `|| true`・`; true`・次の行のコマンドで終了状態を上書きする形、`| cat` などの
+    パイプ、`&` によるバックグラウンド実行、`!` による否定、`npm ci || check` のように
+    チェックが飛ばされる形は起動とみなさない。シェルの -e などの実行時設定には頼らず、
+    失敗が返ることを記述だけから確かめられる形に限る保守的な判定である。echo の引数・
+    引用符内の文字列・コメントは単純コマンドの先頭にならないため、実行とみなさない。
     """
-    stripped = strip_shell_comments(command)
-    for simple in re.split(r"&&|\|\||[;|\n]", stripped):
-        try:
-            tokens = shlex.split(simple, comments=False)
-        except ValueError:
+    try:
+        tokens = shell_tokens(command)
+    except ValueError:
+        return False
+    width = len(AISLOP_CHECK_INVOCATION)
+    return any(
+        tokens[index : index + width] == AISLOP_CHECK_INVOCATION
+        and starts_command_list_item(tokens[:index])
+        and ends_command_list(tokens[index + width :])
+        for index in range(len(tokens))
+    )
+
+
+def is_shell_operator(token):
+    """トークンがシェルの演算子かを判定する。引用符やエスケープで作られたものは演算子ではない。"""
+    return (
+        bool(token)
+        and not getattr(token, "quoted", False)
+        and all(char in SHELL_OPERATOR_CHARS for char in token)
+    )
+
+
+def starts_command_list_item(preceding):
+    """直前のトークン列が、終了状態をそのまま返す位置で次のコマンドを始めるかを判定する。
+
+    改行だけのトークンを読み飛ばした手前が、先頭・&&・; なら真とする。改行を挟んだ
+    手前が普通の語なら、改行がコマンドの区切りなので真とする。|| と | と & と ( は、
+    `||` の直後の改行（行継続）を含めて偽とする。改行を挟まずに語が続く場合は、
+    その語の引数（echo の引数や ! の否定対象）なので偽とする。
+    """
+    index = len(preceding)
+    while index > 0 and preceding[index - 1].strip("\n") == "":
+        index -= 1
+    if index == 0:
+        return True
+    previous = preceding[index - 1]
+    if is_shell_operator(previous):
+        return previous.strip("\n") in ("&&", ";")
+    return index < len(preceding)
+
+
+def ends_command_list(following):
+    """起動の後ろのトークン列が、引数・リダイレクション・末尾の ; と改行だけかを判定する。"""
+    for index, token in enumerate(following):
+        if not is_shell_operator(token):
             continue
-        if tokens[: len(AISLOP_CHECK_INVOCATION)] == AISLOP_CHECK_INVOCATION:
-            return True
-    return False
+        if token.strip(";\n") == "":
+            return all(rest.strip(";\n") == "" for rest in following[index + 1 :])
+        if token == "&" and is_redirection_ampersand(following, index):
+            continue
+        return False
+    return True
+
+
+def is_redirection_ampersand(tokens, index):
+    """`2>&1` や `&>file` の & を、バックグラウンド実行ではなくリダイレクションと判定する。
+
+    `&` の直後に空白を挟まず `>` が続く場合だけリダイレクションとする。
+    `& > file` は、バックグラウンド実行の後にリダイレクションだけの
+    コマンドが続く形で、チェックの失敗は返らない。
+    """
+    before = tokens[index - 1] if index > 0 else ""
+    after = tokens[index + 1] if index + 1 < len(tokens) else ""
+    if before and not getattr(before, "quoted", False) and REDIRECTION.fullmatch(before):
+        return True
+    if not after.startswith(">"):
+        return False
+    return not getattr(after, "space_before", False)
 
 
 def runs_aislop_gate(step):
@@ -477,11 +583,371 @@ def runs_aislop_gate(step):
     )
 
 
+class ShellToken(str):
+    """シェルのトークン。文字列としての比較はそのまま使える。
+
+    quoted: 引用符の中かバックスラッシュの直後で作られた文字を含む場合に真。
+    演算子に見える文字列でも、引用されたものは演算子ではない。
+    space_before: 直前に空白（スペース・タブ・復帰）があった場合に真。
+    `&>` と `& >` の区別に使う。
+    """
+
+    def __new__(cls, text, *, quoted=False, space_before=False):
+        token = super().__new__(cls, text)
+        token.quoted = quoted
+        token.space_before = space_before
+        return token
+
+
+def shell_tokens(command):
+    """シェルのコマンド文字列を、クォートを保ったままトークンへ分ける。
+
+    各トークンは ShellToken で、引用符やエスケープで作られた文字を含むか
+    （quoted）と、直前に空白があったか（space_before）を保持する。演算子
+    の判定はこの情報を使うため、引用符内の `&&` や `;`、エスケープされた
+    `;` は演算子にならない。`&>` と `& >` も区別できる。閉じていない
+    引用符がある場合は、shlex と同じく ValueError を上げる。
+    """
+    text = strip_shell_comments(command)
+    tokens = []
+    index = 0
+    pending_space = False
+
+    def flush_word(chars, quoted, space_before):
+        if chars or quoted:
+            tokens.append(ShellToken("".join(chars), quoted=quoted, space_before=space_before))
+
+    while index < len(text):
+        char = text[index]
+        if char in " \t\r":
+            pending_space = True
+            index += 1
+            continue
+        if char in SHELL_OPERATOR_CHARS:
+            if char in "&|;":
+                end = index + 1
+                while end < len(text) and text[end] == char:
+                    end += 1
+                tokens.append(ShellToken(text[index:end], space_before=pending_space))
+                index = end
+            else:
+                tokens.append(ShellToken(char, space_before=pending_space))
+                index += 1
+            pending_space = False
+            continue
+        word_space = pending_space
+        pending_space = False
+        chars = []
+        quoted = False
+        while index < len(text):
+            char = text[index]
+            if char in " \t\r" or char in SHELL_OPERATOR_CHARS:
+                break
+            if char == "\\" and index + 1 < len(text):
+                chars.append(text[index + 1])
+                quoted = True
+                index += 2
+                continue
+            if char in ("'", '"'):
+                quote = char
+                quoted = True
+                index += 1
+                while index < len(text) and text[index] != quote:
+                    if quote == '"' and text[index] == "\\" and index + 1 < len(text):
+                        chars.append(text[index + 1])
+                        index += 2
+                        continue
+                    chars.append(text[index])
+                    index += 1
+                if index >= len(text):
+                    raise ValueError("No closing quotation")
+                index += 1
+                continue
+            chars.append(char)
+            index += 1
+        flush_word(chars, quoted, word_space)
+    return tokens
+
+
+def simple_commands(tokens):
+    """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。"""
+    current = []
+    for token in tokens:
+        if token in SHELL_SEPARATORS and is_shell_operator(token):
+            if current:
+                yield current
+            current = []
+            continue
+        current.append(token)
+    if current:
+        yield current
+
+
+def invoked_make_targets(command, depth=0):
+    """コマンド文字列が実際に起動する make のターゲットを集める。
+
+    bash -c や sh -c の内側のスクリプトへ再帰し、if/then などの制御語を除いた
+    単純コマンドの先頭が make のときだけ、フラグと変数代入を除いたターゲットを
+    拾う。echo の引数や引用符内の文字列、コメントは起動として扱わない。
+    """
+    found = set()
+    if depth > 5:
+        return found
+    try:
+        tokens = shell_tokens(command)
+    except ValueError:
+        return found
+    for tokens_of_command in simple_commands(tokens):
+        while tokens_of_command and tokens_of_command[0] in SHELL_KEYWORDS:
+            tokens_of_command = tokens_of_command[1:]
+        if not tokens_of_command:
+            continue
+        head = tokens_of_command[0]
+        if head in ("bash", "sh") and "-c" in tokens_of_command:
+            index = tokens_of_command.index("-c")
+            if index + 1 < len(tokens_of_command):
+                found |= invoked_make_targets(tokens_of_command[index + 1], depth + 1)
+            continue
+        if head != "make":
+            continue
+        for token in tokens_of_command[1:]:
+            if REDIRECTION.match(token):
+                break
+            if token.startswith("-"):
+                continue
+            if "=" in token and token.split("=", 1)[0].isidentifier():
+                continue
+            found.add(token)
+    return found
+
+
+def machine_gate_success_checks(condition):
+    """成功条件が6検査の exit_code == 0 の同時成立なら、その検査名を返す。
+
+    when(...) 全体を && で区切った各節が、machine_gate の検査の exit_code == 0 に
+    完全一致する場合だけ受理する。|| や単一キーの result、別ゲートの参照、重複した
+    検査は、空のリストとして拒否する。
+    """
+    text = str(condition or "").strip()
+    if "||" in text:
+        return []
+    outer = re.fullmatch(r"when\((.*)\)", text, re.DOTALL)
+    if outer is None:
+        return []
+    checks = []
+    for term in outer.group(1).split("&&"):
+        match = MACHINE_GATE_SUCCESS_TERM.fullmatch(term.strip())
+        if match is None:
+            return []
+        checks.append(match.group(1))
+    return checks
+
+
+def instruction_text(step):
+    instruction = step.get("instruction")
+    if isinstance(instruction, list):
+        return "\n".join(str(item) for item in instruction)
+    return str(instruction or "")
+
+
+def check_machine_gate_inputs(gate):
+    """machine_gate が mode: system で6検査を command として実行するかを検査する。"""
+    if gate.get("mode") != "system":
+        raise GateError(f"machine_gate は mode: system でなければなりません: {gate.get('mode')!r}")
+
+    inputs = gate.get("system_inputs")
+    if not isinstance(inputs, list):
+        raise GateError("machine_gate に system_inputs がありません")
+    by_name = {}
+    for item in inputs:
+        if not isinstance(item, dict):
+            raise GateError(f"machine_gate の system_inputs に辞書でない要素があります: {item!r}")
+        alias = item.get("as")
+        if not isinstance(alias, str):
+            raise GateError(
+                f"machine_gate の system_inputs の as が文字列ではありません: {alias!r}"
+            )
+        if alias in by_name:
+            raise GateError(f"machine_gate の system_inputs に同じ as が重複しています: {alias!r}")
+        by_name[alias] = item
+    missing = [name for name in GATE_TARGETS if name not in by_name]
+    extra = sorted(name for name in by_name if name not in GATE_TARGETS)
+    if missing or extra:
+        raise GateError(
+            f"machine_gate の system_inputs の as が6検査と一致しません: missing={missing}, extra={extra}"
+        )
+    for name in GATE_TARGETS:
+        item = by_name[name]
+        if item.get("type") != "command":
+            raise GateError(
+                f"machine_gate の {name} の system_input が type: command ではありません: "
+                f"{item.get('type')!r}"
+            )
+        targets = invoked_make_targets(str(item.get("command", "")))
+        make_target = gate_make_target(name)
+        if make_target not in targets:
+            raise GateError(
+                f"{name} の command が make {make_target} を呼んでいません: {item.get('command')!r}"
+            )
+        other_targets = {gate_make_target(other) for other in GATE_TARGETS if other != name}
+        others = sorted(targets & other_targets)
+        if others:
+            raise GateError(
+                f"{name} の command が別の検査 {', '.join(others)} を呼んでいます: "
+                f"{item.get('command')!r}"
+            )
+        expected = MACHINE_GATE_COMMANDS[name]
+        command = str(item.get("command", "")).strip()
+        if command != expected:
+            raise GateError(
+                f"{name} の command が検査を実行する正規形ではありません: {command!r} "
+                f"（期待する形: {expected!r}）"
+            )
+
+
+def check_machine_gate_success_rule(gate_rules, next_name):
+    """成功規則が6検査の exit_code == 0 の同時成立で next_name へ進むかを検査する。"""
+    success_rules = [rule for rule in gate_rules if rule.get("next") == next_name]
+    if len(success_rules) != 1:
+        raise GateError(
+            f"machine_gate に {next_name} へ進む成功規則が 1 つだけありません: {len(success_rules)}"
+        )
+    success_checks = machine_gate_success_checks(success_rules[0].get("condition"))
+    if sorted(success_checks) != sorted(GATE_TARGETS):
+        raise GateError(
+            "machine_gate の成功条件が6検査"
+            "（proto_check・fmt・clippy・test・typecheck・lint）の "
+            f"exit_code == 0 の同時成立になっていません: {success_rules[0].get('condition')!r}"
+        )
+
+
+def check_machine_gate_failure_rules(gate_rules):
+    """失敗規則が検査ごとに対応する修正ステップへ1件ずつ分岐するかを検査する。"""
+    for name in GATE_TARGETS:
+        fix_name = f"fix_machine_gate_{name}"
+        failure_rules = [rule for rule in gate_rules if rule.get("next") == fix_name]
+        if len(failure_rules) != 1:
+            raise GateError(
+                f"machine_gate に {name} の失敗（exit_code != 0）で {fix_name} へ進む規則が "
+                f"1 つだけありません: {len(failure_rules)}"
+            )
+        condition = str(failure_rules[0].get("condition") or "").strip()
+        match = MACHINE_GATE_FAILURE_CONDITION.fullmatch(condition)
+        if match is None or match.group(1) != name:
+            raise GateError(
+                f"machine_gate の {name} の失敗条件が "
+                f"when(context.machine_gate.{name}.exit_code != 0) ではありません: {condition!r}"
+            )
+
+
+def check_fix_step_transitions(fix_name, fix_rules, return_to):
+    """修正ステップの遷移先が、戻り先（return_to）か ABORT だけであることを検査する。"""
+    allowed = {return_to, "ABORT"}
+    unexpected = sorted({str(rule.get("next")) for rule in fix_rules if rule.get("next") not in allowed})
+    if unexpected:
+        raise GateError(
+            f"{fix_name} に許可されない遷移先があります: {unexpected!r}。"
+            f"修正ステップの遷移先は {return_to} か ABORT に限ります"
+        )
+
+
+def check_machine_gate_fix_steps(named):
+    """各修正ステップが当該検査の出力だけを参照し、machine_gate へ戻るかを検査する。"""
+    for name in GATE_TARGETS:
+        fix_name = f"fix_machine_gate_{name}"
+        fix = named.get(fix_name)
+        if fix is None:
+            raise GateError(f"machine_gate の {name} の修正ステップ {fix_name} がありません")
+        references = set(CONTEXT_REFERENCE.findall(instruction_text(fix)))
+        expected = {f"machine_gate.{name}.stdout", f"machine_gate.{name}.stderr"}
+        if references != expected:
+            raise GateError(
+                f"{fix_name} の instruction が参照する出力が {name} の stdout と stderr だけでは"
+                f"ありません: {sorted(references)}"
+            )
+        fix_rules = rules_of(fix)
+        check_fix_step_transitions(fix_name, fix_rules, "machine_gate")
+        returns = [rule for rule in fix_rules if rule.get("next") == "machine_gate"]
+        if len(returns) != 1:
+            raise GateError(
+                f"{fix_name} から machine_gate へ戻る遷移が 1 つだけありません: {len(returns)}"
+            )
+
+
+def check_machine_gate_transitions(gate_rules, next_name):
+    """machine_gate の遷移先が既知のものだけで、ABORT が最後の when(true) かを検査する。"""
+    allowed = {f"fix_machine_gate_{name}" for name in GATE_TARGETS} | {next_name, "ABORT"}
+    for rule in gate_rules:
+        next_value = rule.get("next")
+        if next_value not in allowed:
+            raise GateError(f"machine_gate に許可されない遷移先があります: {next_value!r}")
+    for index, rule in enumerate(gate_rules):
+        if rule.get("next") != "ABORT":
+            continue
+        if str(rule.get("condition") or "").strip() != "when(true)":
+            raise GateError(
+                f"machine_gate の ABORT への遷移条件が when(true) ではありません: "
+                f"{rule.get('condition')!r}"
+            )
+        if index != len(gate_rules) - 1:
+            raise GateError("machine_gate の when(true) -> ABORT が規則列の最後にありません")
+
+
+def check_machine_gate_five_checks(named, next_name):
+    """machine_gate が6検査を実行し、検査ごとに失敗を振り分けるかを検査する。
+
+    6検査の成功は next_name へ進む。公開ステップを置く場合はそのステップ名、
+    置かない場合は aislop_gate を渡す。
+    """
+    gate = named["machine_gate"]
+    check_machine_gate_inputs(gate)
+    gate_rules = rules_of(gate)
+    check_machine_gate_success_rule(gate_rules, next_name)
+    check_machine_gate_failure_rules(gate_rules)
+    check_machine_gate_fix_steps(named)
+    check_machine_gate_transitions(gate_rules, next_name)
+    return [f"fix_machine_gate_{name}" for name in GATE_TARGETS]
+
+
 def transition(rules, predicate):
     for rule in rules:
         if predicate(rule):
             return rule.get("next")
     return None
+
+
+PUBLISH_STAGES = ("commit", "push", "pr", "status")
+PUBLISH_SUCCESS_STAGES = ("commit", "push", "pr")
+
+
+def publish_stages(step):
+    """公開ステップが実行する publish.py の段階を、{段階名: as 名} で返す。"""
+    stages = {}
+    for item in step.get("system_inputs") or []:
+        if not isinstance(item, dict) or item.get("type") != "command":
+            continue
+        tokens = [token for token in str(item.get("command", "")).split() if token]
+        for index, token in enumerate(tokens):
+            if not token.endswith("publish.py") or index + 1 >= len(tokens):
+                continue
+            stage = tokens[index + 1]
+            if stage in PUBLISH_STAGES:
+                stages.setdefault(stage, item.get("as"))
+    return stages
+
+
+def publish_candidates(steps):
+    """公開（commit / push / pr）を実行する mode: system のステップを返す。
+
+    status だけを実行するステップ（開始時の In Progress 更新など）は公開ステップと
+    みなさない。公開ステップを置くかどうかは任意である。
+    """
+    return [
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and any(stage in publish_stages(step) for stage in PUBLISH_SUCCESS_STAGES)
+    ]
 
 
 def is_gate_success_condition(condition, name):
@@ -520,39 +986,165 @@ def check_machine_gate_step(named, name, return_to):
 
     成功条件は、そのゲート自身の結果（context:<name>.result.exit_code）を参照することを
     要求する。別ゲートの exit_code を見る条件では、そのゲートが実行されていなくても
-    成功と判定できてしまうため受け付けない。失敗時の修正ステップは return_to へ戻る。
+    成功と判定できてしまうため受け付けない。規則の順序と各規則の遷移先も検査し、
+    失敗時の修正ステップは return_to へ戻る。
     """
-    gate = named[name]
-    gate_rules = rules_of(gate)
+    gate_rules = rules_of(named[name])
     check_gate_rule_references(gate_rules, name)
-    success_reference = f"context.{name}.result.exit_code"
-    succeeds = transition(
-        gate_rules,
-        lambda rule: is_gate_success_condition(rule.get("condition"), name),
-    )
-    if succeeds is None:
-        raise GateError(f"{name} に成功（{success_reference} == 0）の遷移がありません")
-    failure_next = transition(gate_rules, lambda rule: rule.get("condition") == "when(true)")
-    if failure_next is None:
+    succeeds, failure_next = check_gate_rule_order(gate_rules, name)
+    check_gate_fix_step(named, name, failure_next, return_to)
+    return succeeds, failure_next
+
+
+def check_gate_rule_order(gate_rules, name):
+    """ゲートの規則が、成功規則 1 件と最後の when(true) 1 件を持ち、ほかは修正へ進むかを検査する。
+
+    規則は順に評価されるため、成功規則があるだけでは、成功条件以外の規則から COMPLETE
+    などへ進めてしまう。成功規則以外のすべての規則の遷移先を、最後の when(true) と同じ
+    修正ステップに限る。戻り値は (成功規則の遷移先, 修正ステップ名)。
+    """
+    successes = [rule for rule in gate_rules if is_gate_success_condition(rule.get("condition"), name)]
+    if not successes:
+        raise GateError(f"{name} に成功（context.{name}.result.exit_code == 0）の遷移がありません")
+    if len(successes) != 1:
+        raise GateError(f"{name} の成功規則が 1 つだけではありません: {len(successes)}")
+    fallbacks = [index for index, rule in enumerate(gate_rules) if rule.get("condition") == "when(true)"]
+    if not fallbacks:
         raise GateError(f"{name} に失敗時の遷移（when(true)）がありません")
+    if fallbacks != [len(gate_rules) - 1]:
+        raise GateError(f"{name} の when(true) が規則列の最後に 1 つだけではありません")
+    failure_next = gate_rules[-1].get("next")
     if failure_next == "ABORT":
         raise GateError(
             f"{name} の失敗が修正ステップではなく ABORT へ遷移しています。"
             f"失敗時は修正ステップ（例: fix_{name}）へ遷移してください"
         )
+    for rule in gate_rules:
+        if rule is successes[0]:
+            continue
+        if rule.get("next") == "COMPLETE":
+            raise GateError(
+                f"{name} の成功条件以外の規則が COMPLETE へ遷移しています: {rule.get('condition')!r}"
+            )
+        if rule.get("next") != failure_next:
+            raise GateError(
+                f"{name} の成功条件以外の規則の遷移先が修正ステップ {failure_next} ではありません: "
+                f"{rule.get('condition')!r} -> {rule.get('next')!r}"
+            )
+    return successes[0].get("next"), failure_next
 
-    fix = named.get(failure_next)
+
+def check_gate_fix_step(named, name, fix_name, return_to):
+    """ゲートの修正ステップが、ゲートの出力を参照し、return_to か ABORT へだけ進むかを検査する。"""
+    fix = named.get(fix_name)
     if fix is None:
-        raise GateError(f"{name} の失敗時の遷移先 {failure_next!r} のステップがありません")
-    instruction = fix.get("instruction")
-    instruction_text = "\n".join(instruction) if isinstance(instruction, list) else str(instruction or "")
-    if f"context:{name}.result.stdout" not in instruction_text and (
-        f"context:{name}.result.stderr" not in instruction_text
+        raise GateError(f"{name} の失敗時の遷移先 {fix_name!r} のステップがありません")
+    text = instruction_text(fix)
+    if f"context:{name}.result.stdout" not in text and (
+        f"context:{name}.result.stderr" not in text
     ):
-        raise GateError(f"{failure_next} の instruction に {name} の出力の参照がありません")
-    if transition(rules_of(fix), lambda rule: rule.get("next") == return_to) != return_to:
-        raise GateError(f"{failure_next} から {return_to} へ戻る遷移がありません")
-    return succeeds, failure_next
+        raise GateError(f"{fix_name} の instruction に {name} の出力の参照がありません")
+    fix_rules = rules_of(fix)
+    check_fix_step_transitions(fix_name, fix_rules, return_to)
+    if not any(rule.get("next") == return_to for rule in fix_rules):
+        raise GateError(f"{fix_name} から {return_to} へ戻る遷移がありません")
+
+
+def publish_step(steps):
+    """publish.py で公開を実行する mode: system のステップと、そのステップ名を返す。"""
+    publishers = publish_candidates(steps)
+    if not publishers:
+        raise GateError("publish.py で公開を実行する mode: system のステップがありません")
+    publisher = max(publishers, key=lambda step: len(publish_stages(step)))
+    publish_name = publisher["name"]
+    if publisher.get("mode") != "system":
+        raise GateError(f"公開ステップ {publish_name} が mode: system ではありません")
+    stages = publish_stages(publisher)
+    missing = [stage for stage in PUBLISH_STAGES if stage not in stages]
+    if missing:
+        raise GateError(
+            f"公開ステップ {publish_name} に {' / '.join(missing)} の入力（publish.py <段階>）がありません"
+        )
+    for stage in PUBLISH_STAGES:
+        if stages[stage] != stage:
+            raise GateError(
+                f"公開ステップ {publish_name} の {stage} 入力の as が {stage} ではありません: {stages[stage]!r}"
+            )
+    return publisher, publish_name
+
+
+def publish_failure_step(publish_rules, publish_name, named):
+    """公開ステップの失敗時の遷移と、その遷移先の修正ステップを返す。"""
+    publish_failure_next = transition(publish_rules, lambda rule: rule.get("condition") == "when(true)")
+    if publish_failure_next is None:
+        raise GateError(f"公開ステップ {publish_name} に失敗時の遷移（when(true)）がありません")
+    retry = named.get(publish_failure_next)
+    if publish_failure_next == "COMPLETE" or retry is None:
+        raise GateError(
+            f"公開の失敗時の遷移が修正ステップ（fix_publish）へ行っていません: {publish_failure_next!r}"
+        )
+    return publish_failure_next, retry
+
+
+def check_publish_success_rule(publish_rules, publish_name, aislop_name):
+    """公開ステップの成功条件が aislop ゲートへ進む形になっていることを確かめる。"""
+    success_rules = [rule for rule in publish_rules if rule.get("condition") != "when(true)"]
+    if len(success_rules) != 1:
+        raise GateError(
+            f"公開ステップ {publish_name} で成功を表す rule が1件ではありません: {len(success_rules)} 件"
+        )
+    success_rule = success_rules[0]
+    publish_success_next = success_rule.get("next")
+    if publish_success_next != aislop_name:
+        raise GateError(
+            f"公開ステップ {publish_name} の成功が {aislop_name} へ遷移していません: {publish_success_next!r}"
+        )
+    success_condition = str(success_rule.get("condition", "")).strip()
+    if not (success_condition.startswith("when(") and success_condition.endswith(")")):
+        raise GateError(
+            f"公開ステップ {publish_name} の完了条件が when(...) ではありません: {success_condition!r}"
+        )
+    inner = success_condition[len("when(") : -1]
+    if "||" in inner:
+        raise GateError(
+            f"公開ステップ {publish_name} の完了条件に || があります。commit / push / pr を && で結合してください"
+        )
+    if f"{publish_name}.status.exit_code" in inner:
+        raise GateError("公開の成功条件に status の exit_code を含めています（Status の失敗は非致命です）")
+    if "!=" in inner:
+        raise GateError(
+            f"公開ステップ {publish_name} の完了条件が exit_code == 0 ではありません: {success_condition!r}"
+        )
+    parts = [part.strip() for part in inner.split("&&")]
+    for stage in PUBLISH_SUCCESS_STAGES:
+        if f"context.{publish_name}.{stage}.exit_code == 0" not in parts:
+            raise GateError(f"公開の成功条件に {stage} の exit_code がありません")
+    expected = [f"context.{publish_name}.{stage}.exit_code == 0" for stage in PUBLISH_SUCCESS_STAGES]
+    if sorted(parts) != sorted(expected):
+        raise GateError(
+            f"公開ステップ {publish_name} の完了条件は commit / push / pr の exit_code == 0 を"
+            f"単一の when(...) 内で && 結合する必要があります: {success_condition!r}"
+        )
+
+
+def check_publish_retry_rule(retry, publish_failure_next, publish_name):
+    """公開の失敗後の修正ステップが、公開ステップへ戻る形になっていることを確かめる。"""
+    retry_rules = rules_of(retry)
+    retry_nexts = [rule.get("next") for rule in retry_rules]
+    if "ABORT" in retry_nexts:
+        raise GateError(f"{publish_failure_next} の遷移に ABORT があります")
+    if publish_name not in retry_nexts:
+        raise GateError(f"{publish_failure_next} から {publish_name} へ戻る遷移がありません")
+    retry_instruction = retry.get("instruction")
+    retry_text = (
+        "\n".join(retry_instruction)
+        if isinstance(retry_instruction, list)
+        else str(retry_instruction or "")
+    )
+    if f"context:{publish_name}." not in retry_text:
+        raise GateError(
+            f"{publish_failure_next} の instruction に公開ステップの出力の参照がありません"
+        )
 
 
 def check_workflow_machine_gate(root):
@@ -564,39 +1156,53 @@ def check_workflow_machine_gate(root):
         raise GateError("taktdash-change に develop ステップがありません")
     complete_next = transition(rules_of(named["develop"]), lambda rule: rule.get("condition") == "COMPLETE")
     if complete_next is None:
-        raise GateError("develop に COMPLETE の遷移がありません")
-
-    matching = [step for step in steps if isinstance(step, dict) and runs_make_done(step)]
-    if not matching:
-        raise GateError("make done を実行する mode: system のステップがありません")
-    gate = matching[0]
-    gate_name = gate["name"]
-    if complete_next != gate_name:
-        raise GateError(f"develop の COMPLETE が {gate_name} へ遷移していません: {complete_next!r}")
+        raise GateError("develop の COMPLETE 遷移がありません")
+    if "machine_gate" not in named:
+        raise GateError("taktdash-change に machine_gate ステップがありません")
+    if complete_next != "machine_gate":
+        raise GateError(f"develop の COMPLETE が machine_gate へ遷移していません: {complete_next!r}")
 
     aislop_steps = [step for step in steps if isinstance(step, dict) and runs_aislop_gate(step)]
     if not aislop_steps:
-        raise GateError("aislop-gate を実行する mode: system のステップがありません")
+        raise GateError(
+            "aislop-gate を実行する mode: system のステップがありません"
+            f"（{AISLOP_FAILURE_NOTE}）"
+        )
     aislop_name = aislop_steps[0]["name"]
 
+    publishers = publish_candidates(steps)
+    if publishers:
+        publisher, publish_name = publish_step(steps)
+    else:
+        publisher, publish_name = None, None
+
+    machine_success_next = publish_name or aislop_name
+    fix_names = check_machine_gate_five_checks(named, machine_success_next)
+
     order = [step.get("name") for step in steps if isinstance(step, dict)]
-    if order.index("develop") > order.index(gate_name):
-        raise GateError(f"{gate_name} が develop より前の位置にあります")
-    if order.index(gate_name) > order.index(aislop_name):
-        raise GateError(f"{aislop_name} が {gate_name} より前の位置にあります")
-
-    make_done_next, make_done_fix = check_machine_gate_step(named, gate_name, gate_name)
-    if make_done_next != aislop_name:
-        raise GateError(f"{gate_name} の成功が {aislop_name} へ遷移していません: {make_done_next!r}")
-
-    aislop_next, aislop_fix = check_machine_gate_step(named, aislop_name, gate_name)
+    if order.index("develop") > order.index("machine_gate"):
+        raise GateError("machine_gate が develop より前の位置にあります")
+    if order.index("machine_gate") > order.index(aislop_name):
+        raise GateError(f"{aislop_name} が machine_gate より前の位置にあります")
+    aislop_next, aislop_fix = check_machine_gate_step(named, aislop_name, "machine_gate")
     if aislop_next != "COMPLETE":
         raise GateError(f"{aislop_name} の成功（exit_code == 0）で COMPLETE へ遷移していません: {aislop_next!r}")
 
+    if publisher is None:
+        publish_failure_next = None
+    else:
+        publish_rules = rules_of(publisher)
+        publish_failure_next, retry = publish_failure_step(publish_rules, publish_name, named)
+        check_publish_success_rule(publish_rules, publish_name, aislop_name)
+        check_publish_retry_rule(retry, publish_failure_next, publish_name)
+
     return {
-        "gates": [gate_name, aislop_name],
-        "failure_steps": [make_done_fix, aislop_fix],
+        "gates": ["machine_gate", aislop_name],
+        "checks": list(GATE_TARGETS),
+        "failure_steps": fix_names + [aislop_fix],
         "develop_complete": complete_next,
+        "publish": publish_name,
+        "publish_failure_step": publish_failure_next,
         "max_steps": workflow.get("max_steps"),
     }
 
@@ -666,7 +1272,10 @@ def check_ci(root):
         if not has_node_action or not node_versions:
             problems.append("Node をセットアップしていません")
         if not aislop_called:
-            problems.append(f"aislop のゲート（node {AISLOP_CHECK_COMMAND}）を呼んでいません")
+            problems.append(
+                f"aislop のゲート（node {AISLOP_CHECK_COMMAND}）を呼んでいません"
+                f"（{AISLOP_FAILURE_NOTE}）"
+            )
         elif aislop_misordered_jobs:
             problems.append("aislop のゲートをチェックアウトより前に呼んでいます")
         found.append({"file": str(path.relative_to(root)), "problems": problems})

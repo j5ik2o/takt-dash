@@ -17,6 +17,8 @@ use rusqlite::{params, Connection, OpenFlags};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::domain::ProjectName;
+
 /// 会話の保存先。conversations ディレクトリと opencode の DB のパスを持つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationPaths {
@@ -501,7 +503,7 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 /// 会話の取得を要求する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationQuery {
-  pub project:       String,
+  pub project:       ProjectName,
   pub cwd:           PathBuf,
   pub project_roots: Vec<PathBuf>,
   pub session_id:    Option<String>,
@@ -537,7 +539,7 @@ pub struct SkippedSummary {
 /// 会話の1ページ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationPage {
-  pub project:            String,
+  pub project:            ProjectName,
   pub session_id:         String,
   pub provider:           String,
   pub messages:           Vec<ConversationMessage>,
