@@ -516,7 +516,12 @@ def invokes_aislop_check(command):
 
 
 def is_shell_operator(token):
-    return bool(token) and all(char in SHELL_OPERATOR_CHARS for char in token)
+    """トークンがシェルの演算子かを判定する。引用符やエスケープで作られたものは演算子ではない。"""
+    return (
+        bool(token)
+        and not getattr(token, "quoted", False)
+        and all(char in SHELL_OPERATOR_CHARS for char in token)
+    )
 
 
 def starts_command_list_item(preceding):
@@ -552,10 +557,19 @@ def ends_command_list(following):
 
 
 def is_redirection_ampersand(tokens, index):
-    """`2>&1` や `&>file` の & を、バックグラウンド実行ではなくリダイレクションと判定する。"""
+    """`2>&1` や `&>file` の & を、バックグラウンド実行ではなくリダイレクションと判定する。
+
+    `&` の直後に空白を挟まず `>` が続く場合だけリダイレクションとする。
+    `& > file` は、バックグラウンド実行の後にリダイレクションだけの
+    コマンドが続く形で、チェックの失敗は返らない。
+    """
     before = tokens[index - 1] if index > 0 else ""
     after = tokens[index + 1] if index + 1 < len(tokens) else ""
-    return bool(REDIRECTION.fullmatch(before)) or after.startswith(">")
+    if before and not getattr(before, "quoted", False) and REDIRECTION.fullmatch(before):
+        return True
+    if not after.startswith(">"):
+        return False
+    return not getattr(after, "space_before", False)
 
 
 def runs_aislop_gate(step):
@@ -569,24 +583,97 @@ def runs_aislop_gate(step):
     )
 
 
+class ShellToken(str):
+    """シェルのトークン。文字列としての比較はそのまま使える。
+
+    quoted: 引用符の中かバックスラッシュの直後で作られた文字を含む場合に真。
+    演算子に見える文字列でも、引用されたものは演算子ではない。
+    space_before: 直前に空白（スペース・タブ・復帰）があった場合に真。
+    `&>` と `& >` の区別に使う。
+    """
+
+    def __new__(cls, text, *, quoted=False, space_before=False):
+        token = super().__new__(cls, text)
+        token.quoted = quoted
+        token.space_before = space_before
+        return token
+
+
 def shell_tokens(command):
-    """シェルのコマンド文字列を、クォートを保ったままトークンへ分ける。"""
-    lexer = shlex.shlex(
-        strip_shell_comments(command),
-        posix=True,
-        punctuation_chars=SHELL_OPERATOR_CHARS,
-    )
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    lexer.whitespace = " \t\r"
-    return list(lexer)
+    """シェルのコマンド文字列を、クォートを保ったままトークンへ分ける。
+
+    各トークンは ShellToken で、引用符やエスケープで作られた文字を含むか
+    （quoted）と、直前に空白があったか（space_before）を保持する。演算子
+    の判定はこの情報を使うため、引用符内の `&&` や `;`、エスケープされた
+    `;` は演算子にならない。`&>` と `& >` も区別できる。閉じていない
+    引用符がある場合は、shlex と同じく ValueError を上げる。
+    """
+    text = strip_shell_comments(command)
+    tokens = []
+    index = 0
+    pending_space = False
+
+    def flush_word(chars, quoted, space_before):
+        if chars or quoted:
+            tokens.append(ShellToken("".join(chars), quoted=quoted, space_before=space_before))
+
+    while index < len(text):
+        char = text[index]
+        if char in " \t\r":
+            pending_space = True
+            index += 1
+            continue
+        if char in SHELL_OPERATOR_CHARS:
+            if char in "&|;":
+                end = index + 1
+                while end < len(text) and text[end] == char:
+                    end += 1
+                tokens.append(ShellToken(text[index:end], space_before=pending_space))
+                index = end
+            else:
+                tokens.append(ShellToken(char, space_before=pending_space))
+                index += 1
+            pending_space = False
+            continue
+        word_space = pending_space
+        pending_space = False
+        chars = []
+        quoted = False
+        while index < len(text):
+            char = text[index]
+            if char in " \t\r" or char in SHELL_OPERATOR_CHARS:
+                break
+            if char == "\\" and index + 1 < len(text):
+                chars.append(text[index + 1])
+                quoted = True
+                index += 2
+                continue
+            if char in ("'", '"'):
+                quote = char
+                quoted = True
+                index += 1
+                while index < len(text) and text[index] != quote:
+                    if quote == '"' and text[index] == "\\" and index + 1 < len(text):
+                        chars.append(text[index + 1])
+                        index += 2
+                        continue
+                    chars.append(text[index])
+                    index += 1
+                if index >= len(text):
+                    raise ValueError("No closing quotation")
+                index += 1
+                continue
+            chars.append(char)
+            index += 1
+        flush_word(chars, quoted, word_space)
+    return tokens
 
 
 def simple_commands(tokens):
     """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。"""
     current = []
     for token in tokens:
-        if token in SHELL_SEPARATORS:
+        if token in SHELL_SEPARATORS and is_shell_operator(token):
             if current:
                 yield current
             current = []

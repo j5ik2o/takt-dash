@@ -1435,6 +1435,12 @@ def test_aislop_gate_command_detection() -> None:
             step("echo 準備 # コメント\nnode scripts/aislop-check-bootstrap.mjs check")
         ), "コメント行の次の実起動を許可する"
         assert not module.runs_aislop_gate(step("echo scripts/aislop-check-bootstrap.mjs check")), "echo を実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("echo '&&' node scripts/aislop-check-bootstrap.mjs check")
+        ), "引用符内の && の後ろを実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("node scripts/aislop-check-bootstrap.mjs check & > /dev/null")
+        ), "バックグラウンド実行の & > を実行扱いしない"
         assert not module.runs_aislop_gate(step('echo "node scripts/aislop-check-bootstrap.mjs check"')), "引用符内を実行扱いしない"
         assert not module.runs_aislop_gate(step("# node scripts/aislop-check-bootstrap.mjs check")), "コメントを実行扱いしない"
         assert not module.runs_aislop_gate(
@@ -1517,6 +1523,7 @@ AISLOP_FAILURE_SWALLOWING_SUFFIXES = {
     "末尾の || true": " || true",
     "末尾の ; true": "; true",
     "末尾のパイプ | cat": " | cat",
+    "末尾の & > /dev/null": " & > /dev/null",
 }
 
 
@@ -1539,6 +1546,10 @@ def test_aislop_check_must_return_its_failure() -> None:
             "前段付きで末尾のパイプ | cat": f"npm ci && {AISLOP_CHECK} | cat",
             "末尾のパイプ |& cat": f"{AISLOP_CHECK} |& cat",
             "バックグラウンド実行": f"{AISLOP_CHECK} &",
+            "バックグラウンド実行の & > /dev/null": f"{AISLOP_CHECK} & > /dev/null",
+            "引用符内の && の後ろ": f"echo '&&' {AISLOP_CHECK}",
+            "二重引用符内の && の後ろ": f'npm ci "&&" {AISLOP_CHECK}',
+            "エスケープした ; の後ろ": f"echo \\; {AISLOP_CHECK}",
             "否定": f"! {AISLOP_CHECK}",
             "前段が成功するとチェックを飛ばす ||": f"npm ci || {AISLOP_CHECK}",
             "改行で続けた || の後ろ": f"npm ci ||\n{AISLOP_CHECK}",
@@ -1554,6 +1565,8 @@ def test_aislop_check_must_return_its_failure() -> None:
             "コメント行を含む複数行": f"# 依存を導入する\nnpm ci\n{AISLOP_CHECK}\n",
             "標準エラーの合流": f"{AISLOP_CHECK} 2>&1",
             "ファイルへのリダイレクション": f"{AISLOP_CHECK} > out.txt",
+            "&>file へのリダイレクション": f"{AISLOP_CHECK} &>file",
+            "&> file へのリダイレクション": f"{AISLOP_CHECK} &> file",
         }
         for label, command in accepted.items():
             assert invokes(command), f"{label} を起動とみなしませんでした: {command!r}"
