@@ -27,7 +27,10 @@ make は呼ばない。
      別検査の出力参照・戻り遷移の欠落・別の遷移先は失敗させる。戻り遷移を残したまま
      COMPLETE などへ抜ける迂回規則を足した場合も失敗させる。
   7. aislop_gate の既存の契約（成功で COMPLETE、失敗で修正へ、修正は machine_gate へ
-     戻る）と develop → machine_gate → aislop_gate の順序を維持する。
+     戻る）と develop → machine_gate → aislop_gate の順序を維持する。aislop の起動は、
+     チェックの失敗が呼び出し元へ返る形だけを認め、`|| true`・`; true`・パイプなどで
+     終了状態を潰す command や run は失敗させる。aislop_gate の規則は順序と遷移先も
+     検査し、成功条件以外の規則や修正ステップから COMPLETE へ進む構成は失敗させる。
   8. 公開ステップ（publish.py）を置く場合の配線を確かめる。公開ステップが 4 段階
      （commit/push/pr/status）を実行しない、公開の成功条件が commit/push/pr の
      exit_code を含まない、|| で結合されている、複数の rule に分かれている、status の
@@ -1507,6 +1510,175 @@ def test_ci_aislop_gate_accepts_multiline_run_with_comment() -> None:
         assert_success(sandbox, "コメント行を含む複数行の run")
 
 
+AISLOP_CHECK = "node scripts/aislop-check-bootstrap.mjs check"
+
+# チェックの失敗を呼び出し元へ返さない後続。ワークフローと CI の両方で拒否する。
+AISLOP_FAILURE_SWALLOWING_SUFFIXES = {
+    "末尾の || true": " || true",
+    "末尾の ; true": "; true",
+    "末尾のパイプ | cat": " | cat",
+}
+
+
+def test_aislop_check_must_return_its_failure() -> None:
+    """チェックの失敗が呼び出し元へ返る構成だけを、aislop チェックの起動と判定する。
+
+    後続のコマンドで終了状態を上書きする形、パイプで終了状態を潰す形、バックグラウンド
+    実行、否定、前段の成功でチェックを飛ばす形を拒否する。前段を && でつなぐ形、
+    チェックが最終行にある複数行の記述、リダイレクションは受理する。
+    """
+    with Sandbox() as sandbox:
+        invokes = sandbox.module.invokes_aislop_check
+        rejected = {
+            "末尾の || true": f"{AISLOP_CHECK} || true",
+            "前段付きで末尾の || true": f"npm ci && {AISLOP_CHECK} || true",
+            "末尾の || exit 0": f"{AISLOP_CHECK} || exit 0",
+            "末尾の ; true": f"{AISLOP_CHECK}; true",
+            "前段付きで末尾の ; true": f"npm ci && {AISLOP_CHECK}; true",
+            "末尾のパイプ | cat": f"{AISLOP_CHECK} | cat",
+            "前段付きで末尾のパイプ | cat": f"npm ci && {AISLOP_CHECK} | cat",
+            "末尾のパイプ |& cat": f"{AISLOP_CHECK} |& cat",
+            "バックグラウンド実行": f"{AISLOP_CHECK} &",
+            "否定": f"! {AISLOP_CHECK}",
+            "前段が成功するとチェックを飛ばす ||": f"npm ci || {AISLOP_CHECK}",
+            "改行で続けた || の後ろ": f"npm ci ||\n{AISLOP_CHECK}",
+            "次の行の true で終了状態を上書きする": f"{AISLOP_CHECK}\ntrue\n",
+        }
+        for label, command in rejected.items():
+            assert not invokes(command), f"{label} を起動とみなしました: {command!r}"
+        accepted = {
+            "単独の起動": AISLOP_CHECK,
+            "前段を && でつなぐ": f"npm ci && {AISLOP_CHECK}",
+            "末尾の改行": f"{AISLOP_CHECK}\n",
+            "チェックが最終行にある複数行": f"npm ci\n{AISLOP_CHECK}\n",
+            "コメント行を含む複数行": f"# 依存を導入する\nnpm ci\n{AISLOP_CHECK}\n",
+            "標準エラーの合流": f"{AISLOP_CHECK} 2>&1",
+            "ファイルへのリダイレクション": f"{AISLOP_CHECK} > out.txt",
+        }
+        for label, command in accepted.items():
+            assert invokes(command), f"{label} を起動とみなしませんでした: {command!r}"
+
+
+def test_aislop_gate_command_must_return_the_check_failure() -> None:
+    """ワークフローの aislop_gate で、チェックの失敗を潰す command を起動とみなさない。"""
+    original = f"        command: npm ci && {AISLOP_CHECK}"
+    for label, suffix in AISLOP_FAILURE_SWALLOWING_SUFFIXES.items():
+        with Sandbox() as sandbox:
+            workflow = WORKFLOW.replace(original, original + suffix)
+            assert workflow != WORKFLOW, f"{label}: 置換対象が見つかりません"
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "aislop-gate を実行する")
+
+
+def test_ci_aislop_gate_command_must_return_the_check_failure() -> None:
+    """CI の run で、チェックの失敗を潰す記述を aislop の呼び出しとみなさない。
+
+    前段を && でつなぐ記述は、引き続き呼び出しとして受理する。
+    """
+    original = f"      - run: {AISLOP_CHECK}\n"
+    for label, suffix in AISLOP_FAILURE_SWALLOWING_SUFFIXES.items():
+        with Sandbox() as sandbox:
+            ci = CI.replace(original, f"      - run: {AISLOP_CHECK}{suffix}\n")
+            assert ci != CI, f"{label}: 置換対象が見つかりません"
+            repository(sandbox, ci=ci)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "ci-runs-make-done", "aislop のゲート")
+    with Sandbox() as sandbox:
+        repository(sandbox, ci=CI.replace(original, f"      - run: npm ci && {AISLOP_CHECK}\n"))
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "前段を && でつなぐ run")
+
+
+def test_aislop_gate_rules_must_not_complete_except_on_success() -> None:
+    """aislop_gate は成功条件の規則だけで COMPLETE へ進み、ほかの規則は修正ステップへ進む。
+
+    規則は順に評価されるため、成功条件の規則があるだけでは足りない。成功条件以外の規則が
+    COMPLETE や別のステップへ進む構成、when(true) が規則列の最後にない構成、修正ステップ
+    から COMPLETE へ抜ける構成を拒否する。成功条件以外の規則が修正ステップへ進む構成は
+    受理する。
+    """
+    success_rule = (
+        "      - condition: when(context.aislop_gate.result.exit_code == 0)\n"
+        "        next: COMPLETE\n"
+    )
+    fallback_rule = "      - condition: when(true)\n        next: fix_aislop_gate\n"
+
+    def failure_rule(next_step):
+        return (
+            "      - condition: when(context.aislop_gate.result.exit_code == 1)\n"
+            f"        next: {next_step}\n"
+        )
+
+    def aislop_rules(*rules):
+        replaced = AISLOP_GATE_STEP.replace(success_rule + fallback_rule, "".join(rules))
+        assert replaced != AISLOP_GATE_STEP, "aislop_gate の規則列が見つかりません"
+        return replaced
+
+    def gate_workflow(aislop_step=AISLOP_GATE_STEP, fix_step=FIX_AISLOP_GATE_STEP):
+        return workflow_with(
+            DEVELOP_STEP, MACHINE_GATE_STEP, aislop_step, *FIX_MACHINE_GATE_STEPS, fix_step
+        )
+
+    fix_completes = FIX_AISLOP_GATE_STEP.replace(
+        "    rules:\n",
+        "    rules:\n      - condition: 指摘を確認した\n        next: COMPLETE\n",
+    )
+    assert fix_completes != FIX_AISLOP_GATE_STEP, "fix_aislop_gate の規則列が見つかりません"
+    cases = {
+        "成功条件以外の規則が先頭で COMPLETE へ進む": (
+            aislop_rules(failure_rule("COMPLETE"), success_rule, fallback_rule),
+            "COMPLETE",
+        ),
+        "成功条件以外の規則が成功規則の後ろで COMPLETE へ進む": (
+            aislop_rules(success_rule, failure_rule("COMPLETE"), fallback_rule),
+            "COMPLETE",
+        ),
+        "when(true) が成功規則より前にある": (
+            aislop_rules(fallback_rule, success_rule),
+            "when(true)",
+        ),
+        "when(true) が 2 件ある": (
+            aislop_rules(success_rule, fallback_rule, fallback_rule),
+            "when(true)",
+        ),
+        "成功条件以外の規則が develop へ進む": (
+            aislop_rules(failure_rule("develop"), success_rule, fallback_rule),
+            "fix_aislop_gate",
+        ),
+        "成功条件以外の規則が ABORT へ進む": (
+            aislop_rules(failure_rule("ABORT"), success_rule, fallback_rule),
+            "fix_aislop_gate",
+        ),
+    }
+    for label, (aislop_step, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=gate_workflow(aislop_step=aislop_step))
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=gate_workflow(fix_step=fix_completes))
+        stub_external_tools(sandbox)
+        assert_failure(
+            sandbox,
+            "fix_aislop_gate が machine_gate への戻りを残したまま COMPLETE へ進む",
+            "workflow-machine-gate",
+            "machine_gate か ABORT",
+        )
+
+    with Sandbox() as sandbox:
+        accepted = aislop_rules(
+            "      - condition: when(context.aislop_gate.result.exit_code != 0)\n"
+            "        next: fix_aislop_gate\n",
+            success_rule,
+            fallback_rule,
+        )
+        repository(sandbox, workflow=gate_workflow(aislop_step=accepted))
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "成功条件以外の規則が修正ステップへ進む")
+
+
 def test_aislop_gate_success_condition_must_reference_its_own_gate() -> None:
     """aislop_gate の成功条件は、別ゲートではなく aislop_gate 自身の exit_code だけを見る。"""
     success = "      - condition: when(context.aislop_gate.result.exit_code == 0)"
@@ -1780,11 +1952,15 @@ def main() -> int:
         test_aislop_fix_must_reenter_machine_gate,
         test_aislop_gate_command_detection,
         test_aislop_gate_command_must_invoke_the_check,
+        test_aislop_check_must_return_its_failure,
+        test_aislop_gate_command_must_return_the_check_failure,
+        test_aislop_gate_rules_must_not_complete_except_on_success,
         test_aislop_gate_success_condition_must_reference_its_own_gate,
         test_aislop_gate_success_must_complete,
         test_ci_must_run_make_done_with_toolchains,
         test_ci_must_call_aislop_gate,
         test_ci_aislop_gate_command_must_invoke_the_check,
+        test_ci_aislop_gate_command_must_return_the_check_failure,
         test_ci_aislop_gate_accepts_multiline_run_with_comment,
         test_ci_checkout_order_is_per_job,
         test_gitignore_and_toolchain_rules,
