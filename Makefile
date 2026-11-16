@@ -10,6 +10,7 @@ test:
 	cargo test --workspace
 	npm --prefix frontend/web run test
 	python3 tools/repo-gate/repo_gate_test.py
+	python3 tools/test-summary/test_summary_test.py
 
 typecheck:
 	npm --prefix frontend/web run typecheck
