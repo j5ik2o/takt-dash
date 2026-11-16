@@ -242,11 +242,13 @@ a {
 
 .cards > li {
   display: flex;
+  flex-direction: column;
 }
 
 .card-link {
   display: block;
   width: 100%;
+  flex: 1 1 auto;
 }
 
 .card-link:hover {
@@ -894,6 +896,12 @@ a {
 
 .view:hover {
   text-decoration: underline;
+}
+
+.cards > li > .view {
+  align-self: flex-start;
+  margin-left: 0;
+  margin-top: 6px;
 }
 
 .empty,
