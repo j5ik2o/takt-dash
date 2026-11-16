@@ -5,7 +5,7 @@
 //! 輸送エラーとは区別します。
 
 use std::{
-  collections::BTreeMap,
+  collections::{BTreeMap, HashMap},
   path::PathBuf,
   time::{Duration, Instant},
 };
@@ -81,9 +81,10 @@ impl From<CallError> for ToolError {
 /// takt-mcp の読み取り道具は入力引数に絶対パスの `cwd` を必須とするため、この道具のまとまりは
 /// 対象プロジェクトの `cwd` を保持し、すべての tools/call の引数へ渡します。
 pub struct ToolSet<'a> {
-  client:  &'a mut McpClient,
-  cwd:     PathBuf,
-  metrics: ToolCallMetrics,
+  client:    &'a mut McpClient,
+  cwd:       PathBuf,
+  metrics:   ToolCallMetrics,
+  workflows: HashMap<String, Option<Vec<String>>>,
 }
 
 /// ページ形式の一覧を全件集めるための上限。無限追従を避けます。
@@ -94,7 +95,7 @@ const SPECIFICATION_NOTATIONS: [&str; 3] = ["gherkin", "quint", "alloy"];
 
 impl<'a> ToolSet<'a> {
   pub fn new(client: &'a mut McpClient, cwd: PathBuf) -> Self {
-    ToolSet { client, cwd, metrics: ToolCallMetrics::default() }
+    ToolSet { client, cwd, metrics: ToolCallMetrics::default(), workflows: HashMap::new() }
   }
 
   /// この道具のまとまりが記録した呼び出しの集計を取り出す。
@@ -328,7 +329,7 @@ impl<'a> ToolSet<'a> {
         // 既知の step も応答値で置き換える。継続中だった step が同じ位置で終了すると
         // endedAt や model が付くため、前回値の追記だけでは古い値が残る。
         steps[..overlap].clone_from_slice(&first_page_steps[..overlap]);
-        let mut latest_seen = Some(previous.last_log_at);
+        let mut latest_seen = previous.last_log_at;
         if known < first_page_steps.len() {
           steps.extend(first_page_steps[known..].iter().cloned());
           if let Some(timestamp) = latest_step_timestamp(value) {
@@ -371,7 +372,86 @@ impl<'a> ToolSet<'a> {
       }
       next_offset = step_log_next_offset(&page_value);
     }
-    parse_run(value, task, latest_seen, steps)
+    let workflow = optional_string(value, "workflow").unwrap_or_default();
+    let mut run = parse_run(value, task, latest_seen, steps)?;
+    if !workflow.is_empty() {
+      self.enrich_step_progress(&mut run, &workflow).await?;
+    }
+    Ok(run)
+  }
+
+  /// workflow の step 名一覧から、run の現在ステップの位置と全ステップ数を補う。
+  ///
+  /// workflow を読めないときや現在ステップが一覧に無いときは、位置と総数を設定しません。
+  /// 道具エラー・解析不能な応答は位置不明として扱い、run 一覧全体を失敗させません。
+  async fn enrich_step_progress(&mut self, run: &mut RunEntry, workflow: &str) -> Result<(), ToolError> {
+    let Some(steps) = self.workflow_steps(workflow).await? else {
+      return Ok(());
+    };
+    // takt_get_run の currentStep は takt_get_workflow が返す workflow の step 名に対応する。
+    // stepLogs の末尾は入れ子 workflow の内側の step になり得るため、位置の算出には使わない。
+    // currentStep が無い応答だけ、従来どおり stepLogs の末尾で補う。
+    let Some(current) = run
+      .current_step
+      .as_deref()
+      .filter(|name| !name.is_empty())
+      .or_else(|| run.steps.iter().rev().find(|step| !step.step_name.is_empty()).map(|step| step.step_name.as_str()))
+    else {
+      return Ok(());
+    };
+    let Some(index) = steps.iter().position(|name| name == current) else {
+      return Ok(());
+    };
+    let Some(step_number) = i32::try_from(index + 1).ok() else {
+      return Ok(());
+    };
+    let Some(total_steps) = i32::try_from(steps.len()).ok() else {
+      return Ok(());
+    };
+    run.current_step_number = Some(step_number);
+    run.total_steps = Some(total_steps);
+    Ok(())
+  }
+
+  /// workflow の step 名一覧を取得する。同じ workflow の結果は道具のまとまりの中で再利用します。
+  async fn workflow_steps(&mut self, workflow: &str) -> Result<Option<Vec<String>>, ToolError> {
+    if let Some(cached) = self.workflows.get(workflow) {
+      return Ok(cached.clone());
+    }
+    let steps = match self.fetch_workflow_steps(workflow).await {
+      | Ok(steps) => steps,
+      | Err(ToolError::Transport(error)) => return Err(ToolError::Transport(error)),
+      | Err(_) => None,
+    };
+    self.workflows.insert(workflow.to_owned(), steps.clone());
+    Ok(steps)
+  }
+
+  async fn fetch_workflow_steps(&mut self, workflow: &str) -> Result<Option<Vec<String>>, ToolError> {
+    let mut steps = Vec::new();
+    let mut offset = 0;
+    let mut total_count = None;
+    for _ in 0..MAX_PAGES {
+      let value = self.call_json("takt_get_workflow", json!({ "workflow": workflow, "offset": offset })).await?;
+      total_count = total_count.or_else(|| value.get("totalCount").and_then(Value::as_u64).map(|count| count as usize));
+      let page = Page::from_value(&value, "steps")?;
+      for item in &page.items {
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+          return Ok(None);
+        };
+        steps.push(name.to_owned());
+      }
+      match page.next_offset {
+        | Some(next) => offset = next,
+        | None => {
+          if total_count.is_some_and(|total| total != steps.len()) {
+            return Ok(None);
+          }
+          return Ok(if steps.is_empty() { None } else { Some(steps) });
+        },
+      }
+    }
+    Err(ToolError::Parse("takt_get_workflow のページ追従が上限に達しました".to_owned()))
   }
 
   async fn list_notifications(

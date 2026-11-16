@@ -5,6 +5,7 @@ import { measurePage } from "@/src/telemetry/timing";
 import { StateStreamProviderWithRefresh } from "@/src/components/state-provider";
 import { LiveSidebar } from "@/src/components/live-sidebar";
 import { BackendUnavailableNotice } from "@/src/components/backend-unavailable-notice";
+import { normalizeBuildInfo } from "@/src/state/build-info";
 
 export const metadata: Metadata = {
   title: "taktDash",
@@ -12,6 +13,11 @@ export const metadata: Metadata = {
 };
 
 export const dynamic = "force-dynamic";
+
+const FRONTEND_BUILD = normalizeBuildInfo({
+  commit: process.env.TAKTDASH_FRONTEND_COMMIT,
+  branch: process.env.TAKTDASH_FRONTEND_BRANCH,
+});
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
   // layout は全ページで実行されるため、ここで各ページのサーバー側 RPC（GetOverview）と
@@ -27,7 +33,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
       <body>
         <StateStreamProviderWithRefresh initialState={state}>
           <div className="shell">
-            <LiveSidebar />
+            <LiveSidebar frontendBuild={FRONTEND_BUILD} />
             <div className="content">
               {unavailable ? <BackendUnavailableNotice /> : null}
               {children}

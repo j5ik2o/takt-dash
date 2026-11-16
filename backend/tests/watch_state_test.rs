@@ -171,7 +171,12 @@ async fn watch_state_sends_the_current_thresholds_after_a_config_change() {
   );
 
   // 設定の閾値を滞留 1 分・無音 3 分へ書き換え、定期読み取りの1サイクルを回す。
-  harness.rewrite_thresholds(Thresholds { pending_decision_stale_minutes: 1, run_log_silent_minutes: 3 });
+  harness.rewrite_thresholds(Thresholds {
+    pending_decision_stale_minutes: 1,
+    run_log_silent_minutes:         3,
+    connection_failure_count:       1,
+    connection_delay_seconds:       3,
+  });
   let mut poller = Poller::new(
     harness.config_path().to_path_buf(),
     harness.activity.clone(),

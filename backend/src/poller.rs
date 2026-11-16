@@ -1,9 +1,11 @@
 //! 定期読み取りの調整。
 //!
 //! 各サイクルの前に設定ファイルを再読み込みし、変更後の間隔・閾値・プロジェクト一覧に従います。
-//! 1プロジェクトの読み取り失敗はそのプロジェクトだけ connected
-//! 偽とし、他のプロジェクトを止めません。 読み取りのたびに前回の状態との差分から出来事を検出し、
-//! SQLite へ記録します。
+//! 1プロジェクトの読み取り失敗はそのプロジェクトだけ遅延中（Delayed、接続中）とし、
+//! 他のプロジェクトは止めません。
+//! 連続失敗回数と遅延時間の両方を満たす最初の失敗で応答なし（Unresponsive）へ移し、
+//! その間は起点を更新しません。 読み取りのたびに前回の状態との差分から出来事を検出し、SQLite
+//! へ記録します。
 
 use std::{
   collections::BTreeMap,
@@ -20,20 +22,21 @@ use crate::{
   config::{load_config, Config, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
   mcp::{client_config, McpClientRegistry, ToolCallMetrics, ToolError, ToolSet},
-  model::{PendingDecisionFilter, PendingDecisionType, ProjectSnapshot},
+  model::{ConnectionState, ConnectionTransition, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot},
   store::StateStore,
 };
 
 /// 定期読み取りを1サイクル実行するための調整役。
 pub struct Poller {
-  config_path:        PathBuf,
-  activity:           Arc<ActivityStore>,
-  store:              Arc<StateStore>,
-  registry:           McpClientRegistry,
-  previous:           BTreeMap<String, ProjectSnapshot>,
-  previous_connected: BTreeMap<String, bool>,
-  changes:            broadcast::Sender<()>,
-  last_signature:     Option<StoreSignature>,
+  config_path:    PathBuf,
+  activity:       Arc<ActivityStore>,
+  store:          Arc<StateStore>,
+  registry:       McpClientRegistry,
+  previous:       BTreeMap<String, ProjectSnapshot>,
+  /// 最後に出来事の記録へ成功した接続状態。接続断・復帰の再検出を防ぐ比較基準。
+  notified:       BTreeMap<String, ConnectionState>,
+  changes:        broadcast::Sender<()>,
+  last_signature: Option<StoreSignature>,
 }
 
 /// 1サイクルで読み取った件数と、記録した出来事の件数、次の待機に使う間隔。
@@ -64,7 +67,7 @@ impl Poller {
       store,
       registry,
       previous: BTreeMap::new(),
-      previous_connected: BTreeMap::new(),
+      notified: BTreeMap::new(),
       changes,
       last_signature: None,
     }
@@ -135,17 +138,9 @@ impl Poller {
     }
     for (project, handle) in config.projects.iter().zip(handles) {
       let prev = self.previous.get(&project.name).cloned();
-      let prev_connected = self.previous_connected.get(&project.name).copied().unwrap_or(false);
       let Some(handle) = handle else {
         let error = ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name));
-        self.apply_failure(
-          project,
-          &error,
-          prev.as_ref().map(|snapshot| (snapshot, prev_connected)),
-          Utc::now(),
-          &mut report,
-          &mut record_error,
-        );
+        self.apply_failure(project, &error, prev.as_ref(), Utc::now(), &mut report, &mut record_error);
         continue;
       };
       match handle.await {
@@ -153,13 +148,18 @@ impl Poller {
           metrics.merge(project_metrics);
           match result {
             | Ok(snapshot) => {
-              let events =
-                detect(&project.server, &project.name, prev.as_ref(), prev_connected, true, &snapshot, read_at);
+              // 接続断・復帰の比較基準は、最後に記録へ成功した状態（`notified`）に置きます。
+              // 記録に失敗したサイクルでは基準を進めず、次サイクルで同じ差分を再検出します。
+              let outage =
+                self.store.success_transition(&project.name, read_at).and_then(|transition| transition.outage);
+              let transition = self.notified_transition(&project.name, ConnectionState::Connected, outage);
+              let events = detect(&project.server, &project.name, prev.as_ref(), &snapshot, transition, read_at);
               match self.record_events(&events) {
                 | Ok(()) => {
+                  // 記録に成功したサイクルだけ、snapshot と差分基準を進めます。
                   self.store.record_success(&project.name, snapshot.clone(), read_at);
                   self.previous.insert(project.name.clone(), snapshot);
-                  self.previous_connected.insert(project.name.clone(), true);
+                  self.notified.insert(project.name.clone(), ConnectionState::Connected);
                   report.projects_read += 1;
                   report.events_recorded += events.len();
                 },
@@ -169,28 +169,14 @@ impl Poller {
               }
             },
             | Err(error) => {
-              self.apply_failure(
-                project,
-                &error,
-                prev.as_ref().map(|snapshot| (snapshot, prev_connected)),
-                read_at,
-                &mut report,
-                &mut record_error,
-              );
+              self.apply_failure(project, &error, prev.as_ref(), read_at, &mut report, &mut record_error);
             },
           }
         },
         | Err(error) => {
           let error =
             ToolError::Parse(format!("プロジェクト {} の読み取りタスクが異常終了しました: {error}", project.name));
-          self.apply_failure(
-            project,
-            &error,
-            prev.as_ref().map(|snapshot| (snapshot, prev_connected)),
-            Utc::now(),
-            &mut report,
-            &mut record_error,
-          );
+          self.apply_failure(project, &error, prev.as_ref(), Utc::now(), &mut report, &mut record_error);
         },
       }
     }
@@ -227,29 +213,28 @@ impl Poller {
     &mut self,
     project: &Project,
     error: &ToolError,
-    prev: Option<(&ProjectSnapshot, bool)>,
+    prev: Option<&ProjectSnapshot>,
     read_at: DateTime<Utc>,
     report: &mut CycleReport,
     record_error: &mut Option<crate::config::ConfigError>,
   ) {
-    let baseline_advanced = if let Some((prev, prev_connected)) = prev {
-      let events = detect(&project.server, &project.name, Some(prev), prev_connected, false, prev, read_at);
-      match self.record_events(&events) {
-        | Ok(()) => {
-          report.events_recorded += events.len();
-          true
-        },
-        | Err(record_failure) => {
-          record_error.get_or_insert(record_failure);
-          false
-        },
-      }
-    } else {
-      true
-    };
-    self.store.record_failure(&project.name);
-    if baseline_advanced {
-      self.previous_connected.insert(project.name.clone(), false);
+    // 接続状態は失敗のたびに進め、表示へ反映します。一方で接続断の出来事の比較基準は
+    // 記録に成功するまで進めないため、記録に失敗した接続断は回復後に1回だけ記録されます。
+    let next = self.store.record_failure(&project.name, read_at).and_then(|transition| transition.next);
+    let transition = next.and_then(|next| self.notified_transition(&project.name, next, None));
+    let empty = ProjectSnapshot::empty();
+    let next_snapshot = prev.unwrap_or(&empty);
+    let events = detect(&project.server, &project.name, prev, next_snapshot, transition, read_at);
+    match self.record_events(&events) {
+      | Ok(()) => {
+        if let Some(next) = next {
+          self.notified.insert(project.name.clone(), next);
+        }
+        report.events_recorded += events.len();
+      },
+      | Err(record_failure) => {
+        record_error.get_or_insert(record_failure);
+      },
     }
     report.projects_failed += 1;
     tracing::warn!(project = %project.name, error = %error, "プロジェクトの読み取りに失敗しました。");
@@ -260,6 +245,22 @@ impl Poller {
       .activity
       .record_all(events)
       .map_err(|error| crate::config::ConfigError::Invalid(format!("出来事を記録できませんでした: {error}")))
+  }
+
+  /// 最後に記録へ成功した接続状態から今回の状態への遷移を返す。
+  ///
+  /// まだ一度も記録に成功していないプロジェクトは、比較基準が無いため `None`（基準化のみ）です。
+  fn notified_transition(
+    &self,
+    project: &str,
+    next: ConnectionState,
+    outage: Option<chrono::Duration>,
+  ) -> Option<ConnectionTransition> {
+    self.notified.get(project).map(|previous| ConnectionTransition {
+      previous: Some(*previous),
+      next: Some(next),
+      outage,
+    })
   }
 
   /// すべてのプロジェクトの子プロセスを終了する。
@@ -285,7 +286,7 @@ impl Poller {
   /// 前サイクルの差分基準も捨てます。新接続先の初回読み取りは基準化のみになります。
   fn reset_project_baseline(&mut self, project: &str) {
     self.previous.remove(project);
-    self.previous_connected.remove(project);
+    self.notified.remove(project);
     self.store.reset_project(project);
   }
 }
@@ -307,10 +308,10 @@ struct StoreSignature {
 
 #[derive(Debug, PartialEq, Eq)]
 struct ProjectSignature {
-  name:        String,
-  connected:   bool,
-  snapshot:    Option<ProjectSnapshot>,
-  silent_runs: Vec<(String, bool)>,
+  name:             String,
+  connection_state: Option<ConnectionState>,
+  snapshot:         Option<ProjectSnapshot>,
+  silent_runs:      Vec<(String, bool)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -328,7 +329,12 @@ impl StoreSignature {
       .into_iter()
       .map(|view| {
         let silent_runs = view.runs.iter().map(|run| (run.run_slug.clone(), store.is_log_silent(run, now))).collect();
-        ProjectSignature { name: view.name, connected: view.connected, snapshot: view.snapshot, silent_runs }
+        ProjectSignature {
+          name: view.name,
+          connection_state: view.connection_state,
+          snapshot: view.snapshot,
+          silent_runs,
+        }
       })
       .collect();
     let pending_decisions = store

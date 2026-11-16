@@ -242,6 +242,7 @@ export enum ActivityKind {
   ACTIVITY_KIND_PAUSED = 6,
   ACTIVITY_KIND_BLOCKED = 7,
   ACTIVITY_KIND_CONNECTION_LOST = 8,
+  ACTIVITY_KIND_CONNECTION_RESTORED = 9,
   UNRECOGNIZED = -1,
 }
 
@@ -274,6 +275,9 @@ export function activityKindFromJSON(object: any): ActivityKind {
     case 8:
     case "ACTIVITY_KIND_CONNECTION_LOST":
       return ActivityKind.ACTIVITY_KIND_CONNECTION_LOST;
+    case 9:
+    case "ACTIVITY_KIND_CONNECTION_RESTORED":
+      return ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -301,7 +305,59 @@ export function activityKindToJSON(object: ActivityKind): string {
       return "ACTIVITY_KIND_BLOCKED";
     case ActivityKind.ACTIVITY_KIND_CONNECTION_LOST:
       return "ACTIVITY_KIND_CONNECTION_LOST";
+    case ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED:
+      return "ACTIVITY_KIND_CONNECTION_RESTORED";
     case ActivityKind.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+/** プロジェクトの接続状態を表す。 */
+export enum ConnectionState {
+  /** CONNECTION_STATE_UNSPECIFIED - まだ一度も読めていない */
+  CONNECTION_STATE_UNSPECIFIED = 0,
+  /** CONNECTION_STATE_CONNECTED - 接続中 */
+  CONNECTION_STATE_CONNECTED = 1,
+  /** CONNECTION_STATE_DELAYED - 接続中だが直近の読み取りが失敗している（遅延中） */
+  CONNECTION_STATE_DELAYED = 2,
+  /** CONNECTION_STATE_UNRESPONSIVE - しきい値を超えて応答がない */
+  CONNECTION_STATE_UNRESPONSIVE = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function connectionStateFromJSON(object: any): ConnectionState {
+  switch (object) {
+    case 0:
+    case "CONNECTION_STATE_UNSPECIFIED":
+      return ConnectionState.CONNECTION_STATE_UNSPECIFIED;
+    case 1:
+    case "CONNECTION_STATE_CONNECTED":
+      return ConnectionState.CONNECTION_STATE_CONNECTED;
+    case 2:
+    case "CONNECTION_STATE_DELAYED":
+      return ConnectionState.CONNECTION_STATE_DELAYED;
+    case 3:
+    case "CONNECTION_STATE_UNRESPONSIVE":
+      return ConnectionState.CONNECTION_STATE_UNRESPONSIVE;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ConnectionState.UNRECOGNIZED;
+  }
+}
+
+export function connectionStateToJSON(object: ConnectionState): string {
+  switch (object) {
+    case ConnectionState.CONNECTION_STATE_UNSPECIFIED:
+      return "CONNECTION_STATE_UNSPECIFIED";
+    case ConnectionState.CONNECTION_STATE_CONNECTED:
+      return "CONNECTION_STATE_CONNECTED";
+    case ConnectionState.CONNECTION_STATE_DELAYED:
+      return "CONNECTION_STATE_DELAYED";
+    case ConnectionState.CONNECTION_STATE_UNRESPONSIVE:
+      return "CONNECTION_STATE_UNRESPONSIVE";
+    case ConnectionState.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
   }
@@ -515,7 +571,11 @@ export interface Project {
   /** 応答の有無（プロジェクト単位） */
   connected: boolean;
   /** 最後に読めた時刻 */
-  lastReadAt: Date | undefined;
+  lastReadAt:
+    | Date
+    | undefined;
+  /** 接続状態（未読は UNSPECIFIED） */
+  connectionState: ConnectionState;
 }
 
 /** タスクの状態ごとの件数を表す。 */
@@ -608,18 +668,18 @@ export interface Run {
   taskName: string;
   /** 要約 */
   summary: string;
-  /** 開始時刻 */
-  startedAt:
+  /** 開始時刻（実行中の run は未設定があり得る） */
+  startedAt?:
     | Date
     | undefined;
-  /** ステップの並び（最後が今のステップ） */
+  /** ステップの履歴（入れ子 workflow の内側の step を含み、末尾が今のステップとは限らない） */
   steps: RunStep[];
   /** 今のステップの開始時刻 */
   currentStepStartedAt?:
     | Date
     | undefined;
-  /** 最後のログの時刻 */
-  lastLogAt:
+  /** 最後のログの時刻（実行中の run は未設定があり得る） */
+  lastLogAt?:
     | Date
     | undefined;
   /** レポートの一覧 */
@@ -628,6 +688,20 @@ export interface Run {
   status: RunStatus;
   /** ログの無音の判定済みフラグ */
   logSilent: boolean;
+  /** 現在のステップの位置（1 始まり。不明なら省略） */
+  currentStepNumber?:
+    | number
+    | undefined;
+  /** workflow の全ステップ数（不明なら省略） */
+  totalSteps?:
+    | number
+    | undefined;
+  /** 現在の反復回数（不明なら省略） */
+  currentIteration?:
+    | number
+    | undefined;
+  /** 今のステップ名（current_step_number と同じ step 集合。不明なら省略） */
+  currentStepName?: string | undefined;
 }
 
 /** 判断待ちの項目を表す。 */
@@ -672,6 +746,14 @@ export interface AnomalyThresholds {
   runLogSilentMinutes: number;
 }
 
+/** ビルド元の情報を表す。 */
+export interface BuildInfo {
+  /** ビルド元の短縮コミット SHA（取得できない場合は "unknown"） */
+  commit: string;
+  /** ビルド元のブランチ名（取得できない場合は "unknown"） */
+  branch: string;
+}
+
 /** 集約した状態のまとまりを表す。 */
 export interface DashboardState {
   /** この状態を読んだ時刻 */
@@ -689,7 +771,11 @@ export interface DashboardState {
   /** 判断待ち */
   pendingDecisions: PendingDecision[];
   /** 異常判定の基準 */
-  thresholds: AnomalyThresholds | undefined;
+  thresholds:
+    | AnomalyThresholds
+    | undefined;
+  /** backend 自身のビルド元 */
+  buildInfo: BuildInfo | undefined;
 }
 
 /** 概要の取得を要求する。 */
@@ -849,8 +935,8 @@ export interface GetRunDetailResponse {
   workflow: string;
   /** 状態 */
   status: RunStatus;
-  /** 開始時刻 */
-  startedAt:
+  /** 開始時刻（実行中の run は未設定があり得る） */
+  startedAt?:
     | Date
     | undefined;
   /** 今のステップ */
@@ -881,8 +967,8 @@ export interface GetRunDetailResponse {
   reports: RunReport[];
   /** 指示書の一覧 */
   instructions: RunInstruction[];
-  /** 最後のログの時刻 */
-  lastLogAt:
+  /** 最後のログの時刻（実行中の run は未設定があり得る） */
+  lastLogAt?:
     | Date
     | undefined;
   /** ログの無音の判定済みフラグ */
@@ -1384,7 +1470,15 @@ export const Server: MessageFns<Server> = {
 };
 
 function createBaseProject(): Project {
-  return { name: "", about: "", serverId: "", completedTasks24h: 0, connected: false, lastReadAt: undefined };
+  return {
+    name: "",
+    about: "",
+    serverId: "",
+    completedTasks24h: 0,
+    connected: false,
+    lastReadAt: undefined,
+    connectionState: 0,
+  };
 }
 
 export const Project: MessageFns<Project> = {
@@ -1406,6 +1500,9 @@ export const Project: MessageFns<Project> = {
     }
     if (message.lastReadAt !== undefined) {
       Timestamp.encode(toTimestamp(message.lastReadAt), writer.uint32(50).fork()).join();
+    }
+    if (message.connectionState !== 0) {
+      writer.uint32(56).int32(message.connectionState);
     }
     return writer;
   },
@@ -1471,6 +1568,14 @@ export const Project: MessageFns<Project> = {
             message.lastReadAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
             continue;
           }
+          case 7: {
+            if (tag !== 56) {
+              break;
+            }
+
+            message.connectionState = reader.int32() as any;
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -1503,6 +1608,11 @@ export const Project: MessageFns<Project> = {
         : isSet(object.last_read_at)
         ? fromJsonTimestamp(object.last_read_at)
         : undefined,
+      connectionState: isSet(object.connectionState)
+        ? connectionStateFromJSON(object.connectionState)
+        : isSet(object.connection_state)
+        ? connectionStateFromJSON(object.connection_state)
+        : 0,
     };
   },
 
@@ -1526,6 +1636,9 @@ export const Project: MessageFns<Project> = {
     if (message.lastReadAt !== undefined) {
       obj.lastReadAt = message.lastReadAt.toISOString();
     }
+    if (message.connectionState !== 0) {
+      obj.connectionState = connectionStateToJSON(message.connectionState);
+    }
     return obj;
   },
 
@@ -1540,6 +1653,7 @@ export const Project: MessageFns<Project> = {
     message.completedTasks24h = object.completedTasks24h ?? 0;
     message.connected = object.connected ?? false;
     message.lastReadAt = object.lastReadAt ?? undefined;
+    message.connectionState = object.connectionState ?? 0;
     return message;
   },
 };
@@ -2293,6 +2407,10 @@ function createBaseRun(): Run {
     reports: [],
     status: 0,
     logSilent: false,
+    currentStepNumber: undefined,
+    totalSteps: undefined,
+    currentIteration: undefined,
+    currentStepName: undefined,
   };
 }
 
@@ -2339,6 +2457,18 @@ export const Run: MessageFns<Run> = {
     }
     if (message.logSilent !== false) {
       writer.uint32(112).bool(message.logSilent);
+    }
+    if (message.currentStepNumber !== undefined) {
+      writer.uint32(120).int32(message.currentStepNumber);
+    }
+    if (message.totalSteps !== undefined) {
+      writer.uint32(128).int32(message.totalSteps);
+    }
+    if (message.currentIteration !== undefined) {
+      writer.uint32(136).int32(message.currentIteration);
+    }
+    if (message.currentStepName !== undefined) {
+      writer.uint32(146).string(message.currentStepName);
     }
     return writer;
   },
@@ -2468,6 +2598,38 @@ export const Run: MessageFns<Run> = {
             message.logSilent = reader.bool();
             continue;
           }
+          case 15: {
+            if (tag !== 120) {
+              break;
+            }
+
+            message.currentStepNumber = reader.int32();
+            continue;
+          }
+          case 16: {
+            if (tag !== 128) {
+              break;
+            }
+
+            message.totalSteps = reader.int32();
+            continue;
+          }
+          case 17: {
+            if (tag !== 136) {
+              break;
+            }
+
+            message.currentIteration = reader.int32();
+            continue;
+          }
+          case 18: {
+            if (tag !== 146) {
+              break;
+            }
+
+            message.currentStepName = reader.string();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -2536,6 +2698,26 @@ export const Run: MessageFns<Run> = {
         : isSet(object.log_silent)
         ? globalThis.Boolean(object.log_silent)
         : false,
+      currentStepNumber: isSet(object.currentStepNumber)
+        ? globalThis.Number(object.currentStepNumber)
+        : isSet(object.current_step_number)
+        ? globalThis.Number(object.current_step_number)
+        : undefined,
+      totalSteps: isSet(object.totalSteps)
+        ? globalThis.Number(object.totalSteps)
+        : isSet(object.total_steps)
+        ? globalThis.Number(object.total_steps)
+        : undefined,
+      currentIteration: isSet(object.currentIteration)
+        ? globalThis.Number(object.currentIteration)
+        : isSet(object.current_iteration)
+        ? globalThis.Number(object.current_iteration)
+        : undefined,
+      currentStepName: isSet(object.currentStepName)
+        ? globalThis.String(object.currentStepName)
+        : isSet(object.current_step_name)
+        ? globalThis.String(object.current_step_name)
+        : undefined,
     };
   },
 
@@ -2583,6 +2765,18 @@ export const Run: MessageFns<Run> = {
     if (message.logSilent !== false) {
       obj.logSilent = message.logSilent;
     }
+    if (message.currentStepNumber !== undefined) {
+      obj.currentStepNumber = Math.round(message.currentStepNumber);
+    }
+    if (message.totalSteps !== undefined) {
+      obj.totalSteps = Math.round(message.totalSteps);
+    }
+    if (message.currentIteration !== undefined) {
+      obj.currentIteration = Math.round(message.currentIteration);
+    }
+    if (message.currentStepName !== undefined) {
+      obj.currentStepName = message.currentStepName;
+    }
     return obj;
   },
 
@@ -2605,6 +2799,10 @@ export const Run: MessageFns<Run> = {
     message.reports = object.reports?.map((e) => ReportSummary.fromPartial(e)) || [];
     message.status = object.status ?? 0;
     message.logSilent = object.logSilent ?? false;
+    message.currentStepNumber = object.currentStepNumber ?? undefined;
+    message.totalSteps = object.totalSteps ?? undefined;
+    message.currentIteration = object.currentIteration ?? undefined;
+    message.currentStepName = object.currentStepName ?? undefined;
     return message;
   },
 };
@@ -2988,6 +3186,91 @@ export const AnomalyThresholds: MessageFns<AnomalyThresholds> = {
   },
 };
 
+function createBaseBuildInfo(): BuildInfo {
+  return { commit: "", branch: "" };
+}
+
+export const BuildInfo: MessageFns<BuildInfo> = {
+  encode(message: BuildInfo, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.commit !== "") {
+      writer.uint32(10).string(message.commit);
+    }
+    if (message.branch !== "") {
+      writer.uint32(18).string(message.branch);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BuildInfo {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseBuildInfo();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.commit = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.branch = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): BuildInfo {
+    return {
+      commit: isSet(object.commit) ? globalThis.String(object.commit) : "",
+      branch: isSet(object.branch) ? globalThis.String(object.branch) : "",
+    };
+  },
+
+  toJSON(message: BuildInfo): unknown {
+    const obj: any = {};
+    if (message.commit !== "") {
+      obj.commit = message.commit;
+    }
+    if (message.branch !== "") {
+      obj.branch = message.branch;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<BuildInfo>, I>>(base?: I): BuildInfo {
+    return BuildInfo.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BuildInfo>, I>>(object: I): BuildInfo {
+    const message = createBaseBuildInfo();
+    message.commit = object.commit ?? "";
+    message.branch = object.branch ?? "";
+    return message;
+  },
+};
+
 function createBaseDashboardState(): DashboardState {
   return {
     readAt: undefined,
@@ -2997,6 +3280,7 @@ function createBaseDashboardState(): DashboardState {
     runs: [],
     pendingDecisions: [],
     thresholds: undefined,
+    buildInfo: undefined,
   };
 }
 
@@ -3022,6 +3306,9 @@ export const DashboardState: MessageFns<DashboardState> = {
     }
     if (message.thresholds !== undefined) {
       AnomalyThresholds.encode(message.thresholds, writer.uint32(58).fork()).join();
+    }
+    if (message.buildInfo !== undefined) {
+      BuildInfo.encode(message.buildInfo, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -3095,6 +3382,14 @@ export const DashboardState: MessageFns<DashboardState> = {
             message.thresholds = AnomalyThresholds.decode(reader, reader.uint32());
             continue;
           }
+          case 8: {
+            if (tag !== 66) {
+              break;
+            }
+
+            message.buildInfo = BuildInfo.decode(reader, reader.uint32());
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -3124,6 +3419,11 @@ export const DashboardState: MessageFns<DashboardState> = {
         ? object.pending_decisions.map((e: any) => PendingDecision.fromJSON(e))
         : [],
       thresholds: isSet(object.thresholds) ? AnomalyThresholds.fromJSON(object.thresholds) : undefined,
+      buildInfo: isSet(object.buildInfo)
+        ? BuildInfo.fromJSON(object.buildInfo)
+        : isSet(object.build_info)
+        ? BuildInfo.fromJSON(object.build_info)
+        : undefined,
     };
   },
 
@@ -3150,6 +3450,9 @@ export const DashboardState: MessageFns<DashboardState> = {
     if (message.thresholds !== undefined) {
       obj.thresholds = AnomalyThresholds.toJSON(message.thresholds);
     }
+    if (message.buildInfo !== undefined) {
+      obj.buildInfo = BuildInfo.toJSON(message.buildInfo);
+    }
     return obj;
   },
 
@@ -3166,6 +3469,9 @@ export const DashboardState: MessageFns<DashboardState> = {
     message.pendingDecisions = object.pendingDecisions?.map((e) => PendingDecision.fromPartial(e)) || [];
     message.thresholds = (object.thresholds !== undefined && object.thresholds !== null)
       ? AnomalyThresholds.fromPartial(object.thresholds)
+      : undefined;
+    message.buildInfo = (object.buildInfo !== undefined && object.buildInfo !== null)
+      ? BuildInfo.fromPartial(object.buildInfo)
       : undefined;
     return message;
   },

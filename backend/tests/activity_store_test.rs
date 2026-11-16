@@ -114,13 +114,14 @@ fn daily_summary_uses_jst_day_boundary() {
 }
 
 #[test]
-fn daily_attention_counts_only_inquiry_merge_connection_lost() {
+fn daily_attention_excludes_connection_events() {
   let store = ActivityStore::open_in_memory().expect("SQLite を開けます");
   let day = "2026-11-13T04:00:00Z";
   for kind in [
     EventKind::Inquiry,
     EventKind::AwaitingMerge,
     EventKind::ConnectionLost,
+    EventKind::ConnectionRestored,
     EventKind::GoalCreated,
     EventKind::RunStarted,
     EventKind::TaskCompleted,
@@ -134,9 +135,28 @@ fn daily_attention_counts_only_inquiry_merge_connection_lost() {
   let summaries = store.daily_summaries(now).expect("日次集計を取得できます");
   let today = summaries.iter().find(|summary| summary.date == "2026-11-13").unwrap();
 
-  assert_eq!(today.total, 8, "総数は8種類すべてを数えます");
-  assert_eq!(today.attention, 3, "判断待ちと異常は問い合わせ・マージ待ち・応答なしの3種類だけです");
-  assert_eq!(ATTENTION_KINDS.len(), 3);
+  assert_eq!(today.total, 9, "総数は記録した全種類を数えます");
+  assert_eq!(today.attention, 2, "判断待ちは問い合わせとマージ待ちの2種類だけで、接続の出来事は数えません");
+  assert_eq!(ATTENTION_KINDS.len(), 2);
+  assert!(!ATTENTION_KINDS.contains(&EventKind::ConnectionLost), "既存の切断も集計から外します");
+  assert!(!ATTENTION_KINDS.contains(&EventKind::ConnectionRestored), "復帰も集計に含めません");
+}
+
+#[test]
+fn connection_restored_round_trips_through_sqlite() {
+  let store = ActivityStore::open_in_memory().expect("SQLite を開けます");
+  let recorded = event(
+    "2026-11-13T10:00:00Z",
+    "mac-mini",
+    Some("p"),
+    EventKind::ConnectionRestored,
+    "接続が復帰しました。切断していた時間は 150 秒です。",
+  );
+
+  store.record(&recorded).expect("出来事を記録できます");
+  let events = store.recent_events(10).expect("出来事の一覧を取得できます");
+
+  assert_eq!(events, vec![recorded], "復帰の種類を保存して同じ種類で読み戻します");
 }
 
 #[test]

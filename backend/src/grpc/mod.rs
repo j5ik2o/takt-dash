@@ -13,8 +13,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
 use chrono::{DateTime, Utc};
 use mapping::{
-  activity_kind, conversation_speaker, execution_status, goal_question, goal_status, goal_task, goal_work_log,
-  inquiry_kind, optional_timestamp, pending_decision_type, run_status, step_log, task_status, timestamp,
+  activity_kind, connection_state, conversation_speaker, execution_status, goal_question, goal_status, goal_task,
+  goal_work_log, inquiry_kind, optional_timestamp, pending_decision_type, run_status, step_log, task_status, timestamp,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
@@ -189,6 +189,7 @@ fn assemble_projects(views: &[model::ProjectView], activity: &ActivityStore, now
         completed_tasks_24h,
         connected: view.connected,
         last_read_at: optional_timestamp(view.last_read_at),
+        connection_state: connection_state(view.connection_state) as i32,
       }
     })
     .collect()
@@ -260,7 +261,7 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
         goal_id:                 run.goal_id.clone().unwrap_or_default(),
         task_name:               run.task_name.clone(),
         summary:                 run.summary.clone(),
-        started_at:              Some(timestamp(run.started_at)),
+        started_at:              optional_timestamp(run.started_at),
         steps:                   run
           .steps
           .iter()
@@ -272,7 +273,8 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
           })
           .collect(),
         current_step_started_at: optional_timestamp(run.current_step_started_at),
-        last_log_at:             Some(timestamp(run.last_log_at)),
+        current_step_name:       run.current_step.clone(),
+        last_log_at:             optional_timestamp(run.last_log_at),
         reports:                 run
           .reports
           .iter()
@@ -280,6 +282,9 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
           .collect(),
         status:                  run_status(run.status) as i32,
         log_silent:              store.is_log_silent(run, now),
+        current_step_number:     run.current_step_number,
+        total_steps:             run.total_steps,
+        current_iteration:       run.current_iteration,
       });
     }
   }
@@ -534,23 +539,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     } else {
       detail.session_id.clone()
     };
-    let log_silent = self.store.is_log_silent(
-      &model::RunEntry {
-        run_slug:                detail.run_slug.clone(),
-        session_id:              session_id.clone(),
-        task_name:               task_name.clone(),
-        goal_id:                 goal_id.clone(),
-        summary:                 detail.summary.clone(),
-        status:                  detail.status,
-        current_step:            detail.current_step.clone(),
-        started_at:              detail.started_at,
-        current_step_started_at: detail.current_step_started_at,
-        last_log_at:             detail.last_log_at,
-        steps:                   Vec::new(),
-        reports:                 Vec::new(),
-      },
-      self.now(),
-    );
+    let log_silent = self.store.is_log_silent_at(detail.last_log_at, self.now());
     Ok(Response::new(GetRunDetailResponse {
       run_slug: detail.run_slug,
       session_id,
@@ -562,7 +551,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       summary: detail.summary,
       workflow: detail.workflow,
       status: run_status(detail.status) as i32,
-      started_at: Some(timestamp(detail.started_at)),
+      started_at: optional_timestamp(detail.started_at),
       current_step: detail.current_step,
       current_iteration: detail.current_iteration,
       current_step_started_at: optional_timestamp(detail.current_step_started_at),
@@ -589,7 +578,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
           content:        instruction.content,
         })
         .collect(),
-      last_log_at: Some(timestamp(detail.last_log_at)),
+      last_log_at: optional_timestamp(detail.last_log_at),
       log_silent,
       server_connected: view.connected,
       server_last_read_at: optional_timestamp(view.last_read_at),
@@ -1016,6 +1005,7 @@ fn assemble_state_for(store: &StateStore, activity: &ActivityStore, now: DateTim
       pending_decision_stale_minutes: thresholds.pending_decision_stale_minutes as i32,
       run_log_silent_minutes:         thresholds.run_log_silent_minutes as i32,
     }),
+    build_info:        Some(crate::build_info::current()),
   }
 }
 

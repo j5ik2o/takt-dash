@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::{
-  parse::{optional_string, parse_time, string_field},
+  parse::{optional_string, parse_run_start_time, parse_time, string_field},
   ToolError,
 };
 use crate::model::{
@@ -24,13 +24,13 @@ fn resolve_last_log_at(
   value: &Value,
   latest_step_log: Option<DateTime<Utc>>,
   current_step_started_at: Option<DateTime<Utc>>,
-  started_at: DateTime<Utc>,
-) -> Result<DateTime<Utc>, ToolError> {
+  started_at: Option<DateTime<Utc>>,
+) -> Result<Option<DateTime<Utc>>, ToolError> {
   let second = match latest_step_log {
     | Some(latest) => Some(latest.max(current_step_started_at.unwrap_or(latest))),
     | None => current_step_started_at,
   };
-  Ok(parse_time(value.get("lastLogAt"))?.or(second).unwrap_or(started_at))
+  Ok(parse_time(value.get("lastLogAt"))?.or(second).or(started_at))
 }
 
 pub(super) fn parse_run(
@@ -40,9 +40,7 @@ pub(super) fn parse_run(
   steps: Vec<RunStepEntry>,
 ) -> Result<RunEntry, ToolError> {
   let run_slug = string_field(value, "runSlug")?;
-  let started_at = parse_time(value.get("startedAt"))?
-    .or(task.started_at)
-    .ok_or_else(|| ToolError::Parse("run の開始時刻を取得できません".to_owned()))?;
+  let started_at = parse_run_start_time(value)?.or(task.started_at);
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
   let last_log_at = resolve_last_log_at(value, latest_step_log, current_step_started_at, started_at)?;
   Ok(RunEntry {
@@ -53,6 +51,9 @@ pub(super) fn parse_run(
     summary: optional_string(value, "summary").unwrap_or_default(),
     status: parse_run_status(value.get("status")),
     current_step: optional_string(value, "currentStep"),
+    current_step_number: None,
+    total_steps: None,
+    current_iteration: value.get("currentIteration").and_then(Value::as_i64).map(|value| value as i32),
     started_at,
     current_step_started_at,
     last_log_at,
@@ -134,8 +135,7 @@ pub(super) fn parse_run_detail(
   reports: Vec<RunReportEntry>,
   instructions: Vec<RunInstructionEntry>,
 ) -> Result<RunDetail, ToolError> {
-  let started_at =
-    parse_time(value.get("startedAt"))?.ok_or_else(|| ToolError::Parse("run の開始時刻を取得できません".to_owned()))?;
+  let started_at = parse_run_start_time(value)?;
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
   let last_log_at = resolve_last_log_at(value, latest_step_log_at(&step_logs), current_step_started_at, started_at)?;
   let task_name = optional_string(value, "taskName").or_else(|| task.map(|task| task.name.clone())).unwrap_or_default();

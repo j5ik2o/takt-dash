@@ -56,7 +56,12 @@ impl Default for GrpcHarnessBuilder {
       projects:   Vec::new(),
       state:      json!({}),
       interval:   30,
-      thresholds: Thresholds { pending_decision_stale_minutes: 240, run_log_silent_minutes: 10 },
+      thresholds: Thresholds {
+        pending_decision_stale_minutes: 240,
+        run_log_silent_minutes:         10,
+        connection_failure_count:       3,
+        connection_delay_seconds:       120,
+      },
     }
   }
 }
@@ -160,6 +165,8 @@ impl GrpcHarnessBuilder {
       "thresholds": {
         "pendingDecisionStaleMinutes": thresholds.pending_decision_stale_minutes,
         "runLogSilentMinutes": thresholds.run_log_silent_minutes,
+        "connectionFailureCount": thresholds.connection_failure_count,
+        "connectionDelaySeconds": thresholds.connection_delay_seconds,
       },
       "sqlite": { "path": "data/taktdash.sqlite" },
     });
@@ -223,6 +230,8 @@ impl GrpcHarness {
     value["thresholds"] = json!({
       "pendingDecisionStaleMinutes": thresholds.pending_decision_stale_minutes,
       "runLogSilentMinutes": thresholds.run_log_silent_minutes,
+      "connectionFailureCount": thresholds.connection_failure_count,
+      "connectionDelaySeconds": thresholds.connection_delay_seconds,
     });
     std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
   }
