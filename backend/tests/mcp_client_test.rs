@@ -1574,11 +1574,8 @@ async fn timeout_on_goal_questions_keeps_project_connected_and_previous_inquirie
     .await
     .expect("ゴール質問のタイムアウトはプロジェクト全体を失敗にしません");
 
-  let inquiry = snapshot
-    .inquiries
-    .iter()
-    .find(|entry| entry.inquiry_id.as_str() == "q1")
-    .expect("前回の問い合わせを引き継ぎます");
+  let inquiry =
+    snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "q1").expect("前回の問い合わせを引き継ぎます");
   assert_eq!(inquiry.body, "前回の質問", "タイムアウトしたゴールの問い合わせは前回値です");
   client.shutdown().await;
 }

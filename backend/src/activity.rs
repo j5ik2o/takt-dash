@@ -232,8 +232,8 @@ impl ActivityStore {
       let mut events = Vec::new();
       for row in rows {
         let (occurred_at, server_id, project, kind, body, run_slug) = row?;
-        let kind =
-          EventKind::from_stored(&kind).ok_or_else(|| conversion_error(3, format!("未知の出来事の種類です: {kind}")))?;
+        let kind = EventKind::from_stored(&kind)
+          .ok_or_else(|| conversion_error(3, format!("未知の出来事の種類です: {kind}")))?;
         let run_slug = match run_slug {
           | Some(text) => {
             Some(RunSlug::try_from(text.as_str()).map_err(|error| conversion_error(5, error.to_string()))?)
@@ -282,7 +282,8 @@ impl ActivityStore {
       )?;
       let rows = statement.query_map(params![date], |row| {
         let server_id: String = row.get(0)?;
-        let server_id = ServerId::try_from(server_id.as_str()).map_err(|error| conversion_error(0, error.to_string()))?;
+        let server_id =
+          ServerId::try_from(server_id.as_str()).map_err(|error| conversion_error(0, error.to_string()))?;
         Ok(ServerCount { server_id, count: row.get::<_, i64>(1)? as i32 })
       })?;
       let mut counts = Vec::new();
@@ -359,7 +360,6 @@ fn conversion_error(index: usize, message: String) -> rusqlite::Error {
     Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message)),
   )
 }
-
 
 /// ミリ秒固定幅の RFC3339 UTC 文字列に変換する。文字列の大小が時刻の大小と一致します。
 pub fn format_timestamp(time: DateTime<Utc>) -> String {
