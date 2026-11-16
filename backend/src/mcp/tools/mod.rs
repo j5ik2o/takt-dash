@@ -80,6 +80,9 @@ pub struct ToolSet<'a> {
 
 /// ページ形式の一覧を全件集めるための上限。無限追従を避けます。
 const MAX_PAGES: usize = 100;
+/// takt のゴール仕様の記法。takt_get_goal は省略した大きい値だけを omissions に載せるため、
+/// 仕様の有無を omissions で判定せず、既知の記法を順に読みます。
+const SPECIFICATION_NOTATIONS: [&str; 3] = ["gherkin", "quint", "alloy"];
 
 impl<'a> ToolSet<'a> {
   pub fn new(client: &'a mut McpClient, cwd: PathBuf) -> Self {
@@ -376,12 +379,10 @@ impl<'a> ToolSet<'a> {
     let acceptance_criteria = self.read_goal_array(goal_id, "acceptanceCriteria").await?;
     let constraints = self.read_goal_array(goal_id, "constraints").await?;
     let mut specifications = BTreeMap::new();
-    if let Some(notations) =
-      goal.get("omissions").and_then(|value| value.get("specifications")).and_then(Value::as_object)
-    {
-      for notation in notations.keys() {
-        let content = self.read_goal_text(goal_id, &format!("specifications.{notation}")).await?;
-        specifications.insert(notation.clone(), content);
+    for notation in SPECIFICATION_NOTATIONS {
+      let content = self.read_goal_text(goal_id, &format!("specifications.{notation}")).await?;
+      if !content.is_empty() {
+        specifications.insert(notation.to_owned(), content);
       }
     }
     let work_log = self.read_goal_work_log(goal_id).await?;

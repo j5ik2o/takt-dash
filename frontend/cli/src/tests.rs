@@ -52,6 +52,7 @@ struct DummyServer {
   seen:                  Arc<Mutex<Vec<String>>>,
   conversation_requests: Arc<Mutex<Vec<GetConversationRequest>>>,
   goal_detail_requests:  Arc<Mutex<Vec<v1::GetGoalDetailRequest>>>,
+  timeouts:              Arc<Mutex<Vec<(String, String)>>>,
   shutdown_tx:           tokio::sync::oneshot::Sender<()>,
   server_handle:         tokio::task::JoinHandle<()>,
 }
@@ -70,6 +71,11 @@ impl DummyServer {
   /// 受け取った `GetGoalDetail` の要求を到着順に返す。
   fn goal_detail_requests(&self) -> Vec<v1::GetGoalDetailRequest> {
     self.goal_detail_requests.lock().expect("ゴール詳細の要求の記録を読めませんでした").clone()
+  }
+
+  /// 受け取った読み取り RPC の `grpc-timeout` を、RPC 名と到着順に返す。
+  fn timeouts(&self) -> Vec<(String, String)> {
+    self.timeouts.lock().expect("grpc-timeout の記録を読めませんでした").clone()
   }
 
   /// サーバーを止め、待ち受けを解放する。
@@ -158,6 +164,7 @@ async fn start_dummy_server_with_goals(
   let seen = Arc::new(Mutex::new(Vec::new()));
   let conversation_requests = Arc::new(Mutex::new(Vec::new()));
   let goal_detail_requests = Arc::new(Mutex::new(Vec::new()));
+  let timeouts = Arc::new(Mutex::new(Vec::new()));
   let service = DummyTaktDashService {
     overview: Arc::new(overview),
     overview_error,
@@ -167,6 +174,7 @@ async fn start_dummy_server_with_goals(
     goals,
     goal_detail,
     goal_detail_requests: goal_detail_requests.clone(),
+    timeouts: timeouts.clone(),
   };
   let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
     .await
@@ -181,7 +189,7 @@ async fn start_dummy_server_with_goals(
       })
       .await;
   });
-  DummyServer { addr, seen, conversation_requests, goal_detail_requests, shutdown_tx, server_handle }
+  DummyServer { addr, seen, conversation_requests, goal_detail_requests, timeouts, shutdown_tx, server_handle }
 }
 
 /// 本番と同じ生成サービス定義を実装するテスト用サーバー。
@@ -197,11 +205,18 @@ struct DummyTaktDashService {
   goals:                 Option<Result<v1::GetGoalsResponse, Status>>,
   goal_detail:           Option<Result<v1::GetGoalDetailResponse, Status>>,
   goal_detail_requests:  Arc<Mutex<Vec<v1::GetGoalDetailRequest>>>,
+  timeouts:              Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl DummyTaktDashService {
   fn record(&self, name: &str) {
     self.seen.lock().expect("RPC 名の記録を書けませんでした").push(name.to_owned());
+  }
+
+  fn record_timeout<T>(&self, name: &str, request: &Request<T>) {
+    if let Some(timeout) = request.metadata().get("grpc-timeout").and_then(|value| value.to_str().ok()) {
+      self.timeouts.lock().expect("grpc-timeout の記録を書けませんでした").push((name.to_owned(), timeout.to_owned()));
+    }
   }
 }
 
@@ -249,8 +264,9 @@ impl v1::takt_dash_service_server::TaktDashService for DummyTaktDashService {
     Err(Status::unimplemented("このダミーサーバーは GetRunDetail を提供しません。"))
   }
 
-  async fn get_goals(&self, _request: Request<v1::GetGoalsRequest>) -> Result<Response<v1::GetGoalsResponse>, Status> {
+  async fn get_goals(&self, request: Request<v1::GetGoalsRequest>) -> Result<Response<v1::GetGoalsResponse>, Status> {
     self.record("GetGoals");
+    self.record_timeout("GetGoals", &request);
     match &self.goals {
       | Some(Ok(goals)) => Ok(Response::new(goals.clone())),
       | Some(Err(status)) => Err(status.clone()),
@@ -263,6 +279,7 @@ impl v1::takt_dash_service_server::TaktDashService for DummyTaktDashService {
     request: Request<v1::GetGoalDetailRequest>,
   ) -> Result<Response<v1::GetGoalDetailResponse>, Status> {
     self.record("GetGoalDetail");
+    self.record_timeout("GetGoalDetail", &request);
     let request = request.into_inner();
     self.goal_detail_requests.lock().expect("ゴール詳細の要求の記録を書けませんでした").push(request);
     match &self.goal_detail {
@@ -1895,10 +1912,62 @@ fn goals_and_goal_accept_addr_and_config_flags() {
   );
 }
 
+/// `grpc-timeout` の値（例: "5000000u"）をマイクロ秒へ直す。
+fn grpc_timeout_micros(value: &str) -> u64 {
+  let (digits, unit) = value.split_at(value.len() - 1);
+  let amount: u64 = digits.parse().expect("grpc-timeout の数値を読めます");
+  match unit {
+    | "n" => amount / 1_000,
+    | "u" => amount,
+    | "m" => amount * 1_000,
+    | "S" => amount * 1_000_000,
+    | "M" => amount * 60 * 1_000_000,
+    | "H" => amount * 60 * 60 * 1_000_000,
+    | other => panic!("未知の grpc-timeout の単位です: {other}"),
+  }
+}
+
+#[test]
+fn goal_detail_deadline_is_longer_than_the_goal_list_deadline() {
+  // GetGoalDetail は backend 側で複数の takt-mcp 呼び出しを直列に行うため、他の読み取りより
+  // 長い期限を持たせます。生成クライアントが付ける `grpc-timeout` をダミーサーバーで観測し、
+  // ゴール一覧の期限が5秒のままで、詳細の期限がそれより長いことを固定します。
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let server = runtime.block_on(start_dummy_server_with_goals(
+    None,
+    DashboardState::default(),
+    Vec::new(),
+    Some(Ok(v1::GetGoalsResponse { goals: sample_goals() })),
+    Some(Ok(sample_goal_detail())),
+  ));
+
+  let (goals_code, _goals_stdout, goals_stderr) = run_cli(&write_args(&["goals"]), server.addr);
+  assert_eq!(goals_code, EXIT_OK, "goals は成功します: {goals_stderr}");
+  let (detail_code, _detail_stdout, detail_stderr) = run_cli(&write_args(&["goal", "--goal", "goal-cli"]), server.addr);
+  assert_eq!(detail_code, EXIT_OK, "goal は成功します: {detail_stderr}");
+
+  let timeouts = server.timeouts();
+  runtime.block_on(server.shutdown());
+
+  let goals_timeout = timeouts
+    .iter()
+    .find(|(name, _)| name == "GetGoals")
+    .map(|(_, value)| grpc_timeout_micros(value))
+    .expect("GetGoals の grpc-timeout を記録します");
+  let detail_timeout = timeouts
+    .iter()
+    .find(|(name, _)| name == "GetGoalDetail")
+    .map(|(_, value)| grpc_timeout_micros(value))
+    .expect("GetGoalDetail の grpc-timeout を記録します");
+
+  assert_eq!(goals_timeout, 5_000_000, "他の読み取りの期限は5秒のままです");
+  assert!(detail_timeout > goals_timeout, "ゴール詳細の期限は他の読み取りより長い必要があります");
+}
+
 // ----------------------------------------------------------------------------
 // CLI-GOAL-FAILURE: 接続不能と NOT_FOUND の扱い（要件 15, 21〜23）
 // ----------------------------------------------------------------------------
-
 #[test]
 fn goal_commands_fail_when_backend_is_down() {
   let addr = reserve_closed_addr();

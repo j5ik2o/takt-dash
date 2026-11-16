@@ -219,18 +219,16 @@ export const taskStatusLabel = (status: TaskStatus): string => {
   }
 };
 
-// backend の is_human_merge_wait と同じ規則で、人のマージ待ちかどうかを判定する。
-// awaiting_merge で、仕上げタスクに pending/running がなく、末尾の仕上げタスクが
-// failed/exceeded/pr_failed でもないときに人のマージ待ちになる。
+// 仕上げタスクの末尾状態だけで人のマージ待ちかどうかを判定する。通常タスクの pending/running は
+// 判定に影響しない。awaiting_merge で、末尾が pending/running/failed/exceeded/pr_failed で
+// なければ人のマージ待ちになる。
 export function isHumanMergeWaiting(goal: Goal): boolean {
   if (goal.status !== GOAL_STATUS.AWAITING_MERGE) {
     return false;
   }
-  const counts = goal.taskCounts;
-  if ((counts?.pending ?? 0) > 0 || (counts?.running ?? 0) > 0) {
-    return false;
-  }
   return (
+    goal.mergeTaskLast !== TASK_STATUS.PENDING &&
+    goal.mergeTaskLast !== TASK_STATUS.RUNNING &&
     goal.mergeTaskLast !== TASK_STATUS.FAILED &&
     goal.mergeTaskLast !== TASK_STATUS.EXCEEDED &&
     goal.mergeTaskLast !== TASK_STATUS.PR_FAILED

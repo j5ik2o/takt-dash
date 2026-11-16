@@ -131,6 +131,7 @@ pub(super) fn parse_task(value: &Value) -> Result<TaskEntry, ToolError> {
     status,
     started_at,
     run_slug: optional_string(value, "runSlug"),
+    source_run_slug: optional_string(value, "sourceRunSlug"),
     current_step: optional_string(value, "currentStep"),
     merge_task: value.get("mergeTask").and_then(Value::as_bool).unwrap_or(false),
   })

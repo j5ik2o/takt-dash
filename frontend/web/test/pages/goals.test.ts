@@ -92,6 +92,7 @@ test("ゴール一覧の各行は状態・実行状態・状態別のタスク�
     name: "実行中のゴール",
     status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
     taskCounts: { pending: 0, running: 1, completed: 2, failed: 0, exceeded: 0, prFailed: 0 },
+    mergeTaskLast: TaskStatus.TASK_STATUS_RUNNING,
   });
   const counts = createGoal({
     goalId: "goal-counts",

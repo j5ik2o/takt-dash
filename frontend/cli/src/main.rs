@@ -27,6 +27,9 @@ pub const DEFAULT_CONFIG_PATH: &str = "taktdash.config.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// 読み取り RPC に許す時間。書き込みの期限とは分け、既存の待ち時間を変えません。
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// ゴール詳細 RPC に許す時間。GetGoalDetail は backend が takt-mcp を直列に呼ぶため、
+/// 他の読み取りより長い期限を持たせます。
+const GOAL_DETAIL_TIMEOUT: Duration = Duration::from_secs(60);
 /// 書き込み RPC に許す時間。backend の初期化・道具実行・停止を見込みます。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -649,7 +652,7 @@ async fn fetch_goal_detail(addr: SocketAddr, goal_id: &str) -> Result<GetGoalDet
   let channel = connect(addr).await.map_err(ReadError::Unavailable)?;
   let mut client = TaktDashServiceClient::new(channel);
   let mut request = Request::new(GetGoalDetailRequest { goal_id: goal_id.to_owned() });
-  request.set_timeout(READ_TIMEOUT);
+  request.set_timeout(GOAL_DETAIL_TIMEOUT);
   let response =
     client.get_goal_detail(request).await.map_err(|status| read_call_error(addr, "ゴールの取得", status))?;
   Ok(response.into_inner())

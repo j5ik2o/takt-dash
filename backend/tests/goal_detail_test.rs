@@ -248,6 +248,59 @@ async fn get_goal_detail_assembles_the_full_text_and_collections_from_the_mock()
 }
 
 #[tokio::test]
+async fn get_goal_detail_reads_short_specifications_that_are_not_listed_in_omissions() {
+  // takt_get_goal は省略した大きい値だけを omissions に載せるため、omissions に現れない
+  // 短い仕様も読み取る必要があります。omissions が gherkin だけを持つ状態で、quint と
+  // alloy が結果に含まれることを観測します。
+  let harness = detail_harness(json!({
+    "goalDetails": {
+      "g1": {
+        "summary": {
+          "id": "g1",
+          "status": "created",
+          "executionStatus": "paused",
+          "omissions": { "specifications": { "gherkin": { "totalBytes": 5000 } } },
+        },
+        "objective": "",
+        "outOfScope": [],
+        "acceptanceCriteria": [],
+        "constraints": [],
+        "specifications": { "gherkin": gherkin(), "quint": "Q", "alloy": "A" },
+        "workLog": [],
+        "questions": [],
+      },
+    },
+    "tasks": [],
+  }));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_goal_detail(GetGoalDetailRequest { goal_id: "g1".to_owned() })
+    .await
+    .expect("短い仕様を持つゴール詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(
+    detail.specifications.get("gherkin").map(String::as_str),
+    Some(gherkin().as_str()),
+    "omissions に載る長い仕様も全文を返します"
+  );
+  assert_eq!(
+    detail.specifications.get("quint").map(String::as_str),
+    Some("Q"),
+    "omissions に載らない短い仕様も返します"
+  );
+  assert_eq!(
+    detail.specifications.get("alloy").map(String::as_str),
+    Some("A"),
+    "omissions に載らない短い仕様も返します"
+  );
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn get_goal_detail_returns_not_found_for_an_unknown_goal_id() {
   let harness = detail_harness(json!({ "goalDetails": {}, "tasks": [] }));
   let server = start_server(&harness).await;

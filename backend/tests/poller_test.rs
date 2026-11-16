@@ -147,6 +147,33 @@ async fn first_cycle_reads_state_without_events_and_sets_read_time() {
 }
 
 #[tokio::test]
+async fn task_source_run_slug_is_kept_separately_from_run_slug_in_the_snapshot() {
+  // takt_list_tasks の sourceRunSlug は、元 run の解決に使う別の値として状態ストアへ
+  // 保持します。run_slug へ混ぜると、実行中 run の照合や goal_id の補完が誤ります。
+  let harness = Harness::new(json!({
+    "goals": [],
+    "tasks": [
+      {
+        "name": "implement",
+        "goalId": "g1",
+        "status": "completed",
+        "startedAt": "2026-11-13T09:00:00Z",
+        "sourceRunSlug": "run-src"
+      }
+    ]
+  }));
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1サイクルを実行できます");
+  let snapshot = harness.store.slot("takt-dash").expect("スロットがあります").snapshot.expect("状態があります");
+  poller.shutdown().await;
+
+  let task = snapshot.tasks.first().expect("タスクがあります");
+  assert_eq!(task.source_run_slug.as_deref(), Some("run-src"), "sourceRunSlug は source_run_slug に保持します");
+  assert!(task.run_slug.is_none(), "sourceRunSlug を run_slug へ誤って入れません");
+}
+
+#[tokio::test]
 async fn state_change_between_cycles_emits_and_records_events() {
   let harness = Harness::new(state_with_goal("g1"));
   let mut poller = harness.poller();

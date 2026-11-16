@@ -161,12 +161,15 @@ impl StateStore {
   ///
   /// GetRunDetail は読み先の cwd とサーバーを状態ストアの run
   /// から解決するため、この投影を使います。実行中の run 一覧に無くても、
-  /// 完了タスクが runSlug を保持していれば解決できます。run が完了すると
+  /// 完了タスクが runSlug または sourceRunSlug を保持していれば解決できます。run が完了すると
   /// run 一覧から消えるため、詳細 URL を同じまま取得できるようにします。
   pub fn find_run_project(&self, run_slug: &str) -> Option<ProjectView> {
     self.project_views().into_iter().find(|view| {
       view.runs.iter().any(|run| run.run_slug == run_slug)
-        || view.tasks.iter().any(|task| task.run_slug.as_deref() == Some(run_slug))
+        || view
+          .tasks
+          .iter()
+          .any(|task| task.run_slug.as_deref() == Some(run_slug) || task.source_run_slug.as_deref() == Some(run_slug))
     })
   }
 

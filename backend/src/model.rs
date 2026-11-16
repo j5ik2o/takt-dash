@@ -113,14 +113,16 @@ pub struct GoalEntry {
 /// タスクの一覧に含まれるタスク。配列順は tasks.yaml の順を保ちます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEntry {
-  pub name:         String,
-  pub goal_id:      Option<String>,
-  pub status:       TaskStatus,
-  pub started_at:   Option<DateTime<Utc>>,
-  pub run_slug:     Option<String>,
-  pub current_step: Option<String>,
+  pub name:            String,
+  pub goal_id:         Option<String>,
+  pub status:          TaskStatus,
+  pub started_at:      Option<DateTime<Utc>>,
+  pub run_slug:        Option<String>,
+  /// takt_list_tasks の sourceRunSlug。完了タスクが元 run を指すときに持ちます。
+  pub source_run_slug: Option<String>,
+  pub current_step:    Option<String>,
   /// ゴールの仕上げタスクかどうか。
-  pub merge_task:   bool,
+  pub merge_task:      bool,
 }
 
 /// takt_get_goal から得たゴールの詳細。

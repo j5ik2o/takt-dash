@@ -108,6 +108,7 @@ pub fn task(name: &str, status: TaskStatus) -> TaskEntry {
     status,
     started_at: None,
     run_slug: None,
+    source_run_slug: None,
     current_step: None,
     merge_task: false,
   }

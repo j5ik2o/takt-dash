@@ -12,6 +12,7 @@ use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
   model::{ExecutionStatus, GoalStatus, ProjectSnapshot, TaskEntry, TaskStatus},
+  poller::Poller,
   takt_dash::v1::{GetRunDetailRequest, RunStatus},
 };
 
@@ -259,13 +260,14 @@ async fn 完了した実行の詳細は実行中一覧になくても取得で�
   let snapshot = ProjectSnapshot {
     goals:         vec![],
     tasks:         vec![TaskEntry {
-      name:         "implement".to_owned(),
-      goal_id:      Some("g1".to_owned()),
-      status:       TaskStatus::Completed,
-      started_at:   Some(time("2026-11-13T09:00:00Z")),
-      run_slug:     Some("run-1".to_owned()),
-      current_step: Some("review".to_owned()),
-      merge_task:   false,
+      name:            "implement".to_owned(),
+      goal_id:         Some("g1".to_owned()),
+      status:          TaskStatus::Completed,
+      started_at:      Some(time("2026-11-13T09:00:00Z")),
+      run_slug:        Some("run-1".to_owned()),
+      source_run_slug: None,
+      current_step:    Some("review".to_owned()),
+      merge_task:      false,
     }],
     inquiries:     vec![],
     runs:          vec![],
@@ -287,6 +289,74 @@ async fn 完了した実行の詳細は実行中一覧になくても取得で�
   assert_eq!(detail.goal_id, "g1", "状態ストアの完了タスクからゴールを補います");
   assert_eq!(detail.task_name, "implement", "状態ストアの完了タスクからタスク名を補います");
   assert_eq!(detail.status, RunStatus::Completed as i32);
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_resolves_a_completed_task_that_only_has_a_source_run_slug() {
+  // 完了タスクが runSlug を持たず sourceRunSlug だけを持つ場合でも、状態ストアの投影から
+  // 元 run のプロジェクトを解決できる必要があります。poller に mock の状態を読ませて
+  // ストアを満たし、sourceRunSlug の slug では詳細が返り、別の slug では NotFound に
+  // なることを対で観測します。
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", project_dir()),
+      server_meta(),
+      json!({
+        "goals": [],
+        "tasks": [
+          {
+            "name": "implement",
+            "goalId": "g1",
+            "status": "completed",
+            "startedAt": "2026-11-13T09:00:00Z",
+            "sourceRunSlug": "run-source"
+          }
+        ],
+        "runs": {
+          "run-source": {
+            "runSlug": "run-source",
+            "sessionId": "sess-source",
+            "summary": "元の run",
+            "status": "completed",
+            "startedAt": "2026-11-13T09:00:00Z",
+            "currentStep": "review",
+            "lastLogAt": "2026-11-13T09:30:00Z",
+            "stepLogs": []
+          }
+        }
+      }),
+    )
+    .build();
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+    harness.registry.clone(),
+  );
+  poller.read_cycle_once().await.expect("1サイクルを実行できます");
+  poller.shutdown().await;
+
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-source".to_owned() })
+    .await
+    .expect("sourceRunSlug だけを持つ完了タスクからも run 詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(detail.run_slug, "run-source");
+  assert_eq!(detail.project, "takt-dash", "sourceRunSlug からプロジェクトを解決します");
+
+  let status = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "does-not-exist".to_owned() })
+    .await
+    .expect_err("sourceRunSlug と異なる slug は解決しません");
+
+  assert_eq!(status.code(), tonic::Code::NotFound, "未知の runSlug は Not Found です: {status:?}");
 
   server.stop().await;
 }
