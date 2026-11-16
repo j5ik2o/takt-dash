@@ -11,10 +11,12 @@ import { readFile } from "node:fs/promises";
 import { renderToStaticMarkup } from "react-dom/server";
 import { fileURLToPath } from "node:url";
 import { createDashboardState, createProjectsResponse, NOW } from "../support/fixtures.ts";
+import { DashboardState, InquiryKind, PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import { Sidebar } from "../../src/components/sidebar.tsx";
 import OverviewPage from "../../app/page.tsx";
 import ProjectsPage from "../../app/projects/page.tsx";
+import DecisionsPage from "../../app/decisions/page.tsx";
 
 const webRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -151,4 +153,49 @@ test("概要・プロジェクト・サイドバーは操作要素を増やさ�
     assert.doesNotMatch(html, /<form/i);
     assert.doesNotMatch(html, /<input/i);
   }
+});
+
+const inquiryDecision = (overrides: Partial<PendingDecision> = {}): PendingDecision => ({
+  type: PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY,
+  serverId: "mini",
+  project: "esa",
+  goalId: "goal-2",
+  inquiryKind: InquiryKind.INQUIRY_KIND_QUESTION,
+  inquiryId: "inquiry-schedule",
+  createdAt: new Date(NOW.getTime() - 30 * 60_000),
+  body: "リリースの日取りはどうしますか。",
+  options: [],
+  stale: false,
+  ...overrides,
+});
+
+const renderDecisionsWithState = (state: DashboardState): string =>
+  renderPage(DecisionsPage, { state, now: NOW });
+
+test("概要の判断待ちパネルの「内容を見る」は判断待ちページの同じ項目の id へ移動する", () => {
+  const base = createDashboardState();
+  const state = DashboardState.create({ ...base, pendingDecisions: [inquiryDecision()] });
+  const overview = renderOverviewWithState(state);
+  const decisions = renderDecisionsWithState(state);
+
+  const href = "/decisions#decision-inquiry:mini:esa:inquiry-schedule";
+  anchorFor(overview, href);
+  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:esa:inquiry-schedule");
+  assert.equal(name, "li", "判断待ちページの項目に同じ id を付ける");
+});
+
+test("判断待ちのアンカー id は既存の見出し id と衝突しない", () => {
+  const base = createDashboardState();
+  const state = DashboardState.create({
+    ...base,
+    pendingDecisions: [inquiryDecision({ project: "h-projects", inquiryId: "x" })],
+  });
+  const overview = renderOverviewWithState(state);
+  const decisions = renderDecisionsWithState(state);
+
+  assert.equal(overview.split('id="h-projects"').length - 1, 1, "概要の見出し id は1つだけ残す");
+  anchorFor(overview, "/decisions#decision-inquiry:mini:h-projects:x");
+  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:h-projects:x");
+  assert.equal(name, "li", "判断待ちの id は decision- 接頭辞を付ける");
+  assert.equal(decisions.split('id="h-projects"').length - 1, 0, "見出しの id と同じ id を作らない");
 });

@@ -10,7 +10,14 @@ import type {
   Server,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
-import { CONNECTION_STATE, EXECUTION_STATUS, GOAL_STATUS, PENDING_DECISION_TYPE, RUN_STATUS } from "./proto-values";
+import {
+  CONNECTION_STATE,
+  EXECUTION_STATUS,
+  GOAL_STATUS,
+  PENDING_DECISION_TYPE,
+  RUN_STATUS,
+  TASK_STATUS,
+} from "./proto-values";
 
 // 判断待ちの滞留とログの無音の既定値。要件定義 2.7 節の値で、backend が proto の
 // AnomalyThresholds を返さないときだけ使う。値を決める場所はここ1か所に閉じる。
@@ -58,6 +65,11 @@ type OverviewServerView = {
   state: "live" | "idle" | "down";
   stateLabel: string;
   runs: RunView[];
+  runLimit: number;
+  runningRuns: number;
+  inProgressGoals: number;
+  pendingCount: number;
+  waitingTasks: number;
 };
 
 export type OverviewView = {
@@ -67,6 +79,15 @@ export type OverviewView = {
   runs: RunView[];
   thresholds: AnomalyThresholds;
   runningRuns: number;
+  runLimit: number;
+  completedTasks24h: number;
+  failedTaskCount: number;
+  abortedGoalCount: number;
+  silentRunCount: number;
+  unresponsiveServers: Server[];
+  unresponsiveProjects: Project[];
+  partialReadAt?: Date;
+  hasAnomalies: boolean;
   pendingCounts: PendingCounts;
   pendingDecisions: PendingDecisionView[];
 };
@@ -197,6 +218,50 @@ const serverStateLabel = (state: OverviewServerView["state"]): string => {
   }
 };
 
+// 仕上げタスクが pending/running/failed などでまだ終わっていなければ、人のマージ待ちではなく
+// 進行中のゴールとして数える。merge_task_last が未設定または完了なら人の判断待ちになる。
+const MERGE_TASK_IN_PROGRESS: ReadonlySet<number> = new Set([
+  TASK_STATUS.PENDING,
+  TASK_STATUS.RUNNING,
+  TASK_STATUS.FAILED,
+  TASK_STATUS.EXCEEDED,
+  TASK_STATUS.PR_FAILED,
+]);
+
+const isHumanMerge = (goal: Goal): boolean =>
+  goal.status === GOAL_STATUS.AWAITING_MERGE &&
+  !(goal.mergeTaskLast !== undefined && MERGE_TASK_IN_PROGRESS.has(goal.mergeTaskLast));
+
+const isInProgressGoal = (goal: Goal): boolean =>
+  goal.executionStatus !== EXECUTION_STATUS.ABORTED &&
+  goal.status !== GOAL_STATUS.COMPLETED &&
+  !isHumanMerge(goal);
+
+const waitingTaskCount = (goals: readonly Goal[]): number =>
+  goals.reduce((total, goal) => total + (goal.taskCounts?.pending ?? 0), 0);
+
+const failedTaskCount = (goals: readonly Goal[]): number =>
+  goals.reduce(
+    (total, goal) =>
+      total +
+      (goal.taskCounts?.failed ?? 0) +
+      (goal.taskCounts?.exceeded ?? 0) +
+      (goal.taskCounts?.prFailed ?? 0),
+    0,
+  );
+
+const isUnresponsiveProject = (project: Project): boolean =>
+  project.connectionState === CONNECTION_STATE.UNRESPONSIVE;
+
+// 応答のないサーバー・プロジェクトから最後に読めた時刻のうち、最も古いものを集計の基準にする。
+// 1件も読めた時刻が無ければ undefined のままにし、実在しない時刻を補わない。
+const earliestReadAt = (sources: ReadonlyArray<Date | undefined>): Date | undefined => {
+  const times = sources
+    .filter((value): value is Date => value !== undefined)
+    .map((value) => value.getTime());
+  return times.length === 0 ? undefined : new Date(Math.min(...times));
+};
+
 export function buildOverviewView(state: DashboardState, now: Date): OverviewView {
   const thresholds = resolveThresholds(state.thresholds);
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
@@ -210,8 +275,11 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
   const runs = state.runs.map((run) =>
     toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
   );
+  const unresponsiveServers = state.servers.filter((server) => !server.connected);
+  const unresponsiveProjects = state.projects.filter(isUnresponsiveProject);
   const servers = state.servers.map((server) => {
     const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);
+    const serverGoals = state.goals.filter((goal) => goal.serverId === server.serverId);
     const status = serverState(server, serverRuns);
     return {
       server,
@@ -220,16 +288,50 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
       runs: serverRuns.map((run) =>
         toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
       ),
+      runLimit: server.concurrency,
+      runningRuns: serverRuns.filter((run) => run.status === RUN_STATUS.RUNNING).length,
+      inProgressGoals: serverGoals.filter(isInProgressGoal).length,
+      pendingCount: pendingDecisions.filter((decision) => decision.serverId === server.serverId).length,
+      waitingTasks: waitingTaskCount(serverGoals),
     };
   });
+  const runningRuns = state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length;
+  const silentRunCount = runs.filter((run) => run.state === "warn").length;
+  const failedTasks = failedTaskCount(state.goals);
+  const abortedGoals = state.goals.filter(
+    (goal) => goal.executionStatus === EXECUTION_STATUS.ABORTED,
+  ).length;
+  const pendingCounts = summarizePendingDecisions(pendingDecisions);
+  const readAt = state.readAt ?? now;
+  const partialReadAt = earliestReadAt(
+    [...unresponsiveServers, ...unresponsiveProjects].map((item) => item.lastReadAt),
+  );
   return {
-    readAt: state.readAt ?? now,
+    readAt,
     servers,
     projects: state.projects,
     runs,
     thresholds,
-    runningRuns: state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length,
-    pendingCounts: summarizePendingDecisions(pendingDecisions),
+    runningRuns,
+    runLimit: state.servers.reduce((total, server) => total + server.concurrency, 0),
+    completedTasks24h: state.projects.reduce(
+      (total, project) => total + project.completedTasks24h,
+      0,
+    ),
+    failedTaskCount: failedTasks,
+    abortedGoalCount: abortedGoals,
+    silentRunCount,
+    unresponsiveServers,
+    unresponsiveProjects,
+    partialReadAt,
+    hasAnomalies:
+      pendingCounts.total > 0 ||
+      unresponsiveServers.length > 0 ||
+      unresponsiveProjects.length > 0 ||
+      silentRunCount > 0 ||
+      failedTasks > 0 ||
+      abortedGoals > 0,
+    pendingCounts,
     pendingDecisions,
   };
 }

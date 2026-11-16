@@ -153,6 +153,30 @@ export function createDashboardState(): DashboardState {
   });
 }
 
+// 異常が無い状態。全サーバー・全プロジェクトが接続中で、判断待ち・失敗・中止・
+// ログの無音がすべて無い。概要が警告バナーや判断待ちパネルを描画しないことを
+// 固定するための基準状態として使う。
+export function createHealthyDashboardState(): DashboardState {
+  const base = createDashboardState();
+  return DashboardState.create({
+    ...base,
+    servers: base.servers.map((server) => ({ ...server, connected: true })),
+    projects: base.projects.map((project) => ({
+      ...project,
+      connected: true,
+      connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+      lastReadAt: minutesAgo(1),
+    })),
+    goals: base.goals.map((goal) => ({
+      ...goal,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+      taskCounts: { pending: 0, running: 0, completed: 6, failed: 0, exceeded: 0, prFailed: 0 },
+    })),
+    runs: base.runs.map((run) => ({ ...run, logSilent: false, lastLogAt: minutesAgo(1) })),
+    pendingDecisions: [],
+  });
+}
+
 export function createDashboardStateWithProjectConnection(
   project: string,
   connectionState: ConnectionState,

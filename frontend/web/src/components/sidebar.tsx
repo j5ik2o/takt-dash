@@ -1,12 +1,15 @@
 import type { ReactElement } from "react";
 import Link from "next/link";
-import type { Server } from "../proto/taktdash";
+import type { Run, Server } from "../proto/taktdash";
 import { serverHref } from "../state/anchors";
+import { formatClock } from "../state/format";
 
 type SidebarProps = {
   servers: Server[];
   pendingCount: number;
   currentPath?: string;
+  readAt?: Date;
+  runs?: Run[];
 };
 
 const PAGES = [
@@ -22,7 +25,14 @@ const PAGES = [
 export const isCurrentPath = (currentPath: string | undefined, href: string): boolean =>
   currentPath !== undefined && currentPath === href;
 
-export function Sidebar({ servers, pendingCount, currentPath }: SidebarProps): ReactElement {
+export function Sidebar({
+  servers,
+  pendingCount,
+  currentPath,
+  readAt,
+  runs,
+}: SidebarProps): ReactElement {
+  const connectedCount = servers.filter((server) => server.connected).length;
   return (
     <nav className="sidebar" aria-label="画面と集約対象のサーバー">
       <Link className="brand" href="/">
@@ -31,15 +41,19 @@ export function Sidebar({ servers, pendingCount, currentPath }: SidebarProps): R
       <div className="side-block">
         <p className="side-title">サーバー</p>
         <ul className="srv-list">
-          {servers.map((server) => (
-            <li key={server.serverId}>
-              <span className={`dot ${server.connected ? "live" : "down"}`} aria-hidden="true" />
-              <Link className="nm" href={serverHref(server.serverId)}>
-                {server.name}
-              </Link>
-              <span className="srv-state">{server.connected ? "動作中" : "応答なし"}</span>
-            </li>
-          ))}
+          {servers.map((server) => {
+            const runCount = runs?.filter((run) => run.serverId === server.serverId).length ?? 0;
+            return (
+              <li key={server.serverId}>
+                <span className={`dot ${server.connected ? "live" : "down"}`} aria-hidden="true" />
+                <Link className="nm" href={serverHref(server.serverId)}>
+                  {server.name}
+                </Link>
+                <span className="cnt">run {runCount}件</span>
+                <span className="srv-state">{server.connected ? "動作中" : "応答なし"}</span>
+              </li>
+            );
+          })}
         </ul>
       </div>
       <div className="side-block">
@@ -61,6 +75,12 @@ export function Sidebar({ servers, pendingCount, currentPath }: SidebarProps): R
             );
           })}
         </ul>
+      </div>
+      <div className="side-foot">
+        <p>最終読み取り時刻 {readAt ? formatClock(readAt) : "不明"}</p>
+        <p>
+          {servers.length}台中{connectedCount}台から読めています
+        </p>
       </div>
     </nav>
   );

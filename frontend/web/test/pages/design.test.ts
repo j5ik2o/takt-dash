@@ -106,6 +106,9 @@ const requireDeclaration = (css: string, selector: RegExp, property: string, lab
   return value;
 };
 
+const selectorExists = (css: string, selector: RegExp): boolean =>
+  cssRules(css).some((rule) => rule.selectors.split(",").some((token) => selector.test(token.trim())));
+
 const gsBlocks = (html: string): string[] =>
   html.match(/<p\b[^>]*class="[^"]*\bgs\b[^"]*"[^>]*>[\s\S]*?<\/p>/g) ?? [];
 
@@ -304,6 +307,36 @@ test("サイドバーはモックの幅を持ち、タイルとサーバーの�
 
   const scards = requireDeclaration(css, /^\.scards$/, "grid-template-columns", ".scards");
   assert.match(scards, /^repeat\(2,/, "サーバーのカードは広い幅で2列");
+});
+
+test("概要のタイルは3列で、1280px で2列へ折り返さない", async () => {
+  const css = await readCss();
+
+  const tiles = requireDeclaration(css, /^\.tiles$/, "grid-template-columns", ".tiles");
+  assert.match(tiles, /^repeat\(3,/, "実行中 run・判断待ち・24時間完了の3枚を並べる");
+
+  const block = mediaBlockFor(css, 1280);
+  const narrowTiles = block === undefined ? undefined : declarationMatching(block, /^\.tiles$/, "grid-template-columns");
+  assert.doesNotMatch(narrowTiles ?? "", /repeat\(\s*2/, "1280px で3枚のタイルを2列へ折り返さない");
+});
+
+test("概要はタイル・サーバーカード・run 行の余白を詰め、警告と判断待ちパネルと下端の集計の見た目を持つ", async () => {
+  const css = await readCss();
+
+  assert.ok(selectorExists(css, /^\.overview\s+\.tile$/), "概要のタイルの余白を詰める規則がある");
+  assert.ok(selectorExists(css, /^\.overview\s+\.scard$/), "概要のサーバーカードの余白を詰める規則がある");
+  assert.ok(
+    selectorExists(css, /^\.overview\s+\.runs\s+\.run-row$/),
+    "概要の run 行の余白を詰める規則がある",
+  );
+
+  assert.ok(selectorExists(css, /^\.health\.attention$/), "警告バナーの見た目がある");
+  const attention = requireDeclaration(css, /^\.health\.attention$/, "background", ".health.attention");
+  assert.match(attention, /var\(--/, "警告バナーは警告色のトークンを使う");
+  assert.ok(selectorExists(css, /^\.tile\.attention$/), "判断待ちのタイルの注意の見た目がある");
+  assert.ok(selectorExists(css, /^\.callout$/), "判断待ちパネルの見た目がある");
+  assert.ok(selectorExists(css, /^\.sc-foot$/), "サーバーカード下端の集計の見た目がある");
+  assert.ok(selectorExists(css, /^\.side-foot$/), "サイドバー下端の見た目がある");
 });
 
 test("判断待ちは橙の左罫線の容器になり、要約は4列で wide が2列を占める", async () => {

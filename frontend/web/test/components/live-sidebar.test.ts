@@ -33,3 +33,20 @@ test("サイドバーの表示は別のライブ状態のサーバーと件数�
   assert.match(html, /別の Mac mini/);
   assert.doesNotMatch(html, /2件/);
 });
+
+test("サイドバーは最終読み取り時刻・読めた台数・サーバー別の run 件数を表示する", () => {
+  const html = renderSidebar(createDashboardState());
+
+  assert.match(html, /最終読み取り時刻/, "最終読み取り時刻をサイドバーに出す");
+  assert.match(html, /16:30/, "最終読み取り時刻の値を出す");
+  assert.match(html, /2台中1台から読めています/, "読めているサーバーの台数を出す");
+  assert.match(html, /run\s*1件/, "run のあるサーバーの件数を出す");
+  assert.match(html, /run\s*0件/, "run の無いサーバーの件数を出す");
+});
+
+test("最終読み取り時刻が無いときは不明と表示し、例外にしない", () => {
+  const state = createDashboardState();
+  const html = renderSidebar({ ...state, readAt: undefined });
+
+  assert.match(html, /不明/, "最終読み取り時刻が無いときは不明と出す");
+});

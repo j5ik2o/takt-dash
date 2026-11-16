@@ -6,13 +6,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   ConnectionState,
+  ExecutionStatus,
+  GoalStatus,
   InquiryKind,
   PendingDecisionType,
+  TaskStatus,
   type PendingDecision,
 } from "../../src/proto/taktdash.ts";
 import {
   createDashboardState,
   createDashboardStateWithProjectConnection,
+  createHealthyDashboardState,
   createNestedStepDashboardState,
   NOW,
   SILENT_MINUTES,
@@ -305,4 +309,192 @@ test("応答なしのプロジェクトの run は従来どおり最後に読め
 
   assert.equal(run.state, "idle", "応答なしは idle のままにする");
   assert.doesNotMatch(run.note ?? "", /読み取りが遅れています/);
+});
+
+test("概要は実行上限・24時間完了・失敗・中止・無音を導出する", () => {
+  const view = buildOverviewView(createDashboardState(), NOW);
+
+  assert.equal(view.runLimit, 8, "全サーバーの concurrency の合計を実行上限にする");
+  assert.equal(view.completedTasks24h, 4, "全プロジェクトの24時間完了タスクを合計する");
+  assert.equal(view.failedTaskCount, 1, "失敗・上限超過・PR作成失敗を合わせて数える");
+  assert.equal(view.abortedGoalCount, 0, "中止したゴールは無い");
+  assert.equal(view.silentRunCount, 0, "無音の run は無い");
+  assert.equal(view.hasAnomalies, true, "判断待ちなどがあるので異常ありとする");
+});
+
+test("異常が無い状態は hasAnomalies を false にし、失敗・中止・無音を数えない", () => {
+  const view = buildOverviewView(createHealthyDashboardState(), NOW);
+
+  assert.equal(view.hasAnomalies, false, "異常が無ければ false にする");
+  assert.equal(view.silentRunCount, 0);
+  assert.equal(view.failedTaskCount, 0);
+  assert.equal(view.abortedGoalCount, 0);
+});
+
+test("中止したゴールは異常として数える", () => {
+  const base = createHealthyDashboardState();
+  const state = {
+    ...base,
+    goals: base.goals.map((goal, index) =>
+      index === 0 ? { ...goal, executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED } : goal,
+    ),
+  };
+  const view = buildOverviewView(state, NOW);
+
+  assert.equal(view.abortedGoalCount, 1);
+  assert.equal(view.hasAnomalies, true);
+});
+
+test("ログが止まった run は無音として数え、異常ありにする", () => {
+  const base = createHealthyDashboardState();
+  const justOverThreshold = new Date(NOW.getTime() - (SILENT_MINUTES * 60_000 + 1_000));
+  const state = {
+    ...base,
+    runs: base.runs.map((run) => ({ ...run, logSilent: true, lastLogAt: justOverThreshold })),
+  };
+  const view = buildOverviewView(state, NOW);
+
+  assert.equal(view.silentRunCount, 1, "run 行と同じ警告判定で無音を数える");
+  assert.equal(view.hasAnomalies, true);
+});
+
+test("プロジェクトの応答なしだけでも異常として扱い、最後に読めた時刻を最古にする", () => {
+  const base = createHealthyDashboardState();
+  const failedAt = new Date(NOW.getTime() - 21 * 60_000);
+  const state = {
+    ...base,
+    projects: base.projects.map((project) =>
+      project.name === "esa"
+        ? {
+            ...project,
+            connected: false,
+            connectionState: ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
+            lastReadAt: failedAt,
+          }
+        : project,
+    ),
+  };
+  const view = buildOverviewView(state, NOW);
+
+  assert.equal(view.hasAnomalies, true, "プロジェクトの応答なしも異常として扱う");
+  assert.equal(view.partialReadAt?.getTime(), failedAt.getTime(), "応答なしの最後に読めた時刻を使う");
+});
+
+test("runLimit は concurrency が0でも破綻しない", () => {
+  const base = createHealthyDashboardState();
+  const state = {
+    ...base,
+    servers: base.servers.map((server) => ({ ...server, concurrency: 0 })),
+  };
+  const view = buildOverviewView(state, NOW);
+
+  assert.equal(view.runLimit, 0);
+});
+
+test("サーバーごとの下端値は run・進行中ゴール・判断待ち・待機中タスクを数える", () => {
+  const view = buildOverviewView(createDashboardState(), NOW);
+  const mini = view.servers.find((item) => item.server.serverId === "mini");
+  const down = view.servers.find((item) => item.server.serverId === "down");
+  assert.ok(mini, "mini のカードがある");
+  assert.ok(down, "down のカードがある");
+
+  assert.equal(mini.runLimit, 4, "サーバーの concurrency を上限にする");
+  assert.equal(mini.runningRuns, 1, "実行中の run を数える");
+  assert.equal(mini.inProgressGoals, 1, "人のマージ待ちを除いた進行中のゴールを数える");
+  assert.equal(mini.pendingCount, 2, "そのサーバーの判断待ちを数える");
+  assert.equal(mini.waitingTasks, 1, "そのサーバーの待機中のタスクを合計する");
+
+  assert.equal(down.runningRuns, 0);
+  assert.equal(down.pendingCount, 0);
+});
+
+test("応答なしの読み取り時刻が1件も無いときは partialReadAt を捏造しない", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    servers: base.servers.map((server) =>
+      server.serverId === "down" ? { ...server, lastReadAt: undefined } : server,
+    ),
+  };
+  const view = buildOverviewView(state, NOW);
+
+  assert.equal(view.unresponsiveServers.length, 1, "応答なしのサーバーは異常として残す");
+  assert.equal(view.partialReadAt, undefined, "読めた時刻が無ければ now で補わない");
+});
+
+test("未読のプロジェクトは応答なしに含めず、異常として扱わない", () => {
+  const base = createHealthyDashboardState();
+  const state = {
+    ...base,
+    projects: base.projects.map((project) =>
+      project.name === "esa"
+        ? {
+            ...project,
+            connected: false,
+            connectionState: ConnectionState.CONNECTION_STATE_UNSPECIFIED,
+            lastReadAt: undefined,
+          }
+        : project,
+    ),
+  };
+  const view = buildOverviewView(state, NOW);
+
+  assert.equal(view.unresponsiveProjects.length, 0, "未読（UNSPECIFIED）は応答なしに含めない");
+  assert.equal(view.hasAnomalies, false, "未読だけでは異常にしない");
+  assert.equal(view.partialReadAt, undefined, "未読を最後に読めた時刻に使わない");
+});
+
+test("進行中ゴールは完了・中止・人のマージ待ちを除き、仕上げタスクが進行中のマージ待ちを含める", () => {
+  const base = createHealthyDashboardState();
+  const goalBase = base.goals[0]!;
+  const goal = (overrides: Partial<typeof goalBase>) => ({ ...goalBase, ...overrides });
+  const state = {
+    ...base,
+    goals: [
+      goal({
+        goalId: "g-human-merge",
+        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+        mergeTaskLast: undefined,
+      }),
+      goal({
+        goalId: "g-paused",
+        status: GoalStatus.GOAL_STATUS_CREATED,
+        executionStatus: ExecutionStatus.EXECUTION_STATUS_PAUSED,
+      }),
+      goal({ goalId: "g-completed", status: GoalStatus.GOAL_STATUS_COMPLETED }),
+      goal({
+        goalId: "g-aborted",
+        status: GoalStatus.GOAL_STATUS_CREATED,
+        executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED,
+      }),
+      goal({
+        goalId: "g-merge-in-progress",
+        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+        mergeTaskLast: TaskStatus.TASK_STATUS_PENDING,
+      }),
+    ],
+  };
+  const view = buildOverviewView(state, NOW);
+  const mini = view.servers.find((item) => item.server.serverId === "mini");
+
+  assert.ok(mini, "mini のカードがある");
+  assert.equal(mini.inProgressGoals, 2, "一時停止中と仕上げタスク進行中のマージ待ちだけを数える");
+});
+
+test("失敗タスクは失敗・上限超過・PR作成失敗の3分類を合計する", () => {
+  const base = createHealthyDashboardState();
+  const state = {
+    ...base,
+    goals: base.goals.map((goal, index) =>
+      index === 0
+        ? {
+            ...goal,
+            taskCounts: { pending: 0, running: 0, completed: 6, failed: 1, exceeded: 2, prFailed: 3 },
+          }
+        : goal,
+    ),
+  };
+  const view = buildOverviewView(state, NOW);
+
+  assert.equal(view.failedTaskCount, 6, "failed 1 + exceeded 2 + prFailed 3 を合計する");
 });

@@ -16,6 +16,8 @@ export function LiveSidebar(): ReactElement {
       servers={state.servers}
       pendingCount={state.pendingDecisions.length}
       currentPath={pathname ?? undefined}
+      readAt={state.readAt}
+      runs={state.runs}
     />
   );
 }

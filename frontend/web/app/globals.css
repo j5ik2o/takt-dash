@@ -233,7 +233,7 @@ a {
 }
 
 .tiles {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .cards {
@@ -1038,11 +1038,140 @@ pre {
   font-weight: 600;
 }
 
-@media (max-width: 1280px) {
-  .tiles {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+/* 概要（issue #75）: 3タイル・異常バナー・判断待ちパネル・カード下端の集計をコンパクトに並べる。 */
+.overview {
+  gap: 16px;
+}
 
+.overview .tile {
+  padding: 14px 16px;
+}
+
+.overview .scard {
+  padding: 14px 16px;
+}
+
+.overview .runs .run-row {
+  padding: 8px 0;
+}
+
+.health {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px;
+  max-width: 420px;
+  font-size: 14px;
+}
+
+.health p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.health.attention {
+  border-color: var(--orange-line);
+  background: var(--orange-soft);
+  color: var(--orange-d);
+}
+
+.tile.attention {
+  border-color: var(--orange-line);
+  background: var(--orange-soft);
+}
+
+.callout {
+  border: 1px solid var(--orange-line);
+  border-left: 5px solid var(--orange);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 10px 16px;
+}
+
+.callout-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.callout li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 6px 14px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--line2);
+  font-size: 14px;
+}
+
+.callout li:first-child {
+  border-top: none;
+}
+
+.callout li.stale {
+  background: var(--orange-soft);
+}
+
+.callout .proj {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.callout .kind,
+.callout .wait {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.callout .view {
+  color: var(--teal-d);
+}
+
+.callout .view:focus-visible {
+  outline: 2px solid var(--teal-d);
+  outline-offset: 2px;
+}
+
+.stale-note {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--orange-d);
+}
+
+.sc-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line2);
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.sc-foot .cnt {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.srv-list .cnt {
+  font-size: 12px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.side-foot {
+  margin-top: auto;
+  padding: 10px 8px 4px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.side-foot p {
+  margin: 2px 0;
+}
+
+@media (max-width: 1280px) {
   .cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

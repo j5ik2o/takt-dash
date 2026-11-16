@@ -12,6 +12,7 @@ import {
   type DecisionResult,
 } from "../state/decision-actions";
 import { resolveThresholds, sortPendingDecisions, type PendingDecisionView } from "../state/dashboard";
+import { decisionAnchorId } from "../state/anchors";
 import { formatDuration } from "../state/format";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { DecisionActions } from "./decision-actions";
@@ -79,7 +80,11 @@ export function DecisionsContent({ state, now, disconnected }: DecisionsContentP
               const serverName = serverNames.get(decision.serverId) ?? decision.serverId;
               const target = targetLabel(decision);
               return (
-                <li className={`tray-item${decision.stale ? " stale" : ""}`} key={decisionKey(decision)}>
+                <li
+                  id={decisionAnchorId(decisionKey(decision))}
+                  className={`tray-item${decision.stale ? " stale" : ""}`}
+                  key={decisionKey(decision)}
+                >
                   <div className="proj">
                     <span>プロジェクト: {decision.project}</span>
                     <span className="srv">サーバー: {serverName}</span>
@@ -114,7 +119,8 @@ export function DecisionsContent({ state, now, disconnected }: DecisionsContentP
         <div className="foot-notes">
           <p>
             判断待ちは、未回答の問い合わせ、人のマージ待ちのゴール、ゴール登録の承認待ちの合計です。滞留は
-            {thresholds.pendingDecisionStaleMinutes}分を超えたものを示します。
+            {thresholds.pendingDecisionStaleMinutes}分、ログの無音は{thresholds.runLogSilentMinutes}
+            分を超えたものを示します。
           </p>
         </div>
       </section>

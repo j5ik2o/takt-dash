@@ -59,9 +59,9 @@ test("概要は Provider の Context が接続中なら useLiveState 経由で�
   assert.doesNotMatch(html, /backend に接続できません/);
 });
 
-test("概要は Provider の Context が接続中でも最後に読めた状態の表示を残す", () => {
+test("概要は Provider の Context が接続中なら最終読み取り時刻のタイルを持たない", () => {
   const html = renderLive(LiveOverview, connected().state);
-  assert.match(html, /最終読み取り時刻/, "最後に読めた時刻の表示を残す");
+  assert.doesNotMatch(html, /最終読み取り時刻/, "最終読み取り時刻のタイルはサイドバーへ移した");
   assert.match(html, /Mac mini/, "サーバーの表示を残す");
 });
 

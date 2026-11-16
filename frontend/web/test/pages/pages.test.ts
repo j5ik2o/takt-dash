@@ -22,7 +22,7 @@ import { startTaktDashServer } from "../support/grpc-server.ts";
 import { createBackendClient } from "../../src/grpc/client.ts";
 import { buildOverviewView, type OverviewView } from "../../src/state/dashboard.ts";
 import { OverviewContent } from "../../src/components/overview-content.tsx";
-import { ActivityKind, ConnectionState, DashboardState, InquiryKind, PendingDecisionType } from "../../src/proto/taktdash.ts";
+import { ActivityKind, AnomalyThresholds, ConnectionState, DashboardState, InquiryKind, PendingDecisionType } from "../../src/proto/taktdash.ts";
 import OverviewPage from "../../app/page.tsx";
 import ProjectsPage from "../../app/projects/page.tsx";
 import DecisionsPage from "../../app/decisions/page.tsx";
@@ -63,15 +63,25 @@ const elementsByClass = (html: string, className: string): string[] =>
 
 const occurrences = (html: string, needle: string): number => html.split(needle).length - 1;
 
-// 進捗バーの開始タグから閉じタグまでを取り出す。run 行に1つだけ描画される前提で、
-// バー自身の属性と内側の幅指定を、他の要素の一致に紛れずに観測するために使う。
+// 進捗バーの開始タグから閉じタグまでを取り出す。概要の上部には使用率バーも現れるため、
+// run 行の中のバーだけを対象にし、バー自身の属性と内側の幅指定を他の要素の一致に
+// 紛れずに観測する。
 const barMarkup = (html: string): string => {
-  const match = /<div[^>]*class="[^"]*\bbar\b[^"]*"[^>]*>[\s\S]*?<\/div>/.exec(html);
+  const row = /<li class="run-row[^"]*">([\s\S]*?)<\/li>/.exec(html);
+  if (row === null) {
+    assert.fail("run 行が描画されていない");
+  }
+  const match = /<div[^>]*class="[^"]*\bbar\b[^"]*"[^>]*>[\s\S]*?<\/div>/.exec(row[1]!);
   if (match === null) {
     assert.fail("進捗バーが描画されていない");
   }
   return match[0];
 };
+
+// run 行の進捗バー（bar thick）の開始タグを数える。上部のタイルの使用率バー（bar）とは
+// 区別し、位置と総数が無い run 行がバーを捏造しないことを観測する。
+const thickBars = (html: string): string[] =>
+  html.match(/<div[^>]*class="[^"]*\bbar\b[^"]*\bthick\b[^"]*"/g) ?? [];
 
 // 指定したメディアクエリの本体を波括弧の対応で切り出す。
 const mediaBlock = (css: string, query: string): string | undefined => {
@@ -114,7 +124,7 @@ const withServerEnv = async <T>(
   }
 };
 
-test("概要ページは読み取り状態・最終読み取り時刻・プロジェクト・run・判断待ち件数・閾値を描画する", async () => {
+test("概要ページは実行中 run と判断待ちと24時間完了タスクのタイルを描画し、閾値と最終読み取り時刻を出さない", async () => {
   const state = createDashboardState();
   const server = await startTaktDashServer({ overview: state });
   try {
@@ -126,10 +136,11 @@ test("概要ページは読み取り状態・最終読み取り時刻・プロ�
         assert.match(html, /Mac mini/);
         assert.match(html, /corporate-site/);
         assert.match(html, /採用ページのレイアウトを直す/);
+        assert.match(html, /実行中の run/);
         assert.match(html, /判断待ち/);
-        assert.match(html, /240/);
-        assert.match(html, /10/);
-        assert.match(html, /最終/);
+        assert.match(html, /24時間に完了したタスク/);
+        assert.doesNotMatch(html, /異常判定の閾値/, "閾値のタイルを概要から外す");
+        assert.doesNotMatch(html, /最終読み取り時刻/, "最終読み取り時刻はサイドバーへ移す");
       } finally {
         await client.close();
       }
@@ -217,6 +228,27 @@ test("判断待ちページは待ち時間順に描画し、滞留の項目に�
   assert.ok(mergeIndex >= 0 && inquiryIndex >= 0);
   assert.ok(mergeIndex < inquiryIndex, "待ち時間の長いマージ待ちが先に現れる");
   assert.match(html, /滞留/);
+});
+
+test("判断待ちページの注記に滞留240分とログ無音10分の閾値を残す", () => {
+  const html = renderPage(DecisionsPage, { state: createDashboardState(), now: NOW });
+
+  assert.match(html, /240分/, "判断待ちの滞留の閾値を注記に残す");
+  assert.match(html, /10分/, "ログの無音の閾値も注記に残す");
+});
+
+test("判断待ちページの注記は設定された閾値を反映し、既定値に固定しない", () => {
+  const base = createDashboardState();
+  const state = DashboardState.create({
+    ...base,
+    thresholds: AnomalyThresholds.create({ pendingDecisionStaleMinutes: 90, runLogSilentMinutes: 5 }),
+  });
+  const html = renderPage(DecisionsPage, { state, now: NOW });
+
+  assert.match(html, /90分/, "設定された滞留の閾値を注記に出す");
+  assert.match(html, /5分/, "設定されたログ無音の閾値を注記に出す");
+  assert.doesNotMatch(html, /240分/, "既定値の240分に固定しない");
+  assert.doesNotMatch(html, /10分/, "既定値の10分に固定しない");
 });
 
 test("判断待ちページは種別ごとの操作要素を一覧に描画する", () => {
@@ -659,7 +691,7 @@ test("ステップ位置が分からない run 行は進捗バーを出さない
   const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
 
   assert.match(html, /implement/, "ステップ名は出す");
-  assert.equal(elementsByClass(html, "bar").length, 0, "位置と総数が無ければバーを捏造しない");
+  assert.equal(thickBars(html).length, 0, "位置と総数が無ければ run 行のバーを捏造しない");
 });
 
 test("実行中の run の点とバーは動き、prefers-reduced-motion で止まる", async () => {
