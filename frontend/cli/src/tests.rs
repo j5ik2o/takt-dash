@@ -22,8 +22,9 @@ use super::{
   is_connection_failure, parse_arguments, proto, read_config_listen, render_conversation, render_overview,
   resolve_backend_addr, resolve_overview_addr, run_with, AddrError, AddrSources, Answer, ConversationOptions,
   Invocation, OverviewOptions, UsageError, WriteCommand, WriteInvocation, ANSWER_COMMAND, BACKEND_ADDR_ENV,
-  DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, UNTIL_MERGE,
+  DEFAULT_BACKEND_ADDR, EXIT_FAILURE, EXIT_OK, EXIT_USAGE,
 };
+use crate::domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, ServerId};
 
 // proto の列挙値は生成コードの数値をそのまま使う。
 const GOAL_STATUS_AWAITING_MERGE: i32 = v1::GoalStatus::AwaitingMerge as i32;
@@ -542,7 +543,7 @@ fn overview_rendering_distinguishes_operation_request_inquiry() {
     revision:     None,
   }];
 
-  let rendered = render_overview(&state);
+  let rendered = render_overview(&state).expect("有効です");
 
   assert!(
     rendered.contains("問い合わせ（作業の依頼）"),
@@ -575,6 +576,28 @@ fn overview_of_empty_state_renders_empty_markers() {
     "判断待ち: {stdout}"
   );
   assert!(stdout.contains("（なし）"), "空の一覧は空であることが分かる表示にする必要があります: {stdout}");
+}
+
+#[test]
+fn overview_rejects_unknown_run_status_from_backend() {
+  // 未知の run status を既知値や件数へ丸めず、応答の不正として失敗させる。
+  let mut state = sample_overview();
+  state.runs[0].status = 999;
+
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let server = runtime.block_on(start_dummy_server(state));
+
+  let (code, stdout, stderr) = run_cli(&["overview".to_owned()], server.addr);
+  runtime.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_FAILURE, "未知の run status は取得の失敗として終わる必要があります: {stderr}");
+  assert!(stdout.is_empty(), "不正な応答を表示してはいけません: {stdout}");
+  assert!(stderr.contains("不正な値"), "応答が不正であることを示す必要があります: {stderr}");
+  assert!(
+    !stderr.contains("backend に接続できません。"),
+    "backend が応答した不正値を接続不能として表示してはいけません: {stderr}"
+  );
 }
 
 // ----------------------------------------------------------------------------
@@ -859,7 +882,7 @@ fn parse_arguments_accepts_conversation_with_project_and_session() {
   assert_eq!(
     parse_arguments(&args),
     Ok(Invocation::Conversation(ConversationOptions {
-      project: "corporate-site".to_owned(),
+      project: ProjectName::try_from("corporate-site").expect("有効です"),
       session: Some("session-1".to_owned()),
       addr:    Some("127.0.0.1:50052".to_owned()),
       config:  Some(std::path::PathBuf::from("/tmp/a.json")),
@@ -925,10 +948,10 @@ fn parse_arguments_builds_answer_with_text() {
     parse_arguments(&args),
     Ok(Invocation::Write(WriteInvocation {
       command: WriteCommand::Answer {
-        server_id:  "mac-mini".to_owned(),
-        project:    "takt-dash".to_owned(),
-        goal_id:    Some("g-1".to_owned()),
-        inquiry_id: "q-1".to_owned(),
+        server_id:  ServerId::try_from("mac-mini").expect("有効です"),
+        project:    ProjectName::try_from("takt-dash").expect("有効です"),
+        goal_id:    Some(GoalId::try_from("g-1").expect("有効です")),
+        inquiry_id: InquiryId::try_from("q-1").expect("有効です"),
         answer:     Answer::Text("はい".to_owned()),
       },
       addr:    None,
@@ -981,11 +1004,11 @@ fn parse_arguments_builds_merge_with_until() {
     parse_arguments(&args),
     Ok(Invocation::Write(WriteInvocation {
       command: WriteCommand::Merge {
-        server_id: "mac-mini".to_owned(),
-        project:   "takt-dash".to_owned(),
-        goal_id:   "g-1".to_owned(),
-        pr_number: 42,
-        until:     UNTIL_MERGE.to_owned(),
+        server_id: ServerId::try_from("mac-mini").expect("有効です"),
+        project:   ProjectName::try_from("takt-dash").expect("有効です"),
+        goal_id:   GoalId::try_from("g-1").expect("有効です"),
+        pr_number: PullRequestNumber::try_from(42).expect("有効です"),
+        until:     MergeUntil::Merge,
       },
       addr:    None,
       config:  None,
@@ -1242,7 +1265,8 @@ fn cli_end_to_end_from_arguments_to_stdout() {
 
 #[test]
 fn conversation_rendering_marks_empty_conversation() {
-  let rendered = render_conversation(&conversation_page("corporate-site", "session-1", Vec::new(), 0, false));
+  let rendered =
+    render_conversation(&conversation_page("corporate-site", "session-1", Vec::new(), 0, false)).expect("有効です");
 
   assert!(rendered.contains("会話: corporate-site"), "{rendered}");
   assert!(
