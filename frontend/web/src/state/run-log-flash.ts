@@ -1,15 +1,15 @@
 // 新しいログが届いた run 行の発光を決める。
 //
 // SSE で届く lastLogAt の前進だけを「新しいログ」として扱い、初回観測では光らせない。
-import type { Run } from "../proto/taktdash";
+import type { RunInput } from "./dashboard";
 
 export type LogSeen = Readonly<Record<string, number>>;
 
 export const FLASH_MS = 1_000;
 
-const loggedAt = (run: Run): number | undefined => run.lastLogAt?.getTime();
+const loggedAt = (run: RunInput): number | undefined => run.lastLogAt?.getTime();
 
-export function initialLogSeen(runs: readonly Run[]): LogSeen {
+export function initialLogSeen(runs: readonly RunInput[]): LogSeen {
   const seen: Record<string, number> = {};
   for (const run of runs) {
     const value = loggedAt(run);
@@ -22,7 +22,7 @@ export function initialLogSeen(runs: readonly Run[]): LogSeen {
 
 export function nextLogSeen(
   prev: LogSeen,
-  runs: readonly Run[],
+  runs: readonly RunInput[],
 ): { seen: LogSeen; flashed: readonly string[] } {
   const seen: Record<string, number> = {};
   const flashed: string[] = [];

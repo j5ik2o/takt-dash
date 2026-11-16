@@ -32,6 +32,8 @@ import {
   summarizePendingDecisions,
   toRunView,
 } from "../../src/state/dashboard.ts";
+import { DomainPrimitiveError } from "../../src/state/domain-primitives.ts";
+import { decisionKey } from "../../src/state/decision-actions.ts";
 
 test("判断待ちは待ち時間の長い順に並ぶ", () => {
   const sorted = sortPendingDecisions(createDashboardState().pendingDecisions, NOW);
@@ -167,6 +169,23 @@ test("バックエンドが無音と判定した run は閾値直後でも警告
   const mini = overview.servers.find((item) => item.server.serverId === "mini");
   assert.ok(mini, "run の所属サーバーが概要にあります");
   assert.equal(mini.runs[0]?.label, "ログが止まっています", "サーバー別の run 行にも同じ警告を出します");
+});
+
+test("logSilent が偽でも経過時間が閾値を超えた run は警告にする", () => {
+  const state = createDashboardState();
+  const base = state.runs[0]!;
+  const staleLog = new Date(NOW.getTime() - (SILENT_MINUTES * 60_000 + 60_000));
+  const overview = buildOverviewView(
+    { ...state, runs: [{ ...base, logSilent: false, lastLogAt: staleLog }] },
+    NOW,
+  );
+
+  assert.equal(
+    overview.runs[0]?.label,
+    "ログが止まっています",
+    "バックエンドの logSilent が偽でも、経過時間が閾値を超えたら警告にします",
+  );
+  assert.equal(overview.runs[0]?.note, "ログが 11分 出ていません。", "無音の分数を注記に出す");
 });
 
 test("概要の集計は proto の閾値をそのまま表示用に運ぶ", () => {
@@ -552,4 +571,58 @@ test("通常タスクの未着手・実行中は人のマージ待ちの判定�
 
   const withPending = { ...base, taskCounts: { ...base.taskCounts, pending: 1, running: 0 } };
   assert.equal(isHumanMergeWaiting(withPending), true, "通常タスクが未着手でも人のマージ待ちです");
+});
+
+test("proto の閾値は範囲を検証してから表示用の値へ解決する", () => {
+  const resolved = resolveThresholds({ pendingDecisionStaleMinutes: 60, runLogSilentMinutes: 5 });
+  assert.equal(resolved.pendingDecisionStaleMinutes, 60);
+  assert.equal(resolved.runLogSilentMinutes, 5);
+
+  assert.equal(
+    resolveThresholds({ pendingDecisionStaleMinutes: 0, runLogSilentMinutes: 0 }).pendingDecisionStaleMinutes,
+    0,
+  );
+
+  const invalid = [
+    { pendingDecisionStaleMinutes: -1, runLogSilentMinutes: 10 },
+    { pendingDecisionStaleMinutes: 240, runLogSilentMinutes: -1 },
+    { pendingDecisionStaleMinutes: 2_147_483_648, runLogSilentMinutes: 10 },
+  ];
+  for (const thresholds of invalid) {
+    assert.throws(
+      () => resolveThresholds(thresholds),
+      (error) => error instanceof DomainPrimitiveError && error.stage === "size",
+    );
+  }
+});
+
+test("範囲外の閾値を持つ状態から概要を組み立てない", () => {
+  const state = {
+    ...createDashboardState(),
+    thresholds: { pendingDecisionStaleMinutes: -1, runLogSilentMinutes: 10 },
+  };
+  assert.throws(
+    () => buildOverviewView(state, NOW),
+    (error) => error instanceof DomainPrimitiveError && error.stage === "size",
+  );
+});
+
+test("未指定の inquiryId は proto 文字列の境界で空文字へ射影し、識別子を変えない", () => {
+  const merge = { ...createDashboardState().pendingDecisions[1]!, inquiryId: undefined };
+  const [view] = sortPendingDecisions([merge], NOW);
+
+  assert.ok(view, "未指定の inquiryId を持つ判断待ちも並び替えられる");
+  assert.equal(view.inquiryId, "");
+  assert.equal(decisionKey(view), "merge:mini:corporate-site:goal-1");
+});
+
+test("ゴールに属さない run も概要とサーバー別の run 行に表示する", () => {
+  const state = createDashboardState();
+  const withoutGoal = { ...state, runs: [{ ...state.runs[0]!, goalId: undefined }] };
+  const overview = buildOverviewView(withoutGoal, NOW);
+
+  assert.equal(overview.runs[0]?.run.goalId, undefined);
+  const mini = overview.servers.find((item) => item.server.serverId === "mini");
+  assert.equal(mini?.runs[0]?.run.goalId, undefined);
+  assert.equal(mini?.runs[0]?.run.runSlug, "run-aaa");
 });

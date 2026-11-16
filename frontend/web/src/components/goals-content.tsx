@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import type { DashboardState, Goal } from "../proto/taktdash";
+import type { DashboardGoal as Goal, DashboardState } from "../state/restore-state";
 import { executionStatusLabel, goalStatusLabel, isHumanMergeWaiting, taskStatusLabel } from "../state/dashboard";
 import { TASK_STATUS } from "../state/proto-values";
 
