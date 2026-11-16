@@ -33,9 +33,9 @@ const webRoot = fileURLToPath(new URL("../../", import.meta.url));
 const renderPage = (Page: ComponentType<never>, props: unknown): string =>
   renderToStaticMarkup(createElement(Page as ComponentType<never>, props as never) as ReactElement);
 
-// 判断待ちを1件だけ持つ状態を作る。本文と選択肢を表示の検証に必要な値だけ上書きする。
+// 判断待ちを1件だけ持つ状態を作る。本文と選択肢などを表示の検証に必要な値だけ上書きする。
 const stateWithDecision = (
-  overrides: { body: string; options?: string[] },
+  overrides: { body: string; options?: string[]; inquiryId?: string },
 ): DashboardState => {
   const base = createDashboardState();
   return DashboardState.create({
@@ -47,6 +47,7 @@ const stateWithDecision = (
         project: "esa",
         goalId: "goal-2",
         inquiryKind: InquiryKind.INQUIRY_KIND_QUESTION,
+        inquiryId: overrides.inquiryId,
         createdAt: new Date(NOW.getTime() - 30 * 60_000),
         body: overrides.body,
         options: overrides.options ?? [],
@@ -357,6 +358,39 @@ test("判断待ちページは本文中の選択肢の記述を残したまま�
   assert.equal(occurrences(descHtml, "今週"), 1, "本文中に選択肢欄の内容が二重に現れない");
   const items = optsHtml.match(/<li[^>]*>[\s\S]*?<\/li>/g) ?? [];
   assert.equal(items.length, 2, "選択肢欄は本文の記述とは別に各選択肢を並べる");
+});
+
+test("判断待ちページは選択肢から作る文を表示せず、本文の選択肢の節をそのまま表示する", () => {
+  // 本文が選択肢に触れない場合と、本文自身が「選択肢は」で始まる場合の両方で、
+  // 本文は残し、構造化された選択肢から作る文だけを出さないことを確かめる。
+  const bodies = [
+    "候補は (a) 今週、(b) 来週 です。",
+    "選択肢は本文に書きます。候補は (a) 今週、(b) 来週 です。",
+  ];
+  for (const body of bodies) {
+    const html = renderPage(DecisionsPage, {
+      state: stateWithDecision({ body, options: ["今週", "来週"], inquiryId: "inquiry-options-rendered" }),
+      now: NOW,
+    });
+
+    const descBlock = elementsByClass(html, "desc")[0];
+    assert.ok(descBlock !== undefined, "本文ブロックが描画される");
+    const descIndex = html.indexOf(descBlock);
+    const descEnd = html.indexOf("</div>", descIndex);
+    const descHtml = html.slice(descIndex, descEnd);
+    assert.ok(descHtml.includes(body), `本文を切り取らずにそのまま表示する: ${body}`);
+
+    assert.doesNotMatch(
+      html,
+      /選択肢は\s*今週\s*と\s*来週\s*です/,
+      "構造化された選択肢から作る「選択肢は … です。」の文を表示しない",
+    );
+    const between = html.slice(descEnd, html.indexOf('class="wait"'));
+    assert.doesNotMatch(between, /選択肢は/, `本文ブロックの後に生成文を重ねて表示しない: ${body}`);
+
+    assert.match(html, /<button[^>]*>今週<\/button>/, "1つ目の選択肢の回答ボタンを表示する");
+    assert.match(html, /<button[^>]*>来週<\/button>/, "2つ目の選択肢の回答ボタンも表示する");
+  }
 });
 
 test("判断待ちページは見出し・本文・選択肢・待ち時間をそれぞれ別のブロックとして描画する", async () => {
