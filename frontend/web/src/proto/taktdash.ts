@@ -919,6 +919,8 @@ export interface ConversationMessage {
   speaker: ConversationSpeaker;
   /** 本文 */
   text: string;
+  /** 本文に添える注意書き（元記録の文字化けなど） */
+  notice?: string | undefined;
 }
 
 /** 解釈できずスキップした行の理由と件数を表す。 */
@@ -4970,7 +4972,7 @@ export const GetConversationRequest: MessageFns<GetConversationRequest> = {
 };
 
 function createBaseConversationMessage(): ConversationMessage {
-  return { seq: 0, occurredAt: undefined, speaker: 0, text: "" };
+  return { seq: 0, occurredAt: undefined, speaker: 0, text: "", notice: undefined };
 }
 
 export const ConversationMessage: MessageFns<ConversationMessage> = {
@@ -4986,6 +4988,9 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
     }
     if (message.text !== "") {
       writer.uint32(34).string(message.text);
+    }
+    if (message.notice !== undefined) {
+      writer.uint32(42).string(message.notice);
     }
     return writer;
   },
@@ -5035,6 +5040,14 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
             message.text = reader.string();
             continue;
           }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.notice = reader.string();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -5057,6 +5070,7 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
         : undefined,
       speaker: isSet(object.speaker) ? conversationSpeakerFromJSON(object.speaker) : 0,
       text: isSet(object.text) ? globalThis.String(object.text) : "",
+      notice: isSet(object.notice) ? globalThis.String(object.notice) : undefined,
     };
   },
 
@@ -5074,6 +5088,9 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
     if (message.text !== "") {
       obj.text = message.text;
     }
+    if (message.notice !== undefined) {
+      obj.notice = message.notice;
+    }
     return obj;
   },
 
@@ -5086,6 +5103,7 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
     message.occurredAt = object.occurredAt ?? undefined;
     message.speaker = object.speaker ?? 0;
     message.text = object.text ?? "";
+    message.notice = object.notice ?? undefined;
     return message;
   },
 };

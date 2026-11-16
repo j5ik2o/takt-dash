@@ -446,7 +446,7 @@ fn sample_overview() -> DashboardState {
 
 /// 会話の1件を組み立てる。`secs` は UNIX 時刻の秒。
 fn conversation_message(seq: i64, secs: i64, speaker: v1::ConversationSpeaker, text: &str) -> ConversationMessage {
-  ConversationMessage { seq, occurred_at: Some(ts(secs)), speaker: speaker as i32, text: text.to_owned() }
+  ConversationMessage { seq, occurred_at: Some(ts(secs)), speaker: speaker as i32, text: text.to_owned(), notice: None }
 }
 
 /// 会話の1ページを組み立てる。

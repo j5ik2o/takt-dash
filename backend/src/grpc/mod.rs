@@ -352,6 +352,7 @@ fn conversation_response(page: ConversationPage) -> GetConversationResponse {
         occurred_at: Some(timestamp(message.occurred_at)),
         speaker:     conversation_speaker(message.speaker) as i32,
         text:        message.text,
+        notice:      message.notice,
       })
       .collect(),
     next_after_seq:     page.next_after_seq,

@@ -8,7 +8,11 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { GetConversationResponse } from "../../src/proto/taktdash.ts";
-import { createConversationMessages, createConversationResponse } from "../support/fixtures.ts";
+import {
+  createConversationMessages,
+  createConversationResponse,
+  createGarbledConversationMessage,
+} from "../support/fixtures.ts";
 import { formatDateTime } from "../../src/state/format.ts";
 import { restoreConversationResponse, type ConversationPage } from "../../src/state/conversation.ts";
 import { ConversationContent } from "../../src/components/conversation-content.tsx";
@@ -112,4 +116,18 @@ test("会話の表示は送信・返信の操作要素を持たない", () => {
   assert.doesNotMatch(html, /<button/i);
   assert.doesNotMatch(html, /<textarea/i);
   assert.doesNotMatch(html, /送信/);
+});
+
+test("元記録の文字化けの印を本文と一緒に描画する", () => {
+  const garbled = createGarbledConversationMessage();
+  const html = render(restore({ messages: [garbled] }));
+
+  assert.ok(html.includes(garbled.notice!), "印を本文と一緒に描画する");
+  assert.ok(html.includes(garbled.text), "本文は変えずに描画する");
+});
+
+test("印のない発言には文字化けの印を描画しない", () => {
+  const html = render(restore());
+
+  assert.doesNotMatch(html, /元記録で文字化けしています/);
 });

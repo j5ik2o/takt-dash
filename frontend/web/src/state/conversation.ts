@@ -12,6 +12,7 @@ export type ConversationMessageView = {
   occurredAt?: Date;
   speaker: number;
   text: string;
+  notice?: string;
 };
 
 export type ConversationSkippedView = {
@@ -81,6 +82,7 @@ const toMessage = (raw: Record<string, unknown>): ConversationMessageView => ({
   occurredAt: toDate(raw.occurredAt),
   speaker: enumFromWire("ConversationSpeaker", raw.speaker),
   text: String(raw.text ?? ""),
+  notice: typeof raw.notice === "string" ? raw.notice : undefined,
 });
 
 const toSkipped = (raw: Record<string, unknown>): ConversationSkippedView => ({
