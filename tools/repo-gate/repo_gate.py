@@ -72,7 +72,7 @@ MACHINE_GATE_COMMANDS = {
     "test": (
         "bash -c 'if [ ! -d frontend/web/node_modules ]; then "
         'bash -o pipefail -c "npm --prefix frontend/web ci 2>&1 | tail -c 4000" '
-        '|| exit $?; fi; bash -o pipefail -c "make test 2>&1 | tail -c 56000"\''
+        '|| exit $?; fi; bash -o pipefail -c "make test 2>&1 | python3 tools/test-summary/test_summary.py --max-bytes 56000"\''
     ),
     "typecheck": "bash -o pipefail -c 'make typecheck 2>&1 | tail -c 60000'",
     "lint": "bash -o pipefail -c 'make lint 2>&1 | tail -c 60000'",
@@ -80,6 +80,10 @@ MACHINE_GATE_COMMANDS = {
 }
 AISLOP_CHECK_COMMAND = "scripts/aislop-check-bootstrap.mjs check"
 AISLOP_CHECK_INVOCATION = ["node", "scripts/aislop-check-bootstrap.mjs", "check"]
+AISLOP_FAILURE_NOTE = (
+    "|| true・; true・パイプ・後続のコマンドなどでチェックの失敗を潰す記述は、"
+    "実行とみなしません"
+)
 GATE_EXIT_CODE_REFERENCE = re.compile(r"context\.([A-Za-z0-9_]+)\.result\.exit_code")
 GATE_SUCCESS_CONDITION = re.compile(
     r"when\(\s*context\.([A-Za-z0-9_]+)\.result\.exit_code\s*==\s*0\s*\)"
@@ -107,6 +111,8 @@ SHELL_KEYWORDS = {
     "}",
 }
 REDIRECTION = re.compile(r"^\d*[<>]")
+# shell_tokens が演算子のトークンとして切り出す文字。
+SHELL_OPERATOR_CHARS = ";&|\n()"
 
 
 class GateError(Exception):
@@ -485,23 +491,85 @@ def strip_shell_comments(command):
 
 
 def invokes_aislop_check(command):
-    """コマンド文字列が aislop チェックを実際に起動するかを判定する。
+    """コマンド文字列が aislop チェックを起動し、その失敗を呼び出し元へ返すかを判定する。
 
-    先にシェルのコメントを除去してから、&& / || / ; / | / 改行による単純コマンドへの
-    分割を行い、各単純コマンドの先頭が aislop チェックの起動になっているかを調べる。
-    コメントを除去してから分割することで、コメント内の演算子の後ろを独立した単純
-    コマンドとして解釈しない。echo の引数・引用符内の文字列・コメントは単純コマンドの
-    先頭にならないため、表示だけの文字列を実行とみなさない。
+    コメントを除去してクォートを保ったままトークンへ分け、チェックの起動がコマンド
+    全体の最後の単純コマンドになっている場合だけ真を返す。直前はコマンドの先頭・&&・
+    ; ・改行に限り、直後は引数とリダイレクション、末尾の ; と改行に限る。このため、
+    `|| true`・`; true`・次の行のコマンドで終了状態を上書きする形、`| cat` などの
+    パイプ、`&` によるバックグラウンド実行、`!` による否定、`npm ci || check` のように
+    チェックが飛ばされる形は起動とみなさない。シェルの -e などの実行時設定には頼らず、
+    失敗が返ることを記述だけから確かめられる形に限る保守的な判定である。echo の引数・
+    引用符内の文字列・コメントは単純コマンドの先頭にならないため、実行とみなさない。
     """
-    stripped = strip_shell_comments(command)
-    for simple in re.split(r"&&|\|\||[;|\n]", stripped):
-        try:
-            tokens = shlex.split(simple, comments=False)
-        except ValueError:
+    try:
+        tokens = shell_tokens(command)
+    except ValueError:
+        return False
+    width = len(AISLOP_CHECK_INVOCATION)
+    return any(
+        tokens[index : index + width] == AISLOP_CHECK_INVOCATION
+        and starts_command_list_item(tokens[:index])
+        and ends_command_list(tokens[index + width :])
+        for index in range(len(tokens))
+    )
+
+
+def is_shell_operator(token):
+    """トークンがシェルの演算子かを判定する。引用符やエスケープで作られたものは演算子ではない。"""
+    return (
+        bool(token)
+        and not getattr(token, "quoted", False)
+        and all(char in SHELL_OPERATOR_CHARS for char in token)
+    )
+
+
+def starts_command_list_item(preceding):
+    """直前のトークン列が、終了状態をそのまま返す位置で次のコマンドを始めるかを判定する。
+
+    改行だけのトークンを読み飛ばした手前が、先頭・&&・; なら真とする。改行を挟んだ
+    手前が普通の語なら、改行がコマンドの区切りなので真とする。|| と | と & と ( は、
+    `||` の直後の改行（行継続）を含めて偽とする。改行を挟まずに語が続く場合は、
+    その語の引数（echo の引数や ! の否定対象）なので偽とする。
+    """
+    index = len(preceding)
+    while index > 0 and preceding[index - 1].strip("\n") == "":
+        index -= 1
+    if index == 0:
+        return True
+    previous = preceding[index - 1]
+    if is_shell_operator(previous):
+        return previous.strip("\n") in ("&&", ";")
+    return index < len(preceding)
+
+
+def ends_command_list(following):
+    """起動の後ろのトークン列が、引数・リダイレクション・末尾の ; と改行だけかを判定する。"""
+    for index, token in enumerate(following):
+        if not is_shell_operator(token):
             continue
-        if tokens[: len(AISLOP_CHECK_INVOCATION)] == AISLOP_CHECK_INVOCATION:
-            return True
-    return False
+        if token.strip(";\n") == "":
+            return all(rest.strip(";\n") == "" for rest in following[index + 1 :])
+        if token == "&" and is_redirection_ampersand(following, index):
+            continue
+        return False
+    return True
+
+
+def is_redirection_ampersand(tokens, index):
+    """`2>&1` や `&>file` の & を、バックグラウンド実行ではなくリダイレクションと判定する。
+
+    `&` の直後に空白を挟まず `>` が続く場合だけリダイレクションとする。
+    `& > file` は、バックグラウンド実行の後にリダイレクションだけの
+    コマンドが続く形で、チェックの失敗は返らない。
+    """
+    before = tokens[index - 1] if index > 0 else ""
+    after = tokens[index + 1] if index + 1 < len(tokens) else ""
+    if before and not getattr(before, "quoted", False) and REDIRECTION.fullmatch(before):
+        return True
+    if not after.startswith(">"):
+        return False
+    return not getattr(after, "space_before", False)
 
 
 def runs_aislop_gate(step):
@@ -515,24 +583,97 @@ def runs_aislop_gate(step):
     )
 
 
+class ShellToken(str):
+    """シェルのトークン。文字列としての比較はそのまま使える。
+
+    quoted: 引用符の中かバックスラッシュの直後で作られた文字を含む場合に真。
+    演算子に見える文字列でも、引用されたものは演算子ではない。
+    space_before: 直前に空白（スペース・タブ・復帰）があった場合に真。
+    `&>` と `& >` の区別に使う。
+    """
+
+    def __new__(cls, text, *, quoted=False, space_before=False):
+        token = super().__new__(cls, text)
+        token.quoted = quoted
+        token.space_before = space_before
+        return token
+
+
 def shell_tokens(command):
-    """シェルのコマンド文字列を、クォートを保ったままトークンへ分ける。"""
-    lexer = shlex.shlex(
-        strip_shell_comments(command),
-        posix=True,
-        punctuation_chars=";&|\n()",
-    )
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    lexer.whitespace = " \t\r"
-    return list(lexer)
+    """シェルのコマンド文字列を、クォートを保ったままトークンへ分ける。
+
+    各トークンは ShellToken で、引用符やエスケープで作られた文字を含むか
+    （quoted）と、直前に空白があったか（space_before）を保持する。演算子
+    の判定はこの情報を使うため、引用符内の `&&` や `;`、エスケープされた
+    `;` は演算子にならない。`&>` と `& >` も区別できる。閉じていない
+    引用符がある場合は、shlex と同じく ValueError を上げる。
+    """
+    text = strip_shell_comments(command)
+    tokens = []
+    index = 0
+    pending_space = False
+
+    def flush_word(chars, quoted, space_before):
+        if chars or quoted:
+            tokens.append(ShellToken("".join(chars), quoted=quoted, space_before=space_before))
+
+    while index < len(text):
+        char = text[index]
+        if char in " \t\r":
+            pending_space = True
+            index += 1
+            continue
+        if char in SHELL_OPERATOR_CHARS:
+            if char in "&|;":
+                end = index + 1
+                while end < len(text) and text[end] == char:
+                    end += 1
+                tokens.append(ShellToken(text[index:end], space_before=pending_space))
+                index = end
+            else:
+                tokens.append(ShellToken(char, space_before=pending_space))
+                index += 1
+            pending_space = False
+            continue
+        word_space = pending_space
+        pending_space = False
+        chars = []
+        quoted = False
+        while index < len(text):
+            char = text[index]
+            if char in " \t\r" or char in SHELL_OPERATOR_CHARS:
+                break
+            if char == "\\" and index + 1 < len(text):
+                chars.append(text[index + 1])
+                quoted = True
+                index += 2
+                continue
+            if char in ("'", '"'):
+                quote = char
+                quoted = True
+                index += 1
+                while index < len(text) and text[index] != quote:
+                    if quote == '"' and text[index] == "\\" and index + 1 < len(text):
+                        chars.append(text[index + 1])
+                        index += 2
+                        continue
+                    chars.append(text[index])
+                    index += 1
+                if index >= len(text):
+                    raise ValueError("No closing quotation")
+                index += 1
+                continue
+            chars.append(char)
+            index += 1
+        flush_word(chars, quoted, word_space)
+    return tokens
 
 
 def simple_commands(tokens):
     """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。"""
     current = []
     for token in tokens:
-        if token in SHELL_SEPARATORS:
+        if token in SHELL_SEPARATORS and is_shell_operator(token):
             if current:
                 yield current
             current = []
@@ -699,6 +840,17 @@ def check_machine_gate_failure_rules(gate_rules):
             )
 
 
+def check_fix_step_transitions(fix_name, fix_rules, return_to):
+    """修正ステップの遷移先が、戻り先（return_to）か ABORT だけであることを検査する。"""
+    allowed = {return_to, "ABORT"}
+    unexpected = sorted({str(rule.get("next")) for rule in fix_rules if rule.get("next") not in allowed})
+    if unexpected:
+        raise GateError(
+            f"{fix_name} に許可されない遷移先があります: {unexpected!r}。"
+            f"修正ステップの遷移先は {return_to} か ABORT に限ります"
+        )
+
+
 def check_machine_gate_fix_steps(named):
     """各修正ステップが当該検査の出力だけを参照し、machine_gate へ戻るかを検査する。"""
     for name in GATE_TARGETS:
@@ -714,15 +866,7 @@ def check_machine_gate_fix_steps(named):
                 f"ありません: {sorted(references)}"
             )
         fix_rules = rules_of(fix)
-        allowed = {"machine_gate", "ABORT"}
-        unexpected = sorted(
-            {str(rule.get("next")) for rule in fix_rules if rule.get("next") not in allowed}
-        )
-        if unexpected:
-            raise GateError(
-                f"{fix_name} に許可されない遷移先があります: {unexpected!r}。"
-                "修正ステップの遷移先は machine_gate か ABORT に限ります"
-            )
+        check_fix_step_transitions(fix_name, fix_rules, "machine_gate")
         returns = [rule for rule in fix_rules if rule.get("next") == "machine_gate"]
         if len(returns) != 1:
             raise GateError(
@@ -842,38 +986,68 @@ def check_machine_gate_step(named, name, return_to):
 
     成功条件は、そのゲート自身の結果（context:<name>.result.exit_code）を参照することを
     要求する。別ゲートの exit_code を見る条件では、そのゲートが実行されていなくても
-    成功と判定できてしまうため受け付けない。失敗時の修正ステップは return_to へ戻る。
+    成功と判定できてしまうため受け付けない。規則の順序と各規則の遷移先も検査し、
+    失敗時の修正ステップは return_to へ戻る。
     """
-    gate = named[name]
-    gate_rules = rules_of(gate)
+    gate_rules = rules_of(named[name])
     check_gate_rule_references(gate_rules, name)
-    success_reference = f"context.{name}.result.exit_code"
-    succeeds = transition(
-        gate_rules,
-        lambda rule: is_gate_success_condition(rule.get("condition"), name),
-    )
-    if succeeds is None:
-        raise GateError(f"{name} に成功（{success_reference} == 0）の遷移がありません")
-    failure_next = transition(gate_rules, lambda rule: rule.get("condition") == "when(true)")
-    if failure_next is None:
+    succeeds, failure_next = check_gate_rule_order(gate_rules, name)
+    check_gate_fix_step(named, name, failure_next, return_to)
+    return succeeds, failure_next
+
+
+def check_gate_rule_order(gate_rules, name):
+    """ゲートの規則が、成功規則 1 件と最後の when(true) 1 件を持ち、ほかは修正へ進むかを検査する。
+
+    規則は順に評価されるため、成功規則があるだけでは、成功条件以外の規則から COMPLETE
+    などへ進めてしまう。成功規則以外のすべての規則の遷移先を、最後の when(true) と同じ
+    修正ステップに限る。戻り値は (成功規則の遷移先, 修正ステップ名)。
+    """
+    successes = [rule for rule in gate_rules if is_gate_success_condition(rule.get("condition"), name)]
+    if not successes:
+        raise GateError(f"{name} に成功（context.{name}.result.exit_code == 0）の遷移がありません")
+    if len(successes) != 1:
+        raise GateError(f"{name} の成功規則が 1 つだけではありません: {len(successes)}")
+    fallbacks = [index for index, rule in enumerate(gate_rules) if rule.get("condition") == "when(true)"]
+    if not fallbacks:
         raise GateError(f"{name} に失敗時の遷移（when(true)）がありません")
+    if fallbacks != [len(gate_rules) - 1]:
+        raise GateError(f"{name} の when(true) が規則列の最後に 1 つだけではありません")
+    failure_next = gate_rules[-1].get("next")
     if failure_next == "ABORT":
         raise GateError(
             f"{name} の失敗が修正ステップではなく ABORT へ遷移しています。"
             f"失敗時は修正ステップ（例: fix_{name}）へ遷移してください"
         )
+    for rule in gate_rules:
+        if rule is successes[0]:
+            continue
+        if rule.get("next") == "COMPLETE":
+            raise GateError(
+                f"{name} の成功条件以外の規則が COMPLETE へ遷移しています: {rule.get('condition')!r}"
+            )
+        if rule.get("next") != failure_next:
+            raise GateError(
+                f"{name} の成功条件以外の規則の遷移先が修正ステップ {failure_next} ではありません: "
+                f"{rule.get('condition')!r} -> {rule.get('next')!r}"
+            )
+    return successes[0].get("next"), failure_next
 
-    fix = named.get(failure_next)
+
+def check_gate_fix_step(named, name, fix_name, return_to):
+    """ゲートの修正ステップが、ゲートの出力を参照し、return_to か ABORT へだけ進むかを検査する。"""
+    fix = named.get(fix_name)
     if fix is None:
-        raise GateError(f"{name} の失敗時の遷移先 {failure_next!r} のステップがありません")
+        raise GateError(f"{name} の失敗時の遷移先 {fix_name!r} のステップがありません")
     text = instruction_text(fix)
     if f"context:{name}.result.stdout" not in text and (
         f"context:{name}.result.stderr" not in text
     ):
-        raise GateError(f"{failure_next} の instruction に {name} の出力の参照がありません")
-    if transition(rules_of(fix), lambda rule: rule.get("next") == return_to) != return_to:
-        raise GateError(f"{failure_next} から {return_to} へ戻る遷移がありません")
-    return succeeds, failure_next
+        raise GateError(f"{fix_name} の instruction に {name} の出力の参照がありません")
+    fix_rules = rules_of(fix)
+    check_fix_step_transitions(fix_name, fix_rules, return_to)
+    if not any(rule.get("next") == return_to for rule in fix_rules):
+        raise GateError(f"{fix_name} から {return_to} へ戻る遷移がありません")
 
 
 def publish_step(steps):
@@ -990,7 +1164,10 @@ def check_workflow_machine_gate(root):
 
     aislop_steps = [step for step in steps if isinstance(step, dict) and runs_aislop_gate(step)]
     if not aislop_steps:
-        raise GateError("aislop-gate を実行する mode: system のステップがありません")
+        raise GateError(
+            "aislop-gate を実行する mode: system のステップがありません"
+            f"（{AISLOP_FAILURE_NOTE}）"
+        )
     aislop_name = aislop_steps[0]["name"]
 
     publishers = publish_candidates(steps)
@@ -1095,7 +1272,10 @@ def check_ci(root):
         if not has_node_action or not node_versions:
             problems.append("Node をセットアップしていません")
         if not aislop_called:
-            problems.append(f"aislop のゲート（node {AISLOP_CHECK_COMMAND}）を呼んでいません")
+            problems.append(
+                f"aislop のゲート（node {AISLOP_CHECK_COMMAND}）を呼んでいません"
+                f"（{AISLOP_FAILURE_NOTE}）"
+            )
         elif aislop_misordered_jobs:
             problems.append("aislop のゲートをチェックアウトより前に呼んでいます")
         found.append({"file": str(path.relative_to(root)), "problems": problems})

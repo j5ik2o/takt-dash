@@ -1,4 +1,6 @@
-.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-prod e2e-skip-only-check
+.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-prod e2e-skip-only-check prod-check
+
+BASE_URL ?= http://127.0.0.1:3000
 
 fmt:
 	cargo +nightly fmt --all -- --check
@@ -10,6 +12,7 @@ test:
 	cargo test --workspace
 	npm --prefix frontend/web run test
 	python3 tools/repo-gate/repo_gate_test.py
+	python3 tools/test-summary/test_summary_test.py
 
 typecheck:
 	npm --prefix frontend/web run typecheck
@@ -24,8 +27,13 @@ proto-gen:
 	npm --prefix frontend/web run proto:generate
 
 proto-check:
-	$(MAKE) proto-gen
-	git diff --exit-code -- frontend/web/src/proto
+	@set -e; \
+	tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$${tmp}"' EXIT; \
+	mkdir -p "$${tmp}/proto"; \
+	if [ -d frontend/web/src/proto ]; then cp -R frontend/web/src/proto/. "$${tmp}/proto/"; fi; \
+	$(MAKE) proto-gen; \
+	diff -r "$${tmp}/proto" frontend/web/src/proto
 
 coverage:
 	@echo "== backend (cargo-llvm-cov) =="
@@ -69,3 +77,10 @@ e2e-prod:
 	test -d e2e/node_modules || npm --prefix e2e ci
 	$(MAKE) e2e-skip-only-check
 	npm --prefix e2e run test:prod
+
+# 終了コードで判定するジョブは make を経由しないこと。GNU make はレシピの
+# 失敗を一律に 2 へ変えるため、prod_check.py の 1（不合格）と 2（確認
+# できず）を区別できない。ジョブからは python3 tools/prod-check/prod_check.py
+# を直接実行する。
+prod-check:
+	python3 tools/prod-check/prod_check.py --base-url $(BASE_URL) $(if $(WITH_E2E),--with-e2e,)
