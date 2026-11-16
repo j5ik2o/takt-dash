@@ -9,7 +9,8 @@ import { buildMockState, PROJECT_ABOUT, PROJECT_NAME, SERVER_ID, SERVER_NAME } f
 // リポジトリのルートは e2e/support から2階層上。ビルド済み成果物と実行ファイルをここから解決する。
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const BACKEND_BIN = path.join(REPO_ROOT, "target", "debug", "takt-dash-backend");
-const MOCK_SCRIPT = path.join(REPO_ROOT, "backend", "tests", "mock_mcp_server.mjs");
+const MOCK_SERVER_SCRIPT = path.join(REPO_ROOT, "backend", "tests", "mock_mcp_server.mjs");
+const MOCK_PROXY_SCRIPT = path.join(REPO_ROOT, "e2e", "support", "mock-proxy.mjs");
 const WEB_DIR = path.join(REPO_ROOT, "frontend", "web");
 const NEXT_BIN = path.join(WEB_DIR, "node_modules", ".bin", "next");
 
@@ -23,6 +24,7 @@ export type Stack = {
   projectDir: string;
   readCalls: () => Promise<ToolCall[]>;
   updateState: (mutate: (state: Record<string, unknown>) => Record<string, unknown>) => Promise<void>;
+  setMockDelay: (ms: number) => Promise<void>;
   stopMock: () => Promise<void>;
   stopBackend: () => Promise<void>;
   stop: () => Promise<void>;
@@ -231,6 +233,7 @@ type StackConfigInput = {
   statePath: string;
   callsPath: string;
   mockPidPath: string;
+  delayPath: string;
 };
 
 const buildConfig = (input: StackConfigInput): Record<string, unknown> => ({
@@ -238,7 +241,11 @@ const buildConfig = (input: StackConfigInput): Record<string, unknown> => ({
     [SERVER_ID]: {
       command: "node",
       args: [
-        MOCK_SCRIPT,
+        MOCK_PROXY_SCRIPT,
+        "--delay-file",
+        input.delayPath,
+        "--",
+        MOCK_SERVER_SCRIPT,
         "--state",
         input.statePath,
         "--calls",
@@ -268,6 +275,7 @@ export async function startStack(): Promise<Stack> {
   const sqlitePath = path.join(tempDir, "db.sqlite");
   const callsPath = path.join(tempDir, "calls.jsonl");
   const mockPidPath = path.join(tempDir, "mock.pid");
+  const delayPath = path.join(tempDir, "mock-delay.json");
   const backendLog = path.join(tempDir, "backend.log");
   const webLog = path.join(tempDir, "web.log");
   const homeDir = path.join(tempDir, "home");
@@ -325,21 +333,31 @@ export async function startStack(): Promise<Stack> {
     return calls;
   };
 
-  // 状態ファイルはモックが毎回 JSON.parse するため、同じディレクトリの一時ファイルへ書いて
-  // rename し、途中状態の JSON を読ませない。
-  const updateState = async (
-    mutate: (state: Record<string, unknown>) => Record<string, unknown>,
-  ): Promise<void> => {
-    const current = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
-    const tempPath = path.join(path.dirname(statePath), `state.${process.pid}.${tempCounter}.tmp`);
+  // 状態ファイルと遅延ファイルは読み手が毎回 JSON.parse するため、同じディレクトリの
+  // 一時ファイルへ書いて rename し、途中状態の JSON を読ませない。
+  const writeFileAtomically = async (targetPath: string, content: string, prefix: string): Promise<void> => {
+    const tempPath = path.join(path.dirname(targetPath), `${prefix}.${process.pid}.${tempCounter}.tmp`);
     tempCounter += 1;
-    await writeFile(tempPath, JSON.stringify(mutate(current)), "utf8");
+    await writeFile(tempPath, content, "utf8");
     try {
-      await rename(tempPath, statePath);
+      await rename(tempPath, targetPath);
     } catch (error) {
       await rm(tempPath, { force: true });
       throw error;
     }
+  };
+
+  const updateState = async (
+    mutate: (state: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<void> => {
+    const current = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    await writeFileAtomically(statePath, JSON.stringify(mutate(current)), "state");
+  };
+
+  // ラッパーは転送する行ごとに遅延ファイルを読むため、モックを起動し直さずに量を変えられる。
+  const setMockDelay = async (ms: number): Promise<void> => {
+    const stdoutDelayMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
+    await writeFileAtomically(delayPath, JSON.stringify({ stdoutDelayMs }), "mock-delay");
   };
 
   const cleanup = async (): Promise<void> => {
@@ -374,12 +392,14 @@ export async function startStack(): Promise<Stack> {
 
   try {
     await writeFile(statePath, JSON.stringify(buildMockState(new Date())), "utf8");
+    // backend がモックを起動する前に遅延 0（透過）を用意し、ラッパーが初回から同じ契約で読めるようにする。
+    await writeFile(delayPath, JSON.stringify({ stdoutDelayMs: 0 }), "utf8");
     await mkdir(homeDir, { recursive: true });
     const backendPort = await freePort();
     backendAddress = `127.0.0.1:${backendPort}`;
     await writeFile(
       configPath,
-      JSON.stringify(buildConfig({ backendAddress, projectDir, statePath, callsPath, mockPidPath })),
+      JSON.stringify(buildConfig({ backendAddress, projectDir, statePath, callsPath, mockPidPath, delayPath })),
       "utf8",
     );
     const webPort = await freePort();
@@ -442,6 +462,7 @@ export async function startStack(): Promise<Stack> {
     projectDir,
     readCalls,
     updateState,
+    setMockDelay,
     stopMock: stopMockProcess,
     stopBackend: stopBackendProcess,
     stop,
