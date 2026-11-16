@@ -2,14 +2,16 @@ import type {
   AnomalyThresholds,
   DashboardState,
   ExecutionStatus,
+  Goal,
   GoalStatus,
   PendingDecision,
   Project,
   Run,
   Server,
+  TaskStatus,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
-import { EXECUTION_STATUS, GOAL_STATUS, PENDING_DECISION_TYPE, RUN_STATUS } from "./proto-values";
+import { EXECUTION_STATUS, GOAL_STATUS, PENDING_DECISION_TYPE, RUN_STATUS, TASK_STATUS } from "./proto-values";
 
 // 判断待ちの滞留とログの無音の既定値。要件定義 2.7 節の値で、backend が proto の
 // AnomalyThresholds を返さないときだけ使う。値を決める場所はここ1か所に閉じる。
@@ -197,3 +199,38 @@ export const executionStatusLabel = (status: ExecutionStatus): string => {
       return "不明";
   }
 };
+
+export const taskStatusLabel = (status: TaskStatus): string => {
+  switch (status) {
+    case TASK_STATUS.PENDING:
+      return "未着手";
+    case TASK_STATUS.RUNNING:
+      return "実行中";
+    case TASK_STATUS.COMPLETED:
+      return "完了";
+    case TASK_STATUS.FAILED:
+      return "失敗";
+    case TASK_STATUS.EXCEEDED:
+      return "上限超過";
+    case TASK_STATUS.PR_FAILED:
+      return "PR 失敗";
+    default:
+      return "不明";
+  }
+};
+
+// 仕上げタスクの末尾状態だけで人のマージ待ちかどうかを判定する。通常タスクの pending/running は
+// 判定に影響しない。awaiting_merge で、末尾が pending/running/failed/exceeded/pr_failed で
+// なければ人のマージ待ちになる。
+export function isHumanMergeWaiting(goal: Goal): boolean {
+  if (goal.status !== GOAL_STATUS.AWAITING_MERGE) {
+    return false;
+  }
+  return (
+    goal.mergeTaskLast !== TASK_STATUS.PENDING &&
+    goal.mergeTaskLast !== TASK_STATUS.RUNNING &&
+    goal.mergeTaskLast !== TASK_STATUS.FAILED &&
+    goal.mergeTaskLast !== TASK_STATUS.EXCEEDED &&
+    goal.mergeTaskLast !== TASK_STATUS.PR_FAILED
+  );
+}
