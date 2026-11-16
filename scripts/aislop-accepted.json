@@ -3,17 +3,5 @@
   "missingToolsAllowed": {
     "ruff": "このリポジトリの Python は tools/ 配下の補助スクリプトだけで、ruff を導入していない。format と lint の Python 側は未検査になる。"
   },
-  "accepted": [
-    {
-      "reason": "tools/repo-gate/repo_gate.py の complexity/file-too-large 指摘は、分割・改修を別作業へ切り出すまでの一時的な受け入れとする。解消は issue #104（https://github.com/j5ik2o/takt-dash/issues/104）で追跡する。受け入れ時点の実測は tools/repo-gate/repo_gate.py 757 行（上限 400 行）である。",
-      "findings": [
-        {
-          "engine": "code-quality",
-          "rule": "complexity/file-too-large",
-          "file": "tools/repo-gate/repo_gate.py",
-          "message": "File too large (limit: 400, flagged above 441 lines)"
-        }
-      ]
-    }
-  ]
+  "accepted": []
 }
