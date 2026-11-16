@@ -301,8 +301,8 @@ impl StateStore {
     self.is_log_silent_at(run.last_log_at, now)
   }
 
-  /// 最後のログの時刻が分からない場合を「無音」と判定しない無音判定。takt_get_run の応答に
-  /// 最後のログの時刻が無い run の詳細取得で使います。
+  /// 最後のログの時刻が分からない場合を「無音」と判定しない無音判定。最後のログの時刻が
+  /// 無い run の詳細取得で使います。
   pub fn is_log_silent_at(&self, last_log_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
     is_log_silent_at(last_log_at, now, inner.thresholds.run_log_silent_minutes.get())

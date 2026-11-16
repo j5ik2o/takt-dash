@@ -486,6 +486,94 @@ fn reads_meta_fields() {
 }
 
 #[test]
+fn reads_meta_workflow_and_start_time() {
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-meta-workflow");
+  fs::write(
+    run_dir.join("meta.json"),
+    r#"{"workflow":"development-core","startTime":"2026-11-16T00:30:00Z","status":"running","currentStep":"implement"}"#,
+  )
+  .expect("meta.json を書けます");
+
+  let meta = expect_meta_found(fixture.reader().read_meta(&run_dir));
+
+  assert_eq!(meta.workflow.as_deref(), Some("development-core"));
+  assert_eq!(meta.start_time.as_deref(), Some("2026-11-16T00:30:00Z"));
+}
+
+#[test]
+fn reads_meta_without_workflow_and_start_time_as_none() {
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-meta-minimal");
+  fixture.write_meta(&run_dir);
+
+  let meta = expect_meta_found(fixture.reader().read_meta(&run_dir));
+
+  assert_eq!(meta.workflow, None);
+  assert_eq!(meta.start_time, None);
+}
+
+#[test]
+fn lists_regular_report_files_recursively_in_relative_path_order() {
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-reports");
+  let reports = run_dir.join("reports");
+  fs::create_dir_all(reports.join("subworkflows").join("review")).expect("レポートの置き場を作れます");
+  fs::write(reports.join("plan.md"), "0123456789").expect("レポートを書けます");
+  fs::write(reports.join("subworkflows").join("review").join("ai.md"), "abc").expect("レポートを書けます");
+  fs::write(reports.join("architecture.md"), "").expect("レポートを書けます");
+  let outside = fixture.temp_root().join("outside.md");
+  fs::write(&outside, "外のファイル").expect("外のファイルを書けます");
+  symlink(&outside, reports.join("linked.md")).expect("シンボリックリンクを作れます");
+
+  let listed: Vec<(String, u64)> =
+    fixture.reader().list_reports(&run_dir).into_iter().map(|report| (report.filename, report.size_bytes)).collect();
+
+  assert_eq!(listed, vec![
+    ("architecture.md".to_owned(), 0),
+    ("plan.md".to_owned(), 10),
+    ("subworkflows/review/ai.md".to_owned(), 3),
+  ]);
+}
+
+#[test]
+fn lists_only_markdown_reports_including_those_under_hidden_directories() {
+  // takt の summary と同じく、名前が .md で終わる通常ファイルだけを一覧に載せる。隠しディレクトリの
+  // 下の .md も載せ、takt が置く index.json や .md 以外のファイルは載せない。
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-markdown-reports");
+  let reports = run_dir.join("reports");
+  let versions = reports.join(".takt-report-internal").join("executions").join("versions").join("v1");
+  fs::create_dir_all(&versions).expect("レポートの置き場を作れます");
+  fs::write(reports.join("plan.md"), "plan").expect("レポートを書けます");
+  fs::write(versions.join("review-resolution.md"), "review").expect("レポートを書けます");
+  fs::write(reports.join(".takt-report-internal").join("executions").join("index.json"), "{}")
+    .expect("JSON を書けます");
+  fs::write(reports.join("notes.txt"), "メモ").expect("テキストを書けます");
+
+  let listed: Vec<String> = fixture.reader().list_reports(&run_dir).into_iter().map(|report| report.filename).collect();
+
+  assert_eq!(listed, vec![
+    ".takt-report-internal/executions/versions/v1/review-resolution.md".to_owned(),
+    "plan.md".to_owned(),
+  ]);
+}
+
+#[test]
+fn lists_no_reports_when_the_reports_directory_is_missing_or_points_outside() {
+  let fixture = Fixture::new();
+  let without = fixture.create_run(&fixture.project_cwd, "run-no-reports");
+  let linked = fixture.create_run(&fixture.project_cwd, "run-linked-reports");
+  let outside = fixture.temp_root().join("outside-reports");
+  fs::create_dir_all(&outside).expect("外のディレクトリを作れます");
+  fs::write(outside.join("secret.md"), "外").expect("外のファイルを書けます");
+  symlink(&outside, linked.join("reports")).expect("シンボリックリンクを作れます");
+
+  assert!(fixture.reader().list_reports(&without).is_empty(), "reports が無ければ空です");
+  assert!(fixture.reader().list_reports(&linked).is_empty(), "run の外を指す reports は読みません");
+}
+
+#[test]
 fn reads_meta_without_phase_as_none() {
   let fixture = Fixture::new();
   let run_dir = fixture.create_run(&fixture.project_cwd, "run-meta-nophase");

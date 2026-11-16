@@ -1,9 +1,9 @@
 //! `.takt` 配下の run を保存場所から直接読む。
 //!
 //! `.takt/tasks.yaml` の対応表から run のディレクトリを解決し、`meta.json` と
-//! 本体ログ（`logs/*.jsonl`）を読み取ります。run の識別子からパスを組み立てず、
-//! 解決したパスが worktree の置き場かプロジェクトの `.takt/runs` の下にあることを
-//! 確認してから読みます。
+//! 本体ログ（`logs/*.jsonl`）とレポートの一覧（`reports/`）を読み取ります。
+//! run の識別子からパスを組み立てず、解決したパスが worktree の置き場か
+//! プロジェクトの `.takt/runs` の下にあることを確認してから読みます。
 //!
 //! 本体ログは最後の改行までを追記読みし、読んだ位置を reader の中だけで保持します。
 //! プロンプト本文（`systemPrompt` などの項目）は結果へ含めず、残す文字列は長さの上限で
@@ -38,6 +38,9 @@ const META_FILE: &str = "meta.json";
 const LOGS_DIRECTORY: &str = "logs";
 const BODY_LOG_EXTENSION: &str = "jsonl";
 const PHASE1_DIRECTORY: &str = "phase1-execution";
+const REPORTS_DIRECTORY: &str = "reports";
+/// takt の summary が一覧に載せるレポートの名前の接尾辞（takt の `isMarkdownReport` と同じ判定）。
+const REPORT_FILE_SUFFIX: &str = ".md";
 const MAX_SUMMARY_CHARS: usize = 512;
 const PROMPT_FIELDS: [&str; 4] = ["systemPrompt", "userInstruction", "instruction", "content"];
 
@@ -59,6 +62,8 @@ pub enum RunLocation {
 /// `meta.json` から読む run の状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunMeta {
+  pub workflow:          Option<String>,
+  pub start_time:        Option<String>,
   pub status:            Option<String>,
   pub current_step:      Option<String>,
   pub current_iteration: Option<i64>,
@@ -83,6 +88,14 @@ pub struct BodyLogRead {
   pub skipped: usize,
   /// 本体ログの置き場が残っていない。
   pub missing: bool,
+}
+
+/// run の `reports/` の下にある1件のレポート。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportFile {
+  /// `reports/` からの `/` 区切りの相対パス。
+  pub filename:   String,
+  pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,6 +171,8 @@ impl RunLogReader {
       | Err(error) => return MetaRead::Unreadable(format!("meta.json を解釈できません: {error}")),
     };
     MetaRead::Found(RunMeta {
+      workflow:          raw.workflow,
+      start_time:        raw.start_time,
       status:            raw.status,
       current_step:      raw.current_step,
       current_iteration: raw.current_iteration,
@@ -255,6 +270,18 @@ impl RunLogReader {
     latest
   }
 
+  /// `reports/` の下にある、名前が `.md` で終わる通常ファイルを、相対パスの昇順で返す。
+  /// シンボリックリンクはたどらない。
+  pub fn list_reports(&self, run_dir: &Path) -> Vec<ReportFile> {
+    let Some(reports_dir) = contained_dir(run_dir, Path::new(REPORTS_DIRECTORY)) else {
+      return Vec::new();
+    };
+    let mut reports = Vec::new();
+    collect_reports(&reports_dir, "", &mut reports);
+    reports.sort_by(|left, right| left.filename.cmp(&right.filename));
+    reports
+  }
+
   fn project_runs_root(&self) -> PathBuf {
     self.project_cwd.join(".takt").join("runs")
   }
@@ -299,6 +326,9 @@ fn has_run_data(run_dir: &Path) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct RawMeta {
+  workflow:          Option<String>,
+  #[serde(rename = "startTime")]
+  start_time:        Option<String>,
   status:            Option<String>,
   #[serde(rename = "currentStep")]
   current_step:      Option<String>,
@@ -430,6 +460,28 @@ fn body_log_files(directory: &Path) -> Vec<PathBuf> {
   let mut files = regular_files(directory);
   files.retain(|path| path.extension().and_then(|extension| extension.to_str()) == Some(BODY_LOG_EXTENSION));
   files
+}
+
+fn collect_reports(directory: &Path, prefix: &str, reports: &mut Vec<ReportFile>) {
+  let Ok(entries) = fs::read_dir(directory) else {
+    return;
+  };
+  for entry in entries.flatten() {
+    let Ok(file_type) = entry.file_type() else {
+      continue;
+    };
+    let name = entry.file_name().to_string_lossy().into_owned();
+    let is_report = name.ends_with(REPORT_FILE_SUFFIX);
+    let relative = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+    if file_type.is_dir() {
+      collect_reports(&entry.path(), &relative, reports);
+    } else if file_type.is_file() && is_report {
+      let Ok(metadata) = entry.metadata() else {
+        continue;
+      };
+      reports.push(ReportFile { filename: relative, size_bytes: metadata.len() });
+    }
+  }
 }
 
 fn regular_files(directory: &Path) -> Vec<PathBuf> {
