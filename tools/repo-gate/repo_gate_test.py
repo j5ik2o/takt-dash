@@ -204,34 +204,9 @@ steps:
         timeout_ms: 1800000
     rules:
       - condition: when(context.machine_gate.result.exit_code == 0)
-        next: create_pr
-      - condition: when(true)
-        next: fix_machine_gate
-  - name: create_pr
-    description: コミット・push・PR 作成・Status 更新を段階実行する
-    mode: system
-    system_inputs:
-      - type: command
-        as: commit
-        command: |
-          python3 tools/project-status/publish.py commit
-      - type: command
-        as: push
-        command: |
-          python3 tools/project-status/publish.py push
-      - type: command
-        as: pr
-        command: |
-          python3 tools/project-status/publish.py pr
-      - type: command
-        as: status
-        command: |
-          python3 tools/project-status/publish.py status --status "In Review"
-    rules:
-      - condition: when(context.create_pr.commit.exit_code == 0 && context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)
         next: aislop_gate
       - condition: when(true)
-        next: fix_publish
+        next: fix_machine_gate
   - name: aislop_gate
     description: aislop で警告以上の指摘を検査する
     mode: system
@@ -273,6 +248,36 @@ steps:
         next: machine_gate
       - condition: 修正できない
         next: ABORT
+"""
+
+# 公開ステップを置く場合の形。置くかどうかは任意で、置く場合は公開の段階・成功条件・
+# 失敗時の修正が検査される。
+PUBLISH_STEPS = """\
+  - name: create_pr
+    description: コミット・push・PR 作成・Status 更新を段階実行する
+    mode: system
+    system_inputs:
+      - type: command
+        as: commit
+        command: |
+          python3 tools/project-status/publish.py commit
+      - type: command
+        as: push
+        command: |
+          python3 tools/project-status/publish.py push
+      - type: command
+        as: pr
+        command: |
+          python3 tools/project-status/publish.py pr
+      - type: command
+        as: status
+        command: |
+          python3 tools/project-status/publish.py status --status "In Review"
+    rules:
+      - condition: when(context.create_pr.commit.exit_code == 0 && context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)
+        next: aislop_gate
+      - condition: when(true)
+        next: fix_publish
   - name: fix_publish
     description: 公開の失敗を修正する
     capabilities: edit
@@ -291,6 +296,11 @@ steps:
       - condition: コードを修正する
         next: machine_gate
 """
+
+PUBLISH_WORKFLOW = WORKFLOW.replace(
+    "        next: aislop_gate\n      - condition: when(true)\n        next: fix_machine_gate",
+    "        next: create_pr\n      - condition: when(true)\n        next: fix_machine_gate",
+) + PUBLISH_STEPS
 
 GITIGNORE = """\
 /target
@@ -558,15 +568,22 @@ def test_workflow_gate_wiring() -> None:
             WORKFLOW.replace("      - condition: COMPLETE\n        next: machine_gate", "      - condition: COMPLETE\n        next: COMPLETE"),
             "develop の COMPLETE",
         ),
-        "機械ゲートの成功が公開へ遷移しない": (
+        "機械ゲートの成功が aislop へ遷移しない": (
             WORKFLOW.replace(
+                "next: aislop_gate\n      - condition: when(true)\n        next: fix_machine_gate",
+                "next: COMPLETE\n      - condition: when(true)\n        next: fix_machine_gate",
+            ),
+            "aislop_gate",
+        ),
+        "公開ステップを置く場合に機械ゲートの成功が公開へ遷移しない": (
+            PUBLISH_WORKFLOW.replace(
                 "next: create_pr\n      - condition: when(true)\n        next: fix_machine_gate",
                 "next: COMPLETE\n      - condition: when(true)\n        next: fix_machine_gate",
             ),
             "create_pr",
         ),
         "公開の成功が aislop ステップへ渡さない": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "        next: aislop_gate\n      - condition: when(true)\n        next: fix_publish",
                 "        next: COMPLETE\n      - condition: when(true)\n        next: fix_publish",
             ),
@@ -592,56 +609,56 @@ def test_workflow_gate_wiring() -> None:
             "mode: system",
         ),
         "公開に push の入力が無い": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "      - type: command\n        as: push\n        command: |\n          python3 tools/project-status/publish.py push\n",
                 "",
             ),
             "push",
         ),
         "公開に commit の入力が無い": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "      - type: command\n        as: commit\n        command: |\n          python3 tools/project-status/publish.py commit\n",
                 "",
             ),
             "commit",
         ),
         "公開に status の入力が無い": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "      - type: command\n        as: status\n        command: |\n          python3 tools/project-status/publish.py status --status \"In Review\"\n",
                 "",
             ),
             "status",
         ),
         "公開の成功条件に push の exit_code が無い": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 success_condition,
                 "context.create_pr.commit.exit_code == 0 && context.create_pr.pr.exit_code == 0",
             ),
             "push",
         ),
         "公開の成功条件に pr の exit_code が無い": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 success_condition,
                 "context.create_pr.commit.exit_code == 0 && context.create_pr.push.exit_code == 0",
             ),
             "pr",
         ),
         "公開の成功条件に status の exit_code を含む": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "&& context.create_pr.pr.exit_code == 0)",
                 "&& context.create_pr.pr.exit_code == 0 && context.create_pr.status.exit_code == 0)",
             ),
             "status",
         ),
         "公開の成功条件が || で結合されている": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 success_condition,
                 "context.create_pr.commit.exit_code == 0 || context.create_pr.push.exit_code == 0 || context.create_pr.pr.exit_code == 0",
             ),
             "||",
         ),
         "公開の完了条件が複数の rule に分かれている": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "      - condition: when(" + success_condition + ")\n        next: aislop_gate\n",
                 "      - condition: when(context.create_pr.commit.exit_code == 0)\n        next: aislop_gate\n"
                 "      - condition: when(context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)\n"
@@ -650,32 +667,32 @@ def test_workflow_gate_wiring() -> None:
             "1件",
         ),
         "公開の失敗が修正ステップへ遷移しない": (
-            WORKFLOW.replace("next: fix_publish", "next: COMPLETE"),
+            PUBLISH_WORKFLOW.replace("next: fix_publish", "next: COMPLETE"),
             "fix_publish",
         ),
         "公開の修正が公開の出力を参照しない": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "        {context:create_pr.commit.stdout}\n        {context:create_pr.push.stderr}\n        {context:create_pr.pr.stdout}\n        {context:create_pr.status.stderr}\n",
                 "        公開の出力を確認してください\n",
             ),
             "instruction",
         ),
         "公開の修正から公開へ戻らない": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "next: create_pr\n      - condition: コードを修正する",
                 "next: COMPLETE\n      - condition: コードを修正する",
             ),
             "create_pr",
         ),
         "公開の修正が ABORT へ遷移する": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "      - condition: コードを修正する\n        next: machine_gate",
                 "      - condition: コードを修正する\n        next: ABORT",
             ),
             "ABORT",
         ),
         "公開ステップが system でない": (
-            WORKFLOW.replace(
+            PUBLISH_WORKFLOW.replace(
                 "  - name: create_pr\n    description: コミット・push・PR 作成・Status 更新を段階実行する\n    mode: system",
                 "  - name: create_pr\n    description: コミット・push・PR 作成・Status 更新を段階実行する\n    capabilities: readonly",
             ),
@@ -687,6 +704,30 @@ def test_workflow_gate_wiring() -> None:
             repository(sandbox, workflow=workflow)
             stub_external_tools(sandbox)
             assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+
+def test_status_only_step_is_not_a_publish_step() -> None:
+    """開始時の Status 更新のように publish.py status だけを実行するステップは公開とみなさない。"""
+    workflow = WORKFLOW.replace(
+        "steps:\n  - name: develop",
+        "steps:\n"
+        "  - name: mark_in_progress\n"
+        "    description: 開始時に対象 issue を In Progress にする\n"
+        "    mode: system\n"
+        "    system_inputs:\n"
+        "      - type: command\n"
+        "        as: status\n"
+        "        command: |\n"
+        "          python3 tools/project-status/publish.py status --status \"In Progress\"\n"
+        "    rules:\n"
+        "      - condition: when(true)\n"
+        "        next: develop\n"
+        "  - name: develop",
+    )
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=workflow)
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "status だけを実行する開始ステップ")
 
 
 def test_workflow_requires_aislop_gate_step() -> None:
@@ -707,9 +748,6 @@ def test_workflow_requires_aislop_gate_step() -> None:
         next: fix_aislop_gate
 """,
         "",
-    ).replace(
-        "        next: aislop_gate\n      - condition: when(true)\n        next: fix_publish",
-        "        next: COMPLETE\n      - condition: when(true)\n        next: fix_publish",
     )
     cases = {
         "aislop ステップが無い": (without_step, "aislop"),
@@ -718,7 +756,7 @@ def test_workflow_requires_aislop_gate_step() -> None:
                 "      - condition: COMPLETE\n        next: machine_gate",
                 "      - condition: COMPLETE\n        next: aislop_gate",
             ).replace(
-                "        next: create_pr\n      - condition: when(true)\n        next: fix_machine_gate",
+                "        next: aislop_gate\n      - condition: when(true)\n        next: fix_machine_gate",
                 "        next: COMPLETE\n      - condition: when(true)\n        next: fix_machine_gate",
             ),
             "aislop",
@@ -918,7 +956,7 @@ def test_gate_success_condition_must_reference_its_own_gate() -> None:
     )
     machine_success_rule = (
         "      - condition: when(context.machine_gate.result.exit_code == 0)\n"
-        "        next: create_pr\n"
+        "        next: aislop_gate\n"
     )
     other_gate_rules = {
         "aislop_gate": (

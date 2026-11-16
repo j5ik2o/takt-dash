@@ -16,10 +16,10 @@
                        nightly（rustfmt）と Node をセットアップする。
   workflow-machine-gate taktdash-change に make done を実行する mode が system の
                        ステップがあり、develop の後ろに置かれ、make done の出力を修正
-                       ステップへ渡し、成功で公開ステップ・失敗で修正へ回る遷移を持つ。
-                       公開ステップは commit / push / pr / status の 4 段階を publish.py
-                       で実行し、commit / push / pr の成功だけを完了条件にし、失敗は
-                       再試行または修正へ回し、ABORT へは遷移しない。
+                       ステップへ渡し、成功で aislop ゲート・失敗で修正へ回る遷移を持つ。
+                       公開ステップ（publish.py）は任意で、置く場合は commit / push / pr /
+                       status の 4 段階を実行し、commit / push / pr の成功だけを完了条件に
+                       し、失敗は再試行または修正へ回し、ABORT へは遷移しない。
   gitignore-rules      .gitignore が Rust と Node とローカルデータの生成物を除外する。
   stable-toolchain     rust-toolchain.toml のチャネルが stable のままである。
 
@@ -507,6 +507,20 @@ def publish_stages(step):
     return stages
 
 
+def publish_candidates(steps):
+    """公開（commit / push / pr）を実行する mode: system のステップを返す。
+
+    status だけを実行するステップ（開始時の In Progress 更新など）は公開ステップと
+    みなさない。公開ステップを置くかどうかは任意である。
+    """
+    return [
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and any(stage in publish_stages(step) for stage in PUBLISH_SUCCESS_STAGES)
+    ]
+
+
 def is_gate_success_condition(condition, name):
     """成功条件が、そのゲート自身の exit_code だけを == 0 で見る正規形かを判定する。
 
@@ -580,7 +594,7 @@ def check_machine_gate_step(named, name, return_to):
 
 def publish_step(steps):
     """publish.py で公開を実行する mode: system のステップと、そのステップ名を返す。"""
-    publishers = [step for step in steps if isinstance(step, dict) and publish_stages(step)]
+    publishers = publish_candidates(steps)
     if not publishers:
         raise GateError("publish.py で公開を実行する mode: system のステップがありません")
     publisher = max(publishers, key=lambda step: len(publish_stages(step)))
@@ -705,22 +719,27 @@ def check_workflow_machine_gate(root):
     if order.index(gate_name) > order.index(aislop_name):
         raise GateError(f"{aislop_name} が {gate_name} より前の位置にあります")
 
-    publisher, publish_name = publish_step(steps)
-
     make_done_next, make_done_fix = check_machine_gate_step(named, gate_name, gate_name)
-    if make_done_next != publish_name:
-        raise GateError(
-            f"機械ゲートの成功が公開ステップ {publish_name} へ遷移していません: {make_done_next!r}"
-        )
-
     aislop_next, aislop_fix = check_machine_gate_step(named, aislop_name, gate_name)
     if aislop_next != "COMPLETE":
         raise GateError(f"{aislop_name} の成功（exit_code == 0）で COMPLETE へ遷移していません: {aislop_next!r}")
 
-    publish_rules = rules_of(publisher)
-    publish_failure_next, retry = publish_failure_step(publish_rules, publish_name, named)
-    check_publish_success_rule(publish_rules, publish_name, aislop_name)
-    check_publish_retry_rule(retry, publish_failure_next, publish_name)
+    publishers = publish_candidates(steps)
+    if not publishers:
+        if make_done_next != aislop_name:
+            raise GateError(f"機械ゲートの成功が {aislop_name} へ遷移していません: {make_done_next!r}")
+        publish_name = None
+        publish_failure_next = None
+    else:
+        publisher, publish_name = publish_step(steps)
+        if make_done_next != publish_name:
+            raise GateError(
+                f"機械ゲートの成功が公開ステップ {publish_name} へ遷移していません: {make_done_next!r}"
+            )
+        publish_rules = rules_of(publisher)
+        publish_failure_next, retry = publish_failure_step(publish_rules, publish_name, named)
+        check_publish_success_rule(publish_rules, publish_name, aislop_name)
+        check_publish_retry_rule(retry, publish_failure_next, publish_name)
 
     return {
         "gates": [gate_name, aislop_name],

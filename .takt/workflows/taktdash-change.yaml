@@ -93,7 +93,7 @@ steps:
         timeout_ms: 1800000
     rules:
       - condition: when(context.machine_gate.result.exit_code == 0)
-        next: create_pr
+        next: aislop_gate
       - condition: when(true)
         next: fix_machine_gate
   - name: aislop_gate
@@ -131,63 +131,6 @@ steps:
         next: machine_gate
       - condition: 裏付けられた原因を安全に修正または検証できない
         next: ABORT
-  - name: create_pr
-    description: 成果を commit / push し、PR を作成して Status を In Review にする（Status の失敗は非致命）
-    mode: system
-    system_inputs:
-      - type: command
-        as: commit
-        command: |
-          python3 tools/project-status/publish.py commit
-        timeout_ms: 120000
-      - type: command
-        as: push
-        command: |
-          python3 tools/project-status/publish.py push
-        timeout_ms: 120000
-      - type: command
-        as: pr
-        command: |
-          python3 tools/project-status/publish.py pr
-        timeout_ms: 120000
-      - type: command
-        as: status
-        command: |
-          python3 tools/project-status/publish.py status --status "In Review" --require-published
-        timeout_ms: 120000
-    rules:
-      - condition: when(context.create_pr.commit.exit_code == 0 && context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)
-        next: aislop_gate
-      - condition: when(true)
-        next: fix_publish
-  - name: fix_publish
-    description: 公開の失敗を確認して修正し、公開ステップまたは機械ゲートからやり直す
-    capabilities: edit
-    edit: true
-    persona: coder
-    policy: coding
-    knowledge: taktdash-rules
-    required_permission_mode: edit
-    pass_previous_response: false
-    instruction:
-      - fix-supervisor
-      - |
-        公開（commit / push / PR 作成 / Status 更新）が失敗しました。次の出力から失敗した段階を特定し、原因を修正してください。
-        --- commit の stdout ---
-        {context:create_pr.commit.stdout}
-        --- push の stdout ---
-        {context:create_pr.push.stdout}
-        --- push の stderr ---
-        {context:create_pr.push.stderr}
-        --- PR 作成の stdout ---
-        {context:create_pr.pr.stdout}
-        --- Status 更新の stderr ---
-        {context:create_pr.status.stderr}
-    rules:
-      - condition: 公開の失敗を修正して再試行する
-        next: create_pr
-      - condition: コードを修正して機械ゲートからやり直す
-        next: machine_gate
   - name: fix_aislop_gate
     description: aislop の警告以上の指摘を修正するか、理由を述べて受け入れ一覧へ登録し、検証してから機械ゲートへ戻る
     capabilities: edit
