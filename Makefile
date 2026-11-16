@@ -49,7 +49,7 @@ coverage:
 		--reporter text --extension .ts --extension .tsx npm run test
 	@echo "== tools/repo-gate (coverage.py) =="
 	mkdir -p target/coverage
-	python3 -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py' tools/repo-gate/repo_gate_test.py
+	python3 -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py,tools/repo-gate/gate_*.py' tools/repo-gate/repo_gate_test.py
 	python3 -m coverage report --data-file=target/coverage/.coverage --show-missing
 
 done:
