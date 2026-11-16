@@ -274,18 +274,21 @@ steps:
       - condition: 裏付けられた原因を安全に修正または検証できない
         next: ABORT
   - name: fix_aislop_gate
-    description: aislop の警告以上の指摘を修正するか、理由を述べて受け入れ一覧へ登録し、検証してから機械ゲートへ戻る
+    description: aislop の警告以上の指摘をコードの修正で解消し、検証してから機械ゲートへ戻る
     capabilities: edit
     edit: true
     instruction:
       - aislop の指摘を直す
       - |
-        次の aislop の判定を確認してください。指摘は修正するか、理由を述べて
-        scripts/aislop-accepted.json へ登録してください。
+        次の aislop の判定を確認してください。指摘はコードを修正して解消してください。
+        scripts/aislop-accepted.json のエントリを追加・変更してはなりません。
+        受け入れ一覧への追加には、窓口の承認と、解消を追跡する issue の番号
+        （https://github.com/j5ik2o/takt-dash/issues/<番号>）が必須です。run が自分で追加してはなりません。
+        修正で解消できない場合は、一覧を変えずに ABORT へ進み、理由を報告してください。
         {context:aislop_gate.result.stdout}
         {context:aislop_gate.result.stderr}
     rules:
-      - condition: aislop の指摘を修正または受け入れ一覧へ登録し、検証した
+      - condition: aislop の指摘をコードの修正で解消し、検証した
         next: machine_gate
       - condition: 修正できない
         next: ABORT
