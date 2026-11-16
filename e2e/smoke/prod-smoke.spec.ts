@@ -63,9 +63,11 @@ test("ゴール一覧からゴール詳細へ遷移できる", async ({ page }) 
   expect(goalHref, "ゴール詳細リンクの href").toMatch(/^\/goals\/[^/]+$/);
 
   await firstGoalLink.click();
-  await expect(page).toHaveURL((url) => url.pathname === goalHref);
-  await expect(page.getByRole("heading", { name: /^ゴール /, level: 1 })).toBeVisible();
-  await expect(page.getByRole("link", { name: "ゴール一覧に戻る" }).first()).toBeVisible();
+  await expect(page).toHaveURL((url) => url.pathname === goalHref, { timeout: 35_000 });
+  // 詳細は backend が要求時に takt-mcp を呼ぶため、本番では応答に数秒から十数秒かかる。
+  // 表示の速さではなく到達性を見るので、BFF の deadline（30 秒）を覆う待ち時間にする。
+  await expect(page.getByRole("heading", { name: /^ゴール /, level: 1 })).toBeVisible({ timeout: 35_000 });
+  await expect(page.getByRole("link", { name: "ゴール一覧に戻る" }).first()).toBeVisible({ timeout: 35_000 });
 
   expect(writes).toEqual([]);
   expect(errors).toEqual([]);
