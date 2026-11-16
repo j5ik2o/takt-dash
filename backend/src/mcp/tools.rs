@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use super::client::{CallError, McpClient, McpClientConfig};
 use crate::{
   config::McpServer,
+  domain::{DomainError, GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   model::{
     ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot,
     RegistrationProposalEntry, ReportEntry, RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, RunStatus,
@@ -174,20 +175,19 @@ impl<'a> ToolSet<'a> {
     for goal in goals {
       match self.list_goal_questions(&goal.goal_id).await {
         | Ok(mut entries) => inquiries.append(&mut entries),
-        | Err(ToolError::Tool(_)) => {
-          inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(goal.goal_id.as_str())))
-        },
+        | Err(ToolError::Tool(_)) => inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id))),
         | Err(error) => return Err(error),
       }
     }
     Ok(inquiries.into_iter().map(|parsed| resolve_inquiry(parsed, prev, observed_at)).collect())
   }
 
-  async fn list_goal_questions(&mut self, goal_id: &str) -> Result<Vec<ParsedInquiry>, ToolError> {
+  async fn list_goal_questions(&mut self, goal_id: &GoalId) -> Result<Vec<ParsedInquiry>, ToolError> {
     let mut entries = Vec::new();
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
-      let value = self.call_json("takt_list_goal_questions", json!({ "goalId": goal_id, "offset": offset })).await?;
+      let value =
+        self.call_json("takt_list_goal_questions", json!({ "goalId": goal_id.as_str(), "offset": offset })).await?;
       let page = Page::from_value(&value, "questions")?;
       for item in &page.items {
         if let Some(entry) = parse_inquiry(item, Some(goal_id))? {
@@ -238,7 +238,7 @@ impl<'a> ToolSet<'a> {
         | Ok(run) => runs.push(run),
         | Err(ToolError::Tool(_)) => {
           if let Some(previous) =
-            prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug))
+            prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str()))
           {
             runs.push(previous.clone());
           }
@@ -249,8 +249,8 @@ impl<'a> ToolSet<'a> {
     Ok(runs)
   }
 
-  async fn read_run(&mut self, run_slug: &str, task: &TaskEntry) -> Result<RunEntry, ToolError> {
-    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug })).await?;
+  async fn read_run(&mut self, run_slug: &RunSlug, task: &TaskEntry) -> Result<RunEntry, ToolError> {
+    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
     self.parse_run_with_pages(&value, task).await
   }
 
@@ -260,14 +260,15 @@ impl<'a> ToolSet<'a> {
     let mut step_logs = step_log_entries(value);
     let mut steps = step_entries(value);
     let mut next_offset = step_log_next_offset(value);
-    let run_slug = string_field(value, "runSlug")?;
+    let run_slug = domain_value("run slug", RunSlug::try_from(string_field(value, "runSlug")?.as_str()))?;
     let mut pages_taken = 0;
     while let Some(offset) = next_offset {
       if pages_taken >= MAX_PAGES {
         return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
       }
       pages_taken += 1;
-      let page_value = self.call_json("takt_get_run", json!({ "runSlug": run_slug, "offset": offset })).await?;
+      let page_value =
+        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
       steps.extend(step_entries(&page_value));
       step_logs.extend(step_log_entries(&page_value));
       next_offset = step_log_next_offset(&page_value);
@@ -279,7 +280,7 @@ impl<'a> ToolSet<'a> {
     &mut self,
     goals: &[GoalEntry],
     prev: Option<&ProjectSnapshot>,
-  ) -> Result<(Vec<NotificationEntry>, BTreeMap<String, DateTime<Utc>>), ToolError> {
+  ) -> Result<(Vec<NotificationEntry>, BTreeMap<GoalId, DateTime<Utc>>), ToolError> {
     let mut notifications = Vec::new();
     let mut awaiting_merge_at = BTreeMap::new();
     for goal in goals {
@@ -291,11 +292,10 @@ impl<'a> ToolSet<'a> {
           notifications.extend(goal_notifications);
         },
         | Err(ToolError::Tool(_)) => {
-          let goal_id = goal.goal_id.as_str();
           if let Some(prev) = prev {
-            notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal_id).cloned());
+            notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal.goal_id).cloned());
             if let Some(recorded_at) =
-              prev.goals.iter().find(|entry| entry.goal_id == goal_id).and_then(|entry| entry.awaiting_merge_at)
+              prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id).and_then(|entry| entry.awaiting_merge_at)
             {
               awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
             }
@@ -311,14 +311,14 @@ impl<'a> ToolSet<'a> {
   /// awaiting_merge 通知のうち最も新しい recordedAt を返す。
   async fn list_goal_notifications(
     &mut self,
-    goal_id: &str,
+    goal_id: &GoalId,
   ) -> Result<(Vec<NotificationEntry>, Option<DateTime<Utc>>), ToolError> {
     let mut notifications = Vec::new();
     let mut awaiting_merge_at: Option<DateTime<Utc>> = None;
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
       let value = self
-        .call_json("takt_get_goal", json!({ "goalId": goal_id, "path": "notifications", "offset": offset }))
+        .call_json("takt_get_goal", json!({ "goalId": goal_id.as_str(), "path": "notifications", "offset": offset }))
         .await?;
       let page = Page::from_value(&value, "items")?;
       for item in &page.items {
@@ -341,14 +341,14 @@ impl<'a> ToolSet<'a> {
 
 /// 前回 snapshot の問い合わせのうち、`matches` に合うものを解析済みの形で取り出す。
 /// 道具エラー時に該当項目だけを引き継ぐために使います。前回が無ければ空です。
-fn prev_inquiries(prev: Option<&ProjectSnapshot>, matches: impl Fn(Option<&str>) -> bool) -> Vec<ParsedInquiry> {
+fn prev_inquiries(prev: Option<&ProjectSnapshot>, matches: impl Fn(Option<&GoalId>) -> bool) -> Vec<ParsedInquiry> {
   let Some(prev) = prev else {
     return Vec::new();
   };
   prev
     .inquiries
     .iter()
-    .filter(|entry| matches(entry.goal_id.as_deref()))
+    .filter(|entry| matches(entry.goal_id.as_ref()))
     .map(|entry| ParsedInquiry {
       inquiry_id: entry.inquiry_id.clone(),
       goal_id:    entry.goal_id.clone(),
@@ -415,6 +415,10 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
   value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
+fn domain_value<T>(label: &str, result: Result<T, DomainError>) -> Result<T, ToolError> {
+  result.map_err(|error| ToolError::Parse(format!("{label}: {error}")))
+}
+
 fn parse_time(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, ToolError> {
   match value {
     | None | Some(Value::Null) => Ok(None),
@@ -426,7 +430,7 @@ fn parse_time(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, ToolError>
 }
 
 fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
-  let goal_id = string_field(value, "id")?;
+  let goal_id = domain_value("ゴール ID", GoalId::try_from(string_field(value, "id")?.as_str()))?;
   let status = match value.get("status").and_then(Value::as_str) {
     | Some("created") => GoalStatus::Created,
     | Some("awaiting_merge") => GoalStatus::AwaitingMerge,
@@ -440,7 +444,10 @@ fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
     | other => return Err(ToolError::Parse(format!("未知のゴールの実行状態です: {other:?}"))),
   };
   let pull_request = value.get("pullRequest");
-  let pull_request_number = pull_request.and_then(|value| value.get("number")).and_then(Value::as_i64);
+  let pull_request_number = match pull_request.and_then(|value| value.get("number")).and_then(Value::as_i64) {
+    | Some(number) => Some(domain_value("プルリクエスト番号", PullRequestNumber::try_from(number))?),
+    | None => None,
+  };
   let pull_request_url = pull_request.and_then(|value| value.get("url")).and_then(Value::as_str).map(str::to_owned);
   Ok(GoalEntry {
     goal_id,
@@ -466,12 +473,23 @@ fn parse_task(value: &Value) -> Result<TaskEntry, ToolError> {
     | other => return Err(ToolError::Parse(format!("未知のタスクの状態です: {other:?}"))),
   };
   let started_at = parse_time(value.get("startedAt"))?;
+  let name = domain_value("タスク名", TaskName::try_from(string_field(value, "name")?.as_str()))?;
+  let goal_id = match optional_string(value, "goalId") {
+    | Some(text) if text.is_empty() => None,
+    | Some(text) => Some(domain_value("ゴール ID", GoalId::try_from(text.as_str()))?),
+    | None => None,
+  };
+  let run_slug = match optional_string(value, "runSlug") {
+    | Some(text) if text.is_empty() => None,
+    | Some(text) => Some(domain_value("run slug", RunSlug::try_from(text.as_str()))?),
+    | None => None,
+  };
   Ok(TaskEntry {
-    name: string_field(value, "name")?,
-    goal_id: optional_string(value, "goalId"),
+    name,
+    goal_id,
     status,
     started_at,
-    run_slug: optional_string(value, "runSlug"),
+    run_slug,
     current_step: optional_string(value, "currentStep"),
     merge_task: value.get("mergeTask").and_then(Value::as_bool).unwrap_or(false),
   })
@@ -480,8 +498,8 @@ fn parse_task(value: &Value) -> Result<TaskEntry, ToolError> {
 /// 解析直後の問い合わせ。`created_at` は応答での有無を保持し、前回値の引き継ぎと
 /// 初回観測の既定は `read_snapshot` の解像で決めます。
 struct ParsedInquiry {
-  inquiry_id: String,
-  goal_id:    Option<String>,
+  inquiry_id: InquiryId,
+  goal_id:    Option<GoalId>,
   kind:       InquiryKind,
   body:       String,
   options:    Vec<String>,
@@ -492,7 +510,7 @@ struct ParsedInquiry {
 /// 1件の問い合わせを解析する。`approval` は判断待ちの種類（問い合わせとマージ待ち）に
 /// 対応する値が無いため、判定対象外として `Ok(None)` を返して読み飛ばします。未知の種類は
 /// 解析エラーにします。
-fn parse_inquiry(value: &Value, goal_id: Option<&str>) -> Result<Option<ParsedInquiry>, ToolError> {
+fn parse_inquiry(value: &Value, goal_id: Option<&GoalId>) -> Result<Option<ParsedInquiry>, ToolError> {
   let kind = match value.get("kind").and_then(Value::as_str) {
     | Some("question") => InquiryKind::Question,
     | Some("operation_request") => InquiryKind::OperationRequest,
@@ -509,9 +527,18 @@ fn parse_inquiry(value: &Value, goal_id: Option<&str>) -> Result<Option<ParsedIn
     .and_then(Value::as_array)
     .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
     .unwrap_or_default();
+  let inquiry_id = domain_value("inquiry ID", InquiryId::try_from(string_field(value, "id")?.as_str()))?;
+  let goal_id = match goal_id {
+    | Some(goal_id) => Some(goal_id.clone()),
+    | None => match optional_string(value, "goalId") {
+      | Some(text) if text.is_empty() => None,
+      | Some(text) => Some(domain_value("ゴール ID", GoalId::try_from(text.as_str()))?),
+      | None => None,
+    },
+  };
   Ok(Some(ParsedInquiry {
-    inquiry_id: string_field(value, "id")?,
-    goal_id: goal_id.map(str::to_owned).or_else(|| optional_string(value, "goalId")),
+    inquiry_id,
+    goal_id,
     kind,
     body: optional_string(value, "body").unwrap_or_default(),
     options,
@@ -545,12 +572,12 @@ fn resolve_inquiry(parsed: ParsedInquiry, prev: Option<&ProjectSnapshot>, observ
   }
 }
 
-fn parse_notification(goal_id: &str, value: &Value) -> Result<NotificationEntry, ToolError> {
+fn parse_notification(goal_id: &GoalId, value: &Value) -> Result<NotificationEntry, ToolError> {
   let recorded_at = parse_time(value.get("recordedAt"))?
     .ok_or_else(|| ToolError::Parse("通知の recordedAt がありません".to_owned()))?;
   Ok(NotificationEntry {
     notification_id: string_field(value, "id")?,
-    goal_id: goal_id.to_owned(),
+    goal_id: goal_id.clone(),
     kind: string_field(value, "kind")?,
     body: optional_string(value, "body").unwrap_or_default(),
     recorded_at,
@@ -584,19 +611,19 @@ fn parse_run(
   step_logs: Vec<StepLogEntry>,
   steps: Vec<RunStepEntry>,
 ) -> Result<RunEntry, ToolError> {
-  let run_slug = string_field(value, "runSlug")?;
+  let run_slug = domain_value("run slug", RunSlug::try_from(string_field(value, "runSlug")?.as_str()))?;
   let started_at = parse_time(value.get("startedAt"))?
     .or(task.started_at)
     .ok_or_else(|| ToolError::Parse("run の開始時刻を取得できません".to_owned()))?;
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
   let last_log_at = resolve_last_log_at(value, &step_logs, current_step_started_at, started_at)?;
   Ok(RunEntry {
-    run_slug,
+    run_slug: run_slug.as_str().to_owned(),
     session_id: optional_string(value, "sessionId").unwrap_or_default(),
     task_name: task.name.clone(),
     goal_id: task.goal_id.clone(),
     summary: optional_string(value, "summary").unwrap_or_default(),
-    status: parse_run_status(value.get("status")),
+    status: parse_run_status(value.get("status"))?,
     current_step: optional_string(value, "currentStep"),
     started_at,
     current_step_started_at,
@@ -606,14 +633,11 @@ fn parse_run(
   })
 }
 
-/// run の状態を寛容に解析する。欠落と未知の値は継続中として扱います。
-fn parse_run_status(value: Option<&Value>) -> RunStatus {
-  match value.and_then(Value::as_str) {
-    | Some("completed") => RunStatus::Completed,
-    | Some("aborted") => RunStatus::Aborted,
-    | Some("failed") => RunStatus::Failed,
-    | _ => RunStatus::Running,
-  }
+/// run の状態を既知の値だけから解析する。欠落と未知の値は解析エラーにします。
+fn parse_run_status(value: Option<&Value>) -> Result<RunStatus, ToolError> {
+  let text =
+    value.and_then(Value::as_str).ok_or_else(|| ToolError::Parse("run の status が文字列ではありません".to_owned()))?;
+  domain_value("run の status", RunStatus::try_from(text))
 }
 
 /// 本文つきの stepLogs のうち、時刻を持つものの最新を返す。
@@ -677,9 +701,9 @@ impl<'a> ToolSet<'a> {
   /// stepLogs は先頭 50 件のウィンドウで返るため、stepLogPage.nextOffset が残っていれば追加ページを
   /// 取得して全件を集めます。レポートと指示書の本文は一覧に含まれないため、一覧の filename と
   /// instructionId を使って1件ずつ本文を取得します。
-  pub async fn read_run_detail(&mut self, run_slug: &str) -> Result<RunDetail, ToolError> {
-    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug })).await?;
-    let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_deref() == Some(run_slug));
+  pub async fn read_run_detail(&mut self, run_slug: &RunSlug) -> Result<RunDetail, ToolError> {
+    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
+    let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_ref() == Some(run_slug));
     let mut step_logs = step_log_entries(&value);
     let mut next_offset = step_log_next_offset(&value);
     let mut pages_taken = 0;
@@ -688,14 +712,15 @@ impl<'a> ToolSet<'a> {
         return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
       }
       pages_taken += 1;
-      let page_value = self.call_json("takt_get_run", json!({ "runSlug": run_slug, "offset": offset })).await?;
+      let page_value =
+        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
       step_logs.extend(step_log_entries(&page_value));
       next_offset = step_log_next_offset(&page_value);
     }
     let mut reports = Vec::new();
     for summary in report_summaries(&value) {
       let report_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug, "report": summary.filename })).await?;
+        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "report": summary.filename })).await?;
       reports.push(RunReportEntry {
         filename:   summary.filename.clone(),
         content:    optional_string(&report_value, "content").unwrap_or_default(),
@@ -708,8 +733,9 @@ impl<'a> ToolSet<'a> {
         | None => 0,
         | Some(field) => checked_i32(Some(field), "instructionId")?,
       };
-      let instruction_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug, "instructionId": instruction_id })).await?;
+      let instruction_value = self
+        .call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "instructionId": instruction_id }))
+        .await?;
       instructions.push(RunInstructionEntry {
         instruction_id,
         issued_at: parse_time(instruction_value.get("issuedAt"))
@@ -731,15 +757,19 @@ impl<'a> ToolSet<'a> {
   /// `goal_id` は必須の引数として受け取ります。
   pub async fn answer_goal_question(
     &mut self,
-    goal_id: &str,
-    question_id: &str,
+    goal_id: &GoalId,
+    question_id: &InquiryId,
     answer: Value,
-  ) -> Result<String, ToolError> {
+  ) -> Result<InquiryId, ToolError> {
     let value = self
-      .call_json("takt_answer_goal_question", json!({ "goalId": goal_id, "questionId": question_id, "answer": answer }))
+      .call_json(
+        "takt_answer_goal_question",
+        json!({ "goalId": goal_id.as_str(), "questionId": question_id.as_str(), "answer": answer }),
+      )
       .await?;
-    optional_string(&value, "questionId")
-      .ok_or_else(|| ToolError::Parse("takt_answer_goal_question の応答に questionId がありません".to_owned()))
+    let question_id = optional_string(&value, "questionId")
+      .ok_or_else(|| ToolError::Parse("takt_answer_goal_question の応答に questionId がありません".to_owned()))?;
+    domain_value("inquiry ID", InquiryId::try_from(question_id.as_str()))
   }
 
   /// ゴール登録の承認待ちを取得する。提案が無ければ空の並びを返します。
@@ -752,7 +782,10 @@ impl<'a> ToolSet<'a> {
       .iter()
       .map(|proposal| {
         Ok(RegistrationProposalEntry {
-          revision:             required_i32(proposal, "revision")?,
+          revision:             domain_value(
+            "revision",
+            RegistrationRevision::try_from(required_i32(proposal, "revision")?),
+          )?,
           repository_directory: required_string(proposal, "repositoryDirectory")?,
           summary:              registration_summary_text(proposal.get("summary"))?,
         })
@@ -761,30 +794,41 @@ impl<'a> ToolSet<'a> {
   }
 
   /// ゴール登録の承認待ちを承認する。承認した revision と、登録されたゴールの ID を返します。
-  pub async fn approve_goal_registration(&mut self, revision: i32) -> Result<ApproveGoalRegistrationResult, ToolError> {
-    let value = self.call_json("takt_approve_goal_registration", json!({ "revision": revision })).await?;
-    let goal_id =
-      required_string(value.get("goal").ok_or_else(|| ToolError::Parse("応答に goal がありません".to_owned()))?, "id")?;
-    Ok(ApproveGoalRegistrationResult { revision: required_i32(&value, "revision")?, goal_id })
+  pub async fn approve_goal_registration(
+    &mut self,
+    revision: RegistrationRevision,
+  ) -> Result<ApproveGoalRegistrationResult, ToolError> {
+    let value = self.call_json("takt_approve_goal_registration", json!({ "revision": revision.get() })).await?;
+    let goal = value.get("goal").ok_or_else(|| ToolError::Parse("応答に goal がありません".to_owned()))?;
+    let goal_id = domain_value("ゴール ID", GoalId::try_from(required_string(goal, "id")?.as_str()))?;
+    let revision = domain_value("revision", RegistrationRevision::try_from(required_i32(&value, "revision")?))?;
+    Ok(ApproveGoalRegistrationResult { revision, goal_id })
   }
 
   /// ゴール登録の承認待ちを却下する。却下した revision を返します。
-  pub async fn reject_goal_registration(&mut self, revision: i32) -> Result<i32, ToolError> {
-    let value = self.call_json("takt_reject_goal_registration", json!({ "revision": revision })).await?;
-    required_i32(&value, "revision")
+  pub async fn reject_goal_registration(
+    &mut self,
+    revision: RegistrationRevision,
+  ) -> Result<RegistrationRevision, ToolError> {
+    let value = self.call_json("takt_reject_goal_registration", json!({ "revision": revision.get() })).await?;
+    domain_value("revision", RegistrationRevision::try_from(required_i32(&value, "revision")?))
   }
 
   /// プルリクエストのマージを承認する。依頼したタスク名とワークフローを返します。
   pub async fn merge_goal_pr(
     &mut self,
-    goal_id: &str,
-    pr_number: i64,
-    until: &str,
+    goal_id: &GoalId,
+    pr_number: PullRequestNumber,
+    until: MergeUntil,
   ) -> Result<MergeGoalPrResult, ToolError> {
-    let value =
-      self.call_json("takt_merge_goal_pr", json!({ "goalId": goal_id, "prNumber": pr_number, "until": until })).await?;
+    let value = self
+      .call_json(
+        "takt_merge_goal_pr",
+        json!({ "goalId": goal_id.as_str(), "prNumber": pr_number.get(), "until": until.as_str() }),
+      )
+      .await?;
     Ok(MergeGoalPrResult {
-      task_name: required_string(&value, "taskName")?,
+      task_name: domain_value("タスク名", TaskName::try_from(required_string(&value, "taskName")?.as_str()))?,
       workflow:  required_string(&value, "workflow")?,
     })
   }
@@ -793,14 +837,14 @@ impl<'a> ToolSet<'a> {
 /// takt_approve_goal_registration の結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApproveGoalRegistrationResult {
-  pub revision: i32,
-  pub goal_id:  String,
+  pub revision: RegistrationRevision,
+  pub goal_id:  GoalId,
 }
 
 /// takt_merge_goal_pr の結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeGoalPrResult {
-  pub task_name: String,
+  pub task_name: TaskName,
   pub workflow:  String,
 }
 
@@ -879,7 +923,7 @@ fn required_string(value: &Value, key: &str) -> Result<String, ToolError> {
 
 fn parse_run_detail(
   value: &Value,
-  run_slug: &str,
+  run_slug: &RunSlug,
   task: Option<&TaskEntry>,
   step_logs: Vec<StepLogEntry>,
   reports: Vec<RunReportEntry>,
@@ -889,17 +933,25 @@ fn parse_run_detail(
     parse_time(value.get("startedAt"))?.ok_or_else(|| ToolError::Parse("run の開始時刻を取得できません".to_owned()))?;
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
   let last_log_at = resolve_last_log_at(value, &step_logs, current_step_started_at, started_at)?;
-  let task_name = optional_string(value, "taskName").or_else(|| task.map(|task| task.name.clone())).unwrap_or_default();
-  let goal_id = optional_string(value, "goalId").or_else(|| task.and_then(|task| task.goal_id.clone()));
+  let task_name = match optional_string(value, "taskName") {
+    | Some(text) if text.is_empty() => task.map(|task| task.name.clone()),
+    | Some(text) => Some(domain_value("タスク名", TaskName::try_from(text.as_str()))?),
+    | None => task.map(|task| task.name.clone()),
+  };
+  let goal_id = match optional_string(value, "goalId") {
+    | Some(text) if text.is_empty() => task.and_then(|task| task.goal_id.clone()),
+    | Some(text) => Some(domain_value("ゴール ID", GoalId::try_from(text.as_str()))?),
+    | None => task.and_then(|task| task.goal_id.clone()),
+  };
   Ok(RunDetail {
-    run_slug: run_slug.to_owned(),
+    run_slug: run_slug.clone(),
     session_id: optional_string(value, "sessionId").unwrap_or_default(),
     task_name,
     goal_id,
     task_text: optional_string(value, "taskText").unwrap_or_default(),
     summary: optional_string(value, "summary").unwrap_or_default(),
     workflow: optional_string(value, "workflow").unwrap_or_default(),
-    status: parse_run_status(value.get("status")),
+    status: parse_run_status(value.get("status"))?,
     started_at,
     current_step: optional_string(value, "currentStep"),
     current_iteration: value.get("currentIteration").and_then(Value::as_i64).map(|value| value as i32),

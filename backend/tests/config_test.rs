@@ -32,8 +32,8 @@ fn committed_config_parses_with_four_projects_and_mac_mini_server() {
 fn committed_config_carries_default_interval_and_thresholds() {
   let config = load_config(repo_config_path()).expect("設定ファイルを読み込めます");
   assert_eq!(config.interval_seconds, 30);
-  assert_eq!(config.thresholds.pending_decision_stale_minutes, 240);
-  assert_eq!(config.thresholds.run_log_silent_minutes, 10);
+  assert_eq!(config.thresholds.pending_decision_stale_minutes.get(), 240);
+  assert_eq!(config.thresholds.run_log_silent_minutes.get(), 10);
 }
 
 #[test]
@@ -52,8 +52,14 @@ fn omitted_interval_and_thresholds_fall_back_to_defaults() {
   let config = parse_config(text, Path::new("/base")).expect("既定値が適用されます");
 
   assert_eq!(config.interval_seconds, DEFAULT_INTERVAL_SECONDS);
-  assert_eq!(config.thresholds.pending_decision_stale_minutes, DEFAULT_PENDING_DECISION_STALE_MINUTES);
-  assert_eq!(config.thresholds.run_log_silent_minutes, DEFAULT_RUN_LOG_SILENT_MINUTES);
+  assert_eq!(
+    config.thresholds.pending_decision_stale_minutes.get(),
+    i32::try_from(DEFAULT_PENDING_DECISION_STALE_MINUTES).expect("既定値は i32 の範囲です")
+  );
+  assert_eq!(
+    config.thresholds.run_log_silent_minutes.get(),
+    i32::try_from(DEFAULT_RUN_LOG_SILENT_MINUTES).expect("既定値は i32 の範囲です")
+  );
   assert_eq!(config.sqlite_path, Path::new("/base/data/taktdash.sqlite"));
 }
 
@@ -68,8 +74,8 @@ fn explicit_thresholds_override_defaults() {
   let config = parse_config(text, Path::new("/base")).expect("設定ファイルを解析できます");
 
   assert_eq!(config.interval_seconds, 5);
-  assert_eq!(config.thresholds.pending_decision_stale_minutes, 60);
-  assert_eq!(config.thresholds.run_log_silent_minutes, 3);
+  assert_eq!(config.thresholds.pending_decision_stale_minutes.get(), 60);
+  assert_eq!(config.thresholds.run_log_silent_minutes.get(), 3);
 }
 
 #[test]
@@ -218,4 +224,67 @@ fn malformed_listen_is_rejected_at_the_config_boundary() {
     matches!(&error, ConfigError::Invalid(message) if message.contains("listen")),
     "listen を含む検証エラーになります: {error}"
   );
+}
+
+#[test]
+fn mcp_server_ids_that_are_blank_or_contain_control_characters_are_rejected() {
+  for id in ["   ", "mini\n", "mini\u{0}", "mini\u{7f}"] {
+    let key = serde_json::to_string(id).expect("JSON の文字列にできます");
+    let text = format!(r#"{{ "mcpServers": {{ {key}: {{ "command": "node", "args": [] }} }}, "projects": [] }}"#);
+    let error =
+      parse_config(&text, Path::new("/base")).expect_err("空白だけ・制御文字を含む mcpServers のキーは拒否します");
+    assert!(matches!(error, ConfigError::Invalid(_)), "mcpServers のキー {id:?} は検証エラーになります: {error}");
+  }
+}
+
+#[test]
+fn server_metadata_ids_that_are_blank_or_contain_control_characters_are_rejected() {
+  for id in ["   ", "mini\n", "mini\u{0}", "mini\u{7f}"] {
+    let key = serde_json::to_string(id).expect("JSON の文字列にできます");
+    let text = format!(
+      r#"{{ "mcpServers": {{ "mini": {{ "command": "node", "args": [] }} }}, "servers": {{ {key}: {{ "name": "mini", "kind": "takt", "concurrency": 1 }} }}, "projects": [] }}"#
+    );
+    let error =
+      parse_config(&text, Path::new("/base")).expect_err("空白だけ・制御文字を含む servers のキーは拒否します");
+    assert!(matches!(error, ConfigError::Invalid(_)), "servers のキー {id:?} は検証エラーになります: {error}");
+  }
+}
+
+#[test]
+fn project_names_that_are_blank_or_contain_control_characters_are_rejected() {
+  for name in ["   ", "takt\ndash", "takt\u{0}dash", "takt\u{7f}dash"] {
+    let value = serde_json::to_string(name).expect("JSON の文字列にできます");
+    let text = format!(
+      r#"{{ "mcpServers": {{ "mini": {{ "command": "node", "args": [] }} }}, "projects": [ {{ "name": {value}, "server": "mini", "cwd": "/abs/p" }} ] }}"#
+    );
+    let error =
+      parse_config(&text, Path::new("/base")).expect_err("空白だけ・制御文字を含むプロジェクト名は拒否します");
+    assert!(matches!(error, ConfigError::Invalid(_)), "プロジェクト名 {name:?} は検証エラーになります: {error}");
+  }
+}
+
+#[test]
+fn thresholds_beyond_the_proto_int32_range_are_rejected_but_the_maximum_is_accepted() {
+  let over = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [],
+    "thresholds": { "pendingDecisionStaleMinutes": 2147483648 }
+  }"#;
+  let error = parse_config(over, Path::new("/base")).expect_err("i32 の上限を超える滞留の閾値は拒否します");
+  assert!(matches!(error, ConfigError::Invalid(_)), "滞留の閾値の範囲外は検証エラーになります: {error}");
+
+  let over_silent = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [],
+    "thresholds": { "runLogSilentMinutes": 2147483648 }
+  }"#;
+  let error = parse_config(over_silent, Path::new("/base")).expect_err("i32 の上限を超える無音の閾値は拒否します");
+  assert!(matches!(error, ConfigError::Invalid(_)), "無音の閾値の範囲外は検証エラーになります: {error}");
+
+  let maximum = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [],
+    "thresholds": { "pendingDecisionStaleMinutes": 2147483647, "runLogSilentMinutes": 2147483647 }
+  }"#;
+  parse_config(maximum, Path::new("/base")).expect("i32 の上限ちょうどの閾値は受け入れます");
 }

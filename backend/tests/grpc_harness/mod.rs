@@ -18,6 +18,7 @@ use takt_dash_backend::{
   activity::ActivityStore,
   config::{Project, ServerMeta, Thresholds},
   conversation::{ConversationPaths, ConversationReader},
+  domain::{SilentMinutes, StaleMinutes},
   mcp::McpClientRegistry,
   store::StateStore,
 };
@@ -56,7 +57,10 @@ impl Default for GrpcHarnessBuilder {
       projects:   Vec::new(),
       state:      json!({}),
       interval:   30,
-      thresholds: Thresholds { pending_decision_stale_minutes: 240, run_log_silent_minutes: 10 },
+      thresholds: Thresholds {
+        pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
+        run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
+      },
     }
   }
 }
@@ -158,8 +162,8 @@ impl GrpcHarnessBuilder {
       })).collect::<Vec<_>>(),
       "intervalSeconds": self.interval,
       "thresholds": {
-        "pendingDecisionStaleMinutes": thresholds.pending_decision_stale_minutes,
-        "runLogSilentMinutes": thresholds.run_log_silent_minutes,
+        "pendingDecisionStaleMinutes": thresholds.pending_decision_stale_minutes.get(),
+        "runLogSilentMinutes": thresholds.run_log_silent_minutes.get(),
       },
       "sqlite": { "path": "data/taktdash.sqlite" },
     });
@@ -221,8 +225,8 @@ impl GrpcHarness {
     let text = std::fs::read_to_string(&self.config_path).expect("設定を読めます");
     let mut value: Value = serde_json::from_str(&text).expect("設定を解析できます");
     value["thresholds"] = json!({
-      "pendingDecisionStaleMinutes": thresholds.pending_decision_stale_minutes,
-      "runLogSilentMinutes": thresholds.run_log_silent_minutes,
+      "pendingDecisionStaleMinutes": thresholds.pending_decision_stale_minutes.get(),
+      "runLogSilentMinutes": thresholds.run_log_silent_minutes.get(),
     });
     std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
   }

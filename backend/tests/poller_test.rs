@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use takt_dash_backend::{
   activity::ActivityStore,
   config::Thresholds,
+  domain::{SilentMinutes, StaleMinutes},
   mcp::McpClientRegistry,
   model::EventKind,
   poller::{run_until_stopped, Poller},
@@ -74,7 +75,7 @@ fn state_with_goal(goal_id: &str) -> Value {
 fn state_with_running_run(last_log_at: &str) -> Value {
   json!({
     "tasks": [ { "name": "implement", "status": "running", "runSlug": "r1", "startedAt": last_log_at } ],
-    "runs": { "r1": { "runSlug": "r1", "currentStep": "implement", "startedAt": last_log_at, "lastLogAt": last_log_at } }
+    "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "implement", "startedAt": last_log_at, "lastLogAt": last_log_at } }
   })
 }
 
@@ -100,8 +101,8 @@ impl Harness {
     let mut servers = BTreeMap::new();
     servers.insert("mac-mini".to_owned(), server_meta());
     let store = Arc::new(StateStore::new(servers, vec![project("takt-dash", &project_dir)], Thresholds {
-      pending_decision_stale_minutes: 240,
-      run_log_silent_minutes:         10,
+      pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
+      run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
     }));
     let activity_db_path = directory.path().join("events.sqlite");
     let activity = Arc::new(ActivityStore::open(&activity_db_path).expect("SQLite を開けます"));
@@ -178,7 +179,7 @@ async fn unreachable_project_keeps_last_state_and_read_time_then_recovers() {
   let down = harness.store.slot("takt-dash").expect("スロットがあります");
   assert!(!down.connected, "応答がない間は connected 偽です");
   assert_eq!(down.last_read_at, Some(first_read_at), "最後に読めた時刻を保持します");
-  assert_eq!(down.snapshot.expect("状態を保持します").goals[0].goal_id, "g1", "最後に読めた状態を保持します");
+  assert_eq!(down.snapshot.expect("状態を保持します").goals[0].goal_id.as_str(), "g1", "最後に読めた状態を保持します");
   let lost: Vec<EventKind> = harness.activity.recent_events(10).unwrap().into_iter().map(|event| event.kind).collect();
   assert_eq!(lost, vec![EventKind::ConnectionLost], "接続断を1回だけ記録します");
 
@@ -331,7 +332,7 @@ async fn goal_question_tool_error_keeps_previous_inquiries_without_duplicate_eve
   assert!(slot.connected, "ゴール質問の道具エラーは connected を偽にしません");
   let snapshot = slot.snapshot.expect("状態があります");
   assert!(
-    snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id == "q1"),
+    snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id.as_str() == "q1"),
     "道具エラー中も前回の未回答質問を保持します"
   );
 
@@ -575,8 +576,13 @@ async fn changed_client_settings_are_applied_on_the_same_poller() {
   poller.shutdown().await;
 
   let slot = harness.store.slot("takt-dash").expect("スロットがあります");
-  let goals: Vec<String> =
-    slot.snapshot.expect("読み取った状態があります").goals.into_iter().map(|goal| goal.goal_id).collect();
+  let goals: Vec<String> = slot
+    .snapshot
+    .expect("読み取った状態があります")
+    .goals
+    .into_iter()
+    .map(|goal| goal.goal_id.as_str().to_owned())
+    .collect();
   assert!(goals.contains(&"g-changed".to_owned()), "起動設定の変更が次のサイクルから反映されます: {goals:?}");
 }
 
@@ -648,7 +654,7 @@ async fn changed_server_settings_read_new_state_without_stale_slot_on_failure() 
   let mut poller = harness.poller();
   poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
   let before = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert_eq!(before.snapshot.expect("旧サーバーの状態があります").goals[0].goal_id, "g1");
+  assert_eq!(before.snapshot.expect("旧サーバーの状態があります").goals[0].goal_id.as_str(), "g1");
 
   harness.rewrite_config(|value| {
     value["mcpServers"]["mac-mini"]["args"] =
@@ -790,7 +796,7 @@ async fn failed_event_record_keeps_the_baseline_and_records_the_event_once_after
   // 失敗したサイクルの時点で、差分基準も状態ストアも進んでいないことを観測する。
   let failed_slot = harness.store.slot("takt-dash").expect("スロットがあります");
   assert_eq!(
-    failed_slot.snapshot.expect("状態があります").goals[0].goal_id,
+    failed_slot.snapshot.expect("状態があります").goals[0].goal_id.as_str(),
     "g1",
     "記録に失敗した状態を成功として残しません"
   );
@@ -868,7 +874,7 @@ async fn failed_event_record_does_not_stop_the_remaining_projects() {
   let second = harness.store.slot("other").expect("後続のスロットがあります");
   assert!(second.connected, "後続プロジェクトは記録の失敗に巻き込まれません");
   assert_eq!(
-    second.snapshot.expect("後続の状態があります").goals[0].goal_id,
+    second.snapshot.expect("後続の状態があります").goals[0].goal_id.as_str(),
     "x2",
     "後続プロジェクトの状態を更新します"
   );
@@ -1149,8 +1155,14 @@ async fn changing_the_project_server_assignment_reads_the_new_server_state() {
   let views = harness.store.project_views();
   let view = &views[0];
   assert_eq!(view.server_id, "mini-two", "投影の server_id は新しい割り当てになります");
-  let goals: Vec<String> =
-    view.snapshot.as_ref().expect("読み取った状態があります").goals.iter().map(|goal| goal.goal_id.clone()).collect();
+  let goals: Vec<String> = view
+    .snapshot
+    .as_ref()
+    .expect("読み取った状態があります")
+    .goals
+    .iter()
+    .map(|goal| goal.goal_id.as_str().to_owned())
+    .collect();
   assert!(goals.contains(&"g2".to_owned()), "新しいサーバーの状態を読みます: {goals:?}");
   assert!(!goals.contains(&"g1".to_owned()), "旧サーバーの状態を持ち越しません: {goals:?}");
 }

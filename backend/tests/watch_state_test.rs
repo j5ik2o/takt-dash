@@ -13,6 +13,7 @@ use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
   config::{ServerMeta, Thresholds},
+  domain::{SilentMinutes, StaleMinutes},
   model::{ExecutionStatus, GoalStatus, ProjectSnapshot},
   poller::Poller,
   takt_dash::v1::WatchStateRequest,
@@ -171,7 +172,10 @@ async fn watch_state_sends_the_current_thresholds_after_a_config_change() {
   );
 
   // 設定の閾値を滞留 1 分・無音 3 分へ書き換え、定期読み取りの1サイクルを回す。
-  harness.rewrite_thresholds(Thresholds { pending_decision_stale_minutes: 1, run_log_silent_minutes: 3 });
+  harness.rewrite_thresholds(Thresholds {
+    pending_decision_stale_minutes: StaleMinutes::try_from(1).expect("テストの閾値は有効です"),
+    run_log_silent_minutes:         SilentMinutes::try_from(3).expect("テストの閾値は有効です"),
+  });
   let mut poller = Poller::new(
     harness.config_path().to_path_buf(),
     harness.activity.clone(),
@@ -407,7 +411,7 @@ async fn watch_state_sends_added_server_metadata_after_a_config_change() {
 fn run_state(last_log_at: &str) -> serde_json::Value {
   json!({
     "tasks": [ { "name": "implement", "status": "running", "runSlug": "run-1", "startedAt": last_log_at } ],
-    "runs": { "run-1": { "runSlug": "run-1", "currentStep": "implement", "startedAt": last_log_at, "lastLogAt": last_log_at } }
+    "runs": { "run-1": { "runSlug": "run-1", "status": "running", "currentStep": "implement", "startedAt": last_log_at, "lastLogAt": last_log_at } }
   })
 }
 

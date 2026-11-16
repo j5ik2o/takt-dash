@@ -12,6 +12,7 @@ use common::*;
 use grpc_harness::{client, start_server, start_server_at, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
+  domain::{GoalId, RunSlug, TaskName},
   model::{
     ActivityEvent, EventKind, ExecutionStatus, GoalStatus, InquiryEntry, InquiryKind, ProjectSnapshot, RunEntry,
     TaskEntry, TaskStatus,
@@ -38,8 +39,8 @@ fn run_entry(run_slug: &str) -> RunEntry {
   RunEntry {
     run_slug:                run_slug.to_owned(),
     session_id:              "sess-1".to_owned(),
-    task_name:               "implement".to_owned(),
-    goal_id:                 Some("g1".to_owned()),
+    task_name:               TaskName::try_from("implement").expect("テストのタスク名は有効です"),
+    goal_id:                 Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
     summary:                 "実装の run".to_owned(),
     status:                  takt_dash_backend::model::RunStatus::Running,
     current_step:            Some("implement".to_owned()),
@@ -88,18 +89,18 @@ fn seeded_harness() -> GrpcHarness {
     ],
     tasks:         vec![
       TaskEntry {
-        name:         "impl".to_owned(),
-        goal_id:      Some("g1".to_owned()),
+        name:         TaskName::try_from("impl").expect("テストのタスク名は有効です"),
+        goal_id:      Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
         status:       TaskStatus::Running,
         started_at:   Some(time("2026-11-13T09:00:00Z")),
-        run_slug:     Some("run-1".to_owned()),
+        run_slug:     Some(RunSlug::try_from("run-1").expect("テストの run slug は有効です")),
         current_step: Some("implement".to_owned()),
         merge_task:   false,
       },
       task_for_goal("merge", "g-merge", TaskStatus::Completed, true),
       TaskEntry {
-        name:         "doc".to_owned(),
-        goal_id:      Some("g-open".to_owned()),
+        name:         TaskName::try_from("doc").expect("テストのタスク名は有効です"),
+        goal_id:      Some(GoalId::try_from("g-open").expect("テストのゴール ID は有効です")),
         status:       TaskStatus::Pending,
         started_at:   None,
         run_slug:     None,

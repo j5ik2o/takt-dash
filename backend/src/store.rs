@@ -13,6 +13,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::{
   config::{Project, ServerMeta, Thresholds},
+  domain::{GoalId, ProjectName, RunSlug, ServerId},
   model::{
     GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot, ProjectView,
     RegistrationProposalEntry, RunEntry, TaskEntry, TaskStatus,
@@ -163,17 +164,17 @@ impl StateStore {
   /// から解決するため、この投影を使います。実行中の run 一覧に無くても、
   /// 完了タスクが runSlug を保持していれば解決できます。run が完了すると
   /// run 一覧から消えるため、詳細 URL を同じまま取得できるようにします。
-  pub fn find_run_project(&self, run_slug: &str) -> Option<ProjectView> {
+  pub fn find_run_project(&self, run_slug: &RunSlug) -> Option<ProjectView> {
     self.project_views().into_iter().find(|view| {
-      view.runs.iter().any(|run| run.run_slug == run_slug)
-        || view.tasks.iter().any(|task| task.run_slug.as_deref() == Some(run_slug))
+      view.runs.iter().any(|run| run.run_slug == run_slug.as_str())
+        || view.tasks.iter().any(|task| task.run_slug.as_ref() == Some(run_slug))
     })
   }
 
   /// 判断待ちの一覧を、`filter` の見方で組み立てる。
   pub fn pending_decisions(&self, now: DateTime<Utc>, filter: PendingDecisionFilter) -> Vec<PendingDecision> {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
-    let stale_threshold = Duration::minutes(i64::from(inner.thresholds.pending_decision_stale_minutes));
+    let stale_threshold = Duration::minutes(i64::from(inner.thresholds.pending_decision_stale_minutes.get()));
     let mut decisions = Vec::new();
     for project in &inner.projects {
       let Some(slot) = inner.slots.get(&project.name) else {
@@ -199,12 +200,12 @@ impl StateStore {
   ///
   /// `pending_decisions` の承認待ち射影と同じデータ源（各プロジェクトの
   /// snapshot.proposals）を読みます。
-  pub fn registration_proposals(&self, server_id: &str, project: &str) -> Vec<RegistrationProposalEntry> {
+  pub fn registration_proposals(&self, server_id: &ServerId, project: &ProjectName) -> Vec<RegistrationProposalEntry> {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
     inner
       .projects
       .iter()
-      .filter(|entry| entry.server == server_id && entry.name == project)
+      .filter(|entry| entry.server == server_id.as_str() && entry.name == project.as_str())
       .filter_map(|entry| inner.slots.get(&entry.name))
       .filter_map(|slot| slot.snapshot.as_ref())
       .flat_map(|snapshot| snapshot.proposals.iter().cloned())
@@ -214,12 +215,18 @@ impl StateStore {
   /// ログの無音の判定を、run ごとに返す。
   pub fn is_log_silent(&self, run: &RunEntry, now: DateTime<Utc>) -> bool {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
-    is_log_silent(run, now, inner.thresholds.run_log_silent_minutes)
+    is_log_silent(run.last_log_at, now, inner.thresholds.run_log_silent_minutes.get())
+  }
+
+  /// 最終ログ時刻だけから、ログの無音を判定する。
+  pub fn is_log_silent_at(&self, last_log_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    is_log_silent(last_log_at, now, inner.thresholds.run_log_silent_minutes.get())
   }
 }
 
-fn is_log_silent(run: &RunEntry, now: DateTime<Utc>, silent_minutes: u32) -> bool {
-  now.signed_duration_since(run.last_log_at) > Duration::minutes(i64::from(silent_minutes))
+fn is_log_silent(last_log_at: DateTime<Utc>, now: DateTime<Utc>, silent_minutes: i32) -> bool {
+  now.signed_duration_since(last_log_at) > Duration::minutes(i64::from(silent_minutes))
 }
 
 fn inquiry_decisions(
@@ -238,7 +245,7 @@ fn inquiry_decisions(
         decision_type:       PendingDecisionType::Inquiry,
         server_id:           project.server.clone(),
         project:             project.name.clone(),
-        goal_id:             inquiry.goal_id.clone(),
+        goal_id:             inquiry.goal_id.as_ref().map(|goal_id| goal_id.as_str().to_owned()),
         inquiry_kind:        Some(inquiry.kind),
         created_at:          inquiry.created_at,
         body:                inquiry.body.clone(),
@@ -246,7 +253,7 @@ fn inquiry_decisions(
         pull_request_number: None,
         pull_request_url:    None,
         stale:               wait >= stale_threshold,
-        inquiry_id:          inquiry.inquiry_id.clone(),
+        inquiry_id:          Some(inquiry.inquiry_id.clone()),
         revision:            None,
       }
     })
@@ -271,7 +278,7 @@ fn merge_decisions(
         decision_type: PendingDecisionType::AwaitingMerge,
         server_id: project.server.clone(),
         project: project.name.clone(),
-        goal_id: Some(goal.goal_id.clone()),
+        goal_id: Some(goal.goal_id.as_str().to_owned()),
         // マージ待ちは問い合わせではないため、問い合わせの種類は持たない。
         inquiry_kind: None,
         created_at,
@@ -280,7 +287,7 @@ fn merge_decisions(
         pull_request_number: goal.pull_request_number,
         pull_request_url: goal.pull_request_url.clone(),
         stale: wait >= stale_threshold,
-        inquiry_id: String::new(),
+        inquiry_id: None,
         revision: None,
       }
     })
@@ -307,7 +314,7 @@ fn registration_decisions(project: &Project, snapshot: &ProjectSnapshot, now: Da
       pull_request_number: None,
       pull_request_url:    None,
       stale:               false,
-      inquiry_id:          String::new(),
+      inquiry_id:          None,
       revision:            Some(proposal.revision),
     })
     .collect()
@@ -317,12 +324,12 @@ fn registration_decisions(project: &Project, snapshot: &ProjectSnapshot, now: Da
 ///
 /// awaiting_merge で、ゴールの仕上げタスクに pending/running がなく、
 /// 配列末尾の仕上げタスクの状態が failed/exceeded/pr_failed でもないときに人のマージ待ちです。
-pub fn is_human_merge_wait(status: GoalStatus, goal_id: &str, merge_tasks: &[&TaskEntry]) -> bool {
+pub fn is_human_merge_wait(status: GoalStatus, goal_id: &GoalId, merge_tasks: &[&TaskEntry]) -> bool {
   if status != GoalStatus::AwaitingMerge {
     return false;
   }
   let goal_merge_tasks: Vec<&TaskEntry> =
-    merge_tasks.iter().copied().filter(|task| task.goal_id.as_deref() == Some(goal_id)).collect();
+    merge_tasks.iter().copied().filter(|task| task.goal_id.as_ref() == Some(goal_id)).collect();
   if goal_merge_tasks.iter().any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running)) {
     return false;
   }

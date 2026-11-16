@@ -12,6 +12,8 @@ use std::{
 
 use serde::Deserialize;
 
+use crate::domain::{ProjectName, ServerId, SilentMinutes, StaleMinutes};
+
 /// 読み取り間隔の既定値（秒）。
 pub const DEFAULT_INTERVAL_SECONDS: u64 = 30;
 /// 判断待ちの滞留の既定値（分）。
@@ -75,8 +77,8 @@ pub struct Project {
 /// 異常判定の閾値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Thresholds {
-  pub pending_decision_stale_minutes: u32,
-  pub run_log_silent_minutes:         u32,
+  pub pending_decision_stale_minutes: StaleMinutes,
+  pub run_log_silent_minutes:         SilentMinutes,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +149,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
     serde_json::from_str(text).map_err(|source| ConfigError::Parse { path: base_dir.display().to_string(), source })?;
   let mut servers = BTreeMap::new();
   for (id, server) in raw.mcp_servers {
+    validate_server_id(&id)?;
     servers.insert(id, McpServer { command: server.command, args: server.args, env: server.env });
   }
   if servers.is_empty() {
@@ -154,6 +157,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   }
   let mut server_meta = BTreeMap::new();
   for (id, meta) in raw.servers {
+    validate_server_id(&id)?;
     let name = meta.name.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の name がありません。")))?;
     let kind = meta.kind.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の kind がありません。")))?;
     let concurrency =
@@ -163,6 +167,9 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   let mut projects = Vec::new();
   let mut seen_names = std::collections::BTreeSet::new();
   for project in raw.projects {
+    validate_server_id(&project.server)?;
+    ProjectName::try_from(project.name.as_str())
+      .map_err(|error| ConfigError::Invalid(format!("プロジェクト名 {} が不正です: {error}", project.name)))?;
     if !servers.contains_key(&project.server) {
       return Err(ConfigError::Invalid(format!(
         "プロジェクト {} が参照するサーバー {} は mcpServers にありません。",
@@ -196,16 +203,24 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   if interval_seconds == 0 {
     return Err(ConfigError::Invalid("intervalSeconds は1秒以上である必要があります。".to_owned()));
   }
+  let pending_decision_stale_minutes =
+    raw.thresholds.pending_decision_stale_minutes.unwrap_or(DEFAULT_PENDING_DECISION_STALE_MINUTES);
+  let run_log_silent_minutes = raw.thresholds.run_log_silent_minutes.unwrap_or(DEFAULT_RUN_LOG_SILENT_MINUTES);
   let thresholds = Thresholds {
-    pending_decision_stale_minutes: raw
-      .thresholds
-      .pending_decision_stale_minutes
-      .unwrap_or(DEFAULT_PENDING_DECISION_STALE_MINUTES),
-    run_log_silent_minutes:         raw.thresholds.run_log_silent_minutes.unwrap_or(DEFAULT_RUN_LOG_SILENT_MINUTES),
+    pending_decision_stale_minutes: StaleMinutes::try_from(pending_decision_stale_minutes)
+      .map_err(|error| ConfigError::Invalid(format!("pendingDecisionStaleMinutes が不正です: {error}")))?,
+    run_log_silent_minutes:         SilentMinutes::try_from(run_log_silent_minutes)
+      .map_err(|error| ConfigError::Invalid(format!("runLogSilentMinutes が不正です: {error}")))?,
   };
   let listen_raw = raw.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
   let listen = listen_raw.parse::<SocketAddr>().map_err(|error| {
     ConfigError::Invalid(format!("listen {listen_raw} を待ち受けアドレスとして解釈できませんでした: {error}"))
   })?;
   Ok(Config { servers, server_meta, projects, interval_seconds, thresholds, sqlite_path, listen })
+}
+
+fn validate_server_id(id: &str) -> Result<(), ConfigError> {
+  ServerId::try_from(id)
+    .map(|_| ())
+    .map_err(|error| ConfigError::Invalid(format!("サーバー ID {id} が不正です: {error}")))
 }

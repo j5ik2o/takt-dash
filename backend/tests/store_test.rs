@@ -9,17 +9,32 @@ use chrono::{DateTime, Utc};
 use common::*;
 use takt_dash_backend::{
   config::ServerMeta,
+  domain::{GoalId, SilentMinutes, StaleMinutes},
   model::{EventKind, ExecutionStatus, GoalStatus, PendingDecisionFilter, PendingDecisionType, TaskStatus},
   store::{is_human_merge_wait, StateStore},
 };
+
+fn goal_id() -> GoalId {
+  goal_id_named("g1")
+}
+
+fn goal_id_named(value: &str) -> GoalId {
+  GoalId::try_from(value).expect("テストのゴール ID は有効です")
+}
 
 fn store_with(threshold_minutes: i64, silent_minutes: i64) -> StateStore {
   let mut servers = BTreeMap::new();
   servers.insert("mac-mini".to_owned(), server_meta());
   let projects = vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))];
   let thresholds = takt_dash_backend::config::Thresholds {
-    pending_decision_stale_minutes: threshold_minutes as u32,
-    run_log_silent_minutes:         silent_minutes as u32,
+    pending_decision_stale_minutes: StaleMinutes::try_from(
+      u32::try_from(threshold_minutes).expect("テストの閾値は u32 の範囲です"),
+    )
+    .expect("テストの閾値は有効です"),
+    run_log_silent_minutes:         SilentMinutes::try_from(
+      u32::try_from(silent_minutes).expect("テストの閾値は u32 の範囲です"),
+    )
+    .expect("テストの閾値は有効です"),
   };
   StateStore::new(servers, projects, thresholds)
 }
@@ -37,20 +52,20 @@ fn human_merge_wait_requires_awaiting_merge_status() {
   let tasks = [task_for_goal("merge", "g1", TaskStatus::Completed, true)];
   let borrows: Vec<&takt_dash_backend::model::TaskEntry> = tasks.iter().collect();
 
-  assert!(!is_human_merge_wait(GoalStatus::Created, "g1", &borrows));
-  assert!(!is_human_merge_wait(GoalStatus::Completed, "g1", &borrows));
-  assert!(is_human_merge_wait(GoalStatus::AwaitingMerge, "g1", &borrows));
+  assert!(!is_human_merge_wait(GoalStatus::Created, &goal_id(), &borrows));
+  assert!(!is_human_merge_wait(GoalStatus::Completed, &goal_id(), &borrows));
+  assert!(is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &borrows));
 }
 
 #[test]
 fn human_merge_wait_excludes_pending_or_running_finish_task() {
   let pending = [task_for_goal("merge", "g1", TaskStatus::Pending, true)];
   let pending_refs: Vec<&takt_dash_backend::model::TaskEntry> = pending.iter().collect();
-  assert!(!is_human_merge_wait(GoalStatus::AwaitingMerge, "g1", &pending_refs));
+  assert!(!is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &pending_refs));
 
   let running = [task_for_goal("merge", "g1", TaskStatus::Running, true)];
   let running_refs: Vec<&takt_dash_backend::model::TaskEntry> = running.iter().collect();
-  assert!(!is_human_merge_wait(GoalStatus::AwaitingMerge, "g1", &running_refs));
+  assert!(!is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &running_refs));
 }
 
 #[test]
@@ -58,7 +73,10 @@ fn human_merge_wait_excludes_failed_finish_task_states() {
   for status in [TaskStatus::Failed, TaskStatus::Exceeded, TaskStatus::PrFailed] {
     let tasks = [task_for_goal("merge", "g1", status, true)];
     let refs: Vec<&takt_dash_backend::model::TaskEntry> = tasks.iter().collect();
-    assert!(!is_human_merge_wait(GoalStatus::AwaitingMerge, "g1", &refs), "{status:?} は人のマージ待ちではありません");
+    assert!(
+      !is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &refs),
+      "{status:?} は人のマージ待ちではありません"
+    );
   }
 }
 
@@ -70,7 +88,7 @@ fn human_merge_wait_uses_last_finish_task_among_multiple() {
     task_for_goal("merge-b", "g1", TaskStatus::Completed, true),
   ];
   let refs: Vec<&takt_dash_backend::model::TaskEntry> = tasks.iter().collect();
-  assert!(is_human_merge_wait(GoalStatus::AwaitingMerge, "g1", &refs));
+  assert!(is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &refs));
 }
 
 #[test]
@@ -80,8 +98,14 @@ fn human_merge_wait_ignores_other_goals_finish_tasks() {
     task_for_goal("merge", "g2", TaskStatus::Completed, true),
   ];
   let refs: Vec<&takt_dash_backend::model::TaskEntry> = tasks.iter().collect();
-  assert!(!is_human_merge_wait(GoalStatus::AwaitingMerge, "g1", &refs), "g1 の仕上げタスクが pending なら待ちではない");
-  assert!(is_human_merge_wait(GoalStatus::AwaitingMerge, "g2", &refs), "g2 の仕上げタスクは完了なので待ち");
+  assert!(
+    !is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &refs),
+    "g1 の仕上げタスクが pending なら待ちではない"
+  );
+  assert!(
+    is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id_named("g2"), &refs),
+    "g2 の仕上げタスクは完了なので待ち"
+  );
 }
 
 #[test]
@@ -251,7 +275,7 @@ fn recovery_updates_state_on_next_success() {
   let slot = store.slot("takt-dash").expect("スロットがあります");
   assert!(slot.connected);
   assert_eq!(slot.last_read_at, Some(second), "復旧後の読み取りで時刻を更新します");
-  assert_eq!(slot.snapshot.expect("状態があります").goals[0].goal_id, "g2");
+  assert_eq!(slot.snapshot.expect("状態があります").goals[0].goal_id.as_str(), "g2");
 }
 
 #[test]
@@ -399,7 +423,7 @@ fn set_projects_keeps_existing_project_slot() {
   let takt_dash = views.iter().find(|view| view.name == "takt-dash").expect("既存プロジェクトは残ります");
   assert!(takt_dash.connected, "既存プロジェクトの接続状態を保持します");
   assert_eq!(takt_dash.last_read_at, Some(read_at), "既存プロジェクトの読めた時刻を保持します");
-  assert_eq!(takt_dash.snapshot.as_ref().expect("既存の状態を保持します").goals[0].goal_id, "g1");
+  assert_eq!(takt_dash.snapshot.as_ref().expect("既存の状態を保持します").goals[0].goal_id.as_str(), "g1");
 }
 
 #[test]
@@ -453,6 +477,6 @@ fn project_view_returns_goal_and_event_kind_helpers_stay_consistent() {
   let view = &store.project_views()[0];
   assert_eq!(view.name, "takt-dash");
   assert!(view.connected);
-  assert_eq!(view.goals[0].goal_id, "g1");
+  assert_eq!(view.goals[0].goal_id.as_str(), "g1");
   assert_eq!(EventKind::from_stored(EventKind::Inquiry.as_str()), Some(EventKind::Inquiry));
 }
