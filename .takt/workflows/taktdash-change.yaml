@@ -84,7 +84,7 @@ steps:
       - condition: ABORT
         next: ABORT
   - name: machine_gate
-    description: fmt・clippy・test・typecheck・lint を検査ごとに実行し、すべて通るときだけ完了とする
+    description: proto-check・fmt・clippy・test・typecheck・lint を検査ごとに実行し、すべて通るときだけ完了とする
     mode: system
     system_inputs:
       - type: command
@@ -107,6 +107,10 @@ steps:
         as: lint
         command: "bash -o pipefail -c 'make lint 2>&1 | tail -c 60000'"
         timeout_ms: 1800000
+      - type: command
+        as: proto_check
+        command: "bash -o pipefail -c 'make proto-check 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
     rules:
       - condition: when(context.machine_gate.fmt.exit_code != 0)
         next: fix_machine_gate_fmt
@@ -118,7 +122,9 @@ steps:
         next: fix_machine_gate_typecheck
       - condition: when(context.machine_gate.lint.exit_code != 0)
         next: fix_machine_gate_lint
-      - condition: when(context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0 && context.machine_gate.lint.exit_code == 0)
+      - condition: when(context.machine_gate.proto_check.exit_code != 0)
+        next: fix_machine_gate_proto_check
+      - condition: when(context.machine_gate.proto_check.exit_code == 0 && context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0 && context.machine_gate.lint.exit_code == 0)
         next: aislop_gate
       - condition: when(true)
         next: ABORT
@@ -242,6 +248,28 @@ steps:
         {context:machine_gate.lint.stderr}
     rules:
       - condition: make lint の失敗を修正して検証した
+        next: machine_gate
+      - condition: 裏付けられた原因を安全に修正または検証できない
+        next: ABORT
+  - name: fix_machine_gate_proto_check
+    description: make proto-check の失敗出力を確認して修正し、機械ゲートへ戻る
+    capabilities: edit
+    edit: true
+    persona: coder
+    policy: coding
+    knowledge: taktdash-rules
+    required_permission_mode: edit
+    pass_previous_response: false
+    instruction:
+      - fix-supervisor
+      - |
+        make proto-check が失敗しました。次の出力の生成物と proto の不一致を修正してください。
+        --- make proto-check の stdout ---
+        {context:machine_gate.proto_check.stdout}
+        --- make proto-check の stderr ---
+        {context:machine_gate.proto_check.stderr}
+    rules:
+      - condition: make proto-check の失敗を修正して検証した
         next: machine_gate
       - condition: 裏付けられた原因を安全に修正または検証できない
         next: ABORT

@@ -15,10 +15,10 @@ make は呼ばない。
      それぞれ別の違反として報告する。
   3. make done が検査を省略する、clippy を -- -D warnings なしで呼ぶ、依存の導入手順を
      持たない、検査が失敗する、のそれぞれで失敗する。
-  4. machine_gate が mode: system で、fmt・clippy・test・typecheck・lint の5つの
-     system_input を過不足なく持ち、各 command が対応する make ターゲットを起動する。
+  4. machine_gate が mode: system で、proto-check・fmt・clippy・test・typecheck・lint の
+     6つの system_input を過不足なく持ち、各 command が対応する make ターゲットを起動する。
      検査の欠落・重複・別ターゲットの起動は失敗させる。
-  5. machine_gate の成功条件が5つの exit_code == 0 の同時成立で次のステップへ進み、
+  5. machine_gate の成功条件が6つの exit_code == 0 の同時成立で次のステップへ進み、
      失敗条件が検査ごとの修正ステップへ分岐する。公開ステップを置く場合は公開へ、
      置かない場合は aislop_gate へ進む。1検査の抜け、別の遷移先、単一キーの条件は
      失敗させる。
@@ -139,7 +139,7 @@ WEB_MANIFEST = json.dumps(
 )
 
 MAKEFILE = """\
-.PHONY: fmt clippy test typecheck lint done
+.PHONY: fmt clippy test typecheck lint proto-check done
 
 fmt:
 	cargo +nightly fmt --all -- --check
@@ -157,8 +157,13 @@ typecheck:
 lint:
 	npm --prefix frontend/web run lint
 
+proto-check:
+	$(MAKE) proto-gen
+	git diff --exit-code -- frontend/web/src/proto
+
 done:
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
+	$(MAKE) proto-check
 	$(MAKE) fmt
 	$(MAKE) clippy
 	$(MAKE) test
@@ -237,6 +242,13 @@ LINT_INPUT = """\
         timeout_ms: 1800000
 """
 
+PROTO_CHECK_INPUT = """\
+      - type: command
+        as: proto_check
+        command: "bash -o pipefail -c 'make proto-check 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+"""
+
 EXTRA_INPUT = """\
       - type: command
         as: coverage
@@ -259,6 +271,11 @@ LINT_FAILURE_RULE = """\
         next: fix_machine_gate_lint
 """
 
+PROTO_CHECK_FAILURE_RULE = """\
+      - condition: when(context.machine_gate.proto_check.exit_code != 0)
+        next: fix_machine_gate_proto_check
+"""
+
 MACHINE_GATE_FAILURE_RULES = """\
       - condition: when(context.machine_gate.fmt.exit_code != 0)
         next: fix_machine_gate_fmt
@@ -270,10 +287,12 @@ MACHINE_GATE_FAILURE_RULES = """\
         next: fix_machine_gate_typecheck
       - condition: when(context.machine_gate.lint.exit_code != 0)
         next: fix_machine_gate_lint
+      - condition: when(context.machine_gate.proto_check.exit_code != 0)
+        next: fix_machine_gate_proto_check
 """
 
 MACHINE_GATE_SUCCESS_RULE = """\
-      - condition: when(context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0 && context.machine_gate.lint.exit_code == 0)
+      - condition: when(context.machine_gate.proto_check.exit_code == 0 && context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0 && context.machine_gate.lint.exit_code == 0)
         next: aislop_gate
 """
 
@@ -284,7 +303,7 @@ MACHINE_GATE_ABORT_RULE = """\
 
 MACHINE_GATE_STEP = (
     "  - name: machine_gate\n"
-    "    description: fmt・clippy・test・typecheck・lint を検査ごとに実行する\n"
+    "    description: proto-check・fmt・clippy・test・typecheck・lint を検査ごとに実行する\n"
     "    mode: system\n"
     "    system_inputs:\n"
     + FMT_INPUT
@@ -292,6 +311,7 @@ MACHINE_GATE_STEP = (
     + TEST_INPUT
     + TYPECHECK_INPUT
     + LINT_INPUT
+    + PROTO_CHECK_INPUT
     + "    rules:\n"
     + MACHINE_GATE_FAILURE_RULES
     + MACHINE_GATE_SUCCESS_RULE
@@ -315,7 +335,8 @@ AISLOP_GATE_STEP = """\
 """
 
 
-def fix_machine_gate_step(name, check, failure):
+def fix_machine_gate_step(name, check, failure, alias=None):
+    key = alias or check
     return (
         f"  - name: {name}\n"
         f"    description: make {check} の失敗出力を確認して修正し、機械ゲートへ戻る\n"
@@ -326,9 +347,9 @@ def fix_machine_gate_step(name, check, failure):
         "      - |\n"
         f"        make {check} が失敗しました。次の出力の{failure}を修正してください。\n"
         f"        --- make {check} の stdout ---\n"
-        f"        {{context:machine_gate.{check}.stdout}}\n"
+        f"        {{context:machine_gate.{key}.stdout}}\n"
         f"        --- make {check} の stderr ---\n"
-        f"        {{context:machine_gate.{check}.stderr}}\n"
+        f"        {{context:machine_gate.{key}.stderr}}\n"
         "    rules:\n"
         f"      - condition: make {check} の失敗を修正して検証した\n"
         "        next: machine_gate\n"
@@ -348,12 +369,19 @@ FIX_MACHINE_GATE_TYPECHECK_STEP = fix_machine_gate_step(
     "fix_machine_gate_typecheck", "typecheck", "型検査の失敗"
 )
 FIX_MACHINE_GATE_LINT_STEP = fix_machine_gate_step("fix_machine_gate_lint", "lint", "lint の指摘")
+FIX_MACHINE_GATE_PROTO_CHECK_STEP = fix_machine_gate_step(
+    "fix_machine_gate_proto_check",
+    "proto-check",
+    "生成物と proto の不一致",
+    alias="proto_check",
+)
 FIX_MACHINE_GATE_STEPS = [
     FIX_MACHINE_GATE_FMT_STEP,
     FIX_MACHINE_GATE_CLIPPY_STEP,
     FIX_MACHINE_GATE_TEST_STEP,
     FIX_MACHINE_GATE_TYPECHECK_STEP,
     FIX_MACHINE_GATE_LINT_STEP,
+    FIX_MACHINE_GATE_PROTO_CHECK_STEP,
 ]
 
 FIX_AISLOP_GATE_STEP = """\
@@ -646,14 +674,22 @@ def test_proto_directory_is_required() -> None:
 
 
 def test_make_done_must_run_every_check() -> None:
-    for target in ("fmt", "clippy", "test", "typecheck", "lint"):
+    checks = (
+        ("proto-check", "proto_check"),
+        ("fmt", "fmt"),
+        ("clippy", "clippy"),
+        ("test", "test"),
+        ("typecheck", "typecheck"),
+        ("lint", "lint"),
+    )
+    for target, reported in checks:
         with Sandbox() as sandbox:
             makefile = "\n".join(
                 line for line in MAKEFILE.splitlines() if line.strip() != f"$(MAKE) {target}"
             )
             repository(sandbox, makefile=makefile + "\n")
             stub_external_tools(sandbox)
-            assert_failure(sandbox, f"done が {target} を実行しない", "machine-gate", target)
+            assert_failure(sandbox, f"done が {target} を実行しない", "machine-gate", reported)
 
 
 def test_make_done_must_fail_when_a_check_fails() -> None:
@@ -678,7 +714,7 @@ def test_clippy_must_reject_warnings() -> None:
 
 def test_done_must_install_node_dependencies_when_missing() -> None:
     makefile = """\
-.PHONY: fmt clippy test typecheck lint done
+.PHONY: fmt clippy test typecheck lint proto-check done
 
 fmt:
 	cargo +nightly fmt --all -- --check
@@ -696,7 +732,12 @@ typecheck:
 lint:
 	npm --prefix frontend/web run lint
 
+proto-check:
+	$(MAKE) proto-gen
+	git diff --exit-code -- frontend/web/src/proto
+
 done:
+	$(MAKE) proto-check
 	$(MAKE) fmt
 	$(MAKE) clippy
 	$(MAKE) test
@@ -856,13 +897,17 @@ def test_machine_gate_develop_complete_and_mode() -> None:
             assert_failure(sandbox, label, "workflow-machine-gate", snippet)
 
 
-def test_machine_gate_requires_five_system_inputs() -> None:
+def test_machine_gate_requires_six_system_inputs() -> None:
     cases = {
         "lint の system_input が無い": (
             MACHINE_GATE_STEP.replace(LINT_INPUT, ""),
             "system_inputs",
         ),
-        "6 個目の system_input がある": (
+        "proto_check の system_input が無い": (
+            MACHINE_GATE_STEP.replace(PROTO_CHECK_INPUT, ""),
+            "system_inputs",
+        ),
+        "7 個目の system_input がある": (
             MACHINE_GATE_STEP.replace(LINT_INPUT, LINT_INPUT + EXTRA_INPUT),
             "system_inputs",
         ),
@@ -933,6 +978,23 @@ def test_machine_gate_commands_invoke_their_make_targets() -> None:
             ),
             "make clippy を呼んでいません",
         ),
+        "proto_check が make proto-check を呼ばない": (
+            MACHINE_GATE_STEP.replace(
+                PROTO_CHECK_INPUT,
+                PROTO_CHECK_INPUT.replace("make proto-check 2>&1", "make fmt 2>&1"),
+            ),
+            "make proto-check を呼んでいません",
+        ),
+        "proto_check が別の検査も一緒に呼ぶ": (
+            MACHINE_GATE_STEP.replace(
+                PROTO_CHECK_INPUT,
+                PROTO_CHECK_INPUT.replace(
+                    "make proto-check 2>&1 | tail -c 60000",
+                    "make proto-check && make lint 2>&1 | tail -c 60000",
+                ),
+            ),
+            "lint",
+        ),
     }
     for label, (machine_step, snippet) in cases.items():
         with Sandbox() as sandbox:
@@ -950,13 +1012,17 @@ def test_machine_gate_commands_invoke_their_make_targets() -> None:
             assert_failure(sandbox, label, "workflow-machine-gate", snippet)
 
 
-def test_machine_gate_success_requires_all_five_exit_codes() -> None:
+def test_machine_gate_success_requires_all_six_exit_codes() -> None:
     four_check_success = """\
       - condition: when(context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0)
         next: aislop_gate
 """
+    five_check_success = """\
+      - condition: when(context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0 && context.machine_gate.lint.exit_code == 0)
+        next: aislop_gate
+"""
     or_success = """\
-      - condition: when(context.machine_gate.fmt.exit_code == 0 || context.machine_gate.clippy.exit_code == 0 || context.machine_gate.test.exit_code == 0 || context.machine_gate.typecheck.exit_code == 0 || context.machine_gate.lint.exit_code == 0)
+      - condition: when(context.machine_gate.proto_check.exit_code == 0 || context.machine_gate.fmt.exit_code == 0 || context.machine_gate.clippy.exit_code == 0 || context.machine_gate.test.exit_code == 0 || context.machine_gate.typecheck.exit_code == 0 || context.machine_gate.lint.exit_code == 0)
         next: aislop_gate
 """
     result_success = """\
@@ -974,7 +1040,11 @@ def test_machine_gate_success_requires_all_five_exit_codes() -> None:
     cases = {
         "成功条件から lint の検査が抜けている": (
             MACHINE_GATE_STEP.replace(MACHINE_GATE_SUCCESS_RULE, four_check_success),
-            "5検査",
+            "6検査",
+        ),
+        "成功条件から proto_check の検査が抜けている": (
+            MACHINE_GATE_STEP.replace(MACHINE_GATE_SUCCESS_RULE, five_check_success),
+            "6検査",
         ),
         "成功の遷移先が aislop_gate でない": (
             MACHINE_GATE_STEP.replace(
@@ -1672,9 +1742,9 @@ def main() -> int:
         test_clippy_must_reject_warnings,
         test_done_must_install_node_dependencies_when_missing,
         test_machine_gate_develop_complete_and_mode,
-        test_machine_gate_requires_five_system_inputs,
+        test_machine_gate_requires_six_system_inputs,
         test_machine_gate_commands_invoke_their_make_targets,
-        test_machine_gate_success_requires_all_five_exit_codes,
+        test_machine_gate_success_requires_all_six_exit_codes,
         test_machine_gate_requires_single_success_rule,
         test_machine_gate_failure_routes_to_matching_fix_step,
         test_machine_gate_fix_steps_only_use_their_own_output,

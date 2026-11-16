@@ -15,10 +15,10 @@
   ci-runs-make-done    .github/workflows/ の各 CI が make done を呼び、Rust の stable と
                        nightly（rustfmt）と Node をセットアップする。
   workflow-machine-gate taktdash-change の machine_gate が mode: system で、
-                       fmt・clippy・test・typecheck・lint の5検査を system_inputs の
-                       command として実行し、各検査の make ターゲットを呼ぶ。5検査の
-                       exit_code == 0 の同時成立で次のステップへ進み、検査ごとの失敗は
-                       対応する修正ステップへ回して machine_gate へ戻る。
+                       proto-check・fmt・clippy・test・typecheck・lint の6検査を
+                       system_inputs の command として実行し、各検査の make ターゲットを
+                       呼ぶ。6検査の exit_code == 0 の同時成立で次のステップへ進み、
+                       検査ごとの失敗は対応する修正ステップへ回して machine_gate へ戻る。
                        公開ステップ（publish.py）は任意で、置く場合は commit / push / pr /
                        status の 4 段階を実行し、commit / push / pr の成功だけを完了条件に
                        し、失敗は再試行または修正へ回し、ABORT へは遷移しない。公開ステップを
@@ -51,7 +51,15 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.11 未満は対象外
     tomllib = None
 
 WORKSPACE_MEMBERS = ["backend", "frontend/cli"]
-GATE_TARGETS = ["fmt", "clippy", "test", "typecheck", "lint"]
+GATE_TARGETS = ["fmt", "clippy", "test", "typecheck", "lint", "proto_check"]
+# machine_gate の system_input の as 名と、Makefile のターゲット名の対応。
+# proto-check は Makefile のターゲット名にハイフンを含むため、式から参照しやすい
+# as 名（proto_check）と分けて対応づける。
+GATE_MAKE_TARGETS = {"proto_check": "proto-check"}
+
+
+def gate_make_target(name):
+    return GATE_MAKE_TARGETS.get(name, name)
 AISLOP_CHECK_COMMAND = "scripts/aislop-check-bootstrap.mjs check"
 AISLOP_CHECK_INVOCATION = ["node", "scripts/aislop-check-bootstrap.mjs", "check"]
 GATE_EXIT_CODE_REFERENCE = re.compile(r"context\.([A-Za-z0-9_]+)\.result\.exit_code")
@@ -338,7 +346,7 @@ def check_machine_gate(root, timeout_seconds):
     targets = parse_makefile(makefile)
     gate = gate_commands(targets)
 
-    missing = [name for name in GATE_TARGETS if name not in gate]
+    missing = [name for name in GATE_TARGETS if gate_make_target(name) not in gate]
     if missing:
         raise GateError(f"Makefile の done が実行しない検査があります: {missing}")
 
@@ -555,7 +563,7 @@ def invoked_make_targets(command, depth=0):
 
 
 def machine_gate_success_checks(condition):
-    """成功条件が5検査の exit_code == 0 の同時成立なら、その検査名を返す。
+    """成功条件が6検査の exit_code == 0 の同時成立なら、その検査名を返す。
 
     when(...) 全体を && で区切った各節が、machine_gate の検査の exit_code == 0 に
     完全一致する場合だけ受理する。|| や単一キーの result、別ゲートの参照、重複した
@@ -584,7 +592,7 @@ def instruction_text(step):
 
 
 def check_machine_gate_inputs(gate):
-    """machine_gate が mode: system で5検査を command として実行するかを検査する。"""
+    """machine_gate が mode: system で6検査を command として実行するかを検査する。"""
     if gate.get("mode") != "system":
         raise GateError(f"machine_gate は mode: system でなければなりません: {gate.get('mode')!r}")
 
@@ -607,7 +615,7 @@ def check_machine_gate_inputs(gate):
     extra = sorted(name for name in by_name if name not in GATE_TARGETS)
     if missing or extra:
         raise GateError(
-            f"machine_gate の system_inputs の as が5検査と一致しません: missing={missing}, extra={extra}"
+            f"machine_gate の system_inputs の as が6検査と一致しません: missing={missing}, extra={extra}"
         )
     for name in GATE_TARGETS:
         item = by_name[name]
@@ -617,9 +625,13 @@ def check_machine_gate_inputs(gate):
                 f"{item.get('type')!r}"
             )
         targets = invoked_make_targets(str(item.get("command", "")))
-        if name not in targets:
-            raise GateError(f"{name} の command が make {name} を呼んでいません: {item.get('command')!r}")
-        others = sorted(targets & (set(GATE_TARGETS) - {name}))
+        make_target = gate_make_target(name)
+        if make_target not in targets:
+            raise GateError(
+                f"{name} の command が make {make_target} を呼んでいません: {item.get('command')!r}"
+            )
+        other_targets = {gate_make_target(other) for other in GATE_TARGETS if other != name}
+        others = sorted(targets & other_targets)
         if others:
             raise GateError(
                 f"{name} の command が別の検査 {', '.join(others)} を呼んでいます: "
@@ -628,7 +640,7 @@ def check_machine_gate_inputs(gate):
 
 
 def check_machine_gate_success_rule(gate_rules, next_name):
-    """成功規則が5検査の exit_code == 0 の同時成立で next_name へ進むかを検査する。"""
+    """成功規則が6検査の exit_code == 0 の同時成立で next_name へ進むかを検査する。"""
     success_rules = [rule for rule in gate_rules if rule.get("next") == next_name]
     if len(success_rules) != 1:
         raise GateError(
@@ -637,7 +649,8 @@ def check_machine_gate_success_rule(gate_rules, next_name):
     success_checks = machine_gate_success_checks(success_rules[0].get("condition"))
     if sorted(success_checks) != sorted(GATE_TARGETS):
         raise GateError(
-            "machine_gate の成功条件が5検査（fmt・clippy・test・typecheck・lint）の "
+            "machine_gate の成功条件が6検査"
+            "（proto_check・fmt・clippy・test・typecheck・lint）の "
             f"exit_code == 0 の同時成立になっていません: {success_rules[0].get('condition')!r}"
         )
 
@@ -699,9 +712,9 @@ def check_machine_gate_transitions(gate_rules, next_name):
 
 
 def check_machine_gate_five_checks(named, next_name):
-    """machine_gate が5検査を実行し、検査ごとに失敗を振り分けるかを検査する。
+    """machine_gate が6検査を実行し、検査ごとに失敗を振り分けるかを検査する。
 
-    5検査の成功は next_name へ進む。公開ステップを置く場合はそのステップ名、
+    6検査の成功は next_name へ進む。公開ステップを置く場合はそのステップ名、
     置かない場合は aislop_gate を渡す。
     """
     gate = named["machine_gate"]
