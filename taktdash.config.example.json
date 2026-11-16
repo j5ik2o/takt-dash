@@ -1,0 +1,52 @@
+{
+  "mcpServers": {
+    "mac-mini": {
+      "command": "node",
+      "args": [
+        "/Users/you/local/takt-custom/dist/app/mcp/index.js"
+      ],
+      "env": {}
+    }
+  },
+  "servers": {
+    "mac-mini": {
+      "name": "your-mac-mini",
+      "kind": "Mac mini",
+      "concurrency": 4
+    }
+  },
+  "projects": [
+    {
+      "name": "corporate-site",
+      "server": "mac-mini",
+      "about": "IDEO PLUS のコーポレートサイト",
+      "cwd": "/Users/you/Sources/j5ik2o.github.com/ideo-plus/corporate-site"
+    },
+    {
+      "name": "event-store-adapter",
+      "server": "mac-mini",
+      "about": "イベントストアアダプター",
+      "cwd": "/Users/you/Sources/j5ik2o.github.com/j5ik2o/event-store-adapter"
+    },
+    {
+      "name": "takt",
+      "server": "mac-mini",
+      "about": "takt 本体。takt-mcp にゴール登録の道具を足しています。",
+      "cwd": "/Users/you/Sources/github.com/j5ik2o/takt"
+    },
+    {
+      "name": "takt-dash",
+      "server": "mac-mini",
+      "about": "taktDash 本体。",
+      "cwd": "/Users/you/Sources/j5ik2o.github.com/j5ik2o/takt-dash"
+    }
+  ],
+  "intervalSeconds": 30,
+  "thresholds": {
+    "pendingDecisionStaleMinutes": 240,
+    "runLogSilentMinutes": 10
+  },
+  "sqlite": {
+    "path": "data/taktdash.sqlite"
+  }
+}
