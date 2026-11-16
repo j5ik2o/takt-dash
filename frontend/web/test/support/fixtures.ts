@@ -8,10 +8,13 @@ import {
   ConversationSpeaker,
   DashboardState,
   ExecutionStatus,
+  GetGoalDetailResponse,
+  GetTaskDetailResponse,
   GoalStatus,
   InquiryKind,
   PendingDecisionType,
   RunStatus,
+  TaskStatus,
   type ActivityEvent,
   type ConversationMessage,
   type DailySummary,
@@ -19,6 +22,7 @@ import {
   type GetConversationResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
+  type Goal,
   type ServerEventCount,
 } from "../../src/proto/taktdash.ts";
 
@@ -401,4 +405,90 @@ export function createRunDetailResponse(runSlug = "run-aaa"): GetRunDetailRespon
     serverConnected: true,
     serverLastReadAt: minutesAgo(1),
   };
+}
+
+export function createGoal(overrides: Partial<Goal> = {}): Goal {
+  return {
+    goalId: "goal-1",
+    serverId: "mini",
+    project: "corporate-site",
+    name: "採用ページのレイアウトを直す",
+    status: GoalStatus.GOAL_STATUS_CREATED,
+    executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+    taskCounts: { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 },
+    pullRequest: undefined,
+    ...overrides,
+  };
+}
+
+export function createGoalDetailResponse(
+  overrides: Partial<GetGoalDetailResponse> = {},
+): GetGoalDetailResponse {
+  return GetGoalDetailResponse.create({
+    goalId: "goal-1",
+    serverId: "mini",
+    project: "corporate-site",
+    status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+    executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+    objective: "採用ページのレイアウトを直す目的です。",
+    outOfScope: ["管理画面の変更は対象外です。"],
+    acceptanceCriteria: ["採用ページのレイアウトが崩れないこと。", "スマートフォンで読めること。"],
+    constraints: ["既存の配色を変えないこと。"],
+    specifications: {},
+    branch: "goal/45-frontend",
+    integrationBranch: "main",
+    workLog: [
+      { workLogId: "w1", recordedAt: minutesAgo(50), summary: "最初の作業記録です。" },
+      { workLogId: "w2", recordedAt: minutesAgo(10), summary: "次の作業記録です。" },
+    ],
+    questions: [
+      {
+        questionId: "q1",
+        kind: "question",
+        status: "answered",
+        body: "配色は変えてよいですか。",
+        options: [],
+        answerText: "変えないでください。",
+        answerDecision: "deny",
+        createdAt: minutesAgo(40),
+        answeredAt: minutesAgo(35),
+      },
+      {
+        questionId: "q2",
+        kind: "operation_request",
+        status: "pending",
+        body: "スクリーンショットを撮ってよいですか。",
+        options: ["実施した", "対応できない"],
+        createdAt: minutesAgo(5),
+      },
+    ],
+    tasks: [
+      {
+        taskName: "採用ページのレイアウトを直す",
+        status: TaskStatus.TASK_STATUS_COMPLETED,
+        runSlug: "run-aaa",
+      },
+      { taskName: "タスク/2", status: TaskStatus.TASK_STATUS_RUNNING, runSlug: "run-bbb" },
+    ],
+    ...overrides,
+  });
+}
+
+export function createTaskDetailResponse(
+  overrides: Partial<GetTaskDetailResponse> = {},
+): GetTaskDetailResponse {
+  return GetTaskDetailResponse.create({
+    project: "corporate-site",
+    taskName: "採用ページのレイアウトを直す",
+    goalId: "goal-1",
+    status: TaskStatus.TASK_STATUS_COMPLETED,
+    summary: "レイアウトを直して、確認を待っています。",
+    startedAt: minutesAgo(35),
+    runSlug: "run-aaa",
+    pullRequestNumber: 418,
+    linkedRunSlugs: ["run-aaa", "run-bbb"],
+    branch: "goal/45-frontend",
+    pullRequestUrl: "https://example.test/pr/418",
+    ...overrides,
+  });
 }

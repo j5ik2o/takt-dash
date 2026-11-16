@@ -4,11 +4,12 @@
 // 閾値は proto の AnomalyThresholds から取り、240/10 を実装側へ直書きさせない。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PendingDecisionType, InquiryKind, type PendingDecision } from "../../src/proto/taktdash.ts";
-import { createDashboardState, NOW, SILENT_MINUTES } from "../support/fixtures.ts";
+import { PendingDecisionType, GoalStatus, InquiryKind, TaskStatus, type PendingDecision } from "../../src/proto/taktdash.ts";
+import { createDashboardState, createGoal, NOW, SILENT_MINUTES } from "../support/fixtures.ts";
 import {
   buildOverviewView,
   DEFAULT_ANOMALY_THRESHOLDS,
+  isHumanMergeWaiting,
   resolveThresholds,
   sortPendingDecisions,
   summarizePendingDecisions,
@@ -177,4 +178,58 @@ test("閾値が無い応答では既定値を1か所で解決し、全画面が�
   const overview = buildOverviewView(withoutThresholds, NOW);
   assert.equal(overview.thresholds.pendingDecisionStaleMinutes, 240);
   assert.equal(overview.thresholds.runLogSilentMinutes, 10);
+});
+
+test("人のマージ待ちは仕上げタスクの末尾状態だけで判定する", () => {
+  const awaiting = (mergeTaskLast?: TaskStatus): ReturnType<typeof createGoal> =>
+    createGoal({ status: GoalStatus.GOAL_STATUS_AWAITING_MERGE, mergeTaskLast });
+
+  assert.equal(
+    isHumanMergeWaiting(awaiting(TaskStatus.TASK_STATUS_COMPLETED)),
+    true,
+    "仕上げタスクが完了していれば人のマージ待ちです",
+  );
+  assert.equal(
+    isHumanMergeWaiting(awaiting(undefined)),
+    true,
+    "仕上げタスクの末尾状態が未設定でも人のマージ待ちです",
+  );
+
+  for (const status of [
+    TaskStatus.TASK_STATUS_PENDING,
+    TaskStatus.TASK_STATUS_RUNNING,
+    TaskStatus.TASK_STATUS_FAILED,
+    TaskStatus.TASK_STATUS_EXCEEDED,
+    TaskStatus.TASK_STATUS_PR_FAILED,
+  ]) {
+    assert.equal(
+      isHumanMergeWaiting(awaiting(status)),
+      false,
+      `仕上げタスクの末尾状態が ${TaskStatus[status]} なら人のマージ待ちではありません`,
+    );
+  }
+
+  assert.equal(
+    isHumanMergeWaiting(
+      createGoal({ status: GoalStatus.GOAL_STATUS_CREATED, mergeTaskLast: TaskStatus.TASK_STATUS_COMPLETED }),
+    ),
+    false,
+    "awaiting_merge 以外のゴールは人のマージ待ちではありません",
+  );
+});
+
+test("通常タスクの未着手・実行中は人のマージ待ちの判定に影響しない", () => {
+  const base = createGoal({
+    status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+    mergeTaskLast: TaskStatus.TASK_STATUS_COMPLETED,
+    taskCounts: { pending: 0, running: 0, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+
+  assert.equal(isHumanMergeWaiting(base), true, "通常タスクが動いていなくても人のマージ待ちです");
+
+  const withRunning = { ...base, taskCounts: { ...base.taskCounts, pending: 0, running: 1 } };
+  assert.equal(isHumanMergeWaiting(withRunning), true, "通常タスクが実行中でも人のマージ待ちです");
+
+  const withPending = { ...base, taskCounts: { ...base.taskCounts, pending: 1, running: 0 } };
+  assert.equal(isHumanMergeWaiting(withPending), true, "通常タスクが未着手でも人のマージ待ちです");
 });
