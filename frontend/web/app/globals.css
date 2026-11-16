@@ -25,6 +25,30 @@
   --warn-bg: var(--orange-soft);
   --live: var(--teal);
   --down: var(--idle);
+
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-10: 10px;
+  --space-12: 12px;
+  --space-14: 14px;
+  --space-16: 16px;
+  --space-18: 18px;
+  --space-20: 20px;
+  --space-22: 22px;
+  --space-24: 24px;
+  --space-36: 36px;
+  --font-size-12: 12px;
+  --font-size-13: 13px;
+  --font-size-14: 14px;
+  --font-size-15: 15px;
+  --font-size-16: 16px;
+  --radius-4: 4px;
+  --radius-6: 6px;
+  --radius-8: 8px;
+  --radius-12: 12px;
+  --radius-pill: 999px;
 }
 
 html {
@@ -43,7 +67,7 @@ body {
   background: var(--bg);
   font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN",
     "Noto Sans JP", "Yu Gothic", Meiryo, sans-serif;
-  font-size: 15px;
+  font-size: var(--font-size-15);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
@@ -72,15 +96,15 @@ a {
 .sidebar {
   border-right: 1px solid var(--line);
   background: var(--surface);
-  padding: 20px 14px 16px;
+  padding: var(--space-20) var(--space-14) var(--space-16);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-16);
   overflow-y: auto;
 }
 
 .brand {
-  padding: 0 8px;
+  padding: 0 var(--space-8);
   font-weight: 700;
   font-size: 21px;
   color: var(--text);
@@ -96,20 +120,20 @@ a {
 }
 
 .side-title {
-  font-size: 12px;
+  font-size: var(--font-size-12);
   letter-spacing: 0.08em;
   color: var(--faint);
-  margin: 0 8px 6px;
+  margin: 0 var(--space-8) var(--space-6);
   font-weight: 700;
 }
 
 .srv-list li {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px;
-  border-radius: 8px;
-  font-size: 14px;
+  gap: var(--space-8);
+  padding: var(--space-8);
+  border-radius: var(--radius-8);
+  font-size: var(--font-size-14);
 }
 
 .srv-list li:hover {
@@ -123,7 +147,7 @@ a {
 
 .srv-state {
   margin-left: auto;
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -140,17 +164,17 @@ a {
 .nav li {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 14px;
+  gap: var(--space-8);
+  font-size: var(--font-size-14);
 }
 
 .nav a {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
   flex: 1;
-  padding: 8px;
-  border-radius: 8px;
+  padding: var(--space-8);
+  border-radius: var(--radius-8);
   color: var(--text);
 }
 
@@ -175,48 +199,48 @@ a {
   background: var(--orange-soft);
   color: var(--orange-d);
   border: 1px solid var(--orange-line);
-  border-radius: 999px;
-  padding: 0 8px;
-  font-size: 12px;
+  border-radius: var(--radius-pill);
+  padding: 0 var(--space-8);
+  font-size: var(--font-size-12);
   font-weight: 700;
 }
 
 .content {
-  padding: 28px 36px 48px;
+  padding: 28px var(--space-36) 48px;
   min-width: 0;
 }
 
 .page {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: var(--space-24);
   max-width: 1200px;
 }
 
 .page-head {
   display: flex;
   justify-content: space-between;
-  gap: 12px 24px;
+  gap: var(--space-12) var(--space-24);
   align-items: flex-start;
   flex-wrap: wrap;
 }
 
 .page-head h1 {
   font-size: 26px;
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2);
 }
 
 .page-head p {
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .banner {
-  padding: 10px 14px;
-  border-radius: 8px;
+  padding: var(--space-10) var(--space-14);
+  border-radius: var(--radius-8);
   border: 1px solid var(--line);
-  margin-bottom: 16px;
-  font-size: 14px;
+  margin-bottom: var(--space-16);
+  font-size: var(--font-size-14);
 }
 
 .banner.warn {
@@ -229,7 +253,7 @@ a {
 .cards,
 .scards {
   display: grid;
-  gap: 18px;
+  gap: var(--space-18);
 }
 
 .tiles {
@@ -268,7 +292,7 @@ a {
 .card {
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 18px 20px;
+  padding: var(--space-18) var(--space-20);
   background: var(--surface);
   min-width: 0;
 }
@@ -276,11 +300,11 @@ a {
 .scard {
   border: 1px solid var(--line);
   border-radius: 14px;
-  padding: 18px 20px;
+  padding: var(--space-18) var(--space-20);
   background: var(--surface);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-12);
   min-width: 0;
 }
 
@@ -288,43 +312,43 @@ a {
 .card .k,
 .tile .kv span {
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .tile .num {
   font-size: 32px;
   font-weight: 700;
   line-height: 1.25;
-  margin: 4px 0 6px;
+  margin: var(--space-4) 0 var(--space-6);
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
 .tile .num small {
-  font-size: 16px;
+  font-size: var(--font-size-16);
   font-weight: 500;
-  margin-left: 4px;
+  margin-left: var(--space-4);
   color: var(--muted);
 }
 
 .tile .num.word {
   font-size: 22px;
   line-height: 1.5;
-  padding: 6px 0;
+  padding: var(--space-6) 0;
 }
 
 .t-note {
-  font-size: 14px;
+  font-size: var(--font-size-14);
   color: var(--muted);
-  margin-top: 6px;
+  margin-top: var(--space-6);
 }
 
 .kv li {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  font-size: 14px;
-  padding: 2px 0;
+  gap: var(--space-8);
+  font-size: var(--font-size-14);
+  padding: var(--space-2) 0;
 }
 
 .kv li b {
@@ -334,25 +358,25 @@ a {
 }
 
 .sec {
-  font-size: 16px;
-  margin-bottom: 12px;
+  font-size: var(--font-size-16);
+  margin-bottom: var(--space-12);
 }
 
 .card-head,
 .sc-head {
   display: flex;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-10);
   align-items: flex-start;
   flex-wrap: wrap;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-4);
 }
 
 .sc-head h3 {
   font-size: 18px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
   overflow-wrap: anywhere;
   min-width: 0;
 }
@@ -361,14 +385,14 @@ a {
 .sc-head h3 .srv-id,
 .sc-head h3 .kind {
   display: block;
-  font-size: 13px;
+  font-size: var(--font-size-13);
   font-weight: 400;
   color: var(--muted);
 }
 
 .about,
 .read-at {
-  font-size: 14px;
+  font-size: var(--font-size-14);
   color: var(--muted);
 }
 
@@ -384,17 +408,17 @@ a {
 .counts {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-8);
 }
 
 .mini-runs li {
   display: flex;
-  gap: 8px;
+  gap: var(--space-8);
   align-items: baseline;
   flex-wrap: wrap;
   border-top: 1px solid var(--line2);
   padding: 7px 0;
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .mini-runs li:first-child {
@@ -404,7 +428,7 @@ a {
 .goals li {
   min-width: 0;
   border-top: 1px solid var(--line2);
-  padding: 8px 0;
+  padding: var(--space-8) 0;
 }
 
 .goals li:first-child {
@@ -412,7 +436,7 @@ a {
 }
 
 .goal-head {
-  font-size: 15px;
+  font-size: var(--font-size-15);
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -422,10 +446,10 @@ a {
 .goal-badge {
   display: inline-flex;
   align-items: center;
-  font-size: 12px;
+  font-size: var(--font-size-12);
   font-weight: 500;
-  padding: 1px 10px;
-  border-radius: 999px;
+  padding: 1px var(--space-10);
+  border-radius: var(--radius-pill);
   border: 1px solid var(--line);
   white-space: nowrap;
 }
@@ -450,14 +474,14 @@ a {
 
 .goal-why,
 .goal-progress {
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
-  margin-top: 4px;
+  margin-top: var(--space-4);
 }
 
 .goal-failed {
-  font-size: 13px;
-  margin-top: 4px;
+  font-size: var(--font-size-13);
+  margin-top: var(--space-4);
 }
 
 .goal-failed.warn {
@@ -466,8 +490,8 @@ a {
 }
 
 .goal-pr {
-  font-size: 13px;
-  margin-top: 4px;
+  font-size: var(--font-size-13);
+  margin-top: var(--space-4);
 }
 
 .goal-pr a {
@@ -479,37 +503,37 @@ a {
 }
 
 .goal-full {
-  margin-top: 4px;
+  margin-top: var(--space-4);
 }
 
 .goal-full > summary,
 .goal-done > summary {
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
   cursor: pointer;
 }
 
 .goal-full p {
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
-  margin-top: 6px;
+  margin-top: var(--space-6);
   overflow-wrap: anywhere;
 }
 
 .goal-done {
-  margin-top: 8px;
+  margin-top: var(--space-8);
   border-top: 1px solid var(--line2);
-  padding-top: 8px;
+  padding-top: var(--space-8);
 }
 
 .runs .run-row {
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr) 200px;
-  gap: 4px 16px;
+  gap: var(--space-4) var(--space-16);
   align-items: center;
   padding: 11px 0;
   border-top: 1px solid var(--line2);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .runs .run-row:first-child {
@@ -519,8 +543,8 @@ a {
 .st {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 14px;
+  gap: var(--space-8);
+  font-size: var(--font-size-14);
   font-weight: 600;
   line-height: 1.35;
   white-space: nowrap;
@@ -553,17 +577,17 @@ a {
 .run-main .g {
   display: block;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-13);
   line-height: 1.45;
 }
 
 .run-main .task {
-  font-size: 14px;
+  font-size: var(--font-size-14);
   overflow-wrap: anywhere;
 }
 
 .run-main .model {
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
 }
 
@@ -572,20 +596,20 @@ a {
 }
 
 .run-prog .stp {
-  font-size: 14px;
+  font-size: var(--font-size-14);
   overflow-wrap: anywhere;
 }
 
 .run-prog .stp b {
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .run-prog .meta {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  font-size: 13px;
+  gap: var(--space-8);
+  font-size: var(--font-size-13);
   color: var(--muted);
   flex-wrap: wrap;
 }
@@ -599,21 +623,21 @@ a {
 .bar {
   height: 8px;
   background: var(--track);
-  border-radius: 4px;
+  border-radius: var(--radius-4);
   overflow: hidden;
-  margin: 6px 0;
+  margin: var(--space-6) 0;
 }
 
 .bar > i {
   display: block;
   height: 100%;
   background: var(--live);
-  border-radius: 4px;
+  border-radius: var(--radius-4);
 }
 
 .bar.thick {
   height: 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-6);
 }
 
 .run-row .bar.live > i {
@@ -733,11 +757,11 @@ a {
 .big-badge {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 16px;
+  gap: var(--space-8);
+  font-size: var(--font-size-16);
   font-weight: 700;
-  padding: 5px 14px;
-  border-radius: 999px;
+  padding: 5px var(--space-14);
+  border-radius: var(--radius-pill);
   white-space: nowrap;
   border: 1px solid var(--line);
 }
@@ -779,23 +803,23 @@ a {
   background: var(--surface);
   border: 1px solid var(--orange-line);
   border-left: 5px solid var(--orange);
-  border-radius: 12px;
-  padding: 18px 22px;
+  border-radius: var(--radius-12);
+  padding: var(--space-18) var(--space-22);
 }
 
 .tray-item {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr) 170px 100px;
-  gap: 8px 22px;
+  gap: var(--space-8) var(--space-22);
   align-items: start;
-  padding: 14px 0;
+  padding: var(--space-14) 0;
   border-top: 1px solid var(--line);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .tray-item:first-child {
   border-top: none;
-  padding-top: 4px;
+  padding-top: var(--space-4);
 }
 
 .tray-item.stale {
@@ -825,20 +849,20 @@ a {
 
 .tray-item .opts {
   grid-column: 3;
-  font-size: 14px;
+  font-size: var(--font-size-14);
   color: var(--muted);
 }
 
 .tray-item .wait {
   grid-column: 4;
-  font-size: 14px;
+  font-size: var(--font-size-14);
   color: var(--muted);
 }
 
 .tray-item .proj .srv,
 .tray-item .proj .kind {
   display: block;
-  font-size: 14px;
+  font-size: var(--font-size-14);
   font-weight: 400;
   color: var(--muted);
 }
@@ -848,7 +872,7 @@ a {
 }
 
 .tray-item .desc p + p {
-  margin-top: 6px;
+  margin-top: var(--space-6);
 }
 
 .tray-item .opts {
@@ -862,13 +886,13 @@ a {
 }
 
 .tray-item .opts ul {
-  margin: 4px 0 0;
-  padding-left: 20px;
+  margin: var(--space-4) 0 0;
+  padding-left: var(--space-20);
 }
 
 .tray-item .wait b {
   display: block;
-  font-size: 16px;
+  font-size: var(--font-size-16);
   color: var(--text);
 }
 
@@ -882,8 +906,8 @@ a {
 
 .stale-label {
   color: var(--orange-d);
-  margin-left: 8px;
-  font-size: 13px;
+  margin-left: var(--space-8);
+  font-size: var(--font-size-13);
   font-weight: 600;
 }
 
@@ -901,21 +925,21 @@ a {
 .cards > li > .view {
   align-self: flex-start;
   margin-left: 0;
-  margin-top: 6px;
+  margin-top: var(--space-6);
 }
 
 .empty,
 .note {
   color: var(--muted);
-  font-size: 14px;
-  padding: 6px 0;
+  font-size: var(--font-size-14);
+  padding: var(--space-6) 0;
 }
 
 .daily li,
 .counts li {
   display: flex;
-  gap: 10px;
-  font-size: 14px;
+  gap: var(--space-10);
+  font-size: var(--font-size-14);
 }
 
 .daily li.warn {
@@ -925,11 +949,11 @@ a {
 .ev {
   display: grid;
   grid-template-columns: 56px 150px minmax(0, 1fr) 200px;
-  gap: 4px 14px;
-  padding: 10px 18px;
+  gap: var(--space-4) var(--space-14);
+  padding: var(--space-10) var(--space-18);
   border-top: 1px solid var(--line2);
   align-items: baseline;
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .ev:first-child {
@@ -944,7 +968,7 @@ a {
 .ev .kl {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-6);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -958,7 +982,7 @@ a {
 }
 
 .ev .msg {
-  font-size: 15px;
+  font-size: var(--font-size-15);
   overflow-wrap: anywhere;
 }
 
@@ -974,14 +998,14 @@ a {
 .summary {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 18px 22px;
+  border-radius: var(--radius-12);
+  padding: var(--space-18) var(--space-22);
 }
 
 .sum-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px 24px;
+  gap: var(--space-12) var(--space-24);
 }
 
 .sum-grid .f {
@@ -994,17 +1018,17 @@ a {
 
 .sum-grid .k {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-12);
 }
 
 .sum-grid .v {
-  font-size: 15px;
+  font-size: var(--font-size-15);
   overflow-wrap: anywhere;
 }
 
 .sum-grid .v.mono {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--font-size-13);
 }
 
 .mono {
@@ -1019,18 +1043,18 @@ pre {
   line-height: 1.55;
   background: var(--surface);
   border: 1px solid var(--line2);
-  border-radius: 8px;
-  padding: 10px 12px;
-  margin-top: 6px;
+  border-radius: var(--radius-8);
+  padding: var(--space-10) var(--space-12);
+  margin-top: var(--space-6);
   max-height: 360px;
   overflow: auto;
 }
 
 .back {
   display: inline-block;
-  margin-bottom: 10px;
+  margin-bottom: var(--space-10);
   color: var(--teal-d);
-  font-size: 14px;
+  font-size: var(--font-size-14);
   font-weight: 600;
 }
 
@@ -1043,19 +1067,19 @@ pre {
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-8);
   align-items: center;
   width: 100%;
 }
 
 .actions button {
   font: inherit;
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--foreground);
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 4px 12px;
+  border-radius: var(--radius-6);
+  padding: var(--space-4) var(--space-12);
   cursor: pointer;
 }
 
@@ -1071,10 +1095,10 @@ pre {
 
 .actions input[type="text"] {
   font: inherit;
-  font-size: 13px;
-  padding: 4px 8px;
+  font-size: var(--font-size-13);
+  padding: var(--space-4) var(--space-8);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-6);
   min-width: 220px;
   flex: 1;
 }
@@ -1086,37 +1110,37 @@ pre {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: var(--space-16);
   z-index: 10;
 }
 
 .dialog {
   background: var(--background);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 16px;
+  border-radius: var(--radius-8);
+  padding: var(--space-16);
   width: min(420px, 100%);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-12);
 }
 
 .dialog-message {
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .decision-results ul {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
 }
 
 .decision-results .result {
   display: flex;
-  gap: 8px;
-  font-size: 13px;
-  border-radius: 6px;
-  padding: 6px 10px;
+  gap: var(--space-8);
+  font-size: var(--font-size-13);
+  border-radius: var(--radius-6);
+  padding: var(--space-6) var(--space-10);
 }
 
 .decision-results .result.ok {
@@ -1135,27 +1159,27 @@ pre {
 
 /* 概要（issue #75）: 3タイル・異常バナー・判断待ちパネル・カード下端の集計をコンパクトに並べる。 */
 .overview {
-  gap: 16px;
+  gap: var(--space-16);
 }
 
 .overview .tile {
-  padding: 14px 16px;
+  padding: var(--space-14) var(--space-16);
 }
 
 .overview .scard {
-  padding: 14px 16px;
+  padding: var(--space-14) var(--space-16);
 }
 
 .overview .runs .run-row {
-  padding: 8px 0;
+  padding: var(--space-8) 0;
 }
 
 .health {
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 10px 14px;
+  padding: var(--space-10) var(--space-14);
   max-width: 420px;
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .health p {
@@ -1177,9 +1201,9 @@ pre {
 .callout {
   border: 1px solid var(--orange-line);
   border-left: 5px solid var(--orange);
-  border-radius: 12px;
+  border-radius: var(--radius-12);
   background: var(--surface);
-  padding: 10px 16px;
+  padding: var(--space-10) var(--space-16);
 }
 
 .callout-list {
@@ -1190,11 +1214,11 @@ pre {
 .callout li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto auto;
-  gap: 6px 14px;
+  gap: var(--space-6) var(--space-14);
   align-items: center;
-  padding: 8px 0;
+  padding: var(--space-8) 0;
   border-top: 1px solid var(--line2);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .callout li:first-child {
@@ -1226,19 +1250,19 @@ pre {
 }
 
 .stale-note {
-  margin-top: 6px;
-  font-size: 13px;
+  margin-top: var(--space-6);
+  font-size: var(--font-size-13);
   color: var(--orange-d);
 }
 
 .sc-foot {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 16px;
-  margin-top: 10px;
-  padding-top: 8px;
+  gap: var(--space-4) var(--space-16);
+  margin-top: var(--space-10);
+  padding-top: var(--space-8);
   border-top: 1px solid var(--line2);
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
 }
 
@@ -1249,21 +1273,21 @@ pre {
 }
 
 .srv-list .cnt {
-  font-size: 12px;
+  font-size: var(--font-size-12);
   color: var(--faint);
   white-space: nowrap;
 }
 
 .side-foot {
   margin-top: auto;
-  padding: 10px 8px 4px;
+  padding: var(--space-10) var(--space-8) var(--space-4);
   border-top: 1px solid var(--line);
-  font-size: 12px;
+  font-size: var(--font-size-12);
   color: var(--muted);
 }
 
 .side-foot p {
-  margin: 2px 0;
+  margin: var(--space-2) 0;
 }
 
 @media (max-width: 1280px) {
@@ -1317,14 +1341,14 @@ pre {
     overflow-x: auto;
     border-right: none;
     border-bottom: 1px solid var(--line);
-    gap: 8px;
-    padding: 12px 14px 8px;
+    gap: var(--space-8);
+    padding: var(--space-12) var(--space-14) var(--space-8);
   }
 
   .side-block {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-8);
     flex-wrap: wrap;
   }
 
@@ -1337,13 +1361,13 @@ pre {
   .nav {
     flex-direction: row;
     display: flex;
-    gap: 4px;
+    gap: var(--space-4);
   }
 
   .srv-list li {
     flex: none;
     border: 1px solid var(--line);
-    padding: 6px 10px;
+    padding: var(--space-6) var(--space-10);
   }
 
   .nav li {
@@ -1351,7 +1375,7 @@ pre {
   }
 
   .nav a {
-    padding: 6px 10px;
+    padding: var(--space-6) var(--space-10);
   }
 
   .tiles,
@@ -1367,16 +1391,16 @@ pre {
 
   .runs .run-row {
     grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
+    gap: var(--space-6);
   }
 
   .tray {
-    padding: 14px 16px;
+    padding: var(--space-14) var(--space-16);
   }
 
   .tray-item {
     grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
+    gap: var(--space-6);
   }
 
   .tray-item .proj,
@@ -1388,12 +1412,12 @@ pre {
 
   .tray-item .wait b {
     display: inline;
-    margin-right: 6px;
+    margin-right: var(--space-6);
   }
 
   .ev {
     grid-template-columns: 48px minmax(0, 1fr);
-    padding: 10px 14px;
+    padding: var(--space-10) var(--space-14);
   }
 
   .ev .kl {
@@ -1407,11 +1431,11 @@ pre {
   }
 
   .summary {
-    padding: 16px;
+    padding: var(--space-16);
   }
 
   .content {
-    padding: 18px 14px 36px;
+    padding: var(--space-18) var(--space-14) var(--space-36);
   }
 }
 
@@ -1419,25 +1443,25 @@ pre {
 .conversation-picker {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 16px;
-  font-size: 13px;
+  gap: var(--space-10);
+  margin-bottom: var(--space-16);
+  font-size: var(--font-size-13);
 }
 
 .conversation-picker select {
   background: var(--surface);
   color: inherit;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 13px;
+  border-radius: var(--radius-6);
+  padding: var(--space-4) var(--space-8);
+  font-size: var(--font-size-13);
 }
 
 .conversation {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-12);
   margin: 0;
   padding: 0;
 }
@@ -1445,17 +1469,17 @@ pre {
 .conversation-message {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: var(--radius-8);
+  padding: var(--space-10) var(--space-12);
 }
 
 .conversation-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 10px;
-  margin: 0 0 6px;
-  font-size: 12px;
+  gap: var(--space-10);
+  margin: 0 0 var(--space-6);
+  font-size: var(--font-size-12);
 }
 
 .conversation-seq {
@@ -1477,8 +1501,8 @@ pre {
 }
 
 .conversation-skipped {
-  margin: 0 0 16px;
-  padding-left: 20px;
+  margin: 0 0 var(--space-16);
+  padding-left: var(--space-20);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-12);
 }
