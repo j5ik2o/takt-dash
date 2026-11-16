@@ -4,6 +4,8 @@
 // これをブラウザ向けビルドへ持ち込むとネイティブ依存の解決に失敗する。BFF 構成では
 // ブラウザは backend へ直接接続しないため、表示の分岐に必要な enum の数値だけをここに置く。
 // 値が生成コードと一致することは test/state/proto-values.test.ts で検査する。
+import { DomainPrimitiveError } from "./domain-primitives";
+
 export const GOAL_STATUS = {
   CREATED: 1,
   AWAITING_MERGE: 2,
@@ -23,6 +25,15 @@ export const RUN_STATUS = {
   FAILED: 4,
 } as const;
 
+export const TASK_STATUS = {
+  PENDING: 1,
+  RUNNING: 2,
+  COMPLETED: 3,
+  FAILED: 4,
+  EXCEEDED: 5,
+  PR_FAILED: 6,
+} as const;
+
 export const ACTIVITY_KIND = {
   GOAL_CREATED: 1,
   RUN_STARTED: 2,
@@ -32,6 +43,13 @@ export const ACTIVITY_KIND = {
   PAUSED: 6,
   BLOCKED: 7,
   CONNECTION_LOST: 8,
+  CONNECTION_RESTORED: 9,
+} as const;
+
+export const CONNECTION_STATE = {
+  CONNECTED: 1,
+  DELAYED: 2,
+  UNRESPONSIVE: 3,
 } as const;
 
 export const INQUIRY_KIND = {
@@ -113,11 +131,62 @@ const ENUM_NAME_TO_NUMBER: Record<string, Record<string, number>> = {
     CONVERSATION_SPEAKER_SYSTEM: 3,
     UNRECOGNIZED: -1,
   },
+  ConnectionState: {
+    CONNECTION_STATE_UNSPECIFIED: 0,
+    CONNECTION_STATE_CONNECTED: 1,
+    CONNECTION_STATE_DELAYED: 2,
+    CONNECTION_STATE_UNRESPONSIVE: 3,
+    UNRECOGNIZED: -1,
+  },
 };
 
+// 宣言済みの数値だけを集めた集合。UNRECOGNIZED(-1) は不明値を表すため含めない。
+const DECLARED_NUMBERS: Record<string, ReadonlySet<number>> = Object.fromEntries(
+  Object.entries(ENUM_NAME_TO_NUMBER).map(([name, mapping]) => [
+    name,
+    new Set(
+      Object.entries(mapping)
+        .filter(([key]) => key !== "UNRECOGNIZED")
+        .map(([, number]) => number),
+    ),
+  ]),
+);
+
+const semanticsError = (enumName: string): DomainPrimitiveError =>
+  new DomainPrimitiveError("semantics", enumName);
+
+// 画面の状態に使う列挙の復号。宣言済みの名称・数値だけを受け、欠落・null は
+// UNSPECIFIED(0) として扱う。未知の名称・数値と UNRECOGNIZED は拒否する。
+export function enumFromWire(enumName: keyof typeof ENUM_NAME_TO_NUMBER, value: unknown): number {
+  if (value === undefined || value === null) {
+    return 0;
+  }
+  if (typeof value === "number") {
+    if (DECLARED_NUMBERS[enumName].has(value)) {
+      return value;
+    }
+    throw semanticsError(enumName);
+  }
+  if (typeof value === "string") {
+    if (value === "UNRECOGNIZED") {
+      throw semanticsError(enumName);
+    }
+    const mapped = ENUM_NAME_TO_NUMBER[enumName][value];
+    if (mapped === undefined) {
+      throw semanticsError(enumName);
+    }
+    return mapped;
+  }
+  throw semanticsError(enumName);
+}
+
+// 対象外の列挙（InquiryKind・ConversationSpeaker）向けの tolerant な復号。
 // 生成コードの *FromJSON と同じ扱い: 数値はそのまま、名称文字列は対応する数値、
 // 未知の文字列・欠落は UNRECOGNIZED(-1) にそろえる。
-export function enumFromWire(enumName: keyof typeof ENUM_NAME_TO_NUMBER, value: unknown): number {
+export function enumFromWireOrUnrecognizedName(
+  enumName: keyof typeof ENUM_NAME_TO_NUMBER,
+  value: unknown,
+): number {
   if (typeof value === "number") {
     return value;
   }

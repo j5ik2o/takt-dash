@@ -453,6 +453,27 @@ test("ダイアログの中断は閉じ、回答は対象の有無に関わら�
   assert.equal(answered.action.payload.text, "今週");
 });
 
+test("選択肢の回答は先頭以外を選んでも、選んだ選択肢をそのまま送信する", () => {
+  const options = findDecision((decision) => decision.inquiryId === "inquiry-options");
+  assert.deepEqual(options.options, ["今週", "来週"], "先頭と末尾の異なる選択肢を持つ");
+
+  const answered = decideDecisionTransition({
+    decision: options,
+    intent: { type: "answer-option", option: "来週" },
+    text: "",
+    state: INITIAL_DECISION_DIALOG_STATE,
+  });
+  assert.equal(answered.kind, "submit");
+  if (answered.kind !== "submit") {
+    throw new Error("回答は送信する");
+  }
+  assert.equal(answered.action?.kind, "answer");
+  if (answered.action?.kind !== "answer") {
+    throw new Error("回答の送信内容を返す");
+  }
+  assert.equal(answered.action.payload.text, "来週", "選んだ選択肢をそのまま送信する");
+});
+
 test("一覧の操作要素と入力欄は対象を識別できる name を持つ", () => {
   const mergeHtml = renderDecisions(stateWith([merge()]));
   assert.match(mergeHtml, /aria-label="マージを承認（[^"]*corporate-site[^"]*PR #418[^"]*）"/);

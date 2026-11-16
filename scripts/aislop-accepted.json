@@ -16,23 +16,6 @@
       ]
     },
     {
-      "reason": "frontend/cli/src/main.rs の complexity/file-too-large と complexity/function-too-long の指摘は、分割・改修を別作業へ切り出すまでの一時的な受け入れとする。解消は issue #100（https://github.com/j5ik2o/takt-dash/issues/100）で追跡する。受け入れ時点の実測は frontend/cli/src/main.rs 1222 行（上限 1000 行）、parse_arguments 151 行（上限 120 行）である。",
-      "findings": [
-        {
-          "engine": "code-quality",
-          "rule": "complexity/file-too-large",
-          "file": "frontend/cli/src/main.rs",
-          "message": "File too large (limit: 1000, flagged above 1100 lines)"
-        },
-        {
-          "engine": "code-quality",
-          "rule": "complexity/function-too-long",
-          "file": "frontend/cli/src/main.rs",
-          "message": "Function too long (limit: 120, flagged above 132 lines)"
-        }
-      ]
-    },
-    {
       "reason": "frontend/cli/src/tests.rs の complexity/file-too-large と complexity/function-too-long の指摘は、分割・改修を別作業へ切り出すまでの一時的な受け入れとする。解消は issue #101（https://github.com/j5ik2o/takt-dash/issues/101）で追跡する。受け入れ時点の実測は frontend/cli/src/tests.rs 1421 行（上限 1000 行）、sample_overview 133 行（上限 120 行）である。",
       "findings": [
         {

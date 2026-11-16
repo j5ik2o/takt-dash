@@ -2,7 +2,7 @@ name: taktdash-change
 description: >-
   taktDash の変更作業の標準ワークフロー。builtin の development-core に
   taktdash-rules の知識を注入して計画・実装・レビュー・修正を行う。
-  develop の後、整形・clippy・テスト・型検査・lint を make done で
+  develop の後、整形・clippy・テスト・型検査・lint を検査ごとに
   判定する機械ゲートの固定ステップを回す。
 all_steps:
   rules:
@@ -13,8 +13,20 @@ all_steps:
     - ref: taktdash-coding-rules
       position: before_instruction
 max_steps: 70
-initial_step: develop
+initial_step: mark_in_progress
 steps:
+  - name: mark_in_progress
+    description: 開始時に対象 issue を解決し、ボードの Status を In Progress にする（失敗は非致命）
+    mode: system
+    system_inputs:
+      - type: command
+        as: status
+        command: |
+          python3 tools/project-status/publish.py status --status "In Progress"
+        timeout_ms: 120000
+    rules:
+      - condition: when(true)
+        next: develop
   - name: develop
     description: development-core で計画・テスト作成・実装・レビュー・修正・要件確認を行う
     kind: workflow_call
@@ -72,18 +84,50 @@ steps:
       - condition: ABORT
         next: ABORT
   - name: machine_gate
-    description: make done（整形・clippy・テスト・型検査・lint）をdevelop の成果に対して実行し、すべて通るときだけ完了とする
+    description: proto-check・fmt・clippy・test・typecheck・lint を検査ごとに実行し、すべて通るときだけ完了とする
     mode: system
     system_inputs:
       - type: command
-        as: result
-        command: make done
+        as: fmt
+        command: "bash -o pipefail -c 'make fmt 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+      - type: command
+        as: clippy
+        command: "bash -o pipefail -c 'make clippy 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+      - type: command
+        as: test
+        command: "bash -c 'if [ ! -d frontend/web/node_modules ]; then bash -o pipefail -c \"npm --prefix frontend/web ci 2>&1 | tail -c 4000\" || exit $?; fi; bash -o pipefail -c \"make test 2>&1 | tail -c 56000\"'"
+        timeout_ms: 1800000
+      - type: command
+        as: typecheck
+        command: "bash -o pipefail -c 'make typecheck 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+      - type: command
+        as: lint
+        command: "bash -o pipefail -c 'make lint 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+      - type: command
+        as: proto_check
+        command: "bash -o pipefail -c 'make proto-check 2>&1 | tail -c 60000'"
         timeout_ms: 1800000
     rules:
-      - condition: when(context.machine_gate.result.exit_code == 0)
+      - condition: when(context.machine_gate.fmt.exit_code != 0)
+        next: fix_machine_gate_fmt
+      - condition: when(context.machine_gate.clippy.exit_code != 0)
+        next: fix_machine_gate_clippy
+      - condition: when(context.machine_gate.test.exit_code != 0)
+        next: fix_machine_gate_test
+      - condition: when(context.machine_gate.typecheck.exit_code != 0)
+        next: fix_machine_gate_typecheck
+      - condition: when(context.machine_gate.lint.exit_code != 0)
+        next: fix_machine_gate_lint
+      - condition: when(context.machine_gate.proto_check.exit_code != 0)
+        next: fix_machine_gate_proto_check
+      - condition: when(context.machine_gate.proto_check.exit_code == 0 && context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0 && context.machine_gate.lint.exit_code == 0)
         next: aislop_gate
       - condition: when(true)
-        next: fix_machine_gate
+        next: ABORT
   - name: aislop_gate
     description: aislop の警告以上の指摘を受け入れ一覧と照合し、一覧に無ければ失敗する機械ゲート
     mode: system
@@ -97,8 +141,8 @@ steps:
         next: COMPLETE
       - condition: when(true)
         next: fix_aislop_gate
-  - name: fix_machine_gate
-    description: make done の出力を確認して失敗した検査を修正し、機械ゲートへ戻る
+  - name: fix_machine_gate_fmt
+    description: make fmt の失敗出力を確認して修正し、機械ゲートへ戻る
     capabilities: edit
     edit: true
     persona: coder
@@ -109,13 +153,123 @@ steps:
     instruction:
       - fix-supervisor
       - |
-        make done が失敗しました。次の出力の失敗している検査（整形・clippy・テスト・型検査・lint）を修正してください。
-        --- make done の stdout ---
-        {context:machine_gate.result.stdout}
-        --- make done の stderr ---
-        {context:machine_gate.result.stderr}
+        make fmt が失敗しました。次の出力の整形の失敗を修正してください。
+        --- make fmt の stdout ---
+        {context:machine_gate.fmt.stdout}
+        --- make fmt の stderr ---
+        {context:machine_gate.fmt.stderr}
     rules:
-      - condition: make done の失敗を修正して検証した
+      - condition: make fmt の失敗を修正して検証した
+        next: machine_gate
+      - condition: 裏付けられた原因を安全に修正または検証できない
+        next: ABORT
+  - name: fix_machine_gate_clippy
+    description: make clippy の失敗出力を確認して修正し、機械ゲートへ戻る
+    capabilities: edit
+    edit: true
+    persona: coder
+    policy: coding
+    knowledge: taktdash-rules
+    required_permission_mode: edit
+    pass_previous_response: false
+    instruction:
+      - fix-supervisor
+      - |
+        make clippy が失敗しました。次の出力の clippy の警告とエラーを修正してください。
+        --- make clippy の stdout ---
+        {context:machine_gate.clippy.stdout}
+        --- make clippy の stderr ---
+        {context:machine_gate.clippy.stderr}
+    rules:
+      - condition: make clippy の失敗を修正して検証した
+        next: machine_gate
+      - condition: 裏付けられた原因を安全に修正または検証できない
+        next: ABORT
+  - name: fix_machine_gate_test
+    description: make test の失敗出力を確認して修正し、機械ゲートへ戻る
+    capabilities: edit
+    edit: true
+    persona: coder
+    policy: coding
+    knowledge: taktdash-rules
+    required_permission_mode: edit
+    pass_previous_response: false
+    instruction:
+      - fix-supervisor
+      - |
+        make test が失敗しました。次の出力のテストの失敗を修正してください。
+        --- make test の stdout ---
+        {context:machine_gate.test.stdout}
+        --- make test の stderr ---
+        {context:machine_gate.test.stderr}
+    rules:
+      - condition: make test の失敗を修正して検証した
+        next: machine_gate
+      - condition: 裏付けられた原因を安全に修正または検証できない
+        next: ABORT
+  - name: fix_machine_gate_typecheck
+    description: make typecheck の失敗出力を確認して修正し、機械ゲートへ戻る
+    capabilities: edit
+    edit: true
+    persona: coder
+    policy: coding
+    knowledge: taktdash-rules
+    required_permission_mode: edit
+    pass_previous_response: false
+    instruction:
+      - fix-supervisor
+      - |
+        make typecheck が失敗しました。次の出力の型検査の失敗を修正してください。
+        --- make typecheck の stdout ---
+        {context:machine_gate.typecheck.stdout}
+        --- make typecheck の stderr ---
+        {context:machine_gate.typecheck.stderr}
+    rules:
+      - condition: make typecheck の失敗を修正して検証した
+        next: machine_gate
+      - condition: 裏付けられた原因を安全に修正または検証できない
+        next: ABORT
+  - name: fix_machine_gate_lint
+    description: make lint の失敗出力を確認して修正し、機械ゲートへ戻る
+    capabilities: edit
+    edit: true
+    persona: coder
+    policy: coding
+    knowledge: taktdash-rules
+    required_permission_mode: edit
+    pass_previous_response: false
+    instruction:
+      - fix-supervisor
+      - |
+        make lint が失敗しました。次の出力の lint の指摘を修正してください。
+        --- make lint の stdout ---
+        {context:machine_gate.lint.stdout}
+        --- make lint の stderr ---
+        {context:machine_gate.lint.stderr}
+    rules:
+      - condition: make lint の失敗を修正して検証した
+        next: machine_gate
+      - condition: 裏付けられた原因を安全に修正または検証できない
+        next: ABORT
+  - name: fix_machine_gate_proto_check
+    description: make proto-check の失敗出力を確認して修正し、機械ゲートへ戻る
+    capabilities: edit
+    edit: true
+    persona: coder
+    policy: coding
+    knowledge: taktdash-rules
+    required_permission_mode: edit
+    pass_previous_response: false
+    instruction:
+      - fix-supervisor
+      - |
+        make proto-check が失敗しました。次の出力の生成物と proto の不一致を修正してください。
+        --- make proto-check の stdout ---
+        {context:machine_gate.proto_check.stdout}
+        --- make proto-check の stderr ---
+        {context:machine_gate.proto_check.stderr}
+    rules:
+      - condition: make proto-check の失敗を修正して検証した
         next: machine_gate
       - condition: 裏付けられた原因を安全に修正または検証できない
         next: ABORT

@@ -1,5 +1,4 @@
-import type { DashboardState } from "../proto/taktdash";
-import { restoreDashboardState } from "../state/restore-state";
+import { restoreDashboardState, type DashboardState } from "../state/restore-state";
 
 /** EventSource のうち、この画面が使う部分だけを表す。テストでは差し替える。 */
 export type EventSourceLike = {
