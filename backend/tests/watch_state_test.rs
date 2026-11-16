@@ -175,6 +175,8 @@ async fn watch_state_sends_the_current_thresholds_after_a_config_change() {
   harness.rewrite_thresholds(Thresholds {
     pending_decision_stale_minutes: StaleMinutes::try_from(1).expect("テストの閾値は有効です"),
     run_log_silent_minutes:         SilentMinutes::try_from(3).expect("テストの閾値は有効です"),
+    connection_failure_count:       1,
+    connection_delay_seconds:       3,
   });
   let mut poller = Poller::new(
     harness.config_path().to_path_buf(),

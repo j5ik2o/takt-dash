@@ -1,7 +1,7 @@
 //! 出来事の SQLite への記録と、アクティビティのクエリ。
 //!
 //! 日付の区切りは日本標準時（JST）の日で行います。判断待ちと異常に数える種類は
-//! 問い合わせ・マージ待ち・応答なしの3種類だけです。
+//! 問い合わせ・マージ待ちの2種類だけです。接続の切断・復帰は総数には含めますが数えません。
 
 use std::{path::Path, sync::Mutex};
 
@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// 判断待ちと異常に数える出来事の種類。
-pub const ATTENTION_KINDS: [EventKind; 3] = [EventKind::Inquiry, EventKind::AwaitingMerge, EventKind::ConnectionLost];
+pub const ATTENTION_KINDS: [EventKind; 2] = [EventKind::Inquiry, EventKind::AwaitingMerge];
 
 /// JST の日次集計の1日分。
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,4 +1,5 @@
-//! 出来事検出の純粋関数を検証する。8種の検出、初回の基準化、変化なし、接続断の1回だけを確かめる。
+//! 出来事検出の純粋関数を検証する。9種の検出、初回の基準化、変化なし、
+//! 接続断と復帰の1回だけを確かめる。
 
 mod common;
 
@@ -6,7 +7,10 @@ use common::*;
 use takt_dash_backend::{
   domain::RunSlug,
   events::detect,
-  model::{EventKind, ExecutionStatus, GoalStatus, ProjectSnapshot, TaskEntry, TaskStatus},
+  model::{
+    ConnectionState, ConnectionTransition, EventKind, ExecutionStatus, GoalStatus, ProjectSnapshot, TaskEntry,
+    TaskStatus,
+  },
 };
 
 const SERVER: &str = "mac-mini";
@@ -16,12 +20,24 @@ fn ids(events: &[takt_dash_backend::model::ActivityEvent]) -> Vec<EventKind> {
   events.iter().map(|event| event.kind).collect()
 }
 
+fn connection(previous: ConnectionState, next: ConnectionState, outage_seconds: Option<i64>) -> ConnectionTransition {
+  ConnectionTransition {
+    previous: Some(previous),
+    next:     Some(next),
+    outage:   outage_seconds.map(chrono::Duration::seconds),
+  }
+}
+
+fn stable() -> ConnectionTransition {
+  connection(ConnectionState::Connected, ConnectionState::Connected, None)
+}
+
 #[test]
 fn first_read_only_establishes_baseline_without_events() {
   let now = time("2026-11-13T10:00:00Z");
   let next = snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]);
 
-  let events = detect(SERVER, PROJECT, None, false, true, &next, now);
+  let events = detect(SERVER, PROJECT, None, &next, None, now);
 
   assert!(events.is_empty(), "初回は差分が定義されないため出来事を出しません: {:?}", ids(&events));
 }
@@ -37,7 +53,7 @@ fn unchanged_state_emits_no_events() {
     vec![],
   );
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &prev, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &prev, Some(stable()), now);
 
   assert!(events.is_empty(), "変化がないので出来事を出しません: {:?}", ids(&events));
 }
@@ -48,7 +64,7 @@ fn new_goal_is_detected_as_goal_created() {
   let prev = snapshot(vec![], vec![], vec![], vec![], vec![]);
   let next = snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]);
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::GoalCreated]);
   assert_eq!(events[0].server_id, SERVER);
@@ -66,7 +82,7 @@ fn task_becoming_running_is_detected_as_run_started_with_run_slug() {
   };
   let next = snapshot(vec![], vec![running], vec![], vec![], vec![]);
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::RunStarted]);
   assert_eq!(events[0].run_slug.as_ref().map(RunSlug::as_str), Some("20261113-abc"));
@@ -78,7 +94,7 @@ fn task_becoming_completed_is_detected_as_task_completed() {
   let prev = snapshot(vec![], vec![task("a", TaskStatus::Running)], vec![], vec![], vec![]);
   let next = snapshot(vec![], vec![task("a", TaskStatus::Completed)], vec![], vec![], vec![]);
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::TaskCompleted]);
 }
@@ -90,7 +106,7 @@ fn newly_unanswered_inquiry_is_detected_but_answered_one_is_not() {
   let next =
     snapshot(vec![], vec![], vec![inquiry("q-open", false, now), inquiry("q-done", true, now)], vec![], vec![]);
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::Inquiry], "未回答の問い合わせだけを検出します");
 }
@@ -101,7 +117,7 @@ fn goal_transition_to_awaiting_merge_is_detected() {
   let prev = snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]);
   let next = snapshot(vec![merge_goal("g1", 42)], vec![], vec![], vec![], vec![]);
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::AwaitingMerge]);
 }
@@ -125,7 +141,7 @@ fn awaiting_merge_with_running_finish_task_is_not_a_human_merge_wait_event() {
     vec![],
   );
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert!(
     !ids(&events).contains(&EventKind::AwaitingMerge),
@@ -153,7 +169,7 @@ fn awaiting_merge_becomes_a_human_merge_wait_event_when_the_finish_task_complete
     vec![],
   );
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(
     ids(&events).iter().filter(|kind| **kind == EventKind::AwaitingMerge).count(),
@@ -190,7 +206,7 @@ fn awaiting_merge_with_completed_finish_task_and_unrelated_running_task_is_a_hum
     vec![],
   );
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(
     ids(&events).iter().filter(|kind| **kind == EventKind::AwaitingMerge).count(),
@@ -220,7 +236,7 @@ fn awaiting_merge_with_failed_finish_task_is_not_a_human_merge_wait_event() {
     vec![],
   );
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert!(
     !ids(&events).contains(&EventKind::AwaitingMerge),
@@ -234,7 +250,7 @@ fn already_awaiting_merge_goal_does_not_repeat_the_event() {
   let now = time("2026-11-13T10:00:00Z");
   let prev = snapshot(vec![merge_goal("g1", 42)], vec![], vec![], vec![], vec![]);
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &prev, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &prev, Some(stable()), now);
 
   assert!(events.is_empty(), "状態が同じなので繰り返しません: {:?}", ids(&events));
 }
@@ -245,7 +261,7 @@ fn paused_execution_is_detected_once() {
   let prev = snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]);
   let next = snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Paused)], vec![], vec![], vec![], vec![]);
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::Paused]);
 }
@@ -260,21 +276,89 @@ fn new_blocked_notification_is_detected_but_other_kinds_are_ignored() {
     notification("n-merge", "awaiting_merge", now),
   ]);
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::Blocked], "blocked の通知の種類だけを検出します");
 }
 
 #[test]
-fn connection_lost_is_detected_once_on_transition_from_connected() {
+fn connection_lost_is_detected_once_when_state_enters_unresponsive() {
   let now = time("2026-11-13T10:00:00Z");
   let prev = snapshot(vec![], vec![], vec![], vec![], vec![]);
 
-  let transition = detect(SERVER, PROJECT, Some(&prev), true, false, &prev, now);
-  assert_eq!(ids(&transition), vec![EventKind::ConnectionLost]);
+  let entering = detect(
+    SERVER,
+    PROJECT,
+    Some(&prev),
+    &prev,
+    Some(connection(ConnectionState::Connected, ConnectionState::Unresponsive, None)),
+    now,
+  );
+  assert_eq!(ids(&entering), vec![EventKind::ConnectionLost]);
+}
 
-  let still_down = detect(SERVER, PROJECT, Some(&prev), false, false, &prev, now);
+#[test]
+fn unresponsive_to_unresponsive_emits_nothing() {
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(vec![], vec![], vec![], vec![], vec![]);
+
+  let still_down = detect(
+    SERVER,
+    PROJECT,
+    Some(&prev),
+    &prev,
+    Some(connection(ConnectionState::Unresponsive, ConnectionState::Unresponsive, None)),
+    now,
+  );
   assert!(still_down.is_empty(), "応答なしが続いても接続断を重ねません: {:?}", ids(&still_down));
+}
+
+#[test]
+fn delayed_transition_emits_no_connection_event() {
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(vec![], vec![], vec![], vec![], vec![]);
+
+  let to_delayed = detect(
+    SERVER,
+    PROJECT,
+    Some(&prev),
+    &prev,
+    Some(connection(ConnectionState::Connected, ConnectionState::Delayed, None)),
+    now,
+  );
+  assert!(to_delayed.is_empty(), "遅延中への移行は接続断にしません: {:?}", ids(&to_delayed));
+
+  let back_from_delayed = detect(
+    SERVER,
+    PROJECT,
+    Some(&prev),
+    &prev,
+    Some(connection(ConnectionState::Delayed, ConnectionState::Connected, None)),
+    now,
+  );
+  assert!(back_from_delayed.is_empty(), "遅延中からの復帰は復帰イベントにしません: {:?}", ids(&back_from_delayed));
+}
+
+#[test]
+fn connection_restored_is_detected_with_outage_duration() {
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(vec![], vec![], vec![], vec![], vec![]);
+
+  let events = detect(
+    SERVER,
+    PROJECT,
+    Some(&prev),
+    &prev,
+    Some(connection(ConnectionState::Unresponsive, ConnectionState::Connected, Some(150))),
+    now,
+  );
+
+  assert_eq!(ids(&events), vec![EventKind::ConnectionRestored]);
+  assert!(
+    events[0].body.contains("切断していた時間は 150 秒です。"),
+    "復帰イベントの本文に切断していた時間を入れます: {}",
+    events[0].body
+  );
 }
 
 #[test]
@@ -290,7 +374,7 @@ fn notifications_are_compared_by_id_not_by_count() {
     notification("n-3", "blocked", now),
   ]);
 
-  let events = detect(SERVER, PROJECT, Some(&prev), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::Blocked]);
   assert_eq!(events.len(), 1, "新しい通知の ID だけを1件検出します");
@@ -302,7 +386,7 @@ fn baseline_of_empty_snapshot_with_existing_goal_emits_nothing() {
   let empty: ProjectSnapshot = ProjectSnapshot::empty();
   let next = snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]);
 
-  let events = detect(SERVER, PROJECT, Some(&empty), true, true, &next, now);
+  let events = detect(SERVER, PROJECT, Some(&empty), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::GoalCreated]);
 }

@@ -25,6 +25,15 @@ export const RUN_STATUS = {
   FAILED: 4,
 } as const;
 
+export const TASK_STATUS = {
+  PENDING: 1,
+  RUNNING: 2,
+  COMPLETED: 3,
+  FAILED: 4,
+  EXCEEDED: 5,
+  PR_FAILED: 6,
+} as const;
+
 export const ACTIVITY_KIND = {
   GOAL_CREATED: 1,
   RUN_STARTED: 2,
@@ -34,6 +43,13 @@ export const ACTIVITY_KIND = {
   PAUSED: 6,
   BLOCKED: 7,
   CONNECTION_LOST: 8,
+  CONNECTION_RESTORED: 9,
+} as const;
+
+export const CONNECTION_STATE = {
+  CONNECTED: 1,
+  DELAYED: 2,
+  UNRESPONSIVE: 3,
 } as const;
 
 export const INQUIRY_KIND = {
@@ -113,6 +129,13 @@ const ENUM_NAME_TO_NUMBER: Record<string, Record<string, number>> = {
     CONVERSATION_SPEAKER_USER: 1,
     CONVERSATION_SPEAKER_MANAGER: 2,
     CONVERSATION_SPEAKER_SYSTEM: 3,
+    UNRECOGNIZED: -1,
+  },
+  ConnectionState: {
+    CONNECTION_STATE_UNSPECIFIED: 0,
+    CONNECTION_STATE_CONNECTED: 1,
+    CONNECTION_STATE_DELAYED: 2,
+    CONNECTION_STATE_UNRESPONSIVE: 3,
     UNRECOGNIZED: -1,
   },
 };

@@ -10,6 +10,14 @@ export const formatDateTime = (date: Date): string => {
   return `${jst.getUTCFullYear()}-${pad(jst.getUTCMonth() + 1)}-${pad(jst.getUTCDate())} ${pad(jst.getUTCHours())}:${pad(jst.getUTCMinutes())}`;
 };
 
+const MODEL_LABELS: Readonly<Record<string, string>> = {
+  "opus": "Opus 級",
+  "glm-5.3": "GLM 5.3",
+  "deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
+};
+
+export const formatModel = (model: string): string => MODEL_LABELS[model] ?? model;
+
 export const formatDuration = (seconds: number): string => {
   const whole = Math.max(0, Math.round(seconds));
   if (whole < 60) {
