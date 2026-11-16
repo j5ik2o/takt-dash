@@ -42,6 +42,11 @@ make は呼ばない。
      セットアップしない、のそれぞれで失敗する。
   10. .gitignore に生成物の除外が無い、rust-toolchain.toml のチャネルが stable でない、
      のそれぞれで失敗する。
+  11. aislop の受け入れ一覧（scripts/aislop-accepted.json）の各エントリが、reason に
+     解消 issue の URL（https://github.com/j5ik2o/takt-dash/issues/<番号>）を含み、
+     各 finding が受け入れ時点の行数の上限（maxLines）を持つ。リンクが無い、上限の欄が
+     無い、対象ファイルの実測行数が上限を超える、のそれぞれで失敗し、上限以内と空の一覧
+     （missingToolsAllowed だけを持つ）は通る。実リポジトリの一覧もこの検査に通る。
 """
 import importlib.util
 import io
@@ -490,11 +495,58 @@ next-env.d.ts
 
 TOOLCHAIN = '[toolchain]\nchannel = "stable"\n'
 
+
+def accepted_json(entries):
+    """実リポジトリの scripts/aislop-accepted.json と同じ形の受け入れ一覧を作る。"""
+    return json.dumps(
+        {
+            "engines": ["format", "lint", "code-quality", "ai-slop", "security"],
+            "missingToolsAllowed": {"ruff": "Python 側は ruff を導入していない。"},
+            "accepted": entries,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+ACCEPTED = accepted_json([])
+
+ISSUE_REASON = "一時的な受け入れ。解消は https://github.com/j5ik2o/takt-dash/issues/104 で追跡し、issue が閉じたら削除する"
+
+ACCEPTED_FILE = "tools/big.py"
+
+
+def accepted_finding(**overrides):
+    finding = {
+        "engine": "code-quality",
+        "rule": "complexity/file-too-large",
+        "file": ACCEPTED_FILE,
+        "message": "File has 10 lines (max 400)",
+        "maxLines": 10,
+    }
+    finding.update(overrides)
+    return finding
+
+
+def accepted_entry(reason=ISSUE_REASON, findings=None):
+    entry = {"findings": [accepted_finding()] if findings is None else findings}
+    if reason is not None:
+        entry["reason"] = reason
+    return entry
+
 # 関門のコマンドは外部へ何も出力しない小さな脚本に置き換える。make done の成否は
 # rest に置いた検査の記録から決め、env.toml の fail_targets に並べた検査だけ失敗させる。
 
 
-def repository(sandbox, makefile=MAKEFILE, ci=CI, workflow=WORKFLOW, gitignore=GITIGNORE, toolchain=TOOLCHAIN):
+def repository(
+    sandbox,
+    makefile=MAKEFILE,
+    ci=CI,
+    workflow=WORKFLOW,
+    gitignore=GITIGNORE,
+    toolchain=TOOLCHAIN,
+    accepted=ACCEPTED,
+):
     sandbox.write("Cargo.toml", CARGO_WORKSPACE)
     sandbox.write("backend/Cargo.toml", BACKEND_MANIFEST)
     sandbox.write("backend/src/lib.rs", "")
@@ -512,6 +564,8 @@ def repository(sandbox, makefile=MAKEFILE, ci=CI, workflow=WORKFLOW, gitignore=G
         sandbox.write(".gitignore", gitignore)
     if toolchain is not None:
         sandbox.write("rust-toolchain.toml", toolchain)
+    if accepted is not None:
+        sandbox.write("scripts/aislop-accepted.json", accepted)
 
 
 def stub_external_tools(sandbox, make_failure=False):
@@ -1942,6 +1996,184 @@ def test_makefile_recipe_parsing() -> None:
         assert targets["done"][0] == "$(MAKE) fmt", targets
 
 
+def numbered_lines(count, trailing_newline=True):
+    text = "\n".join(f"line {index}" for index in range(1, count + 1))
+    return text + "\n" if trailing_newline and count else text
+
+
+def accepted_repository(sandbox, entries, files=None):
+    """受け入れ一覧と、そこが参照するファイルを置いたリポジトリを作る。"""
+    repository(sandbox, accepted=accepted_json(entries))
+    if files is None:
+        files = {ACCEPTED_FILE: numbered_lines(10)}
+    for relative, text in files.items():
+        sandbox.write(relative, text)
+    stub_external_tools(sandbox)
+
+
+def accepted_detail(payload):
+    detail = {check["name"]: check for check in payload["checks"]}["workflow-machine-gate"]["detail"]
+    return detail["aislop_accepted"]
+
+
+def test_aislop_accepted_entry_requires_issue_link() -> None:
+    with Sandbox() as sandbox:
+        accepted_repository(sandbox, [accepted_entry()])
+        payload = assert_success(sandbox, "issue の URL を含む reason")
+        assert accepted_detail(payload) == {"entries": 1, "findings": 1}, accepted_detail(payload)
+
+    for label, reason in {
+        "issue 番号だけ": "一時的な受け入れ。解消は issue #104 で追跡する",
+        "pull の URL": "解消は https://github.com/j5ik2o/takt-dash/pull/85 で追跡する",
+        "別リポジトリの issue": "解消は https://github.com/j5ik2o/other/issues/1 で追跡する",
+        "番号の無い issue URL": "解消は https://github.com/j5ik2o/takt-dash/issues/ で追跡する",
+        "空の reason": "",
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [accepted_entry(reason=reason)])
+            assert_failure(sandbox, label, "workflow-machine-gate", "https://github.com/j5ik2o/takt-dash/issues/")
+
+    for label, entry in {
+        "reason が無い": accepted_entry(reason=None),
+        "reason が文字列でない": {"reason": ["https://github.com/j5ik2o/takt-dash/issues/104"], "findings": [accepted_finding()]},
+        "エントリが辞書でない": ISSUE_REASON,
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [entry])
+            assert_gate_rejects(sandbox, label)
+
+    # 2 件目だけがリンクを欠く場合も、1 件目の合格で検査を打ち切らない。
+    with Sandbox() as sandbox:
+        accepted_repository(sandbox, [accepted_entry(), accepted_entry(reason="解消は issue #104")])
+        assert_failure(sandbox, "2 件目のリンク欠落", "workflow-machine-gate", "https://github.com/j5ik2o/takt-dash/issues/")
+
+
+def test_aislop_accepted_finding_requires_max_lines() -> None:
+    without_limit = accepted_finding()
+    del without_limit["maxLines"]
+    for label, finding in {
+        "maxLines が無い": without_limit,
+        "maxLines が文字列": accepted_finding(maxLines="10"),
+        "maxLines が真偽値": accepted_finding(maxLines=True),
+        "maxLines が小数": accepted_finding(maxLines=10.0),
+        "maxLines が 0": accepted_finding(maxLines=0),
+        "maxLines が負": accepted_finding(maxLines=-1),
+        "maxLines が null": accepted_finding(maxLines=None),
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [accepted_entry(findings=[finding])])
+            assert_failure(sandbox, label, "workflow-machine-gate", "maxLines")
+
+    # 2 件目の finding だけが上限の欄を欠く場合も失敗する。
+    with Sandbox() as sandbox:
+        accepted_repository(sandbox, [accepted_entry(findings=[accepted_finding(), without_limit])])
+        assert_failure(sandbox, "2 件目の finding", "workflow-machine-gate", "maxLines")
+
+    for label, entry in {
+        "findings が空": accepted_entry(findings=[]),
+        "findings が無い": {"reason": ISSUE_REASON},
+        "finding が辞書でない": accepted_entry(findings=[ACCEPTED_FILE]),
+        "file が無い": accepted_entry(findings=[{key: value for key, value in accepted_finding().items() if key != "file"}]),
+        "file が空": accepted_entry(findings=[accepted_finding(file="")]),
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [entry])
+            assert_gate_rejects(sandbox, label)
+
+
+def test_aislop_accepted_file_over_max_lines_fails() -> None:
+    for label, text in {
+        "11 行（末尾改行あり）": numbered_lines(11),
+        "11 行（末尾改行なし）": numbered_lines(11, trailing_newline=False),
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [accepted_entry()], files={ACCEPTED_FILE: text})
+            assert_failure(sandbox, label, "workflow-machine-gate", ACCEPTED_FILE)
+
+    # 1 エントリが複数ファイルにまたがるとき、上限を超えた側だけを報告する。
+    with Sandbox() as sandbox:
+        accepted_repository(
+            sandbox,
+            [accepted_entry(findings=[accepted_finding(), accepted_finding(file="tools/other.py", maxLines=3)])],
+            files={ACCEPTED_FILE: numbered_lines(10), "tools/other.py": numbered_lines(4)},
+        )
+        assert_failure(sandbox, "2 件目のファイルが超過", "workflow-machine-gate", "tools/other.py")
+
+
+def test_aislop_accepted_file_must_exist_under_root() -> None:
+    with Sandbox() as sandbox:
+        accepted_repository(sandbox, [accepted_entry()], files={})
+        assert_failure(sandbox, "ファイルが無い", "workflow-machine-gate", ACCEPTED_FILE)
+
+    with Sandbox() as sandbox:
+        outside = sandbox.base / "outside.py"
+        outside.write_text(numbered_lines(1), encoding="utf-8")
+        for label, file in {
+            "ルートの外（相対）": "../outside.py",
+            "絶対パス": str(outside),
+            "ディレクトリ": "tools",
+        }.items():
+            accepted_repository(sandbox, [accepted_entry(findings=[accepted_finding(file=file)])])
+            assert_gate_rejects(sandbox, label)
+
+
+def test_aislop_accepted_within_max_lines_passes() -> None:
+    for label, text in {
+        "上限と同じ 10 行": numbered_lines(10),
+        "上限と同じ 10 行（末尾改行なし）": numbered_lines(10, trailing_newline=False),
+        "上限未満の 9 行": numbered_lines(9),
+        "空のファイル": "",
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [accepted_entry()], files={ACCEPTED_FILE: text})
+            payload = assert_success(sandbox, label)
+            assert accepted_detail(payload) == {"entries": 1, "findings": 1}, accepted_detail(payload)
+
+    with Sandbox() as sandbox:
+        accepted_repository(
+            sandbox,
+            [
+                accepted_entry(findings=[accepted_finding(), accepted_finding(file="tools/other.py", maxLines=3)]),
+                accepted_entry(reason="解消は https://github.com/j5ik2o/takt-dash/issues/7 で追跡する"),
+            ],
+            files={ACCEPTED_FILE: numbered_lines(10), "tools/other.py": numbered_lines(3)},
+        )
+        payload = assert_success(sandbox, "複数エントリと複数ファイル")
+        assert accepted_detail(payload) == {"entries": 2, "findings": 3}, accepted_detail(payload)
+
+
+def test_aislop_accepted_empty_list_passes() -> None:
+    # 既定の一覧は accepted が空で、missingToolsAllowed の理由には issue の URL が無い。
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        payload = assert_success(sandbox, "空の一覧")
+        assert accepted_detail(payload) == {"entries": 0, "findings": 0}, accepted_detail(payload)
+
+
+def test_aislop_accepted_list_must_be_readable() -> None:
+    for label, accepted in {
+        "一覧のファイルが無い": None,
+        "JSON として読めない": "{",
+        "accepted が配列でない": json.dumps({"missingToolsAllowed": {}, "accepted": {}}),
+        "accepted が無い": json.dumps({"missingToolsAllowed": {}}),
+    }.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, accepted=accepted)
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, label)
+
+
+def test_repository_aislop_accepted_list_passes() -> None:
+    """machine_gate と CI の make test で、実リポジトリの受け入れ一覧を検査する。"""
+    from gate_aislop_accepted import check_aislop_accepted
+
+    root = Path(__file__).resolve().parents[2]
+    entries = json.loads((root / "scripts/aislop-accepted.json").read_text(encoding="utf-8"))["accepted"]
+    result = check_aislop_accepted(root)
+    assert result["entries"] == len(entries), result
+
+
 def main() -> int:
     tests = [
         test_correct_repository_passes,
@@ -1980,6 +2212,14 @@ def main() -> int:
         test_skip_make_omits_the_command_run,
         test_install_guard_detection,
         test_makefile_recipe_parsing,
+        test_aislop_accepted_entry_requires_issue_link,
+        test_aislop_accepted_finding_requires_max_lines,
+        test_aislop_accepted_file_over_max_lines_fails,
+        test_aislop_accepted_file_must_exist_under_root,
+        test_aislop_accepted_within_max_lines_passes,
+        test_aislop_accepted_empty_list_passes,
+        test_aislop_accepted_list_must_be_readable,
+        test_repository_aislop_accepted_list_passes,
     ]
     failures = 0
     for test in tests:

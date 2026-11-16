@@ -66,6 +66,25 @@ make done
 - `make typecheck`: `npm --prefix frontend/web run typecheck`
 - `make lint`: `npm --prefix frontend/web run lint`
 
+### aislop の受け入れ一覧
+
+`scripts/aislop-accepted.json` の `accepted` は、aislop の指摘を一時的に受け入れる一覧です。
+指摘はコードの修正で解消するのが原則で、受け入れは次の条件を満たす例外です。
+
+- エントリの追加には窓口の承認が必要です。TAKT の run（fix_aislop_gate など）は自分で追加・変更しません。
+- `reason` には、解消を追跡する issue の URL（`https://github.com/j5ik2o/takt-dash/issues/<番号>`）を書きます。
+- 各 finding の `maxLines` に、受け入れ時点の対象ファイルの実測行数を記録します。
+- 解消 issue が閉じたら、そのエントリを削除します。
+
+`tools/repo-gate` の workflow-machine-gate 検査（`make test` の `repo_gate_test.py` からも実行）は、
+次の場合に失敗します。
+
+- `reason` に issue の URL が無い。
+- `maxLines` が無い（findings が空の場合を含む）。
+- 対象ファイルが `maxLines` を超える行数になった。
+
+`missingToolsAllowed` はこの検査の対象外です。
+
 ## proto を変更したとき
 
 API の正は `proto/taktdash.proto` です。変更したら Rust（tonic）と TypeScript の生成物を
