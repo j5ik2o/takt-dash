@@ -7,6 +7,7 @@
   "statusNames": {
     "in progress": "In Progress",
     "in review": "In Review",
+    "In Progress": "In Progress",
     "In Review": "In Review"
   },
   "repository": "j5ik2o/takt-dash"
