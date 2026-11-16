@@ -23,7 +23,10 @@
                        status の 4 段階を実行し、commit / push / pr の成功だけを完了条件に
                        し、失敗は再試行または修正へ回し、ABORT へは遷移しない。公開ステップを
                        置かない場合は machine_gate の成功が aislop_gate へ直結する。status
-                       だけを実行するステップは公開とみなさない。
+                       だけを実行するステップは公開とみなさない。aislop の受け入れ一覧
+                       （scripts/aislop-accepted.json）の各エントリが reason に解消 issue の
+                       URL を含み、各 finding が maxLines を持ち、対象ファイルの実測行数が
+                       maxLines 以下であることも確かめる。
   gitignore-rules      .gitignore が Rust と Node とローカルデータの生成物を除外する。
   stable-toolchain     rust-toolchain.toml のチャネルが stable のままである。
 
