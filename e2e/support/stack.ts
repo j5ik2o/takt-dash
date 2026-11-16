@@ -261,7 +261,9 @@ const buildConfig = (input: StackConfigInput): Record<string, unknown> => ({
   },
   projects: [{ name: PROJECT_NAME, server: SERVER_ID, about: PROJECT_ABOUT, cwd: input.projectDir }],
   intervalSeconds: 1,
-  thresholds: { pendingDecisionStaleMinutes: 240, runLogSilentMinutes: 10 },
+  // 応答なしの判定は本番の既定（3回・120秒）だと待ち時間がテストの上限に収まらないため、
+  // 固定の fixture では短い値にして画面の遷移だけを観測する。
+  thresholds: { pendingDecisionStaleMinutes: 240, runLogSilentMinutes: 10, connectionFailureCount: 1, connectionDelaySeconds: 1 },
   listen: input.backendAddress,
 });
 

@@ -737,6 +737,7 @@ fn pending_state() -> v1::DashboardState {
       pending_decision_stale_minutes: 240,
       run_log_silent_minutes:         10,
     }),
+    build_info:        None,
   }
 }
 

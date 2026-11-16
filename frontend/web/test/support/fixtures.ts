@@ -5,6 +5,7 @@
 import {
   ActivityKind,
   AnomalyThresholds,
+  ConnectionState,
   ConversationSpeaker,
   DashboardState,
   ExecutionStatus,
@@ -29,6 +30,11 @@ import {
 export const STALE_MINUTES = 240;
 export const SILENT_MINUTES = 10;
 
+// backend が自身のビルド元として返す値。frontend のビルド情報とは別の値にして、
+// サイドバーが両者を区別して表示できることを観測できるようにする。
+export const BACKEND_COMMIT = "d4e5f6a";
+export const BACKEND_BRANCH = "takt/20261116-backend";
+
 export const NOW = new Date("2026-11-13T07:30:00Z");
 
 const minutesAgo = (minutes: number): Date => new Date(NOW.getTime() - minutes * 60_000);
@@ -43,6 +49,7 @@ export function createThresholds(): AnomalyThresholds {
 export function createDashboardState(): DashboardState {
   return DashboardState.create({
     readAt: NOW,
+    buildInfo: { commit: BACKEND_COMMIT, branch: BACKEND_BRANCH },
     servers: [
       {
         serverId: "mini",
@@ -68,6 +75,7 @@ export function createDashboardState(): DashboardState {
         serverId: "mini",
         completedTasks24h: 3,
         connected: true,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
         lastReadAt: minutesAgo(1),
       },
       {
@@ -76,6 +84,7 @@ export function createDashboardState(): DashboardState {
         serverId: "mini",
         completedTasks24h: 1,
         connected: true,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
         lastReadAt: minutesAgo(1),
       },
     ],
@@ -114,6 +123,10 @@ export function createDashboardState(): DashboardState {
         startedAt: minutesAgo(35),
         steps: [{ stepName: "implement", model: "glm-5.3", startedAt: minutesAgo(20) }],
         currentStepStartedAt: minutesAgo(20),
+        currentStepNumber: 2,
+        totalSteps: 5,
+        currentIteration: 2,
+        currentStepName: "implement",
         lastLogAt: minutesAgo(1),
         reports: [{ filename: "review.md", sizeBytes: 1200 }],
         status: RunStatus.RUN_STATUS_RUNNING,
@@ -150,6 +163,62 @@ export function createDashboardState(): DashboardState {
   });
 }
 
+// 異常が無い状態。全サーバー・全プロジェクトが接続中で、判断待ち・失敗・中止・
+// ログの無音がすべて無い。概要が警告バナーや判断待ちパネルを描画しないことを
+// 固定するための基準状態として使う。
+export function createHealthyDashboardState(): DashboardState {
+  const base = createDashboardState();
+  return DashboardState.create({
+    ...base,
+    servers: base.servers.map((server) => ({ ...server, connected: true })),
+    projects: base.projects.map((project) => ({
+      ...project,
+      connected: true,
+      connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+      lastReadAt: minutesAgo(1),
+    })),
+    goals: base.goals.map((goal) => ({
+      ...goal,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+      taskCounts: { pending: 0, running: 0, completed: 6, failed: 0, exceeded: 0, prFailed: 0 },
+    })),
+    runs: base.runs.map((run) => ({ ...run, logSilent: false, lastLogAt: minutesAgo(1) })),
+    pendingDecisions: [],
+  });
+}
+
+export function createDashboardStateWithProjectConnection(
+  project: string,
+  connectionState: ConnectionState,
+  lastReadAt: Date,
+): DashboardState {
+  const base = createDashboardState();
+  return DashboardState.create({
+    ...base,
+    projects: base.projects.map((item) =>
+      item.name === project ? { ...item, connectionState, lastReadAt } : item,
+    ),
+  });
+}
+
+// takt_get_run の実データ形を作る。currentStep はトップレベルの step（develop）で、
+// stepLogs の末尾は入れ子 workflow の内側の step（write_tests）になる。
+// 位置と名前は currentStep 由来の値（1/1）で、steps の末尾とは異なる。
+export function createNestedStepDashboardState(): DashboardState {
+  const base = createDashboardState();
+  return DashboardState.create({
+    ...base,
+    runs: base.runs.map((run) => ({
+      ...run,
+      steps: [{ stepName: "write_tests", model: "glm-5.3", startedAt: minutesAgo(20) }],
+      currentStepName: "develop",
+      currentStepNumber: 1,
+      totalSteps: 1,
+      currentIteration: 3,
+    })),
+  });
+}
+
 // 判断待ちページの操作 UI を確かめるための状態。
 // 3種別（問い合わせ・マージ待ち・ゴール登録の承認待ち）と、操作に必要な値が欠けた
 // 項目をまとめて持つ。各テストは使う項目だけを取り出し、状態を作り直さずに共有しない。
@@ -167,9 +236,9 @@ export function createActionableDashboardState(): DashboardState {
       },
     ],
     projects: [
-      { name: "esa", about: "イベントストアの実装", serverId: "mini", completedTasks24h: 1 },
-      { name: "corporate-site", about: "採用ページを管理する", serverId: "mini", completedTasks24h: 3 },
-      { name: "takt", about: "判断待ちを管理する", serverId: "mini", completedTasks24h: 0 },
+      { name: "esa", about: "イベントストアの実装", serverId: "mini", completedTasks24h: 1, connected: true },
+      { name: "corporate-site", about: "採用ページを管理する", serverId: "mini", completedTasks24h: 3, connected: true },
+      { name: "takt", about: "判断待ちを管理する", serverId: "mini", completedTasks24h: 0, connected: true },
     ],
     goals: [],
     runs: [],

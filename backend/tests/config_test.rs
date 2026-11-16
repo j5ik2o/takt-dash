@@ -5,8 +5,8 @@ mod common;
 use std::path::Path;
 
 use takt_dash_backend::config::{
-  load_config, parse_config, ConfigError, DEFAULT_INTERVAL_SECONDS, DEFAULT_LISTEN,
-  DEFAULT_PENDING_DECISION_STALE_MINUTES, DEFAULT_RUN_LOG_SILENT_MINUTES,
+  load_config, parse_config, ConfigError, DEFAULT_CONNECTION_DELAY_SECONDS, DEFAULT_CONNECTION_FAILURE_COUNT,
+  DEFAULT_INTERVAL_SECONDS, DEFAULT_LISTEN, DEFAULT_PENDING_DECISION_STALE_MINUTES, DEFAULT_RUN_LOG_SILENT_MINUTES,
 };
 
 fn repo_config_path() -> &'static Path {
@@ -34,6 +34,8 @@ fn committed_config_carries_default_interval_and_thresholds() {
   assert_eq!(config.interval_seconds, 30);
   assert_eq!(config.thresholds.pending_decision_stale_minutes, 240);
   assert_eq!(config.thresholds.run_log_silent_minutes, 10);
+  assert_eq!(config.thresholds.connection_failure_count, 3);
+  assert_eq!(config.thresholds.connection_delay_seconds, 120);
 }
 
 #[test]
@@ -54,6 +56,8 @@ fn omitted_interval_and_thresholds_fall_back_to_defaults() {
   assert_eq!(config.interval_seconds, DEFAULT_INTERVAL_SECONDS);
   assert_eq!(config.thresholds.pending_decision_stale_minutes, DEFAULT_PENDING_DECISION_STALE_MINUTES);
   assert_eq!(config.thresholds.run_log_silent_minutes, DEFAULT_RUN_LOG_SILENT_MINUTES);
+  assert_eq!(config.thresholds.connection_failure_count, DEFAULT_CONNECTION_FAILURE_COUNT);
+  assert_eq!(config.thresholds.connection_delay_seconds, DEFAULT_CONNECTION_DELAY_SECONDS);
   assert_eq!(config.sqlite_path, Path::new("/base/data/taktdash.sqlite"));
 }
 
@@ -70,6 +74,45 @@ fn explicit_thresholds_override_defaults() {
   assert_eq!(config.interval_seconds, 5);
   assert_eq!(config.thresholds.pending_decision_stale_minutes, 60);
   assert_eq!(config.thresholds.run_log_silent_minutes, 3);
+}
+
+#[test]
+fn explicit_connection_thresholds_override_defaults() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [],
+    "thresholds": { "connectionFailureCount": 5, "connectionDelaySeconds": 30 }
+  }"#;
+  let config = parse_config(text, Path::new("/base")).expect("設定ファイルを解析できます");
+
+  assert_eq!(config.thresholds.connection_failure_count, 5);
+  assert_eq!(config.thresholds.connection_delay_seconds, 30);
+  assert_eq!(
+    config.thresholds.pending_decision_stale_minutes, DEFAULT_PENDING_DECISION_STALE_MINUTES,
+    "接続の閾値だけを変えても既存の閾値は既定のままです"
+  );
+}
+
+#[test]
+fn zero_connection_failure_count_is_rejected() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [],
+    "thresholds": { "connectionFailureCount": 0 }
+  }"#;
+  let error = parse_config(text, Path::new("/base")).expect_err("0回の連続失敗は拒否します");
+  assert!(matches!(error, ConfigError::Invalid(_)), "検証エラーになります: {error}");
+}
+
+#[test]
+fn zero_connection_delay_seconds_is_rejected() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [],
+    "thresholds": { "connectionDelaySeconds": 0 }
+  }"#;
+  let error = parse_config(text, Path::new("/base")).expect_err("0秒の遅延は拒否します");
+  assert!(matches!(error, ConfigError::Invalid(_)), "検証エラーになります: {error}");
 }
 
 #[test]

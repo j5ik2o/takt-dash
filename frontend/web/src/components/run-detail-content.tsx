@@ -30,31 +30,43 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
         <div className="sum-grid">
           <div className="f">
             <div className="k">サーバー</div>
-            <div className="v">{detail.serverId}</div>
+            <div className="v mono">{detail.serverId}</div>
           </div>
           <div className="f">
             <div className="k">開始と経過</div>
             <div className="v">
-              {detail.startedAt ? `${formatDateTime(detail.startedAt)} に始まりました。` : "開始時刻は不明です。"}
+              {detail.startedAt ? (
+                <>
+                  <span className="mono">{formatDateTime(detail.startedAt)}</span> に始まりました。
+                </>
+              ) : (
+                "開始時刻は不明です。"
+              )}
               {elapsed !== undefined ? `経過は ${elapsed} です。` : ""}
             </div>
           </div>
           <div className="f">
             <div className="k">今のステップ</div>
             <div className="v">
-              {detail.currentStep ?? "なし"}
+              {detail.currentStep !== undefined ? <span className="mono">{detail.currentStep}</span> : "なし"}
               {detail.currentIteration !== undefined ? `（反復 ${detail.currentIteration} 回目）` : ""}
             </div>
           </div>
           <div className="f">
             <div className="k">このステップの開始</div>
             <div className="v">
-              {detail.currentStepStartedAt ? `${formatClock(detail.currentStepStartedAt)} に始まりました。` : "開始時刻は不明です。"}
+              {detail.currentStepStartedAt ? (
+                <>
+                  <span className="mono">{formatClock(detail.currentStepStartedAt)}</span> に始まりました。
+                </>
+              ) : (
+                "開始時刻は不明です。"
+              )}
             </div>
           </div>
           <div className="f">
             <div className="k">最後のログ</div>
-            <div className="v">{detail.lastLogAt ? `${formatClock(detail.lastLogAt)}（${formatDateTime(detail.lastLogAt)}）` : "まだログはありません。"}</div>
+            <div className="v mono">{detail.lastLogAt ? `${formatClock(detail.lastLogAt)}（${formatDateTime(detail.lastLogAt)}）` : "まだログはありません。"}</div>
           </div>
           <div className="f wide">
             <div className="k">要約</div>

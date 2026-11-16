@@ -438,6 +438,7 @@ fn sample_overview() -> DashboardState {
       completed_tasks_24h: 3,
       connected:           true,
       last_read_at:        Some(ts(1_731_599_000)),
+      connection_state:    v1::ConnectionState::Connected as i32,
     }],
     goals:             vec![v1::Goal {
       goal_id:           "goal-cli".to_owned(),
@@ -470,6 +471,10 @@ fn sample_overview() -> DashboardState {
         started_at:              Some(ts(1_731_590_000)),
         steps:                   Vec::new(),
         current_step_started_at: None,
+        current_step_number:     None,
+        total_steps:             None,
+        current_iteration:       None,
+        current_step_name:       None,
         last_log_at:             Some(ts(1_731_599_500)),
         reports:                 Vec::new(),
         status:                  RUN_STATUS_RUNNING,
@@ -487,6 +492,10 @@ fn sample_overview() -> DashboardState {
         started_at:              Some(ts(1_731_580_000)),
         steps:                   Vec::new(),
         current_step_started_at: None,
+        current_step_number:     None,
+        total_steps:             None,
+        current_iteration:       None,
+        current_step_name:       None,
         last_log_at:             Some(ts(1_731_590_000)),
         reports:                 Vec::new(),
         status:                  v1::RunStatus::Completed as i32,
@@ -541,6 +550,7 @@ fn sample_overview() -> DashboardState {
       pending_decision_stale_minutes: 240,
       run_log_silent_minutes:         10,
     }),
+    build_info:        None,
   }
 }
 

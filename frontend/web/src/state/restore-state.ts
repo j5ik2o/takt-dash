@@ -8,6 +8,7 @@
 // test/state/dashboard.test.ts と test/components/state-stream.test.ts で確認する。
 import type {
   AnomalyThresholds,
+  BuildInfo,
   DashboardState,
   GetGoalDetailResponse,
   GetTaskDetailResponse,
@@ -36,6 +37,11 @@ const toDate = (value: unknown): Date | undefined => {
 
 const asNumber = (value: unknown): number => (typeof value === "number" ? value : Number(value ?? 0));
 
+const asOptionalNumber = (value: unknown): number | undefined => (typeof value === "number" ? value : undefined);
+
+const asOptionalString = (value: unknown): string | undefined =>
+  typeof value === "string" && value !== "" ? value : undefined;
+
 const toServer = (raw: Record<string, unknown>): Server => ({
   serverId: String(raw.serverId ?? ""),
   name: String(raw.name ?? ""),
@@ -52,6 +58,10 @@ const toProject = (raw: Record<string, unknown>): Project => ({
   completedTasks24h: asNumber(raw.completedTasks24h),
   connected: raw.connected === true,
   lastReadAt: toDate(raw.lastReadAt),
+  connectionState:
+    raw.connectionState === undefined || raw.connectionState === null
+      ? 0
+      : enumFromWire("ConnectionState", raw.connectionState),
 });
 
 const toTaskCounts = (raw: unknown): TaskStatusCounts | undefined => {
@@ -119,6 +129,10 @@ const toRun = (raw: Record<string, unknown>): Run => ({
   reports: Array.isArray(raw.reports) ? raw.reports.map((report) => toReportSummary(report as Record<string, unknown>)) : [],
   status: enumFromWire("RunStatus", raw.status),
   logSilent: raw.logSilent === true,
+  currentStepNumber: asOptionalNumber(raw.currentStepNumber),
+  totalSteps: asOptionalNumber(raw.totalSteps),
+  currentIteration: asOptionalNumber(raw.currentIteration),
+  currentStepName: asOptionalString(raw.currentStepName),
 });
 
 const toPendingDecision = (raw: Record<string, unknown>): PendingDecision => ({
@@ -150,6 +164,17 @@ const toThresholds = (raw: unknown): AnomalyThresholds | undefined => {
   return {
     pendingDecisionStaleMinutes: asNumber(value.pendingDecisionStaleMinutes),
     runLogSilentMinutes: asNumber(value.runLogSilentMinutes),
+  };
+};
+
+const toBuildInfo = (raw: unknown): BuildInfo | undefined => {
+  if (raw === undefined || raw === null || typeof raw !== "object") {
+    return undefined;
+  }
+  const value = raw as Record<string, unknown>;
+  return {
+    commit: String(value.commit ?? ""),
+    branch: String(value.branch ?? ""),
   };
 };
 
@@ -210,6 +235,7 @@ export function restoreDashboardState(payload: unknown): DashboardState {
     runs: arrayOf(raw.runs).map(toRun),
     pendingDecisions: arrayOf(raw.pendingDecisions).map(toPendingDecision),
     thresholds: toThresholds(raw.thresholds),
+    buildInfo: toBuildInfo(raw.buildInfo),
   };
 }
 
