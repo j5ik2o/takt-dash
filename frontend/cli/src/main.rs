@@ -3,16 +3,21 @@
 //! backend の gRPC へ接続して概要に相当する状態を日本語で表示する閲覧コマンドと、問い合わせへの
 //! 回答・マージの承認・ゴール登録の承認と却下・承認待ちの一覧を行う書き込みコマンドを持ちます。
 
+mod domain;
 mod proto;
 
 use std::{env::VarError, io::Write, net::SocketAddr, path::PathBuf, time::Duration};
 
+use domain::{
+  GoalId, InquiryId, InquiryKind, MergeUntil, PendingDecisionType, ProjectName, PullRequestNumber,
+  RegistrationRevision, RunStatus, ServerId, StaleMinutes, TaskCount,
+};
 use proto::v1::{
   takt_dash_service_client::TaktDashServiceClient, AnswerInquiryRequest, AnswerInquiryResponse,
   ApproveGoalMergeRequest, ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse,
   ConversationSkipped, DashboardState, GetConversationRequest, GetConversationResponse, GetOverviewRequest,
-  GetPendingDecisionsRequest, GoalRegistrationProposal, OperationAnswerReport, PendingDecisionType,
-  RejectGoalRegistrationRequest, RejectGoalRegistrationResponse,
+  GetPendingDecisionsRequest, GoalRegistrationProposal, OperationAnswerReport, RejectGoalRegistrationRequest,
+  RejectGoalRegistrationResponse,
 };
 use tonic::{transport::Endpoint, Code, Request, Status};
 
@@ -56,10 +61,6 @@ const DECISIONS_COMMAND: &str = "decisions";
 const APPROVE_REGISTRATION_COMMAND: &str = "approve-registration";
 /// ゴール登録を却下するコマンド。
 const REJECT_REGISTRATION_COMMAND: &str = "reject-registration";
-/// マージ承認で使う `until` の値（準備まで）。
-const UNTIL_PREPARE: &str = "prepare";
-/// マージ承認で使う `until` の値（マージまで）。
-const UNTIL_MERGE: &str = "merge";
 
 /// 接続先を解決する材料。境界で一度だけ解決するために、生の入力をまとめて受けます。
 struct AddrSources<'a> {
@@ -168,10 +169,10 @@ enum Invocation {
 }
 
 /// 判断待ちの一覧の表示に使う解決前の入力。
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct DecisionsOptions {
-  server_id: String,
-  project:   String,
+  server_id: ServerId,
+  project:   ProjectName,
   addr:      Option<String>,
   config:    Option<PathBuf>,
 }
@@ -184,9 +185,9 @@ struct OverviewOptions {
 }
 
 /// 会話の表示に使う解決前の入力。
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct ConversationOptions {
-  project: String,
+  project: ProjectName,
   session: Option<String>,
   addr:    Option<String>,
   config:  Option<PathBuf>,
@@ -204,15 +205,27 @@ struct WriteInvocation {
 #[derive(Debug, PartialEq, Eq)]
 enum WriteCommand {
   /// 問い合わせへ回答する。`text` か `report` のどちらか一方を指定します。
-  Answer { server_id: String, project: String, goal_id: Option<String>, inquiry_id: String, answer: Answer },
+  Answer {
+    server_id:  ServerId,
+    project:    ProjectName,
+    goal_id:    Option<GoalId>,
+    inquiry_id: InquiryId,
+    answer:     Answer,
+  },
   /// プルリクエストのマージを承認する。
-  Merge { server_id: String, project: String, goal_id: String, pr_number: i64, until: String },
+  Merge {
+    server_id: ServerId,
+    project:   ProjectName,
+    goal_id:   GoalId,
+    pr_number: PullRequestNumber,
+    until:     MergeUntil,
+  },
   /// ゴール登録の承認待ちを一覧表示する。
-  Registrations { server_id: String, project: String },
+  Registrations { server_id: ServerId, project: ProjectName },
   /// ゴール登録を承認する。
-  ApproveRegistration { server_id: String, project: String, revision: i32 },
+  ApproveRegistration { server_id: ServerId, project: ProjectName, revision: RegistrationRevision },
   /// ゴール登録を却下する。
-  RejectRegistration { server_id: String, project: String, revision: i32 },
+  RejectRegistration { server_id: ServerId, project: ProjectName, revision: RegistrationRevision },
 }
 
 /// 問い合わせへの回答の種類。質問は自由記述（`text`）、作業の依頼は実施結果（`report`）を使います。
@@ -386,44 +399,46 @@ fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
   }
   if command == CONVERSATION_COMMAND {
     let project = project.ok_or_else(|| UsageError("会話の表示にはプロジェクト名が必要です。".to_owned()))?;
+    let project = parse_project_name(&project)?;
     return Ok(Invocation::Conversation(ConversationOptions { project, session, addr, config }));
   }
   if command == DECISIONS_COMMAND {
-    let server_id = require_flag(server, DECISIONS_COMMAND, "--server")?;
-    let project = require_flag(project, DECISIONS_COMMAND, "--project")?;
+    let server_id = require_parsed(server, DECISIONS_COMMAND, "--server")?;
+    let project = require_parsed(project, DECISIONS_COMMAND, "--project")?;
     return Ok(Invocation::Decisions(DecisionsOptions { server_id, project, addr, config }));
   }
   let write = |command: WriteCommand| Invocation::Write(WriteInvocation { command, addr, config });
   match command {
     | ANSWER_COMMAND => {
-      let server_id = require_flag(server, ANSWER_COMMAND, "--server")?;
-      let project = require_flag(project, ANSWER_COMMAND, "--project")?;
-      let inquiry_id = require_flag(question, ANSWER_COMMAND, "--question")?;
+      let server_id = require_parsed(server, ANSWER_COMMAND, "--server")?;
+      let project = require_parsed(project, ANSWER_COMMAND, "--project")?;
+      let inquiry_id = require_parsed(question, ANSWER_COMMAND, "--question")?;
+      let goal_id = parse_optional_goal(goal)?;
       let answer = parse_answer(text, report)?;
-      Ok(write(WriteCommand::Answer { server_id, project, goal_id: goal, inquiry_id, answer }))
+      Ok(write(WriteCommand::Answer { server_id, project, goal_id, inquiry_id, answer }))
     },
     | MERGE_COMMAND => {
-      let server_id = require_flag(server, MERGE_COMMAND, "--server")?;
-      let project = require_flag(project, MERGE_COMMAND, "--project")?;
-      let goal_id = require_flag(goal, MERGE_COMMAND, "--goal")?;
+      let server_id = require_parsed(server, MERGE_COMMAND, "--server")?;
+      let project = require_parsed(project, MERGE_COMMAND, "--project")?;
+      let goal_id = require_parsed(goal, MERGE_COMMAND, "--goal")?;
       let pr_number = parse_pr_number(pr)?;
       let until = parse_until(until)?;
       Ok(write(WriteCommand::Merge { server_id, project, goal_id, pr_number, until }))
     },
     | REGISTRATIONS_COMMAND => {
-      let server_id = require_flag(server, REGISTRATIONS_COMMAND, "--server")?;
-      let project = require_flag(project, REGISTRATIONS_COMMAND, "--project")?;
+      let server_id = require_parsed(server, REGISTRATIONS_COMMAND, "--server")?;
+      let project = require_parsed(project, REGISTRATIONS_COMMAND, "--project")?;
       Ok(write(WriteCommand::Registrations { server_id, project }))
     },
     | APPROVE_REGISTRATION_COMMAND => {
-      let server_id = require_flag(server, APPROVE_REGISTRATION_COMMAND, "--server")?;
-      let project = require_flag(project, APPROVE_REGISTRATION_COMMAND, "--project")?;
+      let server_id = require_parsed(server, APPROVE_REGISTRATION_COMMAND, "--server")?;
+      let project = require_parsed(project, APPROVE_REGISTRATION_COMMAND, "--project")?;
       let revision = parse_revision(revision)?;
       Ok(write(WriteCommand::ApproveRegistration { server_id, project, revision }))
     },
     | REJECT_REGISTRATION_COMMAND => {
-      let server_id = require_flag(server, REJECT_REGISTRATION_COMMAND, "--server")?;
-      let project = require_flag(project, REJECT_REGISTRATION_COMMAND, "--project")?;
+      let server_id = require_parsed(server, REJECT_REGISTRATION_COMMAND, "--server")?;
+      let project = require_parsed(project, REJECT_REGISTRATION_COMMAND, "--project")?;
       let revision = parse_revision(revision)?;
       Ok(write(WriteCommand::RejectRegistration { server_id, project, revision }))
     },
@@ -434,6 +449,29 @@ fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
 /// 必須のフラグの値を取り出す。
 fn require_flag(value: Option<String>, command: &str, flag: &str) -> Result<String, UsageError> {
   value.ok_or_else(|| UsageError(format!("{command} には {flag} が必要です。")))
+}
+
+/// 必須のフラグの値を、検証済みの型へ変換して取り出す。
+fn require_parsed<T>(value: Option<String>, command: &str, flag: &str) -> Result<T, UsageError>
+where
+  T: for<'a> TryFrom<&'a str, Error = domain::DomainError>, {
+  let value = require_flag(value, command, flag)?;
+  T::try_from(value.as_str()).map_err(|error| UsageError(format!("{flag} の値が不正です: {value}（{error}）")))
+}
+
+/// 位置引数のプロジェクト名を検証する。
+fn parse_project_name(value: &str) -> Result<ProjectName, UsageError> {
+  ProjectName::try_from(value).map_err(|error| UsageError(format!("プロジェクト名の値が不正です: {value}（{error}）")))
+}
+
+/// `--goal` の任意指定を検証する。
+fn parse_optional_goal(value: Option<String>) -> Result<Option<GoalId>, UsageError> {
+  match value {
+    | Some(value) => GoalId::try_from(value.as_str())
+      .map(Some)
+      .map_err(|error| UsageError(format!("--goal の値が不正です: {value}（{error}）"))),
+    | None => Ok(None),
+  }
 }
 
 /// 回答の種類を、`--text` と `--report` から決める。両方の同時指定と両方の欠落は誤りです。
@@ -458,35 +496,30 @@ fn parse_answer(text: Option<String>, report: Option<String>) -> Result<Answer, 
 }
 
 /// `--pr` の値を正の整数として取り出す。
-fn parse_pr_number(value: Option<String>) -> Result<i64, UsageError> {
+fn parse_pr_number(value: Option<String>) -> Result<PullRequestNumber, UsageError> {
   let value = value.ok_or_else(|| UsageError("merge には --pr が必要です。".to_owned()))?;
   let pr_number =
     value.parse::<i64>().map_err(|_| UsageError(format!("--pr には正の整数を指定してください: {value}")))?;
-  if pr_number <= 0 {
-    return Err(UsageError(format!("--pr には正の整数を指定してください: {value}")));
-  }
-  Ok(pr_number)
+  PullRequestNumber::try_from(pr_number)
+    .map_err(|_| UsageError(format!("--pr には正の整数を指定してください: {value}")))
 }
 
-/// `--until` の値を、`prepare` か `merge` に限定して取り出す。
-fn parse_until(value: Option<String>) -> Result<String, UsageError> {
+/// `--until` の値を、`MergeUntil` が受け付ける値に限定して取り出す。
+fn parse_until(value: Option<String>) -> Result<MergeUntil, UsageError> {
   match value.as_deref() {
-    | Some(UNTIL_PREPARE) => Ok(UNTIL_PREPARE.to_owned()),
-    | Some(UNTIL_MERGE) => Ok(UNTIL_MERGE.to_owned()),
-    | Some(other) => Err(UsageError(format!("--until には prepare か merge を指定してください: {other}"))),
+    | Some(value) => MergeUntil::try_from(value)
+      .map_err(|_| UsageError(format!("--until には prepare か merge を指定してください: {value}"))),
     | None => Err(UsageError("merge には --until が必要です。".to_owned())),
   }
 }
 
 /// `--revision` の値を正の整数として取り出す。
-fn parse_revision(value: Option<String>) -> Result<i32, UsageError> {
+fn parse_revision(value: Option<String>) -> Result<RegistrationRevision, UsageError> {
   let value = value.ok_or_else(|| UsageError("--revision には正の整数が必要です。".to_owned()))?;
   let revision =
     value.parse::<i32>().map_err(|_| UsageError(format!("--revision には正の整数を指定してください: {value}")))?;
-  if revision <= 0 {
-    return Err(UsageError(format!("--revision には正の整数を指定してください: {value}")));
-  }
-  Ok(revision)
+  RegistrationRevision::try_from(revision)
+    .map_err(|_| UsageError(format!("--revision には正の整数を指定してください: {value}")))
 }
 
 /// `--addr` や `--config` の値を取り出す。
@@ -618,7 +651,7 @@ async fn fetch_decisions(addr: SocketAddr) -> Result<DashboardState, ReadError> 
 /// `session_id` を固定します。カーソルが進まない応答では、同じページを取り続けないよう止めます。
 async fn fetch_conversation(
   addr: SocketAddr,
-  project: &str,
+  project: &ProjectName,
   session: Option<&str>,
 ) -> Result<GetConversationResponse, ReadError> {
   let channel = connect(addr).await.map_err(ReadError::Unavailable)?;
@@ -629,7 +662,7 @@ async fn fetch_conversation(
   let mut merged: Option<GetConversationResponse> = None;
   loop {
     let request = GetConversationRequest {
-      project: project.to_owned(),
+      project: project.as_str().to_owned(),
       session_id: session_id.clone(),
       after_seq,
       limit: CONVERSATION_LIMIT,
@@ -691,6 +724,8 @@ enum WriteError {
   Unavailable(String),
   /// backend は応答したが、接続不能以外の理由で失敗した。
   Call(Status),
+  /// backend の応答に、検証済みの型として扱えない値が含まれていた。
+  Invalid(domain::DomainError),
 }
 
 /// 書き込み RPC の失敗を、接続不能と backend の失敗に分類する。
@@ -714,25 +749,25 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
         | Answer::Report(report) => (None, Some(*report as i32)),
       };
       let mut request = Request::new(AnswerInquiryRequest {
-        server_id: server_id.clone(),
-        project: project.clone(),
-        goal_id: goal_id.clone(),
-        inquiry_id: inquiry_id.clone(),
+        server_id: server_id.as_str().to_owned(),
+        project: project.as_str().to_owned(),
+        goal_id: goal_id.as_ref().map(|goal_id| goal_id.as_str().to_owned()),
+        inquiry_id: inquiry_id.as_str().to_owned(),
         text,
         report,
       });
       request.set_timeout(WRITE_TIMEOUT);
       let response =
         client.answer_inquiry(request).await.map_err(|status| write_call_error(addr, operation, status))?.into_inner();
-      Ok(render_answer(&response))
+      render_answer(&response).map_err(WriteError::Invalid)
     },
     | WriteCommand::Merge { server_id, project, goal_id, pr_number, until } => {
       let mut request = Request::new(ApproveGoalMergeRequest {
-        server_id: server_id.clone(),
-        project:   project.clone(),
-        goal_id:   goal_id.clone(),
-        pr_number: *pr_number,
-        until:     until.clone(),
+        server_id: server_id.as_str().to_owned(),
+        project:   project.as_str().to_owned(),
+        goal_id:   goal_id.as_str().to_owned(),
+        pr_number: pr_number.get(),
+        until:     until.as_str().to_owned(),
       });
       request.set_timeout(WRITE_TIMEOUT);
       let response = client
@@ -744,8 +779,8 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
     },
     | WriteCommand::Registrations { server_id, project } => {
       let mut request = Request::new(proto::v1::ListGoalRegistrationProposalsRequest {
-        server_id: server_id.clone(),
-        project:   project.clone(),
+        server_id: server_id.as_str().to_owned(),
+        project:   project.as_str().to_owned(),
       });
       request.set_timeout(READ_TIMEOUT);
       let response = client
@@ -753,13 +788,13 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
         .await
         .map_err(|status| write_call_error(addr, operation, status))?
         .into_inner();
-      Ok(render_registrations(&response.proposals))
+      render_registrations(&response.proposals).map_err(WriteError::Invalid)
     },
     | WriteCommand::ApproveRegistration { server_id, project, revision } => {
       let mut request = Request::new(ApproveGoalRegistrationRequest {
-        server_id: server_id.clone(),
-        project:   project.clone(),
-        revision:  *revision,
+        server_id: server_id.as_str().to_owned(),
+        project:   project.as_str().to_owned(),
+        revision:  revision.get(),
       });
       request.set_timeout(WRITE_TIMEOUT);
       let response = client
@@ -767,13 +802,13 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
         .await
         .map_err(|status| write_call_error(addr, operation, status))?
         .into_inner();
-      Ok(render_approve_registration(&response))
+      render_approve_registration(&response).map_err(WriteError::Invalid)
     },
     | WriteCommand::RejectRegistration { server_id, project, revision } => {
       let mut request = Request::new(RejectGoalRegistrationRequest {
-        server_id: server_id.clone(),
-        project:   project.clone(),
-        revision:  *revision,
+        server_id: server_id.as_str().to_owned(),
+        project:   project.as_str().to_owned(),
+        revision:  revision.get(),
       });
       request.set_timeout(WRITE_TIMEOUT);
       let response = client
@@ -781,7 +816,7 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
         .await
         .map_err(|status| write_call_error(addr, operation, status))?
         .into_inner();
-      Ok(render_reject_registration(&response))
+      render_reject_registration(&response).map_err(WriteError::Invalid)
     },
   }
 }
@@ -825,9 +860,12 @@ fn run_with(
   };
   match action {
     | Action::Decisions { server_id, project } => match runtime.block_on(fetch_decisions(addr)) {
-      | Ok(state) => {
-        let _ = writeln!(stdout, "{}", render_decisions(&state, &server_id, &project));
-        EXIT_OK
+      | Ok(state) => match render_decisions(&state, &server_id, &project) {
+        | Ok(text) => {
+          let _ = writeln!(stdout, "{text}");
+          EXIT_OK
+        },
+        | Err(error) => report_invalid_response(stderr, error),
       },
       | Err(ReadError::Unavailable(message)) => {
         let _ = writeln!(stderr, "backend に接続できません。{message}");
@@ -858,8 +896,15 @@ fn run_with(
         );
         EXIT_FAILURE
       },
+      | Err(WriteError::Invalid(error)) => report_invalid_response(stderr, error),
     },
   }
+}
+
+/// backend の応答に検証済みの型として扱えない値があったことを表示し、失敗の終了コードを返す。
+fn report_invalid_response(stderr: &mut impl Write, error: domain::DomainError) -> i32 {
+  let _ = writeln!(stderr, "backend の応答に不正な値があります: {error}");
+  EXIT_FAILURE
 }
 
 /// 概要の表示を実行する。
@@ -878,9 +923,12 @@ fn run_overview(
     | Err(code) => return code,
   };
   match runtime.block_on(fetch_overview(addr)) {
-    | Ok(state) => {
-      let _ = writeln!(stdout, "{}", render_overview(&state));
-      EXIT_OK
+    | Ok(state) => match render_overview(&state) {
+      | Ok(text) => {
+        let _ = writeln!(stdout, "{text}");
+        EXIT_OK
+      },
+      | Err(error) => report_invalid_response(stderr, error),
     },
     | Err(ReadError::Unavailable(message)) => {
       let _ = writeln!(stderr, "backend に接続できません。{message}");
@@ -909,9 +957,12 @@ fn run_conversation(
     | Err(code) => return code,
   };
   match runtime.block_on(fetch_conversation(addr, &options.project, options.session.as_deref())) {
-    | Ok(response) => {
-      let _ = writeln!(stdout, "{}", render_conversation(&response));
-      EXIT_OK
+    | Ok(response) => match render_conversation(&response) {
+      | Ok(text) => {
+        let _ = writeln!(stdout, "{text}");
+        EXIT_OK
+      },
+      | Err(error) => report_invalid_response(stderr, error),
     },
     | Err(ReadError::Unavailable(message)) => {
       let _ = writeln!(stderr, "backend に接続できません。{message}");
@@ -935,7 +986,7 @@ fn build_runtime(stderr: &mut impl Write) -> Result<tokio::runtime::Runtime, i32
 /// `run_with` が実行する処理。
 enum Action {
   /// 判断待ちの操作対象を表示する。
-  Decisions { server_id: String, project: String },
+  Decisions { server_id: ServerId, project: ProjectName },
   /// 書き込みコマンドを実行する。
   Write(WriteCommand),
 }
@@ -958,20 +1009,23 @@ pub fn run(args: &[String]) -> i32 {
 /// 取得した `DashboardState` だけから表示を作り、`println!` へ直書きしません。表示する項目は、
 /// サーバーの接続状態、プロジェクト、ゴールとタスクの件数、run、判断待ちの件数と内訳、
 /// 異常判定の閾値、最後に読めた時刻です。
-fn render_overview(state: &DashboardState) -> String {
-  let running_runs = state.runs.iter().filter(|run| run.status == proto::v1::RunStatus::Running as i32).count();
-  let inquiries =
-    state.pending_decisions.iter().filter(|decision| decision.r#type == PendingDecisionType::Inquiry as i32).count();
-  let awaiting_merge = state
-    .pending_decisions
-    .iter()
-    .filter(|decision| decision.r#type == PendingDecisionType::AwaitingMerge as i32)
-    .count();
-  let goal_registration = state
-    .pending_decisions
-    .iter()
-    .filter(|decision| decision.r#type == PendingDecisionType::GoalRegistration as i32)
-    .count();
+fn render_overview(state: &DashboardState) -> Result<String, domain::DomainError> {
+  let mut running_runs = 0_usize;
+  for run in &state.runs {
+    if RunStatus::try_from(run.status)? == RunStatus::Running {
+      running_runs += 1;
+    }
+  }
+  let mut inquiries = 0_usize;
+  let mut awaiting_merge = 0_usize;
+  let mut goal_registration = 0_usize;
+  for decision in &state.pending_decisions {
+    match PendingDecisionType::try_from(decision.r#type)? {
+      | PendingDecisionType::Inquiry => inquiries += 1,
+      | PendingDecisionType::AwaitingMerge => awaiting_merge += 1,
+      | PendingDecisionType::GoalRegistration => goal_registration += 1,
+    }
+  }
   let servers: Vec<String> = state
     .servers
     .iter()
@@ -980,39 +1034,25 @@ fn render_overview(state: &DashboardState) -> String {
       format!("- {}（{}、{}）", server.name, server.kind, state_label)
     })
     .collect();
-  let projects: Vec<String> =
-    state.projects.iter().map(|project| format!("- {}（{}）", project.name, project.about)).collect();
-  let goals: Vec<String> = state
-    .goals
+  let projects: Vec<String> = state
+    .projects
     .iter()
-    .map(|goal| {
-      let counts = goal.task_counts.unwrap_or_default();
-      format!(
-        "- {}/{}「{}」完了{}件・失敗{}件（未着手{}件・実行中{}件）",
-        goal.project, goal.goal_id, goal.name, counts.completed, counts.failed, counts.pending, counts.running
-      )
+    .map(|project| {
+      let name = ProjectName::try_from(project.name.as_str())?;
+      Ok(format!("- {name}（{}）", project.about))
     })
-    .collect();
-  let runs: Vec<String> =
-    state.runs.iter().map(|run| format!("- {}/{}（{}）", run.project, run.task_name, run.summary)).collect();
-  let pending_detail: Vec<String> = state
-    .pending_decisions
-    .iter()
-    .map(|decision| {
-      let kind = if decision.r#type == PendingDecisionType::AwaitingMerge as i32 {
-        "人のマージ待ち"
-      } else if decision.r#type == PendingDecisionType::GoalRegistration as i32 {
-        "承認待ち"
-      } else if decision.inquiry_kind == proto::v1::InquiryKind::OperationRequest as i32 {
-        "問い合わせ（作業の依頼）"
-      } else {
-        "問い合わせ（質問）"
-      };
-      format!("- {}/{}: {} {}", decision.project, decision.server_id, kind, decision.body)
-    })
-    .collect();
-  let thresholds = state.thresholds.unwrap_or_default();
-  format!(
+    .collect::<Result<_, domain::DomainError>>()?;
+  let goals: Vec<String> = state.goals.iter().map(render_goal_line).collect::<Result<_, _>>()?;
+  let runs: Vec<String> = state.runs.iter().map(render_run_line).collect::<Result<_, _>>()?;
+  let pending_detail: Vec<String> =
+    state.pending_decisions.iter().map(render_pending_detail).collect::<Result<_, _>>()?;
+  let stale_minutes = match state.thresholds.as_ref() {
+    | Some(thresholds) => Some(StaleMinutes::try_from(thresholds.pending_decision_stale_minutes)?),
+    | None => None,
+  };
+  let silent_minutes =
+    state.thresholds.as_ref().map(|thresholds| thresholds.run_log_silent_minutes).unwrap_or_default();
+  Ok(format!(
     "概要\n\
      読んだ時刻: {}\n\
      サーバー: {}台\n\
@@ -1040,18 +1080,60 @@ fn render_overview(state: &DashboardState) -> String {
     awaiting_merge,
     goal_registration,
     join_lines(&pending_detail),
-    thresholds.pending_decision_stale_minutes,
-    thresholds.run_log_silent_minutes,
-  )
+    stale_minutes.map_or(0, StaleMinutes::get),
+    silent_minutes,
+  ))
+}
+
+/// ゴール1件の表示行を作る。プロジェクト名・ゴール ID・件数を検証済みの型へ通す。
+fn render_goal_line(goal: &proto::v1::Goal) -> Result<String, domain::DomainError> {
+  let project = ProjectName::try_from(goal.project.as_str())?;
+  let goal_id = GoalId::try_from(goal.goal_id.as_str())?;
+  let counts = goal.task_counts.unwrap_or_default();
+  let completed = TaskCount::try_from(counts.completed)?;
+  let failed = TaskCount::try_from(counts.failed)?;
+  let pending = TaskCount::try_from(counts.pending)?;
+  let running = TaskCount::try_from(counts.running)?;
+  Ok(format!(
+    "- {project}/{goal_id}「{}」完了{completed}件・失敗{failed}件（未着手{pending}件・実行中{running}件）",
+    goal.name
+  ))
+}
+
+/// run 1件の表示行を作る。プロジェクト名を検証済みの型へ通す。
+fn render_run_line(run: &proto::v1::Run) -> Result<String, domain::DomainError> {
+  let project = ProjectName::try_from(run.project.as_str())?;
+  Ok(format!("- {project}/{}（{}）", run.task_name, run.summary))
+}
+
+/// 判断待ち1件の概要行を作る。
+fn render_pending_detail(decision: &proto::v1::PendingDecision) -> Result<String, domain::DomainError> {
+  let project = ProjectName::try_from(decision.project.as_str())?;
+  let server_id = ServerId::try_from(decision.server_id.as_str())?;
+  let kind = decision_label(PendingDecisionType::try_from(decision.r#type)?, decision.inquiry_kind)?;
+  Ok(format!("- {project}/{server_id}: {kind} {}", decision.body))
+}
+
+/// 判断待ちの種類を表示ラベルへ変換する。問い合わせのときだけ問い合わせの種類を検証する。
+fn decision_label(decision_type: PendingDecisionType, inquiry_kind: i32) -> Result<&'static str, domain::DomainError> {
+  match decision_type {
+    | PendingDecisionType::AwaitingMerge => Ok("人のマージ待ち"),
+    | PendingDecisionType::GoalRegistration => Ok("承認待ち"),
+    | PendingDecisionType::Inquiry => match InquiryKind::try_from(inquiry_kind)? {
+      | InquiryKind::OperationRequest => Ok("問い合わせ（作業の依頼）"),
+      | InquiryKind::Question => Ok("問い合わせ（質問）"),
+    },
+  }
 }
 
 /// 会話の表示内容を日本語の文字列へ組み立てる。
 ///
 /// 発言は seq の昇順に並べ、発話者・時刻・本文を出す。unavailable_reason は会話が無い理由、
 /// skipped は理由と件数として表示する。
-fn render_conversation(response: &GetConversationResponse) -> String {
+fn render_conversation(response: &GetConversationResponse) -> Result<String, domain::DomainError> {
+  let project = ProjectName::try_from(response.project.as_str())?;
   let mut lines = vec![
-    format!("会話: {}", response.project),
+    format!("会話: {project}"),
     format!("セッション: {}", response.session_id),
     format!("プロバイダ: {}", response.provider),
   ];
@@ -1079,7 +1161,7 @@ fn render_conversation(response: &GetConversationResponse) -> String {
       )
     }));
   }
-  lines.join("\n")
+  Ok(lines.join("\n"))
 }
 
 /// 発話者の数値を表示名へ変換する。未知の値は「不明」にする。
@@ -1098,49 +1180,60 @@ fn conversation_speaker_label(speaker: i32) -> &'static str {
 /// リビジョン）を固定ラベルで出す。滞留期限は proto に専用フィールドが無いため、作成時刻と
 /// 設定の滞留分数から算出して併記します。承認待ちの登録提案は backend が作成時刻を射影時刻で
 /// 返すため、滞留期限の算出対象にしません。
-fn render_decisions(state: &DashboardState, server_id: &str, project: &str) -> String {
-  let stale_minutes = state.thresholds.unwrap_or_default().pending_decision_stale_minutes;
+fn render_decisions(
+  state: &DashboardState,
+  server_id: &ServerId,
+  project: &ProjectName,
+) -> Result<String, domain::DomainError> {
+  let stale_minutes = match state.thresholds.as_ref() {
+    | Some(thresholds) => Some(StaleMinutes::try_from(thresholds.pending_decision_stale_minutes)?),
+    | None => None,
+  };
   let decisions: Vec<&proto::v1::PendingDecision> = state
     .pending_decisions
     .iter()
-    .filter(|decision| decision.server_id == server_id && decision.project == project)
+    .filter(|decision| decision.server_id == server_id.as_str() && decision.project == project.as_str())
     .collect();
-  let lines: Vec<String> = decisions.iter().map(|decision| render_decision(decision, stale_minutes)).collect();
-  format!("判断待ち: {}件（{}/{}）\n{}", decisions.len(), server_id, project, join_lines(&lines))
+  let lines: Vec<String> =
+    decisions.iter().map(|decision| render_decision(decision, stale_minutes)).collect::<Result<_, _>>()?;
+  Ok(format!("判断待ち: {}件（{}/{}）\n{}", decisions.len(), server_id, project, join_lines(&lines)))
 }
 
 /// 判断待ち1件の表示を作る。該当しない項目の行は出さない。
-fn render_decision(decision: &proto::v1::PendingDecision, stale_minutes: i32) -> String {
-  let kind = if decision.r#type == PendingDecisionType::AwaitingMerge as i32 {
-    "人のマージ待ち"
-  } else if decision.r#type == PendingDecisionType::GoalRegistration as i32 {
-    "承認待ち"
-  } else if decision.inquiry_kind == proto::v1::InquiryKind::OperationRequest as i32 {
-    "問い合わせ（作業の依頼）"
-  } else {
-    "問い合わせ（質問）"
-  };
+fn render_decision(
+  decision: &proto::v1::PendingDecision,
+  stale_minutes: Option<StaleMinutes>,
+) -> Result<String, domain::DomainError> {
+  let decision_type = PendingDecisionType::try_from(decision.r#type)?;
+  let kind = decision_label(decision_type, decision.inquiry_kind)?;
   let mut lines = vec![format!("- {kind}: {}", decision.body)];
   if !decision.inquiry_id.is_empty() {
-    lines.push(format!("問い合わせID: {}", decision.inquiry_id));
+    let inquiry_id = InquiryId::try_from(decision.inquiry_id.as_str())?;
+    lines.push(format!("問い合わせID: {inquiry_id}"));
   }
-  if let Some(goal_id) = decision.goal_id.as_deref().filter(|goal_id| !goal_id.is_empty()) {
+  if let Some(goal_id) = decision.goal_id.as_deref() {
+    let goal_id = GoalId::try_from(goal_id)?;
     lines.push(format!("ゴールID: {goal_id}"));
   }
   if let Some(pull_request) = &decision.pull_request {
-    lines.push(format!("プルリクエスト番号: {}", pull_request.number));
+    let number = PullRequestNumber::try_from(pull_request.number)?;
+    lines.push(format!("プルリクエスト番号: {number}"));
   }
   if let Some(revision) = decision.revision {
+    let revision = RegistrationRevision::try_from(revision)?;
     lines.push(format!("リビジョン: {revision}"));
   }
-  if decision.r#type != PendingDecisionType::GoalRegistration as i32 {
+  if decision_type != PendingDecisionType::GoalRegistration {
     lines.push(format!("作成時刻: {}", format_timestamp(decision.created_at.as_ref())));
-    lines.push(format!("滞留期限: {}", stale_deadline(decision.created_at.as_ref(), stale_minutes)));
+    lines.push(format!(
+      "滞留期限: {}",
+      stale_deadline(decision.created_at.as_ref(), stale_minutes.map_or(0, StaleMinutes::get))
+    ));
   }
   if !decision.options.is_empty() {
     lines.push(format!("選択肢: {}", decision.options.join("、")));
   }
-  lines.join("\n")
+  Ok(lines.join("\n"))
 }
 
 /// 判断待ちの滞留期限（作成時刻 + 滞留分数）を表示用の文字列にする。
@@ -1177,8 +1270,9 @@ fn format_timestamp(timestamp: Option<&prost_types::Timestamp>) -> String {
 }
 
 /// 問い合わせへの回答の結果を表示する。
-fn render_answer(response: &AnswerInquiryResponse) -> String {
-  format!("回答を記録しました。\n問い合わせ: {}", response.inquiry_id)
+fn render_answer(response: &AnswerInquiryResponse) -> Result<String, domain::DomainError> {
+  let inquiry_id = InquiryId::try_from(response.inquiry_id.as_str())?;
+  Ok(format!("回答を記録しました。\n問い合わせ: {inquiry_id}"))
 }
 
 /// マージの承認の結果を表示する。
@@ -1187,27 +1281,33 @@ fn render_merge(response: &ApproveGoalMergeResponse) -> String {
 }
 
 /// ゴール登録の承認待ちの一覧を表示する。
-fn render_registrations(proposals: &[GoalRegistrationProposal]) -> String {
+fn render_registrations(proposals: &[GoalRegistrationProposal]) -> Result<String, domain::DomainError> {
   let lines: Vec<String> = proposals
     .iter()
     .map(|proposal| {
-      format!(
-        "- {}/{}（リビジョン {}）: {}（{}）",
-        proposal.server_id, proposal.project, proposal.revision, proposal.body, proposal.repository_directory
-      )
+      let server_id = ServerId::try_from(proposal.server_id.as_str())?;
+      let project = ProjectName::try_from(proposal.project.as_str())?;
+      let revision = RegistrationRevision::try_from(proposal.revision)?;
+      Ok(format!(
+        "- {server_id}/{project}（リビジョン {revision}）: {}（{}）",
+        proposal.body, proposal.repository_directory
+      ))
     })
-    .collect();
-  format!("ゴール登録の承認待ち: {}件\n{}", proposals.len(), join_lines(&lines))
+    .collect::<Result<_, domain::DomainError>>()?;
+  Ok(format!("ゴール登録の承認待ち: {}件\n{}", proposals.len(), join_lines(&lines)))
 }
 
 /// ゴール登録の承認の結果を表示する。
-fn render_approve_registration(response: &ApproveGoalRegistrationResponse) -> String {
-  format!("ゴール登録を承認しました。\nリビジョン: {}\nゴール: {}", response.revision, response.goal_id)
+fn render_approve_registration(response: &ApproveGoalRegistrationResponse) -> Result<String, domain::DomainError> {
+  let revision = RegistrationRevision::try_from(response.revision)?;
+  let goal_id = GoalId::try_from(response.goal_id.as_str())?;
+  Ok(format!("ゴール登録を承認しました。\nリビジョン: {revision}\nゴール: {goal_id}"))
 }
 
 /// ゴール登録の却下の結果を表示する。
-fn render_reject_registration(response: &RejectGoalRegistrationResponse) -> String {
-  format!("ゴール登録を却下しました。\nリビジョン: {}", response.revision)
+fn render_reject_registration(response: &RejectGoalRegistrationResponse) -> Result<String, domain::DomainError> {
+  let revision = RegistrationRevision::try_from(response.revision)?;
+  Ok(format!("ゴール登録を却下しました。\nリビジョン: {revision}"))
 }
 
 fn main() {
