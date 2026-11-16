@@ -19,6 +19,7 @@
 //     "runs": { "<runSlug>": {"runSlug","currentStep","startedAt","currentStepStartedAt","stepLogs",
 //                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
 //                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
+//     "workflows": { "<workflow名>": ["plan", "implement", ...] },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
 //     "goalDetails": {
 //       "<goalId>": {
@@ -160,6 +161,7 @@ const TOOL_ARGUMENTS = {
   takt_list_standalone_inquiries: { required: ["cwd"], optional: ["offset", "limit"] },
   takt_get_run: { required: ["cwd", "runSlug"], optional: ["offset", "limit", "view", "stepIndex", "instructionId", "report", "maxBytes"] },
   takt_get_goal: { required: ["cwd", "goalId"], optional: ["path", "offset", "limit", "recordId", "textOffset", "maxBytes"] },
+  takt_get_workflow: { required: ["cwd", "workflow"], optional: ["offset", "limit"] },
   // 書き込み系。実 takt-mcp（features/mcp/schemas.js ほか）の入力契約に合わせる。
   takt_answer_goal_question: { required: ["cwd", "goalId", "questionId", "answer"], optional: [] },
   takt_list_goal_registration_proposals: { required: ["cwd"], optional: [] },
@@ -250,8 +252,8 @@ const handleToolCall = (name, args) => {
     process.exit(4);
   }
   const isError = new Set(state.isError ?? []);
-  // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug>" の限定キーで対象を絞れる。
-  const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? ""}`;
+  // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug または workflow>" の限定キーで対象を絞れる。
+  const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? args.workflow ?? ""}`;
   if (isError.has(name) || isError.has(scopedKey)) {
     return { content: [{ type: "text", text: `${name} は失敗しました。` }], isError: true };
   }
@@ -306,6 +308,14 @@ const handleToolCall = (name, args) => {
       }
       return asText({ items: value });
     }
+    case "takt_get_workflow":
+      return asText(
+        paged(
+          ((state.workflows ?? {})[args.workflow] ?? []).map((name) => ({ name })),
+          "steps",
+          args.offset,
+        ),
+      );
     case "takt_answer_goal_question":
       return asText({ goalId: args.goalId, questionId: args.questionId, answer: args.answer });
     case "takt_list_goal_registration_proposals":

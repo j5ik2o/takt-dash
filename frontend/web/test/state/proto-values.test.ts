@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   ActivityKind,
+  ConnectionState,
   ConversationSpeaker,
   ExecutionStatus,
   GoalStatus,
@@ -15,6 +16,7 @@ import {
   PendingDecisionType,
   RunStatus,
   TaskStatus,
+  connectionStateFromJSON,
   conversationSpeakerFromJSON,
   executionStatusFromJSON,
   goalStatusFromJSON,
@@ -25,6 +27,7 @@ import {
 } from "../../src/proto/taktdash.ts";
 import {
   ACTIVITY_KIND,
+  CONNECTION_STATE,
   CONVERSATION_SPEAKER,
   EXECUTION_STATUS,
   GOAL_STATUS,
@@ -65,6 +68,11 @@ test("proto-values は生成コードの enum と一致する", () => {
   assert.equal(ACTIVITY_KIND.PAUSED, ActivityKind.ACTIVITY_KIND_PAUSED);
   assert.equal(ACTIVITY_KIND.BLOCKED, ActivityKind.ACTIVITY_KIND_BLOCKED);
   assert.equal(ACTIVITY_KIND.CONNECTION_LOST, ActivityKind.ACTIVITY_KIND_CONNECTION_LOST);
+  assert.equal(ACTIVITY_KIND.CONNECTION_RESTORED, ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED);
+
+  assert.equal(CONNECTION_STATE.CONNECTED, ConnectionState.CONNECTION_STATE_CONNECTED);
+  assert.equal(CONNECTION_STATE.DELAYED, ConnectionState.CONNECTION_STATE_DELAYED);
+  assert.equal(CONNECTION_STATE.UNRESPONSIVE, ConnectionState.CONNECTION_STATE_UNRESPONSIVE);
 
   assert.equal(INQUIRY_KIND.QUESTION, InquiryKind.INQUIRY_KIND_QUESTION);
   assert.equal(INQUIRY_KIND.OPERATION_REQUEST, InquiryKind.INQUIRY_KIND_OPERATION_REQUEST);
@@ -92,6 +100,7 @@ test("enumFromWire は生成コードの名称→数値の対応と一致する�
     { wire: "TaskStatus", generated: TaskStatus, fromJSON: taskStatusFromJSON },
     { wire: "InquiryKind", generated: InquiryKind, fromJSON: inquiryKindFromJSON },
     { wire: "PendingDecisionType", generated: PendingDecisionType, fromJSON: pendingDecisionTypeFromJSON },
+    { wire: "ConnectionState", generated: ConnectionState, fromJSON: connectionStateFromJSON },
     { wire: "ConversationSpeaker", generated: ConversationSpeaker, fromJSON: conversationSpeakerFromJSON },
   ];
   for (const { wire, generated, fromJSON } of cases) {
