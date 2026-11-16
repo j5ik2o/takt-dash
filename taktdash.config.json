@@ -37,6 +37,18 @@
       "server": "mac-mini",
       "about": "taktDash 本体。",
       "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/takt-dash"
+    },
+    {
+      "name": "fraktor-ng-rs",
+      "server": "mac-mini",
+      "about": "Pekko の Rust 移植。アクターフレームワーク。",
+      "cwd": "/Users/j5ik2o/Sources/github.com/j5ik2o/fraktor-ng-rs"
+    },
+    {
+      "name": "ddd-principles",
+      "server": "mac-mini",
+      "about": "DDD の原則の LLM Wiki。本を取り込んで構築する。",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/ddd-principles"
     }
   ],
   "intervalSeconds": 30,
