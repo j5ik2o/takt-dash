@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, openSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, connect, type AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -13,12 +13,24 @@ const MOCK_SCRIPT = path.join(REPO_ROOT, "backend", "tests", "mock_mcp_server.mj
 const WEB_DIR = path.join(REPO_ROOT, "frontend", "web");
 const NEXT_BIN = path.join(WEB_DIR, "node_modules", ".bin", "next");
 
+export type ToolCall = {
+  name: string;
+  arguments: Record<string, unknown>;
+};
+
 export type Stack = {
   webUrl: string;
+  projectDir: string;
+  readCalls: () => Promise<ToolCall[]>;
+  updateState: (mutate: (state: Record<string, unknown>) => Record<string, unknown>) => Promise<void>;
+  stopMock: () => Promise<void>;
+  stopBackend: () => Promise<void>;
   stop: () => Promise<void>;
 };
 
 type ProcessEnv = { [key: string]: string | undefined };
+
+let tempCounter = 0;
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -80,6 +92,30 @@ const waitForHttp = async (url: string, timeoutMs: number, hasExited: () => bool
     await delay(100);
   }
   throw new Error(`${url} が応答しませんでした: ${lastError}`);
+};
+
+// backend は起動直後の最初の集約を終えるまで概要を返せない。ポートの待ち受けだけでは
+// 足りないため、レイアウトが backend 不達の告知を出さなくなるまで待つ。
+const waitForBackendReady = async (url: string, timeoutMs: number, hasExited: () => boolean): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "";
+  while (Date.now() < deadline) {
+    if (hasExited()) {
+      throw new Error(`web が backend の応答を得る前に終了しました。`);
+    }
+    try {
+      const response = await fetch(url);
+      const body = await response.text();
+      if (response.ok && !body.includes("backend に接続できません")) {
+        return;
+      }
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = String(error);
+    }
+    await delay(100);
+  }
+  throw new Error(`${url} が backend の応答を得られませんでした: ${lastError}`);
 };
 
 const isAlive = (pid: number): boolean => {
@@ -241,17 +277,77 @@ export async function startStack(): Promise<Stack> {
   let backendExited = false;
   let webExited = false;
 
-  const cleanup = async (): Promise<void> => {
-    if (web?.pid !== undefined) {
-      await stopGroup(web.pid);
-    }
+  const stopBackendProcess = async (): Promise<void> => {
     if (backend?.pid !== undefined) {
       await stopGroup(backend.pid);
     }
+  };
+
+  // backend は読み取り失敗の次のサイクルでモックを起動し直すため、停止済みフラグでは
+  // 短絡せず毎回 pid ファイルを読む。既に終了している pid を指していても失敗しない。
+  const stopMockProcess = async (): Promise<void> => {
     const mockPid = await readMockPid(mockPidPath);
     if (mockPid !== undefined) {
       await stopPid(mockPid);
     }
+  };
+
+  const readCalls = async (): Promise<ToolCall[]> => {
+    let text: string;
+    try {
+      text = await readFile(callsPath, "utf8");
+    } catch (error) {
+      if ((error as { code?: string }).code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+    const endsWithNewline = text.endsWith("\n");
+    const lines = text.split("\n");
+    if (endsWithNewline) {
+      lines.pop();
+    }
+    const calls: ToolCall[] = [];
+    for (const [index, line] of lines.entries()) {
+      if (line.trim() === "") {
+        continue;
+      }
+      try {
+        calls.push(JSON.parse(line) as ToolCall);
+      } catch (error) {
+        // 追記途中の末尾1行だけは、次の書き込みで完成するため読み飛ばす。
+        if (!endsWithNewline && index === lines.length - 1) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    return calls;
+  };
+
+  // 状態ファイルはモックが毎回 JSON.parse するため、同じディレクトリの一時ファイルへ書いて
+  // rename し、途中状態の JSON を読ませない。
+  const updateState = async (
+    mutate: (state: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<void> => {
+    const current = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    const tempPath = path.join(path.dirname(statePath), `state.${process.pid}.${tempCounter}.tmp`);
+    tempCounter += 1;
+    await writeFile(tempPath, JSON.stringify(mutate(current)), "utf8");
+    try {
+      await rename(tempPath, statePath);
+    } catch (error) {
+      await rm(tempPath, { force: true });
+      throw error;
+    }
+  };
+
+  const cleanup = async (): Promise<void> => {
+    if (web?.pid !== undefined) {
+      await stopGroup(web.pid);
+    }
+    await stopBackendProcess();
+    await stopMockProcess();
     await rm(tempDir, { recursive: true, force: true });
   };
 
@@ -287,7 +383,9 @@ export async function startStack(): Promise<Stack> {
       "utf8",
     );
     const webPort = await freePort();
-    webUrl = `http://127.0.0.1:${webPort}`;
+    // Next は route handler の request.url を listen ホスト名ではなく localhost で組み立てる。
+    // origin 境界の検証と一致させるため、利用時と同じ localhost を webUrl に使う。
+    webUrl = `http://localhost:${webPort}`;
 
     backend = spawnWithLog(
       BACKEND_BIN,
@@ -306,7 +404,7 @@ export async function startStack(): Promise<Stack> {
 
     web = spawnWithLog(
       NEXT_BIN,
-      ["start", "-p", String(webPort)],
+      ["start", "-H", "127.0.0.1", "-p", String(webPort)],
       WEB_DIR,
       webLog,
       { ...process.env, TAKTDASH_BACKEND_ADDR: backendAddress },
@@ -318,6 +416,7 @@ export async function startStack(): Promise<Stack> {
       webExited = true;
     });
     await waitForHttp(webUrl, 60_000, () => webExited);
+    await waitForBackendReady(webUrl, 30_000, () => webExited);
   } catch (error) {
     const backendTail = await logTail(backendLog);
     const webTail = await logTail(webLog);
@@ -338,5 +437,13 @@ export async function startStack(): Promise<Stack> {
     await cleanup();
   };
 
-  return { webUrl, stop };
+  return {
+    webUrl,
+    projectDir,
+    readCalls,
+    updateState,
+    stopMock: stopMockProcess,
+    stopBackend: stopBackendProcess,
+    stop,
+  };
 }
