@@ -282,7 +282,7 @@ pub struct ReportEntry {
   pub size_bytes: i64,
 }
 
-/// takt_get_run から得た run の情報。
+/// 実行中の run の情報。状態とステップの記録は run の保存場所から読みます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunEntry {
   pub run_slug:                String,
@@ -302,7 +302,7 @@ pub struct RunEntry {
   pub reports:                 Vec<ReportEntry>,
 }
 
-/// takt_get_run から得た、run 詳細の本文。一覧の投影では使わない詳細情報です。
+/// run 詳細の本文。一覧の投影では使わない詳細情報です。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunDetail {
   pub run_slug: RunSlug,

@@ -8,11 +8,10 @@ use std::io::Write;
 use common::*;
 use serde_json::{json, Value};
 use takt_dash_backend::{
-  domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
+  domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug},
   mcp::{CallError, ToolError, TransportError},
   model::{
-    ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, RunEntry,
-    RunStatus, RunStepEntry, TaskStatus,
+    ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, TaskStatus,
   },
 };
 use tokio::time::timeout;
@@ -27,10 +26,6 @@ fn inquiry_id(value: &str) -> InquiryId {
 
 fn run_slug(value: &str) -> RunSlug {
   RunSlug::try_from(value).expect("テストの run slug は有効です")
-}
-
-fn task_name(value: &str) -> TaskName {
-  TaskName::try_from(value).expect("テストのタスク名は有効です")
 }
 
 fn revision(value: i32) -> RegistrationRevision {
@@ -53,74 +48,6 @@ fn write_state(directory: &std::path::Path, state: serde_json::Value) -> std::pa
   let mut file = std::fs::File::create(&path).expect("状態ファイルを作れます");
   file.write_all(state.to_string().as_bytes()).expect("状態ファイルへ書けます");
   path
-}
-
-/// 指定件数の stepLog を持つ running run の状態を作る。
-fn running_run_state(step_log_count: usize) -> serde_json::Value {
-  let step_logs: Vec<serde_json::Value> = (0..step_log_count)
-    .map(|index| {
-      json!({
-        "step": format!("step{index}"),
-        "timestamp": format!("2026-11-13T10:{:02}:{:02}Z", index / 60, index % 60)
-      })
-    })
-    .collect();
-  json!({
-    "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-    "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "step0", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": step_logs } }
-  })
-}
-
-/// 指定件数の stepLog を持つ running run の状態を作る。`ended` に含まれる index の step だけが
-/// 終了時刻と model を持ち、それ以外は継続中として終了時刻を持たない。
-fn running_run_state_with_ended(step_log_count: usize, ended: &[usize]) -> serde_json::Value {
-  let step_logs: Vec<serde_json::Value> = (0..step_log_count)
-    .map(|index| {
-      let mut log = json!({
-        "step": format!("step{index}"),
-        "timestamp": format!("2026-11-13T10:{:02}:{:02}Z", index / 60, index % 60)
-      });
-      if ended.contains(&index) {
-        let object = log.as_object_mut().expect("stepLog は JSON オブジェクトです");
-        object.insert("endedAt".to_owned(), json!(format!("2026-11-13T11:{:02}:{:02}Z", index / 60, index % 60)));
-        object.insert("model".to_owned(), json!(format!("model-{index}")));
-      }
-      log
-    })
-    .collect();
-  json!({
-    "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-    "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "step0", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": step_logs } }
-  })
-}
-
-/// 前回値として引き継ぐ、step 1 件を持つ running run のスナップショットを作る。
-fn previous_run_snapshot(last_log_at: &str) -> ProjectSnapshot {
-  ProjectSnapshot {
-    runs: vec![RunEntry {
-      run_slug:                "r1".to_owned(),
-      session_id:              String::new(),
-      task_name:               TaskName::try_from("a").expect("テストのタスク名は有効です"),
-      goal_id:                 None,
-      summary:                 String::new(),
-      status:                  RunStatus::Running,
-      current_step:            Some("implement".to_owned()),
-      current_step_number:     None,
-      total_steps:             None,
-      current_iteration:       None,
-      started_at:              Some(time("2026-11-13T10:00:00Z")),
-      current_step_started_at: None,
-      last_log_at:             Some(time(last_log_at)),
-      steps:                   vec![RunStepEntry {
-        step_name:  "implement".to_owned(),
-        model:      String::new(),
-        started_at: time(last_log_at),
-        ended_at:   None,
-      }],
-      reports:                 Vec::new(),
-    }],
-    ..ProjectSnapshot::empty()
-  }
 }
 
 /// 前回値として引き継ぐ、1 ゴールとその問い合わせを持つスナップショットを作る。
@@ -401,24 +328,20 @@ async fn tools_parse_goals_and_tasks_into_typed_snapshot() {
       "tasks": [
         { "name": "a", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "implement" },
         { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true }
-      ],
-      "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "implement", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:05:00Z" } ] } }
+      ]
     }),
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   assert_eq!(snapshot.goals[0].status, GoalStatus::AwaitingMerge);
   assert_eq!(snapshot.goals[0].pull_request_number, Some(pull_request(12)));
   assert_eq!(snapshot.tasks[0].status, TaskStatus::Running);
   assert!(snapshot.tasks[1].merge_task, "仕上げタスクを読み取ります");
-  assert_eq!(snapshot.runs.len(), 1);
-  assert_eq!(
-    snapshot.runs[0].last_log_at,
-    Some(time("2026-11-13T10:05:00Z")),
-    "最後のログの時刻は末尾の stepLogs です"
-  );
   client.shutdown().await;
 }
 
@@ -436,7 +359,10 @@ async fn snapshot_collects_goal_questions_standalone_inquiries_and_notifications
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   let inquiry_ids: Vec<&str> = snapshot.inquiries.iter().map(|inquiry| inquiry.inquiry_id.as_str()).collect();
   assert!(inquiry_ids.contains(&"q1"), "ゴールの問い合わせを含みます");
@@ -462,7 +388,10 @@ async fn awaiting_merge_at_comes_from_the_awaiting_merge_notification_recorded_a
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   assert_eq!(
     snapshot.goals[0].awaiting_merge_at,
@@ -486,7 +415,10 @@ async fn goal_without_awaiting_merge_notification_gets_first_observed_wait_start
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   assert!(
     snapshot.goals[0].awaiting_merge_at.is_some(),
@@ -515,7 +447,10 @@ async fn awaiting_merge_goal_without_notification_mechanism_keeps_previous_wait_
     ..takt_dash_backend::model::ProjectSnapshot::empty()
   };
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev), &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   assert_eq!(
     snapshot.goals[0].awaiting_merge_at,
@@ -542,7 +477,10 @@ async fn awaiting_merge_goal_new_to_awaiting_merge_gets_a_first_observed_start()
     ..takt_dash_backend::model::ProjectSnapshot::empty()
   };
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev), &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   assert!(
     snapshot.goals[0].awaiting_merge_at.is_some(),
@@ -573,7 +511,10 @@ async fn awaiting_merge_wait_start_is_resolved_per_goal_without_reusing_another_
     ..takt_dash_backend::model::ProjectSnapshot::empty()
   };
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev), &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   let g2 = snapshot.goals.iter().find(|goal| goal.goal_id.as_str() == "g2").expect("g2 を含みます");
   assert_eq!(g2.awaiting_merge_at, Some(time("2026-11-13T02:00:00Z")), "g2 は同じゴール ID の前回起点を引き継ぎます");
@@ -613,7 +554,10 @@ async fn goal_questions_and_notifications_beyond_the_first_page_are_collected() 
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   assert_eq!(snapshot.goals.len(), 60, "50 件を超えるゴールも全件集めます");
   assert_eq!(snapshot.inquiries.len(), 60, "50 件を超えるゴール質問も全件集めます");
@@ -653,8 +597,10 @@ async fn inquiry_without_created_at_is_kept_with_first_observation_time() {
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot =
-    tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("createdAt 欠落でも解析できます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("createdAt 欠落でも解析できます");
 
   assert!(
     snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id.as_str() == "q-x"),
@@ -687,8 +633,10 @@ async fn inquiry_without_created_at_inherits_previous_created_at() {
     ..takt_dash_backend::model::ProjectSnapshot::empty()
   };
 
-  let snapshot =
-    tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("前回値を引き継げます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev), &run_logs(directory.path()))
+    .await
+    .expect("前回値を引き継げます");
 
   let inquiry = snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "q-x").expect("q-x を含みます");
   assert_eq!(inquiry.created_at, time("2026-11-13T01:00:00Z"), "createdAt 欠落は前回の created_at を引き継ぎます");
@@ -709,7 +657,10 @@ async fn approval_kind_is_skipped_and_unknown_kind_is_rejected() {
     }),
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("approval を読み飛ばせます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("approval を読み飛ばせます");
   assert!(snapshot.inquiries.iter().all(|entry| entry.inquiry_id.as_str() != "q-a"), "approval は判断待ちに含めません");
   assert!(snapshot.inquiries.iter().any(|entry| entry.inquiry_id.as_str() == "q-q"), "question は含めます");
   client.shutdown().await;
@@ -723,7 +674,10 @@ async fn approval_kind_is_skipped_and_unknown_kind_is_rejected() {
     }),
   );
   let mut client2 = mock_client(mock_config(directory2.path(), &state2, None));
-  let error = tool_set(&mut client2, directory2.path()).read_snapshot(None).await.expect_err("未知の種類は拒否します");
+  let error = tool_set(&mut client2, directory2.path())
+    .read_snapshot(None, &run_logs(directory2.path()))
+    .await
+    .expect_err("未知の種類は拒否します");
   assert!(matches!(error, takt_dash_backend::mcp::ToolError::Parse(_)), "未知の kind は解析エラーになります: {error}");
   client2.shutdown().await;
 }
@@ -997,7 +951,7 @@ async fn malformed_proposal_summary_keeps_previous_proposals() {
   };
 
   let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&prev))
+    .read_snapshot(Some(&prev), &run_logs(directory.path()))
     .await
     .expect("提案の解析失敗は前回の提案へ縮退します");
 
@@ -1024,7 +978,7 @@ async fn malformed_proposal_summary_without_previous_yields_empty_proposals() {
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
   let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(None)
+    .read_snapshot(None, &run_logs(directory.path()))
     .await
     .expect("前回の提案が無くても解析失敗で snapshot を落としません");
 
@@ -1049,186 +1003,11 @@ async fn proposal_transport_error_is_not_degraded_to_the_previous_proposals() {
   };
 
   let error = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&prev))
+    .read_snapshot(Some(&prev), &run_logs(directory.path()))
     .await
     .expect_err("輸送エラーは縮退せず伝播します");
 
   assert!(matches!(error, ToolError::Transport(_)), "輸送エラーは解析失敗と区別します: {error}");
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn run_with_more_than_one_page_of_step_logs_uses_the_last_step_time() {
-  // 51 ステップの run。先頭ページは 50 件で、51 件目は stepLogPage.nextOffset の 2 ページ目に回る。
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let mut step_logs = Vec::new();
-  for index in 0..51 {
-    let minute = index;
-    step_logs.push(json!({ "step": format!("step{index}"), "timestamp": format!("2026-11-13T10:{minute:02}:00Z") }));
-  }
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "step50", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": step_logs } }
-    }),
-  );
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-
-  let run = &snapshot.runs[0];
-  assert_eq!(run.steps.len(), 51, "2 ページ目のステップも集めます");
-  assert_eq!(run.last_log_at, Some(time("2026-11-13T10:50:00Z")), "最後のログの時刻は末尾ページの最終ステップです");
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn read_snapshot_reads_start_time_only_run() {
-  // 実行中の run は開始時刻を `startTime` で返す。一覧の読み取りが `startedAt` だけを読むと
-  // parse エラーで一覧全体が失敗するため、`startTime` でも run を取り込めることを観測する。
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1" } ],
-      "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "implement", "startTime": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ] } }
-    }),
-  );
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-
-  assert_eq!(snapshot.runs.len(), 1, "startTime だけを持つ run も一覧に含みます");
-  assert_eq!(snapshot.runs[0].started_at, Some(time("2026-11-13T10:00:00Z")), "開始時刻は startTime の値です");
-  assert_eq!(snapshot.runs[0].last_log_at, Some(time("2026-11-13T10:20:00Z")), "最後のログの時刻はステップの時刻です");
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn read_snapshot_keeps_a_run_without_any_start_or_log_time() {
-  // 実行中の run が開始時刻も最後のログの時刻も持たない場合でも、一覧の読み取りが失敗せず
-  // run が snapshot に含まれることを観測する。一覧が解析エラーで全体失敗すると run が状態
-  // ストアに現れず、詳細取得の入口 find_run_project が成立しない。
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1" } ],
-      "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "implement", "stepLogs": [] } }
-    }),
-  );
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-
-  assert_eq!(snapshot.runs.len(), 1, "開始時刻もログ時刻も無い run も一覧に含みます");
-  assert_eq!(snapshot.runs[0].run_slug, "r1");
-  assert_eq!(snapshot.runs[0].started_at, None, "開始時刻は未設定として保持します");
-  assert_eq!(snapshot.runs[0].last_log_at, None, "最後のログの時刻も未設定として保持します");
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn is_error_on_get_run_keeps_previous_runs_without_transport_failure() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "isError": ["takt_get_run"]
-    }),
-  );
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-  let prev = takt_dash_backend::model::ProjectSnapshot {
-    runs: vec![takt_dash_backend::model::RunEntry {
-      run_slug:                "r1".to_owned(),
-      session_id:              String::new(),
-      task_name:               task_name("a"),
-      goal_id:                 None,
-      summary:                 String::new(),
-      status:                  takt_dash_backend::model::RunStatus::Running,
-      current_step:            Some("implement".to_owned()),
-      current_iteration:       None,
-      current_step_number:     None,
-      total_steps:             None,
-      started_at:              Some(time("2026-11-13T10:00:00Z")),
-      current_step_started_at: None,
-      last_log_at:             Some(time("2026-11-13T10:05:00Z")),
-      steps:                   vec![takt_dash_backend::model::RunStepEntry {
-        step_name:  "implement".to_owned(),
-        model:      String::new(),
-        started_at: time("2026-11-13T10:05:00Z"),
-        ended_at:   None,
-      }],
-      reports:                 Vec::new(),
-    }],
-    ..takt_dash_backend::model::ProjectSnapshot::empty()
-  };
-
-  let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&prev))
-    .await
-    .expect("get_run の isError で全体は失敗しません");
-
-  assert_eq!(snapshot.runs.len(), 1, "get_run の道具エラー時は前回の run を保持します");
-  assert_eq!(snapshot.runs[0].last_log_at, Some(time("2026-11-13T10:05:00Z")));
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn one_run_tool_error_keeps_only_that_run_previous_and_updates_the_healthy_sibling() {
-  // 2 つの running run のうち runA だけを isError にし、runB は新しい stepLogs を持つ。
-  // runA は前回値、runB は今回値（新しい last_log_at）になることを観測する。
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [
-        { "name": "a", "status": "running", "runSlug": "runA", "startedAt": "2026-11-13T10:00:00Z" },
-        { "name": "b", "status": "running", "runSlug": "runB", "startedAt": "2026-11-13T10:00:00Z" }
-      ],
-      "runs": { "runB": { "runSlug": "runB", "status": "running", "currentStep": "implement", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ] } },
-      "isError": ["takt_get_run:runA"]
-    }),
-  );
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-  let prev = takt_dash_backend::model::ProjectSnapshot {
-    runs: vec![takt_dash_backend::model::RunEntry {
-      run_slug:                "runA".to_owned(),
-      session_id:              String::new(),
-      task_name:               task_name("a"),
-      goal_id:                 None,
-      summary:                 String::new(),
-      status:                  takt_dash_backend::model::RunStatus::Running,
-      current_step:            Some("implement".to_owned()),
-      current_iteration:       None,
-      current_step_number:     None,
-      total_steps:             None,
-      started_at:              Some(time("2026-11-13T10:00:00Z")),
-      current_step_started_at: None,
-      last_log_at:             Some(time("2026-11-13T10:05:00Z")),
-      steps:                   vec![takt_dash_backend::model::RunStepEntry {
-        step_name:  "implement".to_owned(),
-        model:      String::new(),
-        started_at: time("2026-11-13T10:05:00Z"),
-        ended_at:   None,
-      }],
-      reports:                 Vec::new(),
-    }],
-    ..takt_dash_backend::model::ProjectSnapshot::empty()
-  };
-
-  let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&prev))
-    .await
-    .expect("一方の run の道具エラーで全体は失敗しません");
-
-  assert_eq!(snapshot.runs.len(), 2, "エラー run は前回値で残り、健常 run も含めて 2 件です");
-  let run_a = snapshot.runs.iter().find(|run| run.run_slug == "runA").expect("runA が残ります");
-  assert_eq!(run_a.last_log_at, Some(time("2026-11-13T10:05:00Z")), "道具エラーの runA は前回値です");
-  let run_b = snapshot.runs.iter().find(|run| run.run_slug == "runB").expect("runB が残ります");
-  assert_eq!(run_b.last_log_at, Some(time("2026-11-13T10:20:00Z")), "健常な runB は今回値へ更新されます");
   client.shutdown().await;
 }
 
@@ -1266,7 +1045,7 @@ async fn goal_question_tool_error_inherits_only_that_goal_and_leaves_the_healthy
   };
 
   let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&prev))
+    .read_snapshot(Some(&prev), &run_logs(directory.path()))
     .await
     .expect("g1 の質問の道具エラーで全体は失敗しません");
 
@@ -1286,276 +1065,6 @@ async fn goal_question_tool_error_inherits_only_that_goal_and_leaves_the_healthy
 }
 
 #[tokio::test]
-async fn second_cycle_reads_only_new_step_logs_and_preserves_steps_and_last_log_at() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(directory.path(), running_run_state(120));
-  let call_log = directory.path().join("calls.log");
-  let mut client = mock_client(mock_config_with_call_log(directory.path(), &state, &call_log));
-
-  let previous = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("1 周期目を読み取れます");
-  assert_eq!(previous.runs[0].steps.len(), 120);
-  assert_eq!(previous.runs[0].last_log_at, Some(time("2026-11-13T10:01:59Z")));
-
-  write_state(directory.path(), running_run_state(123));
-  clear_recorded_calls(&call_log);
-  let next =
-    tool_set(&mut client, directory.path()).read_snapshot(Some(&previous)).await.expect("2 周期目を読み取れます");
-  let calls = recorded_calls(&call_log);
-  let get_run_calls = calls.iter().filter(|call| call.as_str() == "takt_get_run").count();
-
-  assert_eq!(next.runs[0].steps.len(), 123, "前回の steps に新しい stepLog を追記します");
-  assert_eq!(next.runs[0].last_log_at, Some(time("2026-11-13T10:02:02Z")), "最後のログの時刻は新しい末尾です");
-  assert_eq!(get_run_calls, 2, "2 周期目は初回応答と前回 offset から先の 1 ページだけを読みます: {calls:?}");
-
-  let full_directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let full_state = write_state(full_directory.path(), running_run_state(123));
-  let mut full_client = mock_client(mock_config(full_directory.path(), &full_state, None));
-  let full = tool_set(&mut full_client, full_directory.path()).read_snapshot(None).await.expect("フル読みできます");
-
-  assert_eq!(next.runs[0].steps, full.runs[0].steps, "差分読みの steps はフル読みと一致します");
-  assert_eq!(next.runs[0].last_log_at, full.runs[0].last_log_at, "差分読みの last_log_at はフル読みと一致します");
-
-  client.shutdown().await;
-  full_client.shutdown().await;
-}
-
-#[tokio::test]
-async fn incremental_read_refreshes_known_steps_below_first_page_size() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(directory.path(), running_run_state_with_ended(2, &[]));
-  let call_log = directory.path().join("calls.log");
-  let mut client = mock_client(mock_config_with_call_log(directory.path(), &state, &call_log));
-
-  let previous = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("1 周期目を読み取れます");
-  assert_eq!(previous.runs[0].steps.len(), 2);
-  assert_eq!(previous.runs[0].steps[1].ended_at, None, "完了前の step は終了時刻を持ちません");
-
-  write_state(directory.path(), running_run_state_with_ended(3, &[1]));
-  clear_recorded_calls(&call_log);
-  let next =
-    tool_set(&mut client, directory.path()).read_snapshot(Some(&previous)).await.expect("2 周期目を読み取れます");
-  let calls = recorded_calls(&call_log);
-  let get_run_calls = calls.iter().filter(|call| call.as_str() == "takt_get_run").count();
-
-  assert_eq!(get_run_calls, 1, "先頭ページに収まる増加は追加ページを読みません: {calls:?}");
-  assert_eq!(next.runs[0].steps.len(), 3, "既知 step を置き換えて新しい stepLog を追記します");
-  assert_eq!(
-    next.runs[0].steps[1].ended_at,
-    Some(time("2026-11-13T11:00:01Z")),
-    "完了した step の終了時刻は応答値になります"
-  );
-  assert_eq!(next.runs[0].steps[1].model, "model-1", "完了した step の model も応答値になります");
-  assert_eq!(next.runs[0].steps[2].step_name, "step2", "先頭ページの残りを末尾に足します");
-
-  let full_directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let full_state = write_state(full_directory.path(), running_run_state_with_ended(3, &[1]));
-  let mut full_client = mock_client(mock_config(full_directory.path(), &full_state, None));
-  let full = tool_set(&mut full_client, full_directory.path()).read_snapshot(None).await.expect("フル読みできます");
-  assert_eq!(next.runs[0].steps, full.runs[0].steps, "差分読みの steps はフル読みと一致します");
-
-  client.shutdown().await;
-  full_client.shutdown().await;
-}
-
-#[tokio::test]
-async fn incremental_read_refreshes_known_steps_without_extra_page() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(directory.path(), running_run_state_with_ended(50, &[]));
-  let call_log = directory.path().join("calls.log");
-  let mut client = mock_client(mock_config_with_call_log(directory.path(), &state, &call_log));
-
-  let previous = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("1 周期目を読み取れます");
-  assert_eq!(previous.runs[0].steps.len(), 50);
-  assert_eq!(previous.runs[0].steps[49].ended_at, None, "完了前の step は終了時刻を持ちません");
-
-  write_state(directory.path(), running_run_state_with_ended(50, &[49]));
-  clear_recorded_calls(&call_log);
-  let next =
-    tool_set(&mut client, directory.path()).read_snapshot(Some(&previous)).await.expect("2 周期目を読み取れます");
-  let calls = recorded_calls(&call_log);
-  let get_run_calls = calls.iter().filter(|call| call.as_str() == "takt_get_run").count();
-
-  assert_eq!(get_run_calls, 1, "既知件数が総件数と同じなら追加ページを読みません: {calls:?}");
-  assert_eq!(next.runs[0].steps.len(), 50, "既知 step の置き換えで件数は変わりません");
-  assert_eq!(
-    next.runs[0].steps[49].ended_at,
-    Some(time("2026-11-13T11:00:49Z")),
-    "完了した step の終了時刻は応答値になります"
-  );
-  assert_eq!(next.runs[0].steps[49].model, "model-49", "完了した step の model も応答値になります");
-
-  let full_directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let full_state = write_state(full_directory.path(), running_run_state_with_ended(50, &[49]));
-  let mut full_client = mock_client(mock_config(full_directory.path(), &full_state, None));
-  let full = tool_set(&mut full_client, full_directory.path()).read_snapshot(None).await.expect("フル読みできます");
-  assert_eq!(next.runs[0].steps, full.runs[0].steps, "差分読みの steps はフル読みと一致します");
-
-  client.shutdown().await;
-  full_client.shutdown().await;
-}
-
-#[tokio::test]
-async fn incremental_read_refreshes_known_steps_and_follows_extra_page() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(directory.path(), running_run_state_with_ended(50, &[]));
-  let call_log = directory.path().join("calls.log");
-  let mut client = mock_client(mock_config_with_call_log(directory.path(), &state, &call_log));
-
-  let previous = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("1 周期目を読み取れます");
-  assert_eq!(previous.runs[0].steps.len(), 50);
-
-  write_state(directory.path(), running_run_state_with_ended(51, &[49]));
-  clear_recorded_calls(&call_log);
-  let next =
-    tool_set(&mut client, directory.path()).read_snapshot(Some(&previous)).await.expect("2 周期目を読み取れます");
-  let calls = recorded_calls(&call_log);
-  let get_run_calls = calls.iter().filter(|call| call.as_str() == "takt_get_run").count();
-
-  assert_eq!(get_run_calls, 2, "増えた stepLog は初回応答と追加の 1 ページで読みます: {calls:?}");
-  assert_eq!(next.runs[0].steps.len(), 51, "既知 step を置き換えて新しい stepLog を追記します");
-  assert_eq!(
-    next.runs[0].steps[49].ended_at,
-    Some(time("2026-11-13T11:00:49Z")),
-    "完了した step の終了時刻は応答値になります"
-  );
-  assert_eq!(next.runs[0].steps[49].model, "model-49", "完了した step の model も応答値になります");
-  assert_eq!(next.runs[0].steps[50].step_name, "step50", "追加ページの step を末尾に足します");
-
-  let full_directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let full_state = write_state(full_directory.path(), running_run_state_with_ended(51, &[49]));
-  let mut full_client = mock_client(mock_config(full_directory.path(), &full_state, None));
-  let full = tool_set(&mut full_client, full_directory.path()).read_snapshot(None).await.expect("フル読みできます");
-  assert_eq!(next.runs[0].steps, full.runs[0].steps, "差分読みの steps はフル読みと一致します");
-
-  client.shutdown().await;
-  full_client.shutdown().await;
-}
-
-#[tokio::test]
-async fn incremental_read_refreshes_known_tail_step_beyond_first_page() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(directory.path(), running_run_state_with_ended(120, &[]));
-  let call_log = directory.path().join("calls.log");
-  let mut client = mock_client(mock_config_with_call_log(directory.path(), &state, &call_log));
-
-  let previous = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("1 周期目を読み取れます");
-  assert_eq!(previous.runs[0].steps.len(), 120);
-  assert_eq!(previous.runs[0].steps[119].ended_at, None, "完了前の末尾 step は終了時刻を持ちません");
-
-  write_state(directory.path(), running_run_state_with_ended(120, &[119]));
-  clear_recorded_calls(&call_log);
-  let next =
-    tool_set(&mut client, directory.path()).read_snapshot(Some(&previous)).await.expect("2 周期目を読み取れます");
-  let calls = recorded_calls(&call_log);
-  let get_run_calls = calls.iter().filter(|call| call.as_str() == "takt_get_run").count();
-
-  assert_eq!(get_run_calls, 2, "既知の末尾 step を含むページだけを追加で読みます: {calls:?}");
-  assert_eq!(next.runs[0].steps.len(), 120, "先頭ページ外の既知 step の置き換えで件数は変わりません");
-  assert_eq!(
-    next.runs[0].steps[119].ended_at,
-    Some(time("2026-11-13T11:01:59Z")),
-    "完了した末尾 step の終了時刻は応答値になります"
-  );
-  assert_eq!(next.runs[0].steps[119].model, "model-119", "完了した末尾 step の model も応答値になります");
-  assert_eq!(next.runs[0].last_log_at, previous.runs[0].last_log_at, "last_log_at は変わりません");
-
-  let full_directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let full_state = write_state(full_directory.path(), running_run_state_with_ended(120, &[119]));
-  let mut full_client = mock_client(mock_config(full_directory.path(), &full_state, None));
-  let full = tool_set(&mut full_client, full_directory.path()).read_snapshot(None).await.expect("フル読みできます");
-  assert_eq!(next.runs[0].steps, full.runs[0].steps, "差分読みの steps はフル読みと一致します");
-
-  client.shutdown().await;
-  full_client.shutdown().await;
-}
-
-#[tokio::test]
-async fn incremental_read_refreshes_known_tail_step_and_appends_new_steps() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(directory.path(), running_run_state_with_ended(120, &[]));
-  let call_log = directory.path().join("calls.log");
-  let mut client = mock_client(mock_config_with_call_log(directory.path(), &state, &call_log));
-
-  let previous = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("1 周期目を読み取れます");
-  assert_eq!(previous.runs[0].steps.len(), 120);
-  assert_eq!(previous.runs[0].steps[119].ended_at, None, "完了前の末尾 step は終了時刻を持ちません");
-
-  write_state(directory.path(), running_run_state_with_ended(123, &[119]));
-  clear_recorded_calls(&call_log);
-  let next =
-    tool_set(&mut client, directory.path()).read_snapshot(Some(&previous)).await.expect("2 周期目を読み取れます");
-  let calls = recorded_calls(&call_log);
-  let get_run_calls = calls.iter().filter(|call| call.as_str() == "takt_get_run").count();
-
-  assert_eq!(get_run_calls, 2, "既知の末尾 step を含むページで更新と追記をまとめて読みます: {calls:?}");
-  assert_eq!(next.runs[0].steps.len(), 123, "既知 step を置き換えて新しい stepLog を追記します");
-  assert_eq!(
-    next.runs[0].steps[119].ended_at,
-    Some(time("2026-11-13T11:01:59Z")),
-    "完了した末尾 step の終了時刻は応答値になります"
-  );
-  assert_eq!(next.runs[0].steps[119].model, "model-119", "完了した末尾 step の model も応答値になります");
-  let appended: Vec<&str> = next.runs[0].steps[120..].iter().map(|step| step.step_name.as_str()).collect();
-  assert_eq!(appended, vec!["step120", "step121", "step122"], "先頭ページ外の新しい step を末尾に足します");
-
-  let full_directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let full_state = write_state(full_directory.path(), running_run_state_with_ended(123, &[119]));
-  let mut full_client = mock_client(mock_config(full_directory.path(), &full_state, None));
-  let full = tool_set(&mut full_client, full_directory.path()).read_snapshot(None).await.expect("フル読みできます");
-  assert_eq!(next.runs[0].steps, full.runs[0].steps, "差分読みの steps はフル読みと一致します");
-  assert_eq!(next.runs[0].last_log_at, full.runs[0].last_log_at, "差分読みの last_log_at はフル読みと一致します");
-
-  client.shutdown().await;
-  full_client.shutdown().await;
-}
-
-#[tokio::test]
-async fn steady_cycle_reads_known_tail_page_and_keeps_steps_and_last_log_at() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(directory.path(), running_run_state(120));
-  let call_log = directory.path().join("calls.log");
-  let mut client = mock_client(mock_config_with_call_log(directory.path(), &state, &call_log));
-
-  let previous = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("1 周期目を読み取れます");
-  assert_eq!(previous.runs[0].steps.len(), 120);
-  let original_steps = previous.runs[0].steps.clone();
-  let original_last_log_at = previous.runs[0].last_log_at;
-
-  clear_recorded_calls(&call_log);
-  let next =
-    tool_set(&mut client, directory.path()).read_snapshot(Some(&previous)).await.expect("2 周期目を読み取れます");
-  let calls = recorded_calls(&call_log);
-  let get_run_calls = calls.iter().filter(|call| call.as_str() == "takt_get_run").count();
-
-  assert_eq!(get_run_calls, 2, "stepLog が増えていない周期も既知の末尾 step を含むページを読みます: {calls:?}");
-  assert_eq!(next.runs[0].steps.len(), 120, "定常周期の steps 件数は変わりません");
-  assert_eq!(next.runs[0].steps, original_steps, "定常周期の steps は前回と同じです");
-  assert_eq!(next.runs[0].last_log_at, original_last_log_at, "定常周期の last_log_at は変わりません");
-
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn step_log_reset_replaces_steps_instead_of_appending() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(directory.path(), running_run_state(120));
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-
-  let previous = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("1 周期目を読み取れます");
-  assert_eq!(previous.runs[0].steps.len(), 120);
-
-  // stepLog が 3 件に減った状態は、前回 steps の追記ではなく全読みで置き換える。
-  write_state(directory.path(), running_run_state(3));
-  let next =
-    tool_set(&mut client, directory.path()).read_snapshot(Some(&previous)).await.expect("2 周期目を読み取れます");
-
-  let step_names: Vec<&str> = next.runs[0].steps.iter().map(|step| step.step_name.as_str()).collect();
-  assert_eq!(step_names, vec!["step0", "step1", "step2"], "リセットされた steps で置き換えます");
-  assert_eq!(next.runs[0].last_log_at, Some(time("2026-11-13T10:00:02Z")), "最後のログの時刻も新しい末尾です");
-  client.shutdown().await;
-}
-
-#[tokio::test]
 async fn timeout_on_goal_questions_keeps_project_connected_and_previous_inquiries() {
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let state = write_state(
@@ -1570,7 +1079,7 @@ async fn timeout_on_goal_questions_keeps_project_connected_and_previous_inquirie
   let previous = previous_goal_question_snapshot();
 
   let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&previous))
+    .read_snapshot(Some(&previous), &run_logs(directory.path()))
     .await
     .expect("ゴール質問のタイムアウトはプロジェクト全体を失敗にしません");
 
@@ -1595,7 +1104,7 @@ async fn timeout_on_notifications_keeps_previous_notifications_and_awaiting_merg
   let previous = previous_notification_snapshot();
 
   let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&previous))
+    .read_snapshot(Some(&previous), &run_logs(directory.path()))
     .await
     .expect("通知のタイムアウトはプロジェクト全体を失敗にしません");
 
@@ -1607,51 +1116,6 @@ async fn timeout_on_notifications_keeps_previous_notifications_and_awaiting_merg
     Some(time("2026-11-13T02:00:00Z")),
     "タイムアウトした通知のマージ待ち起点は前回値です"
   );
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn timeout_on_get_run_keeps_previous_run() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "hang": ["takt_get_run:r1"]
-    }),
-  );
-  let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, None, 1));
-  let previous = previous_run_snapshot("2026-11-13T10:05:00Z");
-
-  let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&previous))
-    .await
-    .expect("run のタイムアウトはプロジェクト全体を失敗にしません");
-
-  assert_eq!(snapshot.runs.len(), 1, "前回の run を保持します");
-  assert_eq!(snapshot.runs[0], previous.runs[0], "タイムアウトした run は前回値です");
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn timeout_on_step_log_page_keeps_previous_run() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(directory.path(), running_run_state(120));
-  let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, None, 1));
-
-  let previous = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("1 周期目を読み取れます");
-  assert_eq!(previous.runs[0].steps.len(), 120);
-
-  let mut next_state = running_run_state(123);
-  next_state["hang"] = json!(["takt_get_run:r1@119"]);
-  write_state(directory.path(), next_state);
-  let next = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&previous))
-    .await
-    .expect("追加ページのタイムアウトはプロジェクト全体を失敗にしません");
-
-  assert_eq!(next.runs.len(), 1, "前回の run を保持します");
-  assert_eq!(next.runs[0], previous.runs[0], "追加ページのタイムアウトで中途半端な steps を残さず前回値へ戻します");
   client.shutdown().await;
 }
 
@@ -1670,7 +1134,7 @@ async fn timeout_on_standalone_inquiries_keeps_project_success() {
   let previous = previous_standalone_inquiry_snapshot();
 
   let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(Some(&previous))
+    .read_snapshot(Some(&previous), &run_logs(directory.path()))
     .await
     .expect("ゴールに属さない問い合わせのタイムアウトはプロジェクト全体を失敗にしません");
 
@@ -1683,68 +1147,76 @@ async fn timeout_on_standalone_inquiries_keeps_project_success() {
   client.shutdown().await;
 }
 
+/// running の r1 タスクと、takt_get_workflow が返す workflow `wf` の step 名一覧を持つ状態。
+fn running_task_with_workflow(workflow_steps: &[&str]) -> serde_json::Value {
+  json!({
+    "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+    "workflows": { "wf": workflow_steps }
+  })
+}
+
+/// プロジェクトの cwd に、対応表に r1 を載せた実行中の run の保存場所を作る。
+fn write_running_run(project_cwd: &std::path::Path, current_step: &str, current_iteration: i64, records: &[Value]) {
+  let fixture = RunFixture::new(project_cwd);
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  fixture.write_meta("r1", &running_meta(current_step, current_iteration, "wf", "2026-11-13T10:00:00Z"));
+  let mut all = vec![workflow_start_record("wf")];
+  all.extend_from_slice(records);
+  fixture.append_records("r1", &all);
+}
+
 #[tokio::test]
 async fn run_step_progress_is_derived_from_the_workflow_step_list() {
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "runs": { "r1": {
-        "runSlug": "r1",
-        "status": "running",
-        "workflow": "wf",
-        "currentStep": "implement",
-        "currentIteration": 2,
-        "startedAt": "2026-11-13T10:00:00Z",
-        "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ]
-      } },
-      "workflows": { "wf": ["plan", "implement", "review", "fix", "close"] }
-    }),
-  );
+  let state =
+    write_state(directory.path(), running_task_with_workflow(&["plan", "implement", "review", "fix", "close"]));
+  write_running_run(directory.path(), "implement", 2, &[step_complete_record(
+    "plan",
+    "architect",
+    1,
+    "2026-11-13T10:20:00Z",
+  )]);
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   let run = &snapshot.runs[0];
   assert_eq!(run.current_step_number, Some(2), "現在ステップの位置を workflow の並びから求めます");
   assert_eq!(run.total_steps, Some(5), "workflow の全ステップ数を求めます");
-  assert_eq!(run.current_iteration, Some(2), "takt_get_run の currentIteration を読み取ります");
+  assert_eq!(run.current_iteration, Some(2), "meta.json の currentIteration を読み取ります");
   client.shutdown().await;
 }
 
 #[tokio::test]
 async fn run_step_position_uses_the_current_step_even_when_the_last_log_is_a_nested_step() {
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "runs": { "r1": {
-        "runSlug": "r1",
-        "status": "running",
-        "workflow": "wf",
-        "currentStep": "develop",
-        "currentIteration": 3,
-        "startedAt": "2026-11-13T10:00:00Z",
-        "stepLogs": [ { "step": "write_tests", "timestamp": "2026-11-13T10:20:00Z" } ]
-      } },
-      "workflows": { "wf": ["develop", "machine_gate", "fix_machine_gate"] }
-    }),
-  );
+  let state =
+    write_state(directory.path(), running_task_with_workflow(&["develop", "machine_gate", "fix_machine_gate"]));
+  write_running_run(directory.path(), "develop", 3, &[step_complete_record(
+    "write_tests",
+    "coder",
+    3,
+    "2026-11-13T10:20:00Z",
+  )]);
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   let run = &snapshot.runs[0];
   assert_eq!(run.current_step_number, Some(1), "入れ子 workflow のログではなく currentStep を位置に使います");
   assert_eq!(run.total_steps, Some(3), "workflow の全ステップ数を求めます");
-  assert_eq!(run.current_iteration, Some(3), "takt_get_run の currentIteration を読み取ります");
+  assert_eq!(run.current_iteration, Some(3), "meta.json の currentIteration を読み取ります");
   assert_eq!(run.current_step.as_deref(), Some("develop"), "今のステップ名は currentStep から読み取ります");
   assert_eq!(
     run.steps.last().map(|step| step.step_name.as_str()),
     Some("write_tests"),
-    "stepLogs の末尾は入れ子 workflow の内側の step で、今のトップレベル step とは異なります"
+    "ステップの記録の末尾は入れ子 workflow の内側の step で、今のトップレベル step とは異なります"
   );
   client.shutdown().await;
 }
@@ -1752,25 +1224,14 @@ async fn run_step_position_uses_the_current_step_even_when_the_last_log_is_a_nes
 #[tokio::test]
 async fn run_step_position_is_unset_when_the_current_step_is_not_in_the_workflow() {
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "runs": { "r1": {
-        "runSlug": "r1",
-        "status": "running",
-        "workflow": "wf",
-        "currentStep": "implement",
-        "currentIteration": 2,
-        "startedAt": "2026-11-13T10:00:00Z",
-        "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ]
-      } },
-      "workflows": { "wf": ["plan", "review"] }
-    }),
-  );
+  let state = write_state(directory.path(), running_task_with_workflow(&["plan", "review"]));
+  write_running_run(directory.path(), "implement", 2, &[]);
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
 
   let run = &snapshot.runs[0];
   assert_eq!(run.current_step_number, None, "workflow に無いステップの位置を捏造しません");
@@ -1780,29 +1241,56 @@ async fn run_step_position_is_unset_when_the_current_step_is_not_in_the_workflow
 }
 
 #[tokio::test]
+async fn workflow_timeout_keeps_the_previous_run_without_failing_the_project() {
+  // ステップ位置を補う takt_get_workflow がタイムアウトしても、プロジェクトの読み取りは成功し、
+  // その run だけ前回値になる。補完の失敗をそのまま返す実装は Timeout の輸送エラーで落ちる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let mut state = running_task_with_workflow(&["plan", "implement"]);
+  state["hang"] = json!(["takt_get_workflow"]);
+  let state = write_state(directory.path(), state);
+  write_running_run(directory.path(), "implement", 2, &[]);
+  let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, None, 1));
+  let previous =
+    ProjectSnapshot { runs: vec![run("r1", "a", time("2026-11-13T09:30:00Z"))], ..ProjectSnapshot::empty() };
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&previous), &run_logs(directory.path()))
+    .await
+    .expect("workflow のタイムアウトでプロジェクト全体を失敗させません");
+
+  assert_eq!(snapshot.runs, previous.runs, "タイムアウトした run は前回値です");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn workflow_timeout_without_a_previous_run_leaves_the_run_out() {
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let mut state = running_task_with_workflow(&["plan", "implement"]);
+  state["hang"] = json!(["takt_get_workflow"]);
+  let state = write_state(directory.path(), state);
+  write_running_run(directory.path(), "implement", 2, &[]);
+  let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, None, 1));
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("workflow のタイムアウトでプロジェクト全体を失敗させません");
+
+  assert!(snapshot.runs.is_empty(), "前回値の無い run は一覧から外れます: {:?}", snapshot.runs);
+  client.shutdown().await;
+}
+
+#[tokio::test]
 async fn workflow_tool_error_keeps_the_run_without_step_progress() {
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "runs": { "r1": {
-        "runSlug": "r1",
-        "status": "running",
-        "workflow": "wf",
-        "currentStep": "implement",
-        "currentIteration": 2,
-        "startedAt": "2026-11-13T10:00:00Z",
-        "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ]
-      } },
-      "workflows": { "wf": ["plan", "implement"] },
-      "isError": ["takt_get_workflow:wf"]
-    }),
-  );
+  let mut state = running_task_with_workflow(&["plan", "implement"]);
+  state["isError"] = json!(["takt_get_workflow:wf"]);
+  let state = write_state(directory.path(), state);
+  write_running_run(directory.path(), "implement", 2, &[]);
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
   let snapshot = tool_set(&mut client, directory.path())
-    .read_snapshot(None)
+    .read_snapshot(None, &run_logs(directory.path()))
     .await
     .expect("workflow の道具エラーで run 一覧全体を失敗させません");
 
@@ -1885,8 +1373,6 @@ async fn instruction_id_beyond_i32_is_a_parse_error_and_is_not_sent_truncated() 
       "runs": {
         "r1": {
           "runSlug": "r1",
-          "status": "running",
-          "startedAt": "2026-11-13T10:00:00Z",
           "instructions": [
             { "instructionId": 4294967298i64, "issuedAt": "2026-11-13T10:05:00Z", "state": "issued", "content": "指示書" }
           ]
@@ -1894,11 +1380,12 @@ async fn instruction_id_beyond_i32_is_a_parse_error_and_is_not_sent_truncated() 
       }
     }),
   );
+  write_running_run(directory.path(), "implement", 1, &[]);
   let calls_path = directory.path().join("tool-calls.jsonl");
   let mut client = mock_client(mock_config_with_calls(directory.path(), &state, &calls_path));
 
   let error = tool_set(&mut client, directory.path())
-    .read_run_detail(&run_slug("r1"))
+    .read_run_detail(&run_slug("r1"), &run_logs(directory.path()))
     .await
     .expect_err("i32 の範囲外の instructionId は受理しません");
 
@@ -1920,196 +1407,44 @@ async fn instruction_id_beyond_i32_is_a_parse_error_and_is_not_sent_truncated() 
 }
 
 #[tokio::test]
-async fn 一覧の最終ログ時刻は応答の最終ログ時刻を最優先する() {
-  // 応答の lastLogAt がステップ記録と現在ステップの開始時刻より新しいとき、一覧の
-  // last_log_at は lastLogAt を採ります。同じ状態の詳細も同じ値になることを観測します。
+async fn a_run_meta_without_a_status_leaves_the_run_out_instead_of_listing_it_as_running() {
+  // meta.json に status が無い run は Running に丸めず、その run
+  // だけ一覧に入れない（前回値も無い）。 run の読み取りの失敗はプロジェクトの失敗にしない。
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T11:30:00Z", "runSlug": "r1", "currentStep": "implement" } ],
-      "runs": { "r1": {
-        "runSlug": "r1",
-        "status": "running",
-        "startedAt": "2026-11-13T11:30:00Z",
-        "currentStep": "implement",
-        "currentStepStartedAt": "2026-11-13T11:50:00Z",
-        "lastLogAt": "2026-11-13T11:59:00Z",
-        "stepLogs": [ { "step": "plan", "status": "completed", "timestamp": "2026-11-13T11:40:00Z" } ]
-      } }
-    }),
-  );
+  let state = write_state(directory.path(), running_task_with_workflow(&["implement"]));
+  let fixture = RunFixture::new(directory.path());
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  let mut meta = running_meta("implement", 1, "wf", "2026-11-13T10:00:00Z");
+  meta.as_object_mut().expect("meta はオブジェクトです").remove("status");
+  fixture.write_meta("r1", &meta);
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-  let detail =
-    tool_set(&mut client, directory.path()).read_run_detail(&run_slug("r1")).await.expect("run 詳細を読み取れます");
-
-  assert_eq!(detail.last_log_at, Some(time("2026-11-13T11:59:00Z")), "詳細は応答の lastLogAt を最終ログ時刻に使います");
-  assert_eq!(
-    snapshot.runs[0].last_log_at,
-    Some(time("2026-11-13T11:59:00Z")),
-    "一覧の最終ログ時刻は応答の lastLogAt を最優先します"
-  );
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn 最終ログ時刻がないときは現在ステップの開始時刻を採る() {
-  // lastLogAt が無いとき、古い完了ステップの記録ではなく、現在ステップの開始時刻が
-  // 新しければそちらを採ります。一覧と詳細の無音判定が食い違わないことを観測します。
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T11:30:00Z", "runSlug": "r1", "currentStep": "implement" } ],
-      "runs": { "r1": {
-        "runSlug": "r1",
-        "status": "running",
-        "startedAt": "2026-11-13T11:30:00Z",
-        "currentStep": "implement",
-        "currentStepStartedAt": "2026-11-13T11:59:00Z",
-        "stepLogs": [ { "step": "plan", "status": "completed", "timestamp": "2026-11-13T11:40:00Z" } ]
-      } }
-    }),
-  );
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-  let detail =
-    tool_set(&mut client, directory.path()).read_run_detail(&run_slug("r1")).await.expect("run 詳細を読み取れます");
-
-  assert_eq!(
-    detail.last_log_at,
-    Some(time("2026-11-13T11:59:00Z")),
-    "詳細は lastLogAt が無ければ現在ステップの開始時刻を使います"
-  );
-  assert_eq!(
-    snapshot.runs[0].last_log_at,
-    Some(time("2026-11-13T11:59:00Z")),
-    "一覧も現在ステップの開始時刻を使います"
-  );
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn 一覧と詳細の最終ログ時刻はステップ記録と現在ステップの開始時刻の新しい方で一致する() {
-  // lastLogAt が無く、ステップ記録が現在ステップの開始時刻より新しいとき、一覧と詳細の
-  // 最終ログ時刻が同じ値になることを観測します。片方だけが現在ステップの開始時刻に落ちると
-  // 無音判定が食い違います。
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "implement" } ],
-      "runs": { "r1": {
-        "runSlug": "r1",
-        "status": "running",
-        "startedAt": "2026-11-13T10:00:00Z",
-        "currentStep": "implement",
-        "currentStepStartedAt": "2026-11-13T10:02:00Z",
-        "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:05:00Z" } ]
-      } }
-    }),
-  );
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-  let detail =
-    tool_set(&mut client, directory.path()).read_run_detail(&run_slug("r1")).await.expect("run 詳細を読み取れます");
-
-  assert_eq!(
-    snapshot.runs[0].last_log_at,
-    Some(time("2026-11-13T10:05:00Z")),
-    "一覧は現在ステップの開始時刻より新しいステップ記録を最終ログ時刻に採ります"
-  );
-  assert_eq!(
-    detail.last_log_at,
-    Some(time("2026-11-13T10:05:00Z")),
-    "詳細も同じステップ記録を最終ログ時刻に採り、一覧と一致します"
-  );
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn 一覧と詳細の最終ログ時刻は複数ページの末尾ステップで一致する() {
-  // 51 ステップの run。lastLogAt と currentStepStartedAt が無いとき、先頭ページだけでなく
-  // 2 ページ目の末尾ステップの時刻を一覧と詳細の両方が採ることを観測します。
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let mut step_logs = Vec::new();
-  for index in 0..51 {
-    let minute = index;
-    step_logs.push(json!({ "step": format!("step{index}"), "timestamp": format!("2026-11-13T10:{minute:02}:00Z") }));
-  }
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "step50" } ],
-      "runs": { "r1": {
-        "runSlug": "r1",
-        "status": "running",
-        "startedAt": "2026-11-13T10:00:00Z",
-        "currentStep": "step50",
-        "stepLogs": step_logs
-      } }
-    }),
-  );
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-
-  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-  let detail =
-    tool_set(&mut client, directory.path()).read_run_detail(&run_slug("r1")).await.expect("run 詳細を読み取れます");
-
-  assert_eq!(
-    snapshot.runs[0].last_log_at,
-    Some(time("2026-11-13T10:50:00Z")),
-    "一覧は末尾ページの最終ステップを最終ログ時刻に採ります"
-  );
-  assert_eq!(
-    detail.last_log_at,
-    Some(time("2026-11-13T10:50:00Z")),
-    "詳細も末尾ページの最終ステップを採り、一覧と一致します"
-  );
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn a_run_without_a_status_is_a_parse_error_instead_of_running() {
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "runs": { "r1": { "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [] } }
-    }),
-  );
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
-
-  let error = tool_set(&mut client, directory.path())
-    .read_snapshot(None)
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
     .await
-    .expect_err("run の状態が欠落した応答は解析エラーです");
+    .expect("run の状態の欠落でプロジェクト全体は失敗しません");
 
-  assert!(matches!(error, ToolError::Parse(_)), "欠落した run の状態は Running に丸めません: {error}");
+  assert!(snapshot.runs.is_empty(), "欠落した run の状態を Running に丸めて一覧へ入れません: {:?}", snapshot.runs);
   client.shutdown().await;
 }
 
 #[tokio::test]
-async fn a_run_with_an_unknown_status_is_a_parse_error() {
+async fn a_run_meta_with_an_unknown_status_leaves_the_run_out() {
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "runs": { "r1": { "runSlug": "r1", "status": "queued", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [] } }
-    }),
-  );
+  let state = write_state(directory.path(), running_task_with_workflow(&["implement"]));
+  let fixture = RunFixture::new(directory.path());
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  let mut meta = running_meta("implement", 1, "wf", "2026-11-13T10:00:00Z");
+  meta["status"] = json!("queued");
+  fixture.write_meta("r1", &meta);
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
-  let error =
-    tool_set(&mut client, directory.path()).read_snapshot(None).await.expect_err("未知の run の状態は解析エラーです");
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("未知の run の状態でプロジェクト全体は失敗しません");
 
-  assert!(matches!(error, ToolError::Parse(_)), "未知の run の状態は Running に丸めません: {error}");
+  assert!(snapshot.runs.is_empty(), "未知の run の状態を Running に丸めて一覧へ入れません: {:?}", snapshot.runs);
   client.shutdown().await;
 }
 
@@ -2133,7 +1468,7 @@ async fn a_non_positive_pull_request_number_is_a_parse_error() {
     let mut client = mock_client(mock_config(directory.path(), &state, None));
 
     let error = tool_set(&mut client, directory.path())
-      .read_snapshot(None)
+      .read_snapshot(None, &run_logs(directory.path()))
       .await
       .expect_err("0 以下のプルリクエスト番号は解析エラーです");
 

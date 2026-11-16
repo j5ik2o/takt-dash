@@ -23,6 +23,7 @@ use crate::{
   events::detect,
   mcp::{client_config, McpClientRegistry, ToolCallMetrics, ToolError, ToolSet},
   model::{ConnectionState, ConnectionTransition, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot},
+  run_progress::RunLogHandles,
   store::StateStore,
 };
 
@@ -37,6 +38,9 @@ pub struct Poller {
   notified:       BTreeMap<String, ConnectionState>,
   changes:        broadcast::Sender<()>,
   last_signature: Option<StoreSignature>,
+  /// プロジェクトごとの run の集計と、その集計を作ったときの cwd。周期をまたいで持ち、
+  /// run の本体ログを前回の続きから読むために使います。
+  run_logs:       RunLogHandles<String>,
 }
 
 /// 1サイクルで読み取った件数と、記録した出来事の件数、次の待機に使う間隔。
@@ -70,6 +74,7 @@ impl Poller {
       notified: BTreeMap::new(),
       changes,
       last_signature: None,
+      run_logs: RunLogHandles::default(),
     }
   }
 
@@ -103,6 +108,7 @@ impl Poller {
     self.store.set_servers(config.server_meta.clone());
     self.store.set_projects(config.projects.clone());
     self.sync_clients(&config);
+    self.run_logs.retain(|name| config.projects.iter().any(|project| &project.name == name));
     let mut report = CycleReport {
       projects_read:   0,
       projects_failed: 0,
@@ -121,6 +127,7 @@ impl Poller {
         self.reset_project_baseline(&project.name);
       }
       let prev = self.previous.get(&project.name).cloned();
+      let run_logs = self.run_logs.handle_for(&project.name, &project.cwd);
       match self.registry.get(&project.server, &project.name) {
         | Some(handle) => {
           let project = project.clone();
@@ -128,7 +135,7 @@ impl Poller {
             let read_at = Utc::now();
             let mut client = handle.lock().await;
             let mut tools = ToolSet::new(&mut client, project.cwd.clone());
-            let result = tools.read_snapshot(prev.as_ref()).await;
+            let result = tools.read_snapshot(prev.as_ref(), &run_logs).await;
             let metrics = tools.take_metrics();
             (read_at, result, metrics)
           })));
@@ -283,9 +290,10 @@ impl Poller {
   /// クライアントを作り直したプロジェクトの差分基準と状態をリセットする。
   ///
   /// 旧接続先の snapshot と接続状態を新接続先の所属で投影しないよう、スロットを未読へ戻し、
-  /// 前サイクルの差分基準も捨てます。新接続先の初回読み取りは基準化のみになります。
+  /// 前サイクルの差分基準と run の集計も捨てます。新接続先の初回読み取りは基準化のみになります。
   fn reset_project_baseline(&mut self, project: &str) {
     self.previous.remove(project);
+    self.run_logs.remove(project);
     self.notified.remove(project);
     self.store.reset_project(project);
   }

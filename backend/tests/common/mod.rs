@@ -86,6 +86,12 @@ pub fn tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> ToolSet<'a> {
   ToolSet::new(client, cwd.to_path_buf())
 }
 
+/// プロジェクトの cwd の run
+/// の集計を作る。読み取り1回ごとに作ると、本体ログは毎回先頭から読みます。
+pub fn run_logs(cwd: &Path) -> takt_dash_backend::run_progress::RunLogHandle {
+  takt_dash_backend::run_progress::run_log_handle(cwd.to_path_buf())
+}
+
 /// takt-mcp の道具呼び出し引数へ cwd を加える。
 pub fn with_cwd(cwd: &Path, extra: serde_json::Value) -> serde_json::Value {
   let mut object = serde_json::Map::new();
@@ -215,6 +221,161 @@ pub fn project(name: &str, cwd: &Path) -> Project {
 
 pub fn mcp_server() -> McpServer {
   McpServer { command: "node".to_owned(), args: vec!["server.mjs".to_owned()], env: Default::default() }
+}
+
+/// takt がプロジェクトの `.takt` へ書く run の保存形式（`tasks.yaml` の対応表、`meta.json`、
+/// 本体ログ、`reports/`）を一時ディレクトリへ作る。
+///
+/// 実ホームや実在の `takt-worktrees` は参照せず、run はすべてプロジェクトの `.takt/runs` の
+/// 下に置きます。本体ログの record は実物のキー構成（type、step、persona、iteration、status、
+/// timestamp、workflow、stack）に合わせた合成データです。
+pub struct RunFixture {
+  project_cwd: PathBuf,
+}
+
+/// `tasks.yaml` の1項目。`source_run_slug` は元 run の解決だけに使う別の値です。
+pub struct RunTaskLine<'a> {
+  pub run_slug:        Option<&'a str>,
+  pub source_run_slug: Option<&'a str>,
+}
+
+impl RunFixture {
+  pub fn new(project_cwd: &Path) -> RunFixture {
+    std::fs::create_dir_all(project_cwd.join(".takt")).expect("プロジェクトの .takt を作れます");
+    RunFixture { project_cwd: project_cwd.to_path_buf() }
+  }
+
+  /// `tasks.yaml` の対応表を書く。指定した run だけが対応表に載ります。
+  pub fn write_tasks(&self, entries: &[RunTaskLine<'_>]) {
+    let mut yaml = String::from("tasks:\n");
+    for entry in entries {
+      let mut fields = Vec::new();
+      if let Some(run_slug) = entry.run_slug {
+        fields.push(format!("run_slug: {run_slug}"));
+      }
+      if let Some(source) = entry.source_run_slug {
+        fields.push(format!("source_run_slug: {source}"));
+      }
+      for (index, field) in fields.iter().enumerate() {
+        let prefix = if index == 0 { "  - " } else { "    " };
+        yaml.push_str(&format!("{prefix}{field}\n"));
+      }
+    }
+    std::fs::write(self.project_cwd.join(".takt").join("tasks.yaml"), yaml).expect("tasks.yaml を書けます");
+  }
+
+  /// run のディレクトリ（`logs` を含む）を作って返す。
+  pub fn run_dir(&self, run_slug: &str) -> PathBuf {
+    let run_dir = self.project_cwd.join(".takt").join("runs").join(run_slug);
+    std::fs::create_dir_all(run_dir.join("logs")).expect("run の logs ディレクトリを作れます");
+    run_dir
+  }
+
+  pub fn write_meta(&self, run_slug: &str, meta: &serde_json::Value) {
+    std::fs::write(self.run_dir(run_slug).join("meta.json"), meta.to_string()).expect("meta.json を書けます");
+  }
+
+  pub fn write_meta_raw(&self, run_slug: &str, text: &str) {
+    std::fs::write(self.run_dir(run_slug).join("meta.json"), text).expect("meta.json を書けます");
+  }
+
+  pub fn body_log(&self, run_slug: &str) -> PathBuf {
+    self.run_dir(run_slug).join("logs").join("session.jsonl")
+  }
+
+  /// 本体ログの末尾へ record を1行ずつ追記する。
+  pub fn append_records(&self, run_slug: &str, records: &[serde_json::Value]) {
+    use std::io::Write;
+    let mut file =
+      std::fs::OpenOptions::new().append(true).create(true).open(self.body_log(run_slug)).expect("本体ログを開けます");
+    for record in records {
+      let mut line = record.to_string();
+      line.push('\n');
+      file.write_all(line.as_bytes()).expect("本体ログへ追記できます");
+    }
+  }
+
+  /// 本体ログの既読範囲にある `from` をすべて、同じバイト長の `to` へ書き換える。inode
+  /// とファイルの大きさは
+  /// 変えないため、読み取り位置を保持する読み取りは書き換えた範囲を読み直しません。
+  pub fn overwrite_body_log_in_place(&self, run_slug: &str, from: &str, to: &str) {
+    use std::io::{Seek, SeekFrom, Write};
+    assert_eq!(from.len(), to.len(), "書き換えの前後でバイト長を揃えます");
+    let path = self.body_log(run_slug);
+    let text = std::fs::read_to_string(&path).expect("本体ログを読めます");
+    let replaced = text.replace(from, to);
+    assert_ne!(text, replaced, "書き換え対象 {from} が本体ログにあります");
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).expect("本体ログを開けます");
+    file.seek(SeekFrom::Start(0)).expect("先頭へ移動できます");
+    file.write_all(replaced.as_bytes()).expect("本体ログを書き換えられます");
+  }
+
+  /// 本体ログの更新時刻を固定する。ログ群の最新更新時刻を決定的にするために使います。
+  pub fn set_body_log_modified(&self, run_slug: &str, modified: DateTime<Utc>) {
+    let file = std::fs::File::options().write(true).open(self.body_log(run_slug)).expect("本体ログを開けます");
+    file.set_modified(std::time::SystemTime::from(modified)).expect("更新時刻を設定できます");
+  }
+
+  /// `reports/` の下へレポートを書く。`relative` は `/` 区切りの相対パスです。
+  pub fn write_report(&self, run_slug: &str, relative: &str, content: &str) {
+    let path = self.run_dir(run_slug).join("reports").join(relative);
+    std::fs::create_dir_all(path.parent().expect("レポートの親があります")).expect("レポートの置き場を作れます");
+    std::fs::write(path, content).expect("レポートを書けます");
+  }
+}
+
+/// 実行中の run の `meta.json`。
+pub fn running_meta(current_step: &str, current_iteration: i64, workflow: &str, start_time: &str) -> serde_json::Value {
+  serde_json::json!({
+    "workflow": workflow,
+    "status": "running",
+    "startTime": start_time,
+    "currentStep": current_step,
+    "currentIteration": current_iteration,
+    "phase": 1,
+    "updatedAt": start_time
+  })
+}
+
+pub fn workflow_start_record(workflow: &str) -> serde_json::Value {
+  serde_json::json!({ "type": "workflow_start", "workflow": workflow })
+}
+
+/// 最上位（stack の長さ 1）の step_complete。
+pub fn step_complete_record(step: &str, persona: &str, iteration: i64, timestamp: &str) -> serde_json::Value {
+  serde_json::json!({
+    "type": "step_complete",
+    "step": step,
+    "persona": persona,
+    "iteration": iteration,
+    "status": "done",
+    "timestamp": timestamp,
+    "workflow": "development-core",
+    "stack": [ { "workflow": "development-core", "step": step, "kind": "agent", "occurrence": 1 } ]
+  })
+}
+
+/// step_start。`stack_steps` は外側から順の stack の step 名で、長さが stack の深さになります。
+pub fn step_start_record(
+  step: &str,
+  workflow: &str,
+  iteration: i64,
+  timestamp: &str,
+  stack_steps: &[&str],
+) -> serde_json::Value {
+  let stack: Vec<serde_json::Value> = stack_steps
+    .iter()
+    .map(|stack_step| serde_json::json!({ "workflow": workflow, "step": stack_step, "kind": "agent", "occurrence": 1 }))
+    .collect();
+  serde_json::json!({
+    "type": "step_start",
+    "step": step,
+    "persona": "coder",
+    "iteration": iteration,
+    "timestamp": timestamp,
+    "workflow": workflow,
+    "stack": stack
+  })
 }
 
 pub fn thresholds() -> Thresholds {

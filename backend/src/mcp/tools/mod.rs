@@ -23,8 +23,9 @@ use crate::{
   model::{
     ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
     InquiryEntry, NotificationEntry, ProjectSnapshot, RegistrationProposalEntry, RunDetail, RunEntry,
-    RunInstructionEntry, RunReportEntry, RunStepEntry, TaskDetail, TaskEntry, TaskStatus,
+    RunInstructionEntry, RunReportEntry, TaskDetail, TaskEntry, TaskStatus,
   },
+  run_progress::{read_run, retain_runs, RunLogHandle, RunReadFailure},
 };
 
 mod goal;
@@ -38,7 +39,7 @@ use self::{
     registration_summary_text, resolve_awaiting_merge_at, resolve_inquiry, ParsedInquiry, TaskLinkFields,
   },
   parse::{checked_i32, domain_value, optional_string, parse_time, required_i32, required_string, string_field, Page},
-  run::{parse_run, parse_run_detail, report_summaries, step_entries, step_log_entries, step_log_next_offset},
+  run::{assemble_run_detail, report_summaries},
 };
 
 /// takt-mcp 子プロセスの起動設定を作る。
@@ -66,6 +67,9 @@ pub enum ToolError {
   Tool(#[from] super::client::ToolCallError),
   #[error("takt-mcp の応答を解析できませんでした: {0}")]
   Parse(String),
+  /// run の保存場所（`.takt/runs`）を読めなかった失敗。takt-mcp の失敗ではありません。
+  #[error(transparent)]
+  RunLog(#[from] RunReadFailure),
 }
 
 impl From<CallError> for ToolError {
@@ -116,7 +120,9 @@ impl<'a> ToolSet<'a> {
 
   /// ゴール・タスク・問い合わせ・run を読み取り、1プロジェクト分の snapshot を組み立てる。
   ///
-  /// `prev` には前回の snapshot を渡します。補助読み取り（run・ゴール質問・通知・ゴールに
+  /// `prev` には前回の snapshot を渡します。`runs` はプロジェクトの run の集計で、同じ取っ手を
+  /// 周期をまたいで渡すと、run
+  /// の本体ログは前回の続きだけを読みます。補助読み取り（run・ゴール質問・通知・ゴールに
   /// 属さない問い合わせ）が道具エラーまたはタイムアウトで失敗したときは、その項目だけ前回値
   /// （無ければ空）を保持し、プロジェクト全体を失敗にしません。ゴール登録提案も道具エラーと
   /// 解析エラーのときは前回の提案（無ければ空）へ縮退し、周期を失敗させません。コア読み取り
@@ -126,7 +132,11 @@ impl<'a> ToolSet<'a> {
   /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知から得るため、通知を読んだ後に
   /// ゴールへ起点時刻を反映します。通知が無いゴールは前回 snapshot の同じゴールの起点を
   /// 引き継ぎ、前回が無い初回観測でもその読み取りの観測時刻を起点として確定します。
-  pub async fn read_snapshot(&mut self, prev: Option<&ProjectSnapshot>) -> Result<ProjectSnapshot, ToolError> {
+  pub async fn read_snapshot(
+    &mut self,
+    prev: Option<&ProjectSnapshot>,
+    runs: &RunLogHandle,
+  ) -> Result<ProjectSnapshot, ToolError> {
     let observed_at = Utc::now();
     let mut goals = self.list_goals().await?;
     let tasks = self.list_tasks().await?;
@@ -136,7 +146,7 @@ impl<'a> ToolSet<'a> {
       goal.awaiting_merge_at =
         resolve_awaiting_merge_at(goal, awaiting_merge_at.get(&goal.goal_id).copied(), prev, observed_at);
     }
-    let runs = self.get_running_runs(&tasks, prev).await?;
+    let runs = self.get_running_runs(&tasks, prev, runs).await?;
     let proposals = match self.list_goal_registration_proposals().await {
       | Ok(entries) => entries,
       | Err(ToolError::Tool(_)) | Err(ToolError::Parse(_)) => {
@@ -264,122 +274,50 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_list_standalone_inquiries のページ追従が上限に達しました".to_owned()))
   }
 
-  /// running なタスクの run を集める。`takt_get_run` が道具エラーまたはタイムアウトを返した
-  /// run だけ、前回 snapshot の同じ runSlug を引き継ぎ（無ければ欠落）、健常な run は今回の
-  /// 値を採ります。その他の輸送エラーと解析エラーは全体の失敗として伝播します。
+  /// running なタスクの run を、run の保存場所（`meta.json` と本体ログ）から集める。
+  ///
+  /// 保存場所を読めなかった run
+  /// と、ステップ位置の補完が道具エラー以外の縮退できる失敗（タイムアウト） になった run だけ、前回
+  /// snapshot の同じ runSlug を引き継ぎ（無ければ欠落）、健常な run は今回の
+  /// 値を採ります。これらの失敗はプロジェクトの失敗にしません。補完のその他の輸送エラーは全体の
+  /// 失敗として伝播します。running でなくなった run の集計は、次の周期に持ち越さないよう捨てます。
   async fn get_running_runs(
     &mut self,
     tasks: &[TaskEntry],
     prev: Option<&ProjectSnapshot>,
+    handle: &RunLogHandle,
   ) -> Result<Vec<RunEntry>, ToolError> {
     let mut runs = Vec::new();
+    let mut running = Vec::new();
     for task in tasks.iter().filter(|task| task.status == TaskStatus::Running) {
       let Some(run_slug) = task.run_slug.clone() else {
         continue;
       };
-      match self.read_run(&run_slug, task, prev).await {
-        | Ok(run) => runs.push(run),
-        | Err(error) if is_degradable_auxiliary_error(&error) => {
-          if let Some(previous) =
-            prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str()))
-          {
-            runs.push(previous.clone());
+      running.push(run_slug.clone());
+      match read_run(handle, run_slug.clone()).await {
+        | Ok(view) => {
+          let mut run = view.run_entry(&run_slug, task);
+          let enriched = match view.workflow.as_deref().filter(|workflow| !workflow.is_empty()) {
+            | Some(workflow) => self.enrich_step_progress(&mut run, workflow).await,
+            | None => Ok(()),
+          };
+          match enriched {
+            | Ok(()) => runs.push(run),
+            | Err(error) if is_degradable_auxiliary_error(&error) => {
+              tracing::warn!(run_slug = %run_slug.as_str(), error = %error, "run のステップ位置を補えませんでした。前回の値を使います。");
+              runs.extend(previous_run(prev, &run_slug));
+            },
+            | Err(error) => return Err(error),
           }
         },
-        | Err(error) => return Err(error),
+        | Err(failure) => {
+          tracing::warn!(run_slug = %run_slug.as_str(), error = %failure, "run を保存場所から読めませんでした。前回の値を使います。");
+          runs.extend(previous_run(prev, &run_slug));
+        },
       }
     }
+    retain_runs(handle, running).await;
     Ok(runs)
-  }
-
-  async fn read_run(
-    &mut self,
-    run_slug: &RunSlug,
-    task: &TaskEntry,
-    prev: Option<&ProjectSnapshot>,
-  ) -> Result<RunEntry, ToolError> {
-    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
-    let prev_run = prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str()));
-    self.parse_run_with_pages(&value, task, prev_run).await
-  }
-
-  /// stepLogPage.nextOffset が残っていれば追加ページを取得して末尾のログの時刻を求める。
-  ///
-  /// 前回の run に同じ stepLog の並びが残っていれば、先頭ページの同一性と総件数を確かめ、
-  /// 前回の steps の既知部分を応答値で置き換えて、新しい分だけを追記します。前回が無い、
-  /// 件数が減った（リセット）、 先頭の step が変わった、総件数が読めない場合は、
-  /// 従来どおり全ページを読み直します。
-  async fn parse_run_with_pages(
-    &mut self,
-    value: &Value,
-    task: &TaskEntry,
-    prev_run: Option<&RunEntry>,
-  ) -> Result<RunEntry, ToolError> {
-    let first_page_steps = step_entries(value);
-    let total = step_log_total_count(value);
-    let differential = prev_run.filter(|previous| {
-      !previous.steps.is_empty()
-        && total.is_some_and(|total| total >= previous.steps.len())
-        && first_step_matches(&previous.steps, &first_page_steps)
-    });
-    let (mut latest_seen, mut steps, mut next_offset) = match differential {
-      | Some(previous) => {
-        let known = previous.steps.len();
-        let overlap = known.min(first_page_steps.len());
-        let mut steps = previous.steps.clone();
-        // 既知の step も応答値で置き換える。継続中だった step が同じ位置で終了すると
-        // endedAt や model が付くため、前回値の追記だけでは古い値が残る。
-        steps[..overlap].clone_from_slice(&first_page_steps[..overlap]);
-        let mut latest_seen = previous.last_log_at;
-        if known < first_page_steps.len() {
-          steps.extend(first_page_steps[known..].iter().cloned());
-          if let Some(timestamp) = latest_step_timestamp(value) {
-            latest_seen = Some(timestamp);
-          }
-        }
-        let next_offset = if known > first_page_steps.len() {
-          // 既知の末尾 step は先頭ページに含まれない。その step が同じ位置で完了すると
-          // endedAt や model が付くため、末尾 step を含むページを 1 回だけ取得して置換する。
-          Some(known - 1)
-        } else if total.is_some_and(|total| known >= total) {
-          None
-        } else if known < first_page_steps.len() {
-          step_log_next_offset(value)
-        } else {
-          Some(known)
-        };
-        (latest_seen, steps, next_offset)
-      },
-      | None => (latest_step_timestamp(value), first_page_steps, step_log_next_offset(value)),
-    };
-    let run_slug = domain_value("run slug", RunSlug::try_from(string_field(value, "runSlug")?.as_str()))?;
-    let mut pages_taken = 0;
-    while let Some(offset) = next_offset {
-      if pages_taken >= MAX_PAGES {
-        return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
-      }
-      pages_taken += 1;
-      let page_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
-      if let Some(timestamp) = latest_step_timestamp(&page_value) {
-        latest_seen = Some(latest_seen.map_or(timestamp, |current| current.max(timestamp)));
-      }
-      for (index, entry) in step_entries(&page_value).into_iter().enumerate() {
-        let absolute = offset + index;
-        if absolute < steps.len() {
-          steps[absolute] = entry;
-        } else {
-          steps.push(entry);
-        }
-      }
-      next_offset = step_log_next_offset(&page_value);
-    }
-    let workflow = optional_string(value, "workflow").unwrap_or_default();
-    let mut run = parse_run(value, task, latest_seen, steps)?;
-    if !workflow.is_empty() {
-      self.enrich_step_progress(&mut run, &workflow).await?;
-    }
-    Ok(run)
   }
 
   /// workflow の step 名一覧から、run の現在ステップの位置と全ステップ数を補う。
@@ -390,9 +328,9 @@ impl<'a> ToolSet<'a> {
     let Some(steps) = self.workflow_steps(workflow).await? else {
       return Ok(());
     };
-    // takt_get_run の currentStep は takt_get_workflow が返す workflow の step 名に対応する。
-    // stepLogs の末尾は入れ子 workflow の内側の step になり得るため、位置の算出には使わない。
-    // currentStep が無い応答だけ、従来どおり stepLogs の末尾で補う。
+    // meta.json の currentStep は takt_get_workflow が返す workflow の step 名に対応する。
+    // ステップの記録の末尾は入れ子 workflow の内側の step になり得るため、位置の算出には使わない。
+    // currentStep が無い run だけ、従来どおりステップの記録の末尾で補う。
     let Some(current) = run
       .current_step
       .as_deref()
@@ -547,6 +485,11 @@ fn is_degradable_auxiliary_error(error: &ToolError) -> bool {
   matches!(error, |ToolError::Tool(_)| ToolError::Transport(TransportError::Timeout(_)))
 }
 
+/// 前回 snapshot の同じ runSlug の run を返す。前回が無ければ `None` です。
+fn previous_run(prev: Option<&ProjectSnapshot>, run_slug: &RunSlug) -> Option<RunEntry> {
+  prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str())).cloned()
+}
+
 /// 前回 snapshot の同じゴールの通知と、マージ待ちの起点時刻を引き継ぐ。前回が無ければ何もしません。
 fn inherit_previous_notifications(
   notifications: &mut Vec<NotificationEntry>,
@@ -563,37 +506,6 @@ fn inherit_previous_notifications(
   {
     awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
   }
-}
-
-/// 応答の stepLogs 配列のうち、時刻を持つものの最新を返します。時刻を持たない記録は無視します。
-fn latest_step_timestamp(value: &Value) -> Option<DateTime<Utc>> {
-  value
-    .get("stepLogs")
-    .and_then(Value::as_array)
-    .into_iter()
-    .flatten()
-    .filter_map(|log| log.get("timestamp").and_then(Value::as_str))
-    .filter_map(|text| DateTime::parse_from_rfc3339(text).ok())
-    .map(|time| time.with_timezone(&Utc))
-    .max()
-}
-
-/// stepLogPage.totalCount を取り出す。欠落していれば差分読みをせず全読みに落とします。
-fn step_log_total_count(value: &Value) -> Option<usize> {
-  value.get("stepLogPage").and_then(|page| page.get("totalCount")).and_then(Value::as_u64).map(|total| total as usize)
-}
-
-/// 前回の先頭 step と今回の先頭ページの先頭 step が同じかを判定する。stepLog がリセットされたり
-/// 別の run の応答が混ざったりした場合は差分読みをせず、全読みで置き換えます。`UNIX_EPOCH` は
-/// 時刻が欠けた step を表すため比較対象から除外します。
-fn first_step_matches(previous: &[RunStepEntry], first_page: &[RunStepEntry]) -> bool {
-  let (Some(previous), Some(first)) = (previous.first(), first_page.first()) else {
-    return false;
-  };
-  previous.step_name == first.step_name
-    && (previous.started_at == first.started_at
-      || previous.started_at == DateTime::<Utc>::UNIX_EPOCH
-      || first.started_at == DateTime::<Utc>::UNIX_EPOCH)
 }
 
 impl<'a> ToolSet<'a> {
@@ -807,27 +719,16 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_list_tasks のページ追従が上限に達しました".to_owned()))
   }
 
-  /// 指定した runSlug の詳細を takt_get_run から読み取る。
+  /// 指定した runSlug の詳細を読み取る。
   ///
-  /// stepLogs は先頭 50 件のウィンドウで返るため、stepLogPage.nextOffset が残っていれば追加ページを
-  /// 取得して全件を集めます。レポートと指示書の本文は一覧に含まれないため、一覧の filename と
+  /// 状態とステップの記録は run の保存場所から読みます。`runs` に同じ取っ手を渡し続けると、
+  /// 本体ログは前回の続きだけを読みます。takt_get_run は summary を1回だけ呼び、stepLogs の
+  /// ページは追いません。レポートと指示書の本文は一覧に含まれないため、summary の filename と
   /// instructionId を使って1件ずつ本文を取得します。
-  pub async fn read_run_detail(&mut self, run_slug: &RunSlug) -> Result<RunDetail, ToolError> {
+  pub async fn read_run_detail(&mut self, run_slug: &RunSlug, runs: &RunLogHandle) -> Result<RunDetail, ToolError> {
+    let view = read_run(runs, run_slug.clone()).await?;
     let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
     let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_ref() == Some(run_slug));
-    let mut step_logs = step_log_entries(&value);
-    let mut next_offset = step_log_next_offset(&value);
-    let mut pages_taken = 0;
-    while let Some(offset) = next_offset {
-      if pages_taken >= MAX_PAGES {
-        return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
-      }
-      pages_taken += 1;
-      let page_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
-      step_logs.extend(step_log_entries(&page_value));
-      next_offset = step_log_next_offset(&page_value);
-    }
     let mut reports = Vec::new();
     for summary in report_summaries(&value) {
       let report_value =
@@ -860,7 +761,7 @@ impl<'a> ToolSet<'a> {
         content: optional_string(&instruction_value, "content").unwrap_or_default(),
       });
     }
-    parse_run_detail(&value, run_slug, task.as_ref(), step_logs, reports, instructions)
+    assemble_run_detail(&value, &view, run_slug, task.as_ref(), reports, instructions)
   }
 
   /// 問い合わせへ回答する。`answer` は takt の `answer` オブジェクト（例: `{"text": "..."}`）。
@@ -972,9 +873,12 @@ mod tests {
   };
 
   use super::{call_outcome, ToolError, ToolSet};
-  use crate::mcp::{
-    client::{CallError, McpClient, McpClientConfig, ToolCallError, TransportError},
-    metrics::{ToolCallMetrics, ToolCallOutcome},
+  use crate::{
+    mcp::{
+      client::{CallError, McpClient, McpClientConfig, ToolCallError, TransportError},
+      metrics::{ToolCallMetrics, ToolCallOutcome},
+    },
+    run_progress::run_log_handle,
   };
 
   fn mock_script() -> PathBuf {
@@ -1020,7 +924,10 @@ mod tests {
     let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
 
     let started = Instant::now();
-    tools.read_snapshot(None).await.expect("起動の遅延後も読み取れます");
+    tools
+      .read_snapshot(None, &run_log_handle(directory.path().to_path_buf()))
+      .await
+      .expect("起動の遅延後も読み取れます");
     let elapsed = started.elapsed();
     let metrics = tools.take_metrics();
     drop(tools);
@@ -1039,7 +946,10 @@ mod tests {
     let mut client = McpClient::new(config);
     let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
 
-    let error = tools.read_snapshot(None).await.expect_err("起動できない client は読み取れません");
+    let error = tools
+      .read_snapshot(None, &run_log_handle(directory.path().to_path_buf()))
+      .await
+      .expect_err("起動できない client は読み取れません");
     let metrics = tools.take_metrics();
     drop(tools);
 
@@ -1058,7 +968,10 @@ mod tests {
     let mut client = McpClient::new(config);
     let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
 
-    let error = tools.read_snapshot(None).await.expect_err("initialize に応答がなければ読み取れません");
+    let error = tools
+      .read_snapshot(None, &run_log_handle(directory.path().to_path_buf()))
+      .await
+      .expect_err("initialize に応答がなければ読み取れません");
     let metrics = tools.take_metrics();
     drop(tools);
 

@@ -2,15 +2,20 @@
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
-//! GetRunDetail は要求時に takt-mcp の takt_get_run を呼びます。GetConversation は保存領域の
-//! manager の会話を読みます。GetGoals・GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
-//! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
+//! GetRunDetail は要求時に run の保存場所を読み、takt-mcp の takt_get_run
+//! でレポートと指示書を補います。GetConversation は保存領域の manager の会話を読みます。GetGoals・
+//! GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を 返し、GetGoalDetail と GetTaskDetail
+//! は要求時に takt-mcp を呼びます。WatchState は接続時に
 //! 全件を返し、定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
 
 pub mod assembly;
 pub mod mapping;
 
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+  path::PathBuf,
+  sync::{Arc, Mutex},
+  time::Instant,
+};
 
 use assembly::{activity_event, assemble_goals, assemble_state_for, conversation_response};
 use chrono::{DateTime, Utc};
@@ -31,6 +36,7 @@ use crate::{
   },
   mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
   model::{self},
+  run_progress::{RunLogHandle, RunLogHandles, RunReadFailure},
   store::StateStore,
   takt_dash::v1::{
     self, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest, ApproveGoalMergeResponse,
@@ -95,6 +101,10 @@ pub struct TaktDashServiceImpl {
   shutdown:     watch::Receiver<bool>,
   registry:     McpClientRegistry,
   clock:        Clock,
+  /// プロジェクトごとの run の集計と、その集計を作ったときの cwd。GetRunDetail が要求をまたいで
+  /// 持ち、同じ run の本体ログを前回の続きから読むために使います。lock は取っ手の受け渡しの間だけ
+  /// 持ち、読み取りの間は持ちません。
+  run_logs:     Mutex<RunLogHandles<ProjectName>>,
 }
 
 /// サービスの現在時刻を返す関数。テストは固定時計を注入します。
@@ -128,7 +138,7 @@ impl TaktDashServiceImpl {
   /// 同じレジストリから同じプロジェクトの子プロセスを取得します。
   ///
   /// GetRunDetail は要求のたびに設定のパスから対象サーバーの起動方法と cwd を解決し、
-  /// takt-mcp の子プロセスを起動して takt_get_run を呼びます。
+  /// run の保存場所を読んだうえで、takt-mcp の子プロセスを起動して takt_get_run を呼びます。
   pub fn new(deps: ServiceDeps) -> Self {
     Self::with_clock(deps, Arc::new(Utc::now))
   }
@@ -136,7 +146,25 @@ impl TaktDashServiceImpl {
   /// 現在時刻を返す関数を注入してサービスを作る。既定は実時計です。
   pub fn with_clock(deps: ServiceDeps, clock: Clock) -> Self {
     let ServiceDeps { store, activity, config_path, conversation, changes, shutdown, registry } = deps;
-    TaktDashServiceImpl { store, activity, config_path, conversation, changes, shutdown, registry, clock }
+    TaktDashServiceImpl {
+      store,
+      activity,
+      config_path,
+      conversation,
+      changes,
+      shutdown,
+      registry,
+      clock,
+      run_logs: Mutex::new(RunLogHandles::default()),
+    }
+  }
+
+  /// プロジェクトの run の集計の取っ手を返す。cwd が変わったときの作り直しは [`RunLogHandles`]
+  /// が決めます。
+  fn run_log_handle(&self, project: &ProjectName, cwd: &std::path::Path) -> Result<RunLogHandle, Status> {
+    let mut run_logs =
+      self.run_logs.lock().map_err(|error| Status::internal(format!("run の集計を取得できませんでした: {error}")))?;
+    Ok(run_logs.handle_for(project, cwd))
   }
 
   /// サービスが今回の要求で使う現在時刻を返す。
@@ -203,6 +231,16 @@ fn tool_error_status(error: ToolError) -> Status {
     | ToolError::Parse(message) => Status::internal(format!("takt-mcp の応答を解析できませんでした: {message}")),
     | ToolError::Tool(error) => Status::unavailable(format!("takt-mcp の道具が失敗しました: {error}")),
     | ToolError::Transport(error) => Status::unavailable(format!("takt-mcp へ接続できませんでした: {error}")),
+    | ToolError::RunLog(failure) => run_read_failure_status(failure),
+  }
+}
+
+/// run の保存場所の読み取り失敗を gRPC のステータスへ変換する。
+fn run_read_failure_status(failure: RunReadFailure) -> Status {
+  match failure {
+    | RunReadFailure::NotListed | RunReadFailure::Missing => Status::not_found(failure.to_string()),
+    | RunReadFailure::Unreadable(_) | RunReadFailure::Rejected(_) => Status::unavailable(failure.to_string()),
+    | RunReadFailure::InvalidMeta(_) => Status::internal(failure.to_string()),
   }
 }
 
@@ -351,8 +389,9 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let view_project = ProjectName::try_from(view.name.as_str())
       .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
     let resolved = self.resolve_project(&view_server_id, &view_project)?;
+    let run_logs = self.run_log_handle(&resolved.project, &resolved.cwd)?;
     let mut client = McpClient::new(resolved.client_config);
-    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_run_detail(&run_slug).await {
+    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_run_detail(&run_slug, &run_logs).await {
       | Ok(detail) => detail,
       | Err(error) => {
         client.shutdown().await;
