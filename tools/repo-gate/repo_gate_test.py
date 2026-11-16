@@ -17,13 +17,15 @@ make は呼ばない。
      持たない、検査が失敗する、のそれぞれで失敗する。
   4. machine_gate が mode: system で、proto-check・fmt・clippy・test・typecheck・lint の
      6つの system_input を過不足なく持ち、各 command が対応する make ターゲットを起動する。
-     検査の欠落・重複・別ターゲットの起動は失敗させる。
+     検査の欠落・重複・別ターゲットの起動は失敗させる。検査を実行させない制御演算子
+     （例: `true || make fmt`）を含む command も、正規形との照合で失敗させる。
   5. machine_gate の成功条件が6つの exit_code == 0 の同時成立で次のステップへ進み、
      失敗条件が検査ごとの修正ステップへ分岐する。公開ステップを置く場合は公開へ、
      置かない場合は aislop_gate へ進む。1検査の抜け、別の遷移先、単一キーの条件は
      失敗させる。
   6. 各修正ステップが当該検査の stdout と stderr だけを参照し、machine_gate へ戻る。
-     別検査の出力参照・戻り遷移の欠落・別の遷移先は失敗させる。
+     別検査の出力参照・戻り遷移の欠落・別の遷移先は失敗させる。戻り遷移を残したまま
+     COMPLETE などへ抜ける迂回規則を足した場合も失敗させる。
   7. aislop_gate の既存の契約（成功で COMPLETE、失敗で修正へ、修正は machine_gate へ
      戻る）と develop → machine_gate → aislop_gate の順序を維持する。
   8. 公開ステップ（publish.py）を置く場合の配線を確かめる。公開ステップが 4 段階
@@ -995,6 +997,23 @@ def test_machine_gate_commands_invoke_their_make_targets() -> None:
             ),
             "lint",
         ),
+        "fmt が制御演算子で検査を実行させない": (
+            MACHINE_GATE_STEP.replace(
+                FMT_INPUT,
+                FMT_INPUT.replace("make fmt 2>&1 | tail -c 60000", "true || make fmt"),
+            ),
+            "正規形",
+        ),
+        "test が制御演算子で make test を実行させない": (
+            MACHINE_GATE_STEP.replace(
+                TEST_INPUT,
+                TEST_INPUT.replace(
+                    'bash -o pipefail -c "make test 2>&1 | tail -c 56000"',
+                    'bash -o pipefail -c "true || make test 2>&1 | tail -c 56000"',
+                ),
+            ),
+            "正規形",
+        ),
     }
     for label, (machine_step, snippet) in cases.items():
         with Sandbox() as sandbox:
@@ -1260,6 +1279,14 @@ def test_machine_gate_fix_steps_return_to_machine_gate() -> None:
         ),
         "lint の修正に戻りの遷移が無い": FIX_MACHINE_GATE_LINT_STEP.replace(
             "        next: machine_gate\n", ""
+        ),
+        "lint の修正に COMPLETE への迂回規則を足す": FIX_MACHINE_GATE_LINT_STEP.replace(
+            "    rules:\n",
+            "    rules:\n      - condition: when(true)\n        next: COMPLETE\n",
+        ),
+        "lint の修正に aislop への迂回規則を足す": FIX_MACHINE_GATE_LINT_STEP.replace(
+            "    rules:\n",
+            "    rules:\n      - condition: when(true)\n        next: aislop_gate\n",
         ),
     }
     for label, mutated in cases.items():

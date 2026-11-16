@@ -60,6 +60,24 @@ GATE_MAKE_TARGETS = {"proto_check": "proto-check"}
 
 def gate_make_target(name):
     return GATE_MAKE_TARGETS.get(name, name)
+
+
+# machine_gate の各検査が実行するコマンドの正規形。
+# 制御演算子で検査の実行を飛ばす変異（例: `true || make fmt`）を、単純コマンドの
+# 解析だけで受理しないよう、コマンド全文を照合する。検査のコマンドを変える場合は
+# ここも更新する（ゲートの検査そのものを変える変更としてレビュー対象にする）。
+MACHINE_GATE_COMMANDS = {
+    "fmt": "bash -o pipefail -c 'make fmt 2>&1 | tail -c 60000'",
+    "clippy": "bash -o pipefail -c 'make clippy 2>&1 | tail -c 60000'",
+    "test": (
+        "bash -c 'if [ ! -d frontend/web/node_modules ]; then "
+        'bash -o pipefail -c "npm --prefix frontend/web ci 2>&1 | tail -c 4000" '
+        '|| exit $?; fi; bash -o pipefail -c "make test 2>&1 | tail -c 56000"\''
+    ),
+    "typecheck": "bash -o pipefail -c 'make typecheck 2>&1 | tail -c 60000'",
+    "lint": "bash -o pipefail -c 'make lint 2>&1 | tail -c 60000'",
+    "proto_check": "bash -o pipefail -c 'make proto-check 2>&1 | tail -c 60000'",
+}
 AISLOP_CHECK_COMMAND = "scripts/aislop-check-bootstrap.mjs check"
 AISLOP_CHECK_INVOCATION = ["node", "scripts/aislop-check-bootstrap.mjs", "check"]
 GATE_EXIT_CODE_REFERENCE = re.compile(r"context\.([A-Za-z0-9_]+)\.result\.exit_code")
@@ -637,6 +655,13 @@ def check_machine_gate_inputs(gate):
                 f"{name} の command が別の検査 {', '.join(others)} を呼んでいます: "
                 f"{item.get('command')!r}"
             )
+        expected = MACHINE_GATE_COMMANDS[name]
+        command = str(item.get("command", "")).strip()
+        if command != expected:
+            raise GateError(
+                f"{name} の command が検査を実行する正規形ではありません: {command!r} "
+                f"（期待する形: {expected!r}）"
+            )
 
 
 def check_machine_gate_success_rule(gate_rules, next_name):
@@ -688,8 +713,21 @@ def check_machine_gate_fix_steps(named):
                 f"{fix_name} の instruction が参照する出力が {name} の stdout と stderr だけでは"
                 f"ありません: {sorted(references)}"
             )
-        if not any(rule.get("next") == "machine_gate" for rule in rules_of(fix)):
-            raise GateError(f"{fix_name} から machine_gate へ戻る遷移がありません")
+        fix_rules = rules_of(fix)
+        allowed = {"machine_gate", "ABORT"}
+        unexpected = sorted(
+            {str(rule.get("next")) for rule in fix_rules if rule.get("next") not in allowed}
+        )
+        if unexpected:
+            raise GateError(
+                f"{fix_name} に許可されない遷移先があります: {unexpected!r}。"
+                "修正ステップの遷移先は machine_gate か ABORT に限ります"
+            )
+        returns = [rule for rule in fix_rules if rule.get("next") == "machine_gate"]
+        if len(returns) != 1:
+            raise GateError(
+                f"{fix_name} から machine_gate へ戻る遷移が 1 つだけありません: {len(returns)}"
+            )
 
 
 def check_machine_gate_transitions(gate_rules, next_name):
