@@ -20,6 +20,10 @@ pub const DEFAULT_INTERVAL_SECONDS: u64 = 30;
 pub const DEFAULT_PENDING_DECISION_STALE_MINUTES: u32 = 240;
 /// ログの無音の既定値（分）。
 pub const DEFAULT_RUN_LOG_SILENT_MINUTES: u32 = 10;
+/// 接続の応答なしと判定する連続失敗回数の既定値。
+pub const DEFAULT_CONNECTION_FAILURE_COUNT: u32 = 3;
+/// 接続の遅延中を応答なしへ移す経過時間の既定値（秒）。
+pub const DEFAULT_CONNECTION_DELAY_SECONDS: u32 = 120;
 /// SQLite の置き場所の既定値（設定ファイルのディレクトリ基準の相対パス）。
 pub const DEFAULT_SQLITE_PATH: &str = "data/taktdash.sqlite";
 /// gRPC サーバーの待ち受けアドレスの既定値。
@@ -79,6 +83,8 @@ pub struct Project {
 pub struct Thresholds {
   pub pending_decision_stale_minutes: StaleMinutes,
   pub run_log_silent_minutes:         SilentMinutes,
+  pub connection_failure_count:       u32,
+  pub connection_delay_seconds:       u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +134,10 @@ struct RawThresholds {
   pending_decision_stale_minutes: Option<u32>,
   #[serde(rename = "runLogSilentMinutes")]
   run_log_silent_minutes:         Option<u32>,
+  #[serde(rename = "connectionFailureCount")]
+  connection_failure_count:       Option<u32>,
+  #[serde(rename = "connectionDelaySeconds")]
+  connection_delay_seconds:       Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -211,7 +221,15 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
       .map_err(|error| ConfigError::Invalid(format!("pendingDecisionStaleMinutes が不正です: {error}")))?,
     run_log_silent_minutes:         SilentMinutes::try_from(run_log_silent_minutes)
       .map_err(|error| ConfigError::Invalid(format!("runLogSilentMinutes が不正です: {error}")))?,
+    connection_failure_count:       raw.thresholds.connection_failure_count.unwrap_or(DEFAULT_CONNECTION_FAILURE_COUNT),
+    connection_delay_seconds:       raw.thresholds.connection_delay_seconds.unwrap_or(DEFAULT_CONNECTION_DELAY_SECONDS),
   };
+  if thresholds.connection_failure_count == 0 {
+    return Err(ConfigError::Invalid("connectionFailureCount は1回以上である必要があります。".to_owned()));
+  }
+  if thresholds.connection_delay_seconds == 0 {
+    return Err(ConfigError::Invalid("connectionDelaySeconds は1秒以上である必要があります。".to_owned()));
+  }
   let listen_raw = raw.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
   let listen = listen_raw.parse::<SocketAddr>().map_err(|error| {
     ConfigError::Invalid(format!("listen {listen_raw} を待ち受けアドレスとして解釈できませんでした: {error}"))

@@ -66,6 +66,19 @@ test("run 詳細ページは本番経路でも JSONL の直接表示や生ログ
   }
 });
 
+test("開始時刻が無い run でも本番経路で描画し、開始時刻は不明と表示する", async () => {
+  const response = { ...createRunDetailResponse("run-aaa"), startedAt: undefined };
+  const server = await startTaktDashServer({ runDetail: response });
+  try {
+    const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
+    assert.match(html, /開始時刻は不明です。/);
+    assert.match(html, /採用ページのレイアウトを直す/);
+    assert.doesNotMatch(html, /1970-01-01/);
+  } finally {
+    await server.shutdown();
+  }
+});
+
 test("見つからない runSlug は本番経路で notFound()（404 の digest）に到達する", async () => {
   const server = await startTaktDashServer({ runDetail: { code: grpc.status.NOT_FOUND, details: "missing" } });
   try {

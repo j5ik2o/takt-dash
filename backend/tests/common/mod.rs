@@ -109,6 +109,7 @@ pub fn task(name: &str, status: TaskStatus) -> TaskEntry {
     status,
     started_at: None,
     run_slug: None,
+    source_run_slug: None,
     current_step: None,
     merge_task: false,
   }
@@ -146,23 +147,26 @@ pub fn notification(id: &str, kind: &str, recorded_at: DateTime<Utc>) -> Notific
 
 pub fn run(run_slug: &str, task_name: &str, last_log_at: DateTime<Utc>) -> RunEntry {
   RunEntry {
-    run_slug: run_slug.to_owned(),
-    session_id: String::new(),
-    task_name: TaskName::try_from(task_name).expect("テストのタスク名は有効です"),
-    goal_id: None,
-    summary: String::new(),
-    status: takt_dash_backend::model::RunStatus::Running,
-    current_step: Some("implement".to_owned()),
-    started_at: last_log_at,
+    run_slug:                run_slug.to_owned(),
+    session_id:              String::new(),
+    task_name:               TaskName::try_from(task_name).expect("テストのタスク名は有効です"),
+    goal_id:                 None,
+    summary:                 String::new(),
+    status:                  takt_dash_backend::model::RunStatus::Running,
+    current_step:            Some("implement".to_owned()),
+    current_iteration:       None,
+    current_step_number:     None,
+    total_steps:             None,
+    started_at:              Some(last_log_at),
     current_step_started_at: None,
-    last_log_at,
-    steps: vec![takt_dash_backend::model::RunStepEntry {
+    last_log_at:             Some(last_log_at),
+    steps:                   vec![takt_dash_backend::model::RunStepEntry {
       step_name:  "implement".to_owned(),
       model:      String::new(),
       started_at: last_log_at,
       ended_at:   None,
     }],
-    reports: Vec::new(),
+    reports:                 Vec::new(),
   }
 }
 
@@ -197,5 +201,7 @@ pub fn thresholds() -> Thresholds {
   Thresholds {
     pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
     run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
+    connection_failure_count:       3,
+    connection_delay_seconds:       120,
   }
 }

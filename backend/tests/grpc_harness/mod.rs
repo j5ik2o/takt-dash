@@ -60,6 +60,8 @@ impl Default for GrpcHarnessBuilder {
       thresholds: Thresholds {
         pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
         run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
+        connection_failure_count:       3,
+        connection_delay_seconds:       120,
       },
     }
   }
@@ -164,6 +166,8 @@ impl GrpcHarnessBuilder {
       "thresholds": {
         "pendingDecisionStaleMinutes": thresholds.pending_decision_stale_minutes.get(),
         "runLogSilentMinutes": thresholds.run_log_silent_minutes.get(),
+        "connectionFailureCount": thresholds.connection_failure_count,
+        "connectionDelaySeconds": thresholds.connection_delay_seconds,
       },
       "sqlite": { "path": "data/taktdash.sqlite" },
     });
@@ -227,6 +231,8 @@ impl GrpcHarness {
     value["thresholds"] = json!({
       "pendingDecisionStaleMinutes": thresholds.pending_decision_stale_minutes.get(),
       "runLogSilentMinutes": thresholds.run_log_silent_minutes.get(),
+      "connectionFailureCount": thresholds.connection_failure_count,
+      "connectionDelaySeconds": thresholds.connection_delay_seconds,
     });
     std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
   }

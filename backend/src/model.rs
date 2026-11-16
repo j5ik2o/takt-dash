@@ -3,6 +3,8 @@
 //! これらの型は lib の公開 API の一部であり、後続のタスクの gRPC サーバーが
 //! 読み取り系 API の応答を組み立てるために使います。
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 
 use crate::domain::{GoalId, InquiryId, PullRequestNumber, RegistrationRevision, RunSlug, TaskName};
@@ -34,6 +36,28 @@ pub enum TaskStatus {
   PrFailed,
 }
 
+/// プロジェクトの接続状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+  /// 最後の読み取りに成功している。
+  Connected,
+  /// 直近の読み取りに失敗したが、遅延のしきい値には達していない。
+  Delayed,
+  /// 連続失敗と経過時間のしきい値を超えて応答がない。
+  Unresponsive,
+}
+
+/// 接続状態の遷移。出来事の検出と投影に使います。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionTransition {
+  /// 遷移前の状態。まだ一度も読めていない場合は None。
+  pub previous: Option<ConnectionState>,
+  /// 遷移後の状態。スロットが無い場合は None。
+  pub next:     Option<ConnectionState>,
+  /// 応答なしから接続中へ戻ったときの、応答なしだった時間。
+  pub outage:   Option<chrono::Duration>,
+}
+
 /// アクティビティの出来事の種類。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
@@ -45,6 +69,7 @@ pub enum EventKind {
   Paused,
   Blocked,
   ConnectionLost,
+  ConnectionRestored,
 }
 
 impl EventKind {
@@ -59,6 +84,7 @@ impl EventKind {
       | EventKind::Paused => "paused",
       | EventKind::Blocked => "blocked",
       | EventKind::ConnectionLost => "connection_lost",
+      | EventKind::ConnectionRestored => "connection_restored",
     }
   }
 
@@ -73,6 +99,7 @@ impl EventKind {
       | "paused" => Some(EventKind::Paused),
       | "blocked" => Some(EventKind::Blocked),
       | "connection_lost" => Some(EventKind::ConnectionLost),
+      | "connection_restored" => Some(EventKind::ConnectionRestored),
       | _ => None,
     }
   }
@@ -113,14 +140,83 @@ pub struct GoalEntry {
 /// タスクの一覧に含まれるタスク。配列順は tasks.yaml の順を保ちます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEntry {
-  pub name:         TaskName,
-  pub goal_id:      Option<GoalId>,
-  pub status:       TaskStatus,
-  pub started_at:   Option<DateTime<Utc>>,
-  pub run_slug:     Option<RunSlug>,
-  pub current_step: Option<String>,
+  pub name:            TaskName,
+  pub goal_id:         Option<GoalId>,
+  pub status:          TaskStatus,
+  pub started_at:      Option<DateTime<Utc>>,
+  pub run_slug:        Option<RunSlug>,
+  /// takt_list_tasks の sourceRunSlug。完了タスクが元 run を指すときに持ちます。
+  pub source_run_slug: Option<String>,
+  pub current_step:    Option<String>,
   /// ゴールの仕上げタスクかどうか。
-  pub merge_task:   bool,
+  pub merge_task:      bool,
+}
+
+/// takt_get_goal から得たゴールの詳細。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalDetail {
+  pub goal_id:             String,
+  pub status:              GoalStatus,
+  pub execution_status:    ExecutionStatus,
+  pub objective:           String,
+  pub out_of_scope:        Vec<String>,
+  pub acceptance_criteria: Vec<String>,
+  pub constraints:         Vec<String>,
+  pub specifications:      BTreeMap<String, String>,
+  pub branch:              String,
+  pub integration_branch:  String,
+  pub work_log:            Vec<GoalWorkLogEntry>,
+  pub questions:           Vec<GoalQuestionEntry>,
+  pub tasks:               Vec<GoalTaskEntry>,
+}
+
+/// ゴールの作業記録。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalWorkLogEntry {
+  pub work_log_id: String,
+  pub recorded_at: DateTime<Utc>,
+  pub summary:     String,
+}
+
+/// ゴールに対する manager の質問と回答。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalQuestionEntry {
+  pub question_id:     String,
+  pub kind:            String,
+  pub status:          String,
+  pub body:            String,
+  pub options:         Vec<String>,
+  pub answer_text:     Option<String>,
+  pub answer_decision: Option<String>,
+  pub answer_report:   Option<String>,
+  pub created_at:      Option<DateTime<Utc>>,
+  pub answered_at:     Option<DateTime<Utc>>,
+}
+
+/// ゴールに紐づくタスク。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalTaskEntry {
+  pub task_name: String,
+  pub status:    TaskStatus,
+  pub run_slug:  Option<String>,
+}
+
+/// takt_list_tasks から得たタスクの詳細。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDetail {
+  pub project:             String,
+  pub task_name:           String,
+  pub goal_id:             Option<String>,
+  pub status:              TaskStatus,
+  pub summary:             String,
+  pub created_at:          Option<DateTime<Utc>>,
+  pub started_at:          Option<DateTime<Utc>>,
+  pub completed_at:        Option<DateTime<Utc>>,
+  pub run_slug:            Option<String>,
+  pub linked_run_slugs:    Vec<String>,
+  pub pull_request_number: Option<i64>,
+  pub branch:              Option<String>,
+  pub pull_request_url:    Option<String>,
 }
 
 /// ゴールに属する問い合わせ。
@@ -196,9 +292,12 @@ pub struct RunEntry {
   pub summary:                 String,
   pub status:                  RunStatus,
   pub current_step:            Option<String>,
-  pub started_at:              DateTime<Utc>,
+  pub current_step_number:     Option<i32>,
+  pub total_steps:             Option<i32>,
+  pub current_iteration:       Option<i32>,
+  pub started_at:              Option<DateTime<Utc>>,
   pub current_step_started_at: Option<DateTime<Utc>>,
-  pub last_log_at:             DateTime<Utc>,
+  pub last_log_at:             Option<DateTime<Utc>>,
   pub steps:                   Vec<RunStepEntry>,
   pub reports:                 Vec<ReportEntry>,
 }
@@ -214,7 +313,7 @@ pub struct RunDetail {
   pub summary: String,
   pub workflow: String,
   pub status: RunStatus,
-  pub started_at: DateTime<Utc>,
+  pub started_at: Option<DateTime<Utc>>,
   pub current_step: Option<String>,
   pub current_iteration: Option<i32>,
   pub current_step_started_at: Option<DateTime<Utc>>,
@@ -224,7 +323,7 @@ pub struct RunDetail {
   pub log_tail: String,
   pub reports: Vec<RunReportEntry>,
   pub instructions: Vec<RunInstructionEntry>,
-  pub last_log_at: DateTime<Utc>,
+  pub last_log_at: Option<DateTime<Utc>>,
 }
 
 /// run のステップの記録。
@@ -332,15 +431,17 @@ pub enum PendingDecisionFilter {
 /// 状態ストアが返す、1プロジェクト分の投影。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectView {
-  pub name:         String,
-  pub about:        String,
-  pub server_id:    String,
-  pub connected:    bool,
+  pub name:             String,
+  pub about:            String,
+  pub server_id:        String,
+  pub connected:        bool,
+  /// 接続状態。まだ一度も読めていない場合は None。
+  pub connection_state: Option<ConnectionState>,
   /// 最後に読めた時刻。応答がない間も保持します。
-  pub last_read_at: Option<DateTime<Utc>>,
-  pub goals:        Vec<GoalEntry>,
-  pub tasks:        Vec<TaskEntry>,
-  pub runs:         Vec<RunEntry>,
+  pub last_read_at:     Option<DateTime<Utc>>,
+  pub goals:            Vec<GoalEntry>,
+  pub tasks:            Vec<TaskEntry>,
+  pub runs:             Vec<RunEntry>,
   /// 状態の元になった snapshot。プロジェクトがまだ一度も読めていない場合は None。
-  pub snapshot:     Option<ProjectSnapshot>,
+  pub snapshot:         Option<ProjectSnapshot>,
 }

@@ -7,6 +7,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DashboardState,
+  GetGoalDetailResponse,
+  GetTaskDetailResponse,
   GoalStatus,
   InquiryKind,
   PendingDecisionType,
@@ -16,11 +18,15 @@ import {
 import {
   createActionableDashboardState,
   createDashboardState,
+  createGoalDetailResponse,
+  createTaskDetailResponse,
   NOW,
 } from "../support/fixtures.ts";
 import {
   dashboardStateFromProto,
   restoreDashboardState,
+  restoreGoalDetail,
+  restoreTaskDetail,
 } from "../../src/state/restore-state.ts";
 import { DomainPrimitiveError } from "../../src/state/domain-primitives.ts";
 
@@ -315,4 +321,83 @@ test("承認待ちの revision と任意ゴール ID を含む実送信形式を
     restored.pendingDecisions.find((decision) => decision.body === "revision の無い承認待ちです。")?.revision,
     undefined,
   );
+});
+
+test("ゴール詳細の JSON を内部型へ復元し、作業記録・質問・タスクを保つ", () => {
+  const wire = GetGoalDetailResponse.toJSON(createGoalDetailResponse());
+  const restored = restoreGoalDetail(wire);
+  assert.equal(restored.goalId, "goal-1");
+  assert.equal(restored.status, 2);
+  assert.equal(restored.executionStatus, 1);
+  assert.equal(restored.objective, "採用ページのレイアウトを直す目的です。");
+  assert.deepEqual(restored.outOfScope, ["管理画面の変更は対象外です。"]);
+  assert.deepEqual(restored.acceptanceCriteria, [
+    "採用ページのレイアウトが崩れないこと。",
+    "スマートフォンで読めること。",
+  ]);
+  assert.deepEqual(restored.constraints, ["既存の配色を変えないこと。"]);
+  assert.equal(restored.branch, "goal/45-frontend");
+  assert.equal(restored.integrationBranch, "main");
+  assert.ok(restored.workLog[0]!.recordedAt instanceof Date);
+  assert.equal(restored.workLog[0]!.summary, "最初の作業記録です。");
+  assert.equal(restored.questions[0]!.answerText, "変えないでください。");
+  assert.equal(restored.questions[1]!.answerText, undefined);
+  assert.equal(restored.tasks[0]!.status, 3);
+  assert.equal(restored.tasks[1]!.runSlug, "run-bbb");
+});
+
+test("タスク詳細の JSON を内部型へ復元し、開始時刻と列挙型と任意項目を保つ", () => {
+  const wire = GetTaskDetailResponse.toJSON(createTaskDetailResponse());
+  const restored = restoreTaskDetail(wire);
+  assert.equal(restored.project, "corporate-site");
+  assert.equal(restored.taskName, "採用ページのレイアウトを直す");
+  assert.equal(restored.goalId, "goal-1");
+  assert.equal(restored.status, 3);
+  assert.ok(restored.startedAt instanceof Date);
+  assert.equal(restored.pullRequestNumber, 418);
+  assert.equal(restored.branch, "goal/45-frontend");
+  assert.equal(restored.pullRequestUrl, "https://example.test/pr/418");
+  assert.deepEqual(restored.linkedRunSlugs, ["run-aaa", "run-bbb"]);
+});
+
+test("タスク詳細の JSON を復元するとき、作成時刻と完了時刻を Date として保つ", () => {
+  const createdAt = new Date("2026-11-13T06:00:00Z");
+  const completedAt = new Date("2026-11-13T07:00:00Z");
+  const wire = GetTaskDetailResponse.toJSON(createTaskDetailResponse({ createdAt, completedAt }));
+  const restored = restoreTaskDetail(wire);
+  assert.ok(restored.createdAt instanceof Date, "作成時刻を Date として復元する");
+  assert.equal(restored.createdAt!.toISOString(), createdAt.toISOString());
+  assert.ok(restored.completedAt instanceof Date, "完了時刻を Date として復元する");
+  assert.equal(restored.completedAt!.toISOString(), completedAt.toISOString());
+});
+
+test("タスク詳細の JSON で作成時刻と完了時刻が省略されたときは undefined のまま復元する", () => {
+  const wire = GetTaskDetailResponse.toJSON(
+    createTaskDetailResponse({ createdAt: undefined, completedAt: undefined }),
+  );
+  const restored = restoreTaskDetail(wire);
+  assert.equal(restored.createdAt, undefined);
+  assert.equal(restored.completedAt, undefined);
+});
+
+test("タスク詳細の任意項目が省略された JSON は undefined のまま復元し、undefined 文字列を作らない", () => {
+  const wire = GetTaskDetailResponse.toJSON(
+    createTaskDetailResponse({
+      startedAt: undefined,
+      branch: undefined,
+      pullRequestNumber: undefined,
+      pullRequestUrl: undefined,
+      goalId: undefined,
+      runSlug: undefined,
+      linkedRunSlugs: [],
+    }),
+  );
+  const restored = restoreTaskDetail(wire);
+  assert.equal(restored.startedAt, undefined);
+  assert.equal(restored.branch, undefined);
+  assert.equal(restored.pullRequestNumber, undefined);
+  assert.equal(restored.pullRequestUrl, undefined);
+  assert.equal(restored.goalId, undefined);
+  assert.equal(restored.runSlug, undefined);
+  assert.deepEqual(restored.linkedRunSlugs, []);
 });

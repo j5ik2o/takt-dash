@@ -197,6 +197,24 @@ impl v1::takt_dash_service_server::TaktDashService for DummyService {
     Err(Status::unimplemented("このダミーサーバーは GetRunDetail を提供しません。"))
   }
 
+  async fn get_goals(&self, _request: Request<v1::GetGoalsRequest>) -> Result<Response<v1::GetGoalsResponse>, Status> {
+    Err(Status::unimplemented("このダミーサーバーは GetGoals を提供しません。"))
+  }
+
+  async fn get_goal_detail(
+    &self,
+    _request: Request<v1::GetGoalDetailRequest>,
+  ) -> Result<Response<v1::GetGoalDetailResponse>, Status> {
+    Err(Status::unimplemented("このダミーサーバーは GetGoalDetail を提供しません。"))
+  }
+
+  async fn get_task_detail(
+    &self,
+    _request: Request<v1::GetTaskDetailRequest>,
+  ) -> Result<Response<v1::GetTaskDetailResponse>, Status> {
+    Err(Status::unimplemented("このダミーサーバーは GetTaskDetail を提供しません。"))
+  }
+
   async fn get_conversation(
     &self,
     _request: Request<v1::GetConversationRequest>,
@@ -744,6 +762,7 @@ fn pending_state() -> v1::DashboardState {
       pending_decision_stale_minutes: 240,
       run_log_silent_minutes:         10,
     }),
+    build_info:        None,
   }
 }
 

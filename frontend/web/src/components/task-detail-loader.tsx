@@ -1,0 +1,62 @@
+import type { ReactElement } from "react";
+import { notFound } from "next/navigation";
+import {
+  BackendUnavailableError,
+  createBackendClient,
+  TaskNotFoundError,
+} from "../grpc/client";
+import type { GetTaskDetailResponse } from "../proto/taktdash";
+import { BackendUnavailableNotice } from "./backend-unavailable-notice";
+import { LiveTaskDetail } from "./live-task-detail";
+
+type TaskDetailLoaderProps = {
+  params: Promise<{ project: string }>;
+  searchParams: Promise<{ task?: string | string[]; goal?: string | string[] }>;
+};
+
+type LoadResult =
+  | { kind: "found"; detail: GetTaskDetailResponse }
+  | { kind: "unavailable" };
+
+const firstValue = (value: string | string[] | undefined): string | undefined =>
+  Array.isArray(value) ? value[0] : value;
+
+// タスクが見つからないときは 404 を返す。gRPC の NOT_FOUND と応答の taskName・project・
+// goalId の不一致は、どれも TaskNotFoundError として扱う。backend 自体に接続できない
+// ときはページを落とさず、接続できない旨を表示する。
+export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoaderProps): Promise<ReactElement> {
+  const { project } = await params;
+  const query = await searchParams;
+  const taskName = firstValue(query.task);
+  const goalId = firstValue(query.goal);
+  if (taskName === undefined) {
+    notFound();
+  }
+  const client = createBackendClient();
+  let result: LoadResult;
+  try {
+    result = { kind: "found", detail: await client.getTaskDetail(project, taskName, goalId) };
+  } catch (error) {
+    if (error instanceof TaskNotFoundError) {
+      notFound();
+    }
+    if (error instanceof BackendUnavailableError) {
+      result = { kind: "unavailable" };
+    } else {
+      throw error;
+    }
+  } finally {
+    await client.close();
+  }
+  if (result.kind === "unavailable") {
+    return <BackendUnavailableNotice />;
+  }
+  return (
+    <LiveTaskDetail
+      initialDetail={result.detail}
+      project={project}
+      taskName={taskName}
+      goalId={goalId}
+    />
+  );
+}
