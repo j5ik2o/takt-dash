@@ -5,7 +5,7 @@
 // restoreConversationResponse が内部の型へ復元する。差分取得は after_seq と
 // next_after_seq を使い、最初の応答の session_id を固定して同一の会話を追う。
 import { Timestamp } from "../proto/google/protobuf/timestamp";
-import { CONVERSATION_SPEAKER, enumFromWire } from "./proto-values";
+import { CONVERSATION_SPEAKER, enumFromWireOrUnrecognizedName } from "./proto-values";
 
 export type ConversationMessageView = {
   seq: number;
@@ -80,7 +80,7 @@ const asNumber = (value: unknown): number => (typeof value === "number" ? value 
 const toMessage = (raw: Record<string, unknown>): ConversationMessageView => ({
   seq: asNumber(raw.seq),
   occurredAt: toDate(raw.occurredAt),
-  speaker: enumFromWire("ConversationSpeaker", raw.speaker),
+  speaker: enumFromWireOrUnrecognizedName("ConversationSpeaker", raw.speaker),
   text: String(raw.text ?? ""),
   notice: typeof raw.notice === "string" ? raw.notice : undefined,
 });

@@ -1,10 +1,11 @@
-//! proto/taktdash.proto の TaktDashService（読み取り系 API）の実装。
+//! proto/taktdash.proto の TaktDashService（読み取り系と書き込み系の API）の実装。
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
 //! GetRunDetail は要求時に takt-mcp の takt_get_run を呼びます。GetConversation は保存領域の
-//! manager の会話を読みます。WatchState は接続時に全件を返し、
-//! 定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
+//! manager の会話を読みます。GetGoals・GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
+//! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
+//! 全件を返し、定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
 
 pub mod mapping;
 
@@ -12,8 +13,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use mapping::{
-  activity_kind, conversation_speaker, execution_status, goal_status, inquiry_kind, optional_timestamp,
-  pending_decision_type, run_status, step_log, task_status, timestamp,
+  activity_kind, connection_state, conversation_speaker, execution_status, goal_question, goal_status, goal_task,
+  goal_work_log, inquiry_kind, optional_timestamp, pending_decision_type, run_status, step_log, task_status, timestamp,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
@@ -21,17 +22,22 @@ use tonic::{Request, Response, Status};
 
 use crate::{
   activity::ActivityStore,
-  config::load_config,
+  config::{load_config, Config},
   conversation::{ConversationPage, ConversationQuery, ConversationReader},
+  domain::{
+    GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, ServerId, TaskCount,
+    TaskName,
+  },
   mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
   model::{self, TaskEntry},
   store::StateStore,
   takt_dash::v1::{
     self, ActivityEvent, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
     ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse, DashboardState,
-    GetActivityRequest, GetActivityResponse, GetConversationRequest, GetConversationResponse, GetOverviewRequest,
-    GetPendingDecisionsRequest, GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse,
-    GetRunDetailRequest, GetRunDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
+    GetActivityRequest, GetActivityResponse, GetConversationRequest, GetConversationResponse, GetGoalDetailRequest,
+    GetGoalDetailResponse, GetGoalsRequest, GetGoalsResponse, GetOverviewRequest, GetPendingDecisionsRequest,
+    GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse, GetRunDetailRequest, GetRunDetailResponse,
+    GetTaskDetailRequest, GetTaskDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
     ListGoalRegistrationProposalsResponse, OperationAnswerReport, PendingDecision, Project,
     RejectGoalRegistrationRequest, RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, Server,
     TaskStatusCounts, WatchStateRequest,
@@ -144,7 +150,8 @@ fn assemble_projects(views: &[model::ProjectView], activity: &ActivityStore, now
   views
     .iter()
     .map(|view| {
-      let completed_tasks_24h = activity.completed_tasks_since(&view.name, since).unwrap_or_default();
+      let completed_tasks_24h =
+        activity.completed_tasks_since(&view.name, since).map(TaskCount::get).unwrap_or_default();
       Project {
         name: view.name.clone(),
         about: view.about.clone(),
@@ -152,6 +159,7 @@ fn assemble_projects(views: &[model::ProjectView], activity: &ActivityStore, now
         completed_tasks_24h,
         connected: view.connected,
         last_read_at: optional_timestamp(view.last_read_at),
+        connection_state: connection_state(view.connection_state) as i32,
       }
     })
     .collect()
@@ -164,14 +172,14 @@ fn assemble_goals(views: &[model::ProjectView]) -> Vec<v1::Goal> {
     let merge_tasks: Vec<&TaskEntry> = view.tasks.iter().filter(|task| task.merge_task).collect();
     for goal in &view.goals {
       let goal_tasks: Vec<&TaskEntry> =
-        view.tasks.iter().filter(|task| task.goal_id.as_deref() == Some(goal.goal_id.as_str())).collect();
+        view.tasks.iter().filter(|task| task.goal_id.as_ref() == Some(&goal.goal_id)).collect();
       let merge_task_last = merge_tasks
         .iter()
         .rev()
-        .find(|task| task.goal_id.as_deref() == Some(goal.goal_id.as_str()))
+        .find(|task| task.goal_id.as_ref() == Some(&goal.goal_id))
         .map(|task| task_status(task.status) as i32);
       goals.push(v1::Goal {
-        goal_id: goal.goal_id.clone(),
+        goal_id: goal.goal_id.as_str().to_owned(),
         server_id: view.server_id.clone(),
         project: view.name.clone(),
         name: goal.objective.clone(),
@@ -179,7 +187,10 @@ fn assemble_goals(views: &[model::ProjectView]) -> Vec<v1::Goal> {
         execution_status: execution_status(goal.execution_status) as i32,
         task_counts: Some(task_status_counts(&goal_tasks)),
         paused_reason: goal.paused_reason.clone(),
-        pull_request: pull_request(goal.pull_request_number, goal.pull_request_url.as_deref()),
+        pull_request: pull_request(
+          goal.pull_request_number.map(PullRequestNumber::get),
+          goal.pull_request_url.as_deref(),
+        ),
         awaiting_merge_at: optional_timestamp(goal.awaiting_merge_at),
         merge_task_last,
       });
@@ -189,18 +200,21 @@ fn assemble_goals(views: &[model::ProjectView]) -> Vec<v1::Goal> {
 }
 
 fn task_status_counts(tasks: &[&TaskEntry]) -> TaskStatusCounts {
-  let mut counts = TaskStatusCounts::default();
-  for task in tasks {
-    match task.status {
-      | model::TaskStatus::Pending => counts.pending += 1,
-      | model::TaskStatus::Running => counts.running += 1,
-      | model::TaskStatus::Completed => counts.completed += 1,
-      | model::TaskStatus::Failed => counts.failed += 1,
-      | model::TaskStatus::Exceeded => counts.exceeded += 1,
-      | model::TaskStatus::PrFailed => counts.pr_failed += 1,
-    }
+  // 状態ごとの件数も `TaskCount` を通し、`i32` の上限を超える件数は proto の表現に合わせて
+  // 飽和させます。実運用の件数は上限に届きませんが、集計の型を迂回しません。
+  let count = |status: model::TaskStatus| {
+    let total = tasks.iter().filter(|task| task.status == status).count();
+    let total = i64::try_from(total).unwrap_or(i64::MAX);
+    TaskCount::try_from(total).map(TaskCount::get).unwrap_or(i32::MAX)
+  };
+  TaskStatusCounts {
+    pending:   count(model::TaskStatus::Pending),
+    running:   count(model::TaskStatus::Running),
+    completed: count(model::TaskStatus::Completed),
+    failed:    count(model::TaskStatus::Failed),
+    exceeded:  count(model::TaskStatus::Exceeded),
+    pr_failed: count(model::TaskStatus::PrFailed),
   }
-  counts
 }
 
 fn pull_request(number: Option<i64>, url: Option<&str>) -> Option<v1::PullRequest> {
@@ -220,10 +234,10 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
         session_id:              run.session_id.clone(),
         server_id:               view.server_id.clone(),
         project:                 view.name.clone(),
-        goal_id:                 run.goal_id.clone().unwrap_or_default(),
-        task_name:               run.task_name.clone(),
+        goal_id:                 run.goal_id.as_ref().map(|goal_id| goal_id.as_str().to_owned()).unwrap_or_default(),
+        task_name:               run.task_name.as_str().to_owned(),
         summary:                 run.summary.clone(),
-        started_at:              Some(timestamp(run.started_at)),
+        started_at:              optional_timestamp(run.started_at),
         steps:                   run
           .steps
           .iter()
@@ -235,7 +249,8 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
           })
           .collect(),
         current_step_started_at: optional_timestamp(run.current_step_started_at),
-        last_log_at:             Some(timestamp(run.last_log_at)),
+        current_step_name:       run.current_step.clone(),
+        last_log_at:             optional_timestamp(run.last_log_at),
         reports:                 run
           .reports
           .iter()
@@ -243,6 +258,9 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
           .collect(),
         status:                  run_status(run.status) as i32,
         log_silent:              store.is_log_silent(run, now),
+        current_step_number:     run.current_step_number,
+        total_steps:             run.total_steps,
+        current_iteration:       run.current_iteration,
       });
     }
   }
@@ -264,10 +282,13 @@ fn assemble_pending_decisions(store: &StateStore, now: DateTime<Utc>) -> Vec<Pen
       created_at:   Some(timestamp(decision.created_at)),
       body:         decision.body,
       options:      decision.options,
-      pull_request: pull_request(decision.pull_request_number, decision.pull_request_url.as_deref()),
+      pull_request: pull_request(
+        decision.pull_request_number.map(PullRequestNumber::get),
+        decision.pull_request_url.as_deref(),
+      ),
       stale:        decision.stale,
-      inquiry_id:   decision.inquiry_id,
-      revision:     decision.revision,
+      inquiry_id:   decision.inquiry_id.as_ref().map(|inquiry_id| inquiry_id.as_str().to_owned()).unwrap_or_default(),
+      revision:     decision.revision.map(RegistrationRevision::get),
     })
     .collect()
 }
@@ -279,7 +300,7 @@ fn activity_event(event: model::ActivityEvent) -> ActivityEvent {
     project:     event.project,
     kind:        activity_kind(event.kind) as i32,
     body:        event.body,
-    run_slug:    event.run_slug,
+    run_slug:    event.run_slug.map(|run_slug| run_slug.as_str().to_owned()),
   }
 }
 
@@ -294,46 +315,47 @@ fn tool_error_status(error: ToolError) -> Status {
 
 /// 設定から解決した、対象サーバーの起動方法とプロジェクトの cwd。
 struct ResolvedProject {
-  server_id:     String,
-  project:       String,
+  server_id:     ServerId,
+  project:       ProjectName,
   client_config: crate::mcp::McpClientConfig,
   cwd:           PathBuf,
+}
+
+/// 読み込み済みの設定から、`server_id` と `project` の起動方法と cwd を解決する。
+///
+/// 設定に無いサーバー・プロジェクトは `unavailable` で返し、takt-mcp を起動しません。
+fn resolve_project_in(config: &Config, server_id: &ServerId, project: &ProjectName) -> Result<ResolvedProject, Status> {
+  let server = config
+    .servers
+    .get(server_id.as_str())
+    .ok_or_else(|| Status::unavailable(format!("サーバー {} の起動方法が設定にありません。", server_id.as_str())))?
+    .clone();
+  let cwd = config
+    .projects
+    .iter()
+    .find(|entry| entry.name == project.as_str() && entry.server == server_id.as_str())
+    .map(|entry| entry.cwd.clone())
+    .ok_or_else(|| Status::unavailable(format!("プロジェクト {} の cwd が設定にありません。", project.as_str())))?;
+  Ok(ResolvedProject {
+    server_id: server_id.clone(),
+    project: project.clone(),
+    client_config: client_config(&server, &cwd),
+    cwd,
+  })
 }
 
 impl TaktDashServiceImpl {
   /// 設定を読み、`server_id` と `project` から対象サーバーの起動方法と cwd を解決する。
   ///
   /// 設定に無いサーバー・プロジェクトは `unavailable` で返し、takt-mcp を起動しません。
-  fn resolve_project(&self, server_id: &str, project: &str) -> Result<ResolvedProject, Status> {
+  fn resolve_project(&self, server_id: &ServerId, project: &ProjectName) -> Result<ResolvedProject, Status> {
     let config = load_config(&self.config_path)
       .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
-    let server = config
-      .servers
-      .get(server_id)
-      .ok_or_else(|| Status::unavailable(format!("サーバー {server_id} の起動方法が設定にありません。")))?
-      .clone();
-    let cwd = config
-      .projects
-      .iter()
-      .find(|entry| entry.name == project && entry.server == server_id)
-      .map(|entry| entry.cwd.clone())
-      .ok_or_else(|| Status::unavailable(format!("プロジェクト {project} の cwd が設定にありません。")))?;
-    Ok(ResolvedProject {
-      server_id: server_id.to_owned(),
-      project: project.to_owned(),
-      client_config: client_config(&server, &cwd),
-      cwd,
-    })
+    resolve_project_in(&config, server_id, project)
   }
 
-  /// 書き込み RPC の共通の入口。`server_id` と `project` の空文字を拒否し、対象を解決する。
-  fn resolve_write_target(&self, server_id: &str, project: &str) -> Result<ResolvedProject, Status> {
-    if server_id.trim().is_empty() {
-      return Err(Status::invalid_argument("server_id が空です。"));
-    }
-    if project.trim().is_empty() {
-      return Err(Status::invalid_argument("project が空です。"));
-    }
+  /// 書き込み RPC の共通の入口。型で検証済みの対象を解決する。
+  fn resolve_write_target(&self, server_id: &ServerId, project: &ProjectName) -> Result<ResolvedProject, Status> {
     self.resolve_project(server_id, project)
   }
 }
@@ -341,7 +363,7 @@ impl TaktDashServiceImpl {
 /// 会話のページを proto の応答へ写す。
 fn conversation_response(page: ConversationPage) -> GetConversationResponse {
   GetConversationResponse {
-    project:            page.project,
+    project:            page.project.as_str().to_owned(),
     session_id:         page.session_id,
     provider:           page.provider,
     messages:           page
@@ -412,7 +434,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .map_err(|error| Status::internal(format!("日次集計を取得できませんでした: {error}")))?
       .into_iter()
       .map(|summary| v1::DailySummary {
-        date:      summary.date,
+        date:      summary.date.as_str().to_owned(),
         total:     summary.total,
         attention: summary.attention,
       })
@@ -422,7 +444,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .today_counts_by_server(now)
       .map_err(|error| Status::internal(format!("サーバーごとの件数を取得できませんでした: {error}")))?
       .into_iter()
-      .map(|count| v1::ServerEventCount { server_id: count.server_id, count: count.count })
+      .map(|count| v1::ServerEventCount { server_id: count.server_id.as_str().to_owned(), count: count.count })
       .collect();
     Ok(Response::new(GetActivityResponse { state: Some(state), events, daily_summaries, today_counts_by_server }))
   }
@@ -431,19 +453,25 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     &self,
     request: Request<GetRunDetailRequest>,
   ) -> Result<Response<GetRunDetailResponse>, Status> {
-    let run_slug = request.into_inner().run_slug;
-    if run_slug.trim().is_empty() {
+    let run_slug_text = request.into_inner().run_slug;
+    if run_slug_text.trim().is_empty() {
       return Err(Status::invalid_argument("runSlug が空です。"));
     }
+    let run_slug = RunSlug::try_from(run_slug_text.as_str())
+      .map_err(|error| Status::invalid_argument(format!("runSlug が不正です: {error}")))?;
     let view = self
       .store
       .find_run_project(&run_slug)
-      .ok_or_else(|| Status::not_found(format!("runSlug {run_slug} は状態ストアにありません。")))?;
-    let stored_run = view.runs.iter().find(|run| run.run_slug == run_slug).cloned();
+      .ok_or_else(|| Status::not_found(format!("runSlug {} は状態ストアにありません。", run_slug.as_str())))?;
+    let stored_run = view.runs.iter().find(|run| run.run_slug == run_slug.as_str()).cloned();
     // 完了した run は実行中一覧から消えるため、状態ストアの完了タスクからゴールと
     // タスク名を補います。run の詳細 URL は完了後も同じまま取得できます。
-    let stored_task = view.tasks.iter().find(|task| task.run_slug.as_deref() == Some(run_slug.as_str()));
-    let resolved = self.resolve_project(&view.server_id, &view.name)?;
+    let stored_task = view.tasks.iter().find(|task| task.run_slug.as_ref() == Some(&run_slug));
+    let view_server_id = ServerId::try_from(view.server_id.as_str())
+      .map_err(|error| Status::internal(format!("状態ストアの server_id が不正です: {error}")))?;
+    let view_project = ProjectName::try_from(view.name.as_str())
+      .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
+    let resolved = self.resolve_project(&view_server_id, &view_project)?;
     let mut client = McpClient::new(resolved.client_config);
     let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_run_detail(&run_slug).await {
       | Ok(detail) => detail,
@@ -453,7 +481,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       },
     };
     client.shutdown().await;
-    let server_id = resolved.server_id;
+    let server_id = resolved.server_id.as_str().to_owned();
     // 対象 run のゴールとタスク名は、状態ストアの run（定期読み取りで task
     // から解決済み）を正とする。 takt_get_run の応答に無い場合だけ、ストアの値で補う。
     // run が完了して一覧から消えている場合は、完了タスクの値で補う。
@@ -462,47 +490,32 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .clone()
       .or_else(|| stored_run.as_ref().and_then(|run| run.goal_id.clone()))
       .or_else(|| stored_task.and_then(|task| task.goal_id.clone()));
-    let fallback_task_name = stored_run
-      .as_ref()
-      .map(|run| run.task_name.clone())
-      .filter(|name| !name.is_empty())
-      .or_else(|| stored_task.map(|task| task.name.clone()));
-    let task_name =
-      if detail.task_name.is_empty() { fallback_task_name.unwrap_or_default() } else { detail.task_name.clone() };
+    let fallback_task_name =
+      stored_run.as_ref().map(|run| run.task_name.clone()).or_else(|| stored_task.map(|task| task.name.clone()));
+    let task_name = detail
+      .task_name
+      .clone()
+      .or(fallback_task_name)
+      .map(|task_name| task_name.as_str().to_owned())
+      .unwrap_or_default();
     let session_id = if detail.session_id.is_empty() {
       stored_run.as_ref().map(|run| run.session_id.clone()).unwrap_or_default()
     } else {
       detail.session_id.clone()
     };
-    let log_silent = self.store.is_log_silent(
-      &model::RunEntry {
-        run_slug:                detail.run_slug.clone(),
-        session_id:              session_id.clone(),
-        task_name:               task_name.clone(),
-        goal_id:                 goal_id.clone(),
-        summary:                 detail.summary.clone(),
-        status:                  detail.status,
-        current_step:            detail.current_step.clone(),
-        started_at:              detail.started_at,
-        current_step_started_at: detail.current_step_started_at,
-        last_log_at:             detail.last_log_at,
-        steps:                   Vec::new(),
-        reports:                 Vec::new(),
-      },
-      self.now(),
-    );
+    let log_silent = self.store.is_log_silent_at(detail.last_log_at, self.now());
     Ok(Response::new(GetRunDetailResponse {
-      run_slug: detail.run_slug,
+      run_slug: run_slug.as_str().to_owned(),
       session_id,
       server_id,
       project: view.name.clone(),
-      goal_id: goal_id.unwrap_or_default(),
+      goal_id: goal_id.map(|goal_id| goal_id.as_str().to_owned()).unwrap_or_default(),
       task_name,
       task_text: detail.task_text,
       summary: detail.summary,
       workflow: detail.workflow,
       status: run_status(detail.status) as i32,
-      started_at: Some(timestamp(detail.started_at)),
+      started_at: optional_timestamp(detail.started_at),
       current_step: detail.current_step,
       current_iteration: detail.current_iteration,
       current_step_started_at: optional_timestamp(detail.current_step_started_at),
@@ -529,10 +542,130 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
           content:        instruction.content,
         })
         .collect(),
-      last_log_at: Some(timestamp(detail.last_log_at)),
+      last_log_at: optional_timestamp(detail.last_log_at),
       log_silent,
       server_connected: view.connected,
       server_last_read_at: optional_timestamp(view.last_read_at),
+    }))
+  }
+
+  async fn get_goals(&self, _request: Request<GetGoalsRequest>) -> Result<Response<GetGoalsResponse>, Status> {
+    let goals = assemble_goals(&self.store.project_views());
+    Ok(Response::new(GetGoalsResponse { goals }))
+  }
+
+  async fn get_goal_detail(
+    &self,
+    request: Request<GetGoalDetailRequest>,
+  ) -> Result<Response<GetGoalDetailResponse>, Status> {
+    let goal_id_text = request.into_inner().goal_id;
+    if goal_id_text.trim().is_empty() {
+      return Err(Status::invalid_argument("goalId が空です。"));
+    }
+    let goal_id = GoalId::try_from(goal_id_text.as_str())
+      .map_err(|error| Status::invalid_argument(format!("goalId が不正です: {error}")))?;
+    let view = self
+      .store
+      .find_goal_project(goal_id.as_str())
+      .ok_or_else(|| Status::not_found(format!("goalId {} は状態ストアにありません。", goal_id.as_str())))?;
+    let view_server_id = ServerId::try_from(view.server_id.as_str())
+      .map_err(|error| Status::internal(format!("状態ストアの server_id が不正です: {error}")))?;
+    let view_project = ProjectName::try_from(view.name.as_str())
+      .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
+    let resolved = self.resolve_project(&view_server_id, &view_project)?;
+    let mut client = McpClient::new(resolved.client_config);
+    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_goal_detail(goal_id.as_str()).await {
+      | Ok(detail) => detail,
+      | Err(error) => {
+        client.shutdown().await;
+        return Err(tool_error_status(error));
+      },
+    };
+    client.shutdown().await;
+    Ok(Response::new(GetGoalDetailResponse {
+      goal_id:             detail.goal_id,
+      server_id:           view.server_id.clone(),
+      project:             view.name.clone(),
+      status:              goal_status(detail.status) as i32,
+      execution_status:    execution_status(detail.execution_status) as i32,
+      objective:           detail.objective,
+      out_of_scope:        detail.out_of_scope,
+      acceptance_criteria: detail.acceptance_criteria,
+      constraints:         detail.constraints,
+      specifications:      detail.specifications.into_iter().collect(),
+      branch:              detail.branch,
+      integration_branch:  detail.integration_branch,
+      work_log:            detail.work_log.into_iter().map(goal_work_log).collect(),
+      questions:           detail.questions.into_iter().map(goal_question).collect(),
+      tasks:               detail.tasks.into_iter().map(goal_task).collect(),
+    }))
+  }
+
+  async fn get_task_detail(
+    &self,
+    request: Request<GetTaskDetailRequest>,
+  ) -> Result<Response<GetTaskDetailResponse>, Status> {
+    let request = request.into_inner();
+    if request.project.trim().is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    if request.task_name.trim().is_empty() {
+      return Err(Status::invalid_argument("taskName が空です。"));
+    }
+    let project = ProjectName::try_from(request.project.as_str())
+      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
+    let task_name = TaskName::try_from(request.task_name.as_str())
+      .map_err(|error| Status::invalid_argument(format!("taskName が不正です: {error}")))?;
+    let goal_id = match request.goal_id.as_deref() {
+      | None => None,
+      | Some("") => None,
+      | Some(text) => {
+        Some(GoalId::try_from(text).map_err(|error| Status::invalid_argument(format!("goalId が不正です: {error}")))?)
+      },
+    };
+    let config = load_config(&self.config_path)
+      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
+    let configured = config
+      .projects
+      .iter()
+      .find(|configured| configured.name == project.as_str())
+      .ok_or_else(|| Status::not_found(format!("プロジェクト {} は設定にありません。", project.as_str())))?;
+    let configured_server_id = ServerId::try_from(configured.server.as_str())
+      .map_err(|error| Status::internal(format!("設定のサーバー ID が不正です: {error}")))?;
+    let resolved = resolve_project_in(&config, &configured_server_id, &project)?;
+    let mut client = McpClient::new(resolved.client_config);
+    let detail = match ToolSet::new(&mut client, resolved.cwd.clone())
+      .read_task_detail(project.as_str(), task_name.as_str(), goal_id.as_ref().map(|goal_id| goal_id.as_str()))
+      .await
+    {
+      | Ok(Some(detail)) => detail,
+      | Ok(None) => {
+        client.shutdown().await;
+        return Err(Status::not_found(format!(
+          "タスク {} はプロジェクト {} にありません。",
+          request.task_name, request.project
+        )));
+      },
+      | Err(error) => {
+        client.shutdown().await;
+        return Err(tool_error_status(error));
+      },
+    };
+    client.shutdown().await;
+    Ok(Response::new(GetTaskDetailResponse {
+      project:             detail.project,
+      task_name:           detail.task_name,
+      goal_id:             detail.goal_id,
+      status:              task_status(detail.status) as i32,
+      summary:             detail.summary,
+      created_at:          optional_timestamp(detail.created_at),
+      started_at:          optional_timestamp(detail.started_at),
+      completed_at:        optional_timestamp(detail.completed_at),
+      run_slug:            detail.run_slug,
+      pull_request_number: detail.pull_request_number,
+      linked_run_slugs:    detail.linked_run_slugs,
+      branch:              detail.branch,
+      pull_request_url:    detail.pull_request_url,
     }))
   }
 
@@ -545,15 +678,17 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     if project.is_empty() {
       return Err(Status::invalid_argument("project が空です。"));
     }
+    let project_name = ProjectName::try_from(project)
+      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let config = load_config(&self.config_path)
       .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
     let configured = config
       .projects
       .iter()
-      .find(|configured| configured.name == project)
+      .find(|configured| configured.name == project_name.as_str())
       .ok_or_else(|| Status::not_found(format!("project {project} は設定にありません。")))?;
     let query = ConversationQuery {
-      project:       project.to_owned(),
+      project:       project_name,
       cwd:           configured.cwd.clone(),
       project_roots: config.projects.iter().map(|project| project.cwd.clone()).collect(),
       session_id:    request.session_id.filter(|session_id| !session_id.is_empty()),
@@ -622,6 +757,12 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     if request.inquiry_id.trim().is_empty() {
       return Err(Status::invalid_argument("inquiry_id が空です。"));
     }
+    if request.server_id.trim().is_empty() {
+      return Err(Status::invalid_argument("server_id が空です。"));
+    }
+    if request.project.trim().is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
     // 保留項目は (server_id, project, inquiry_id) の3条件一致で引き当てる。同じ id が別の
     // プロジェクトや別のサーバーにあっても、対象の判断だけを選ぶ。
     let matches: Vec<model::PendingDecision> = self
@@ -631,7 +772,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .filter(|decision| {
         decision.server_id == request.server_id
           && decision.project == request.project
-          && decision.inquiry_id == request.inquiry_id
+          && decision.inquiry_id.as_ref().map(InquiryId::as_str) == Some(request.inquiry_id.as_str())
       })
       .collect();
     let pending = match matches.len() {
@@ -655,24 +796,35 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       )));
     };
     // takt_answer_goal_question の入力契約では goalId は必須（UUID）です。要求が明示した
-    // ゴールを優先し、無ければ引き当てた判断待ちのゴールを使います。
-    let goal_id = request
-      .goal_id
-      .clone()
-      .or_else(|| pending.goal_id.clone())
-      .filter(|goal_id| !goal_id.trim().is_empty())
-      .ok_or_else(|| {
-        Status::invalid_argument("goal_id を特定できません。ゴールに属さない問い合わせには回答できません。")
-      })?;
-    let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
-    let question_id = request.inquiry_id.clone();
-    let client = self.registry.client(&resolved.server_id, &resolved.project, || resolved.client_config.clone());
+    // ゴールを優先し、無ければ引き当てた判断待ちのゴールを使います。要求の値の誤りは入力の
+    // 誤り、状態ストア由来の値の誤りは内部の不整合として扱います。
+    let requested_goal_id = request.goal_id.clone().filter(|goal_id| !goal_id.trim().is_empty());
+    let goal_id = match requested_goal_id {
+      | Some(goal_id) => GoalId::try_from(goal_id.as_str())
+        .map_err(|error| Status::invalid_argument(format!("goal_id が不正です: {error}")))?,
+      | None => {
+        let goal_id = pending.goal_id.clone().filter(|goal_id| !goal_id.trim().is_empty()).ok_or_else(|| {
+          Status::invalid_argument("goal_id を特定できません。ゴールに属さない問い合わせには回答できません。")
+        })?;
+        GoalId::try_from(goal_id.as_str())
+          .map_err(|error| Status::internal(format!("状態ストアの goal_id が不正です: {error}")))?
+      },
+    };
+    let question_id = InquiryId::try_from(request.inquiry_id.as_str())
+      .map_err(|error| Status::invalid_argument(format!("inquiry_id が不正です: {error}")))?;
+    let server_id = ServerId::try_from(request.server_id.as_str())
+      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
+    let project = ProjectName::try_from(request.project.as_str())
+      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
+    let resolved = self.resolve_write_target(&server_id, &project)?;
+    let client =
+      self.registry.client(resolved.server_id.as_str(), resolved.project.as_str(), || resolved.client_config.clone());
     let mut client = client.lock().await;
     ToolSet::new(&mut client, resolved.cwd.clone())
-      .answer_goal_question(&goal_id, &request.inquiry_id, answer)
+      .answer_goal_question(&goal_id, &question_id, answer)
       .await
       .map_err(tool_error_status)?;
-    Ok(Response::new(AnswerInquiryResponse { inquiry_id: question_id }))
+    Ok(Response::new(AnswerInquiryResponse { inquiry_id: question_id.as_str().to_owned() }))
   }
 
   async fn approve_goal_merge(
@@ -689,14 +841,34 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     if !matches!(request.until.as_str(), "prepare" | "merge") {
       return Err(Status::invalid_argument("until は \"prepare\" か \"merge\" を指定してください。"));
     }
-    let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
-    let client = self.registry.client(&resolved.server_id, &resolved.project, || resolved.client_config.clone());
+    if request.server_id.trim().is_empty() {
+      return Err(Status::invalid_argument("server_id が空です。"));
+    }
+    if request.project.trim().is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    let goal_id = GoalId::try_from(request.goal_id.as_str())
+      .map_err(|error| Status::invalid_argument(format!("goal_id が不正です: {error}")))?;
+    let pr_number = PullRequestNumber::try_from(request.pr_number)
+      .map_err(|error| Status::invalid_argument(format!("pr_number が不正です: {error}")))?;
+    let until = MergeUntil::try_from(request.until.as_str())
+      .map_err(|error| Status::invalid_argument(format!("until が不正です: {error}")))?;
+    let server_id = ServerId::try_from(request.server_id.as_str())
+      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
+    let project = ProjectName::try_from(request.project.as_str())
+      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
+    let resolved = self.resolve_write_target(&server_id, &project)?;
+    let client =
+      self.registry.client(resolved.server_id.as_str(), resolved.project.as_str(), || resolved.client_config.clone());
     let mut client = client.lock().await;
     let result = ToolSet::new(&mut client, resolved.cwd.clone())
-      .merge_goal_pr(&request.goal_id, request.pr_number, &request.until)
+      .merge_goal_pr(&goal_id, pr_number, until)
       .await
       .map_err(tool_error_status)?;
-    Ok(Response::new(ApproveGoalMergeResponse { task_name: result.task_name, workflow: result.workflow }))
+    Ok(Response::new(ApproveGoalMergeResponse {
+      task_name: result.task_name.as_str().to_owned(),
+      workflow:  result.workflow,
+    }))
   }
 
   async fn approve_goal_registration(
@@ -707,14 +879,30 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     if request.revision <= 0 {
       return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
     }
-    let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
-    let client = self.registry.client(&resolved.server_id, &resolved.project, || resolved.client_config.clone());
+    let revision = RegistrationRevision::try_from(request.revision)
+      .map_err(|error| Status::invalid_argument(format!("revision が不正です: {error}")))?;
+    if request.server_id.trim().is_empty() {
+      return Err(Status::invalid_argument("server_id が空です。"));
+    }
+    if request.project.trim().is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    let server_id = ServerId::try_from(request.server_id.as_str())
+      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
+    let project = ProjectName::try_from(request.project.as_str())
+      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
+    let resolved = self.resolve_write_target(&server_id, &project)?;
+    let client =
+      self.registry.client(resolved.server_id.as_str(), resolved.project.as_str(), || resolved.client_config.clone());
     let mut client = client.lock().await;
     let result = ToolSet::new(&mut client, resolved.cwd.clone())
-      .approve_goal_registration(request.revision)
+      .approve_goal_registration(revision)
       .await
       .map_err(tool_error_status)?;
-    Ok(Response::new(ApproveGoalRegistrationResponse { revision: result.revision, goal_id: result.goal_id }))
+    Ok(Response::new(ApproveGoalRegistrationResponse {
+      revision: result.revision.get(),
+      goal_id:  result.goal_id.as_str().to_owned(),
+    }))
   }
 
   async fn reject_goal_registration(
@@ -725,14 +913,27 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     if request.revision <= 0 {
       return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
     }
-    let resolved = self.resolve_write_target(&request.server_id, &request.project)?;
-    let client = self.registry.client(&resolved.server_id, &resolved.project, || resolved.client_config.clone());
+    let revision = RegistrationRevision::try_from(request.revision)
+      .map_err(|error| Status::invalid_argument(format!("revision が不正です: {error}")))?;
+    if request.server_id.trim().is_empty() {
+      return Err(Status::invalid_argument("server_id が空です。"));
+    }
+    if request.project.trim().is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    let server_id = ServerId::try_from(request.server_id.as_str())
+      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
+    let project = ProjectName::try_from(request.project.as_str())
+      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
+    let resolved = self.resolve_write_target(&server_id, &project)?;
+    let client =
+      self.registry.client(resolved.server_id.as_str(), resolved.project.as_str(), || resolved.client_config.clone());
     let mut client = client.lock().await;
     let rejected = ToolSet::new(&mut client, resolved.cwd.clone())
-      .reject_goal_registration(request.revision)
+      .reject_goal_registration(revision)
       .await
       .map_err(tool_error_status)?;
-    Ok(Response::new(RejectGoalRegistrationResponse { revision: rejected }))
+    Ok(Response::new(RejectGoalRegistrationResponse { revision: rejected.get() }))
   }
 
   async fn list_goal_registration_proposals(
@@ -746,14 +947,18 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     if request.project.trim().is_empty() {
       return Err(Status::invalid_argument("project が空です。"));
     }
+    let server_id = ServerId::try_from(request.server_id.as_str())
+      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
+    let project = ProjectName::try_from(request.project.as_str())
+      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     // 一覧は `GetPendingDecisions` の承認待ち射影と同じデータ源（ストアの snapshot.proposals）
     // から作り、ストアだけを読む。
     let proposals = self
       .store
-      .registration_proposals(&request.server_id, &request.project)
+      .registration_proposals(&server_id, &project)
       .into_iter()
       .map(|entry| GoalRegistrationProposal {
-        revision:             entry.revision,
+        revision:             entry.revision.get(),
         server_id:            request.server_id.clone(),
         project:              request.project.clone(),
         body:                 entry.summary,
@@ -830,9 +1035,10 @@ fn assemble_state_for(store: &StateStore, activity: &ActivityStore, now: DateTim
     runs:              assemble_runs(&views, store, now),
     pending_decisions: assemble_pending_decisions(store, now),
     thresholds:        Some(v1::AnomalyThresholds {
-      pending_decision_stale_minutes: thresholds.pending_decision_stale_minutes as i32,
-      run_log_silent_minutes:         thresholds.run_log_silent_minutes as i32,
+      pending_decision_stale_minutes: thresholds.pending_decision_stale_minutes.get(),
+      run_log_silent_minutes:         thresholds.run_log_silent_minutes.get(),
     }),
+    build_info:        Some(crate::build_info::current()),
   }
 }
 

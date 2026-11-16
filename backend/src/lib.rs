@@ -6,13 +6,16 @@
 //! [`grpc`] モジュールが実装します。
 
 pub mod activity;
+pub mod build_info;
 pub mod config;
 pub mod conversation;
+pub mod domain;
 pub mod events;
 pub mod grpc;
 pub mod mcp;
 pub mod model;
 pub mod poller;
+pub mod run_log;
 pub mod store;
 
 pub mod takt_dash {

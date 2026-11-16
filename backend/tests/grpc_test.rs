@@ -12,14 +12,16 @@ use common::*;
 use grpc_harness::{client, start_server, start_server_at, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
+  domain::{GoalId, RunSlug, TaskName},
   model::{
     ActivityEvent, EventKind, ExecutionStatus, GoalStatus, InquiryEntry, InquiryKind, ProjectSnapshot, RunEntry,
     TaskEntry, TaskStatus,
   },
   takt_dash::v1::{
-    ActivityKind, AnomalyThresholds, ExecutionStatus as ProtoExecutionStatus, GetActivityRequest, GetOverviewRequest,
-    GetPendingDecisionsRequest, GetProjectsRequest, GoalStatus as ProtoGoalStatus, InquiryKind as ProtoInquiryKind,
-    PendingDecisionType as ProtoPendingDecisionType, RunStatus, TaskStatus as ProtoTaskStatus,
+    ActivityKind, AnomalyThresholds, ConnectionState as ProtoConnectionState, ExecutionStatus as ProtoExecutionStatus,
+    GetActivityRequest, GetOverviewRequest, GetPendingDecisionsRequest, GetProjectsRequest,
+    GoalStatus as ProtoGoalStatus, InquiryKind as ProtoInquiryKind, PendingDecisionType as ProtoPendingDecisionType,
+    RunStatus, TaskStatus as ProtoTaskStatus,
   },
 };
 
@@ -38,14 +40,17 @@ fn run_entry(run_slug: &str) -> RunEntry {
   RunEntry {
     run_slug:                run_slug.to_owned(),
     session_id:              "sess-1".to_owned(),
-    task_name:               "implement".to_owned(),
-    goal_id:                 Some("g1".to_owned()),
+    task_name:               TaskName::try_from("implement").expect("テストのタスク名は有効です"),
+    goal_id:                 Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
     summary:                 "実装の run".to_owned(),
     status:                  takt_dash_backend::model::RunStatus::Running,
     current_step:            Some("implement".to_owned()),
-    started_at:              time("2026-11-13T09:00:00Z"),
+    current_iteration:       Some(2),
+    current_step_number:     Some(2),
+    total_steps:             Some(5),
+    started_at:              Some(time("2026-11-13T09:00:00Z")),
     current_step_started_at: Some(time("2026-11-13T09:05:00Z")),
-    last_log_at:             time("2026-11-13T09:06:00Z"),
+    last_log_at:             Some(time("2026-11-13T09:06:00Z")),
     steps:                   vec![
       takt_dash_backend::model::RunStepEntry {
         step_name:  "plan".to_owned(),
@@ -71,7 +76,7 @@ fn run_entry(run_slug: &str) -> RunEntry {
 /// run。一覧の組み立てで「無音ではない」経路を決定的に観測するために使う。
 fn recent_run(run_slug: &str) -> RunEntry {
   let mut run = run_entry(run_slug);
-  run.last_log_at = Utc::now();
+  run.last_log_at = Some(Utc::now());
   run
 }
 
@@ -88,23 +93,25 @@ fn seeded_harness() -> GrpcHarness {
     ],
     tasks:         vec![
       TaskEntry {
-        name:         "impl".to_owned(),
-        goal_id:      Some("g1".to_owned()),
-        status:       TaskStatus::Running,
-        started_at:   Some(time("2026-11-13T09:00:00Z")),
-        run_slug:     Some("run-1".to_owned()),
-        current_step: Some("implement".to_owned()),
-        merge_task:   false,
+        name:            TaskName::try_from("impl").expect("テストのタスク名は有効です"),
+        goal_id:         Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
+        status:          TaskStatus::Running,
+        started_at:      Some(time("2026-11-13T09:00:00Z")),
+        run_slug:        Some(RunSlug::try_from("run-1").expect("テストの run slug は有効です")),
+        source_run_slug: None,
+        current_step:    Some("implement".to_owned()),
+        merge_task:      false,
       },
       task_for_goal("merge", "g-merge", TaskStatus::Completed, true),
       TaskEntry {
-        name:         "doc".to_owned(),
-        goal_id:      Some("g-open".to_owned()),
-        status:       TaskStatus::Pending,
-        started_at:   None,
-        run_slug:     None,
-        current_step: None,
-        merge_task:   false,
+        name:            TaskName::try_from("doc").expect("テストのタスク名は有効です"),
+        goal_id:         Some(GoalId::try_from("g-open").expect("テストのゴール ID は有効です")),
+        status:          TaskStatus::Pending,
+        started_at:      None,
+        run_slug:        None,
+        source_run_slug: None,
+        current_step:    None,
+        merge_task:      false,
       },
     ],
     inquiries:     vec![
@@ -145,6 +152,16 @@ async fn get_overview_assembles_the_dashboard_state_from_the_store() {
   assert_eq!(state.projects[0].name, "takt-dash");
   assert_eq!(state.projects[0].server_id, "mac-mini");
   assert_eq!(state.projects[0].about, "takt-dash の説明");
+  assert_eq!(
+    state.projects[0].connection_state,
+    ProtoConnectionState::Connected as i32,
+    "読めているプロジェクトの接続状態を写します"
+  );
+  assert_eq!(
+    state.projects[0].last_read_at,
+    Some(timestamp("2026-11-13T12:00:00Z")),
+    "読めているプロジェクトの最後に読めた時刻を写します"
+  );
 
   assert_eq!(state.goals.len(), 4);
   let paused = state.goals.iter().find(|goal| goal.goal_id == "g-pause").expect("一時停止のゴール");
@@ -188,6 +205,10 @@ async fn get_overview_assembles_the_dashboard_state_from_the_store() {
   assert_eq!(run.steps[1].ended_at, None, "継続中のステップは終了時刻を持ちません");
   assert_eq!(run.steps[1].started_at, Some(timestamp("2026-11-13T09:05:00Z")));
   assert_eq!(run.current_step_started_at, Some(timestamp("2026-11-13T09:05:00Z")));
+  assert_eq!(run.current_step_name.as_deref(), Some("implement"), "今のステップ名を proto へ写します");
+  assert_eq!(run.current_step_number, Some(2), "現在ステップの位置を proto へ写します");
+  assert_eq!(run.total_steps, Some(5), "全ステップ数を proto へ写します");
+  assert_eq!(run.current_iteration, Some(2), "反復回数を proto へ写します");
   assert_eq!(run.reports.len(), 1);
   assert_eq!(run.reports[0].filename, "plan.md");
   assert_eq!(run.reports[0].size_bytes, 1234);
@@ -207,7 +228,7 @@ async fn get_overview_marks_a_run_silent_beyond_the_configured_threshold() {
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
   let mut stale_run = run_entry("run-1");
-  stale_run.last_log_at = Utc::now() - Duration::minutes(30);
+  stale_run.last_log_at = Some(Utc::now() - Duration::minutes(30));
   let snapshot = ProjectSnapshot {
     goals:         vec![],
     tasks:         vec![],
@@ -229,17 +250,50 @@ async fn get_overview_marks_a_run_silent_beyond_the_configured_threshold() {
 }
 
 #[tokio::test]
-async fn get_overview_marks_a_disconnected_project_and_keeps_its_last_read_at() {
-  // 応答がない間は connected が偽になり、read_at は最後に読めた時刻のままです。
+async fn get_overview_keeps_server_connected_when_every_project_is_delayed() {
+  // 1回の失敗は遅延中で、サーバーは接続中のままです。
   let harness = seeded_harness();
-  harness.store.record_failure("takt-dash");
+  harness.store.record_failure("takt-dash", time("2026-11-13T12:00:30Z"));
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
   let state = client.get_overview(GetOverviewRequest {}).await.expect("概要を取得できます").into_inner();
 
-  assert!(!state.servers[0].connected, "読み取りに失敗していれば接続なしです");
+  assert!(state.servers[0].connected, "全プロジェクトが遅延中でもサーバーは応答なしにしません");
+  assert_eq!(
+    state.projects[0].connection_state,
+    ProtoConnectionState::Delayed as i32,
+    "プロジェクトの状態は遅延中です"
+  );
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_overview_marks_a_disconnected_project_and_keeps_its_last_read_at() {
+  // 応答がない間は connected が偽になり、read_at は最後に読めた時刻のままです。
+  let harness = seeded_harness();
+  let failed_at = time("2026-11-13T12:02:00Z");
+  for _ in 0..3 {
+    harness.store.record_failure("takt-dash", failed_at);
+  }
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let state = client.get_overview(GetOverviewRequest {}).await.expect("概要を取得できます").into_inner();
+
+  assert!(!state.servers[0].connected, "しきい値を超えた失敗では接続なしです");
   assert_eq!(state.read_at, Some(timestamp("2026-11-13T12:00:00Z")), "応答がない間も最後に読めた時刻を返します");
+  assert_eq!(
+    state.projects[0].connection_state,
+    ProtoConnectionState::Unresponsive as i32,
+    "プロジェクトの状態は応答なしです"
+  );
+  assert_eq!(
+    state.projects[0].last_read_at,
+    Some(timestamp("2026-11-13T12:00:00Z")),
+    "応答がない間もプロジェクトの最後に読めた時刻を保持します"
+  );
 
   server.stop().await;
 }
@@ -378,6 +432,29 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
 }
 
 #[tokio::test]
+async fn get_activity_maps_connection_restored_to_its_activity_kind() {
+  // 復帰の出来事が GetActivity で切断と取り違えられず、ConnectionRestored として返る。
+  let harness = seeded_harness();
+  harness
+    .activity
+    .record(&event("2026-11-13T12:05:00Z", "mac-mini", Some("takt-dash"), EventKind::ConnectionRestored, "接続の復帰"))
+    .expect("出来事を記録できます");
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let response = client.get_activity(GetActivityRequest {}).await.expect("アクティビティを取得できます").into_inner();
+
+  assert_eq!(response.events.len(), 1);
+  assert_eq!(
+    response.events[0].kind,
+    ActivityKind::ConnectionRestored as i32,
+    "復帰の出来事を ConnectionRestored として返します"
+  );
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn get_overview_counts_completed_tasks_in_the_last_24_hours_per_project() {
   // 直近24時間のタスク完了の出来事だけを数え、24時間より前の完了は数えない。
   let harness = seeded_harness();
@@ -450,7 +527,7 @@ async fn プロジェクトごとの接続状態と最後に読めた時刻を�
     .build();
   harness.store.record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T12:00:00Z"));
   harness.store.record_success("corporate-site", ProjectSnapshot::empty(), time("2026-11-13T12:01:00Z"));
-  harness.store.record_failure("corporate-site");
+  harness.store.record_failure("corporate-site", time("2026-11-13T12:02:00Z"));
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -467,7 +544,8 @@ async fn プロジェクトごとの接続状態と最後に読めた時刻を�
 
   let failed =
     state.projects.iter().find(|entry| entry.name == "corporate-site").expect("corporate-site のプロジェクト");
-  assert!(!failed.connected, "読み取りに失敗したプロジェクトだけ接続なしです");
+  assert!(failed.connected, "1 回の失敗は遅延中として接続ありのままです");
+  assert_eq!(failed.connection_state, ProtoConnectionState::Delayed as i32, "1 回の失敗は遅延中です");
   assert_eq!(
     failed.last_read_at,
     Some(timestamp("2026-11-13T12:01:00Z")),
