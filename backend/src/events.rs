@@ -6,6 +6,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
+  domain::RunSlug,
   model::{ActivityEvent, ConnectionState, ConnectionTransition, EventKind, ProjectSnapshot, TaskStatus},
   store::is_human_merge_wait,
 };
@@ -211,7 +212,7 @@ fn event(
   project: Option<&str>,
   kind: EventKind,
   body: String,
-  run_slug: Option<String>,
+  run_slug: Option<RunSlug>,
 ) -> ActivityEvent {
   ActivityEvent {
     occurred_at,

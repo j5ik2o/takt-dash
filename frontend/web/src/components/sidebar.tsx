@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import Link from "next/link";
-import type { Run, Server } from "../proto/taktdash";
+import type { Server } from "../proto/taktdash";
+import type { DashboardRun } from "../state/restore-state";
 import { serverHref } from "../state/anchors";
 import { commitsDiffer, type BuildInfo } from "../state/build-info";
 import { formatClock } from "../state/format";
@@ -10,7 +11,7 @@ type SidebarProps = {
   pendingCount: number;
   currentPath?: string;
   readAt?: Date;
-  runs?: Run[];
+  runs?: readonly DashboardRun[];
   frontendBuild: BuildInfo;
   backendBuild: BuildInfo;
 };

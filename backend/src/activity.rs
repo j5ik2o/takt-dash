@@ -8,7 +8,10 @@ use std::{path::Path, sync::Mutex};
 use chrono::{DateTime, Duration, FixedOffset, Utc};
 use rusqlite::{params, Connection};
 
-use crate::model::{ActivityEvent, EventKind};
+use crate::{
+  domain::{DailyDate, RunSlug, ServerId, TaskCount},
+  model::{ActivityEvent, EventKind},
+};
 
 /// 判断待ちと異常に数える出来事の種類。
 pub const ATTENTION_KINDS: [EventKind; 2] = [EventKind::Inquiry, EventKind::AwaitingMerge];
@@ -16,8 +19,8 @@ pub const ATTENTION_KINDS: [EventKind; 2] = [EventKind::Inquiry, EventKind::Awai
 /// JST の日次集計の1日分。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailyCount {
-  /// JST の日を "YYYY-MM-DD" で表した文字列。
-  pub date:      String,
+  /// JST の日を "YYYY-MM-DD" で表した日付。
+  pub date:      DailyDate,
   pub total:     i32,
   pub attention: i32,
 }
@@ -25,7 +28,7 @@ pub struct DailyCount {
 /// サーバーごとの出来事の件数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerCount {
-  pub server_id: String,
+  pub server_id: ServerId,
   pub count:     i32,
 }
 
@@ -77,7 +80,7 @@ impl ActivityStore {
         event.project,
         event.kind.as_str(),
         event.body,
-        event.run_slug,
+        event.run_slug.as_ref().map(RunSlug::as_str),
       ],
     )?;
     Ok(())
@@ -99,7 +102,7 @@ impl ActivityStore {
           event.project,
           event.kind.as_str(),
           event.body,
-          event.run_slug,
+          event.run_slug.as_ref().map(RunSlug::as_str),
         ],
       )?;
     }
@@ -126,13 +129,12 @@ impl ActivityStore {
     let mut events = Vec::new();
     for row in rows {
       let (occurred_at, server_id, project, kind, body, run_slug) = row?;
-      let kind = EventKind::from_stored(&kind).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-          3,
-          rusqlite::types::Type::Text,
-          Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("未知の出来事の種類です: {kind}"))),
-        )
-      })?;
+      let kind =
+        EventKind::from_stored(&kind).ok_or_else(|| conversion_error(3, format!("未知の出来事の種類です: {kind}")))?;
+      let run_slug = match run_slug {
+        | Some(text) => Some(RunSlug::try_from(text.as_str()).map_err(|error| conversion_error(5, error.to_string()))?),
+        | None => None,
+      };
       events.push(ActivityEvent {
         occurred_at: parse_timestamp(&occurred_at),
         server_id,
@@ -153,7 +155,7 @@ impl ActivityStore {
     let mut summaries = Vec::new();
     for back in (0..7).rev() {
       let day = today - Duration::days(back);
-      let date = day.format("%Y-%m-%d").to_string();
+      let date = DailyDate::from(day);
       let total = self.count_on(date.as_str(), None)?;
       let attention = self.count_on(date.as_str(), Some(&ATTENTION_KINDS))?;
       summaries.push(DailyCount { date, total, attention });
@@ -194,7 +196,9 @@ impl ActivityStore {
        GROUP BY server_id ORDER BY COUNT(*) DESC, server_id",
     )?;
     let rows = statement.query_map(params![date], |row| {
-      Ok(ServerCount { server_id: row.get(0)?, count: row.get::<_, i64>(1)? as i32 })
+      let server_id: String = row.get(0)?;
+      let server_id = ServerId::try_from(server_id.as_str()).map_err(|error| conversion_error(0, error.to_string()))?;
+      Ok(ServerCount { server_id, count: row.get::<_, i64>(1)? as i32 })
     })?;
     let mut counts = Vec::new();
     for row in rows {
@@ -204,15 +208,24 @@ impl ActivityStore {
   }
 
   /// 指定したプロジェクトで、`since` より後に完了したタスクの件数を返す。
-  pub fn completed_tasks_since(&self, project: &str, since: DateTime<Utc>) -> rusqlite::Result<i32> {
+  pub fn completed_tasks_since(&self, project: &str, since: DateTime<Utc>) -> rusqlite::Result<TaskCount> {
     let count: i64 = self.connection.lock().expect("SQLite のロックが壊れています").query_row(
       "SELECT COUNT(*) FROM events
        WHERE project = ?1 AND kind = ?2 AND occurred_at >= ?3",
       params![project, EventKind::TaskCompleted.as_str(), format_timestamp(since)],
       |row| row.get(0),
     )?;
-    Ok(count as i32)
+    TaskCount::try_from(count).map_err(|error| conversion_error(0, error.to_string()))
   }
+}
+
+/// 保存済みの値がドメインの値オブジェクトとして復元できないことを表す SQL の変換エラー。
+fn conversion_error(index: usize, message: String) -> rusqlite::Error {
+  rusqlite::Error::FromSqlConversionFailure(
+    index,
+    rusqlite::types::Type::Text,
+    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message)),
+  )
 }
 
 /// ミリ秒固定幅の RFC3339 UTC 文字列に変換する。文字列の大小が時刻の大小と一致します。

@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
+use crate::domain::{GoalId, InquiryId, PullRequestNumber, RegistrationRevision, RunSlug, TaskName};
+
 /// ゴールの状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalStatus {
@@ -122,12 +124,12 @@ pub enum InquiryKind {
 /// ゴールの一覧に含まれるゴール。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalEntry {
-  pub goal_id:             String,
+  pub goal_id:             GoalId,
   pub status:              GoalStatus,
   pub execution_status:    ExecutionStatus,
   pub objective:           String,
   pub integration_branch:  String,
-  pub pull_request_number: Option<i64>,
+  pub pull_request_number: Option<PullRequestNumber>,
   pub pull_request_url:    Option<String>,
   /// takt_get_goal の通知（path=notifications）から得た、awaiting_merge の種類の通知の記録時刻。
   pub awaiting_merge_at:   Option<DateTime<Utc>>,
@@ -138,11 +140,11 @@ pub struct GoalEntry {
 /// タスクの一覧に含まれるタスク。配列順は tasks.yaml の順を保ちます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEntry {
-  pub name:            String,
-  pub goal_id:         Option<String>,
+  pub name:            TaskName,
+  pub goal_id:         Option<GoalId>,
   pub status:          TaskStatus,
   pub started_at:      Option<DateTime<Utc>>,
-  pub run_slug:        Option<String>,
+  pub run_slug:        Option<RunSlug>,
   /// takt_list_tasks の sourceRunSlug。完了タスクが元 run を指すときに持ちます。
   pub source_run_slug: Option<String>,
   pub current_step:    Option<String>,
@@ -220,8 +222,8 @@ pub struct TaskDetail {
 /// ゴールに属する問い合わせ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InquiryEntry {
-  pub inquiry_id: String,
-  pub goal_id:    Option<String>,
+  pub inquiry_id: InquiryId,
+  pub goal_id:    Option<GoalId>,
   pub kind:       InquiryKind,
   pub body:       String,
   pub options:    Vec<String>,
@@ -234,7 +236,7 @@ pub struct InquiryEntry {
 pub struct NotificationEntry {
   pub notification_id: String,
   /// 通知を読んだゴール。道具エラー時の前回値保持で、ゴール単位に引き継ぐために使います。
-  pub goal_id:         String,
+  pub goal_id:         GoalId,
   pub kind:            String,
   pub body:            String,
   pub recorded_at:     DateTime<Utc>,
@@ -247,6 +249,20 @@ pub enum RunStatus {
   Completed,
   Aborted,
   Failed,
+}
+
+impl TryFrom<&str> for RunStatus {
+  type Error = crate::domain::DomainError;
+
+  fn try_from(value: &str) -> Result<Self, Self::Error> {
+    match value {
+      | "running" => Ok(RunStatus::Running),
+      | "completed" => Ok(RunStatus::Completed),
+      | "aborted" => Ok(RunStatus::Aborted),
+      | "failed" => Ok(RunStatus::Failed),
+      | _ => Err(crate::domain::DomainError::Semantics("run の状態")),
+    }
+  }
 }
 
 /// run の実行で通ったステップ。
@@ -271,8 +287,8 @@ pub struct ReportEntry {
 pub struct RunEntry {
   pub run_slug:                String,
   pub session_id:              String,
-  pub task_name:               String,
-  pub goal_id:                 Option<String>,
+  pub task_name:               TaskName,
+  pub goal_id:                 Option<GoalId>,
   pub summary:                 String,
   pub status:                  RunStatus,
   pub current_step:            Option<String>,
@@ -289,10 +305,10 @@ pub struct RunEntry {
 /// takt_get_run から得た、run 詳細の本文。一覧の投影では使わない詳細情報です。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunDetail {
-  pub run_slug: String,
+  pub run_slug: RunSlug,
   pub session_id: String,
-  pub task_name: String,
-  pub goal_id: Option<String>,
+  pub task_name: Option<TaskName>,
+  pub goal_id: Option<GoalId>,
   pub task_text: String,
   pub summary: String,
   pub workflow: String,
@@ -372,7 +388,7 @@ pub struct ActivityEvent {
   pub project:     Option<String>,
   pub kind:        EventKind,
   pub body:        String,
-  pub run_slug:    Option<String>,
+  pub run_slug:    Option<RunSlug>,
 }
 
 /// 判断待ちの項目。
@@ -386,19 +402,19 @@ pub struct PendingDecision {
   pub created_at:          DateTime<Utc>,
   pub body:                String,
   pub options:             Vec<String>,
-  pub pull_request_number: Option<i64>,
+  pub pull_request_number: Option<PullRequestNumber>,
   pub pull_request_url:    Option<String>,
   pub stale:               bool,
-  /// 問い合わせの識別子。マージ待ちは問い合わせではないため空です。
-  pub inquiry_id:          String,
+  /// 問い合わせの識別子。マージ待ちと承認待ちは問い合わせではないため持ちません。
+  pub inquiry_id:          Option<InquiryId>,
   /// ゴール登録の承認待ちの revision。それ以外の種別は持ちません。
-  pub revision:            Option<i32>,
+  pub revision:            Option<RegistrationRevision>,
 }
 
 /// ゴール登録の承認待ち。提案そのものの保持と射影に使います。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationProposalEntry {
-  pub revision:             i32,
+  pub revision:             RegistrationRevision,
   pub repository_directory: String,
   /// 提案の要約。判断待ちの本文として表示します。
   pub summary:              String,

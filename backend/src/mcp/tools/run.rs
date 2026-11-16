@@ -4,12 +4,15 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::{
-  parse::{optional_string, parse_run_start_time, parse_time, string_field},
+  parse::{domain_value, optional_string, parse_run_start_time, parse_time, string_field},
   ToolError,
 };
-use crate::model::{
-  ReportEntry, RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, RunStatus, RunStepEntry, StepLogEntry,
-  TaskEntry,
+use crate::{
+  domain::{GoalId, RunSlug, TaskName},
+  model::{
+    ReportEntry, RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, RunStatus, RunStepEntry, StepLogEntry,
+    TaskEntry,
+  },
 };
 
 /// 一覧と詳細で共通の最終ログ時刻の決定順です。
@@ -39,17 +42,17 @@ pub(super) fn parse_run(
   step_logs: Vec<StepLogEntry>,
   steps: Vec<RunStepEntry>,
 ) -> Result<RunEntry, ToolError> {
-  let run_slug = string_field(value, "runSlug")?;
+  let run_slug = domain_value("run slug", RunSlug::try_from(string_field(value, "runSlug")?.as_str()))?;
   let started_at = parse_run_start_time(value)?.or(task.started_at);
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
   let last_log_at = resolve_last_log_at(value, &step_logs, current_step_started_at, started_at)?;
   Ok(RunEntry {
-    run_slug,
+    run_slug: run_slug.as_str().to_owned(),
     session_id: optional_string(value, "sessionId").unwrap_or_default(),
     task_name: task.name.clone(),
     goal_id: task.goal_id.clone(),
     summary: optional_string(value, "summary").unwrap_or_default(),
-    status: parse_run_status(value.get("status")),
+    status: parse_run_status(value.get("status"))?,
     current_step: optional_string(value, "currentStep"),
     current_step_number: None,
     total_steps: None,
@@ -62,14 +65,11 @@ pub(super) fn parse_run(
   })
 }
 
-/// run の状態を寛容に解析する。欠落と未知の値は継続中として扱います。
-fn parse_run_status(value: Option<&Value>) -> RunStatus {
-  match value.and_then(Value::as_str) {
-    | Some("completed") => RunStatus::Completed,
-    | Some("aborted") => RunStatus::Aborted,
-    | Some("failed") => RunStatus::Failed,
-    | _ => RunStatus::Running,
-  }
+/// run の状態を既知の値だけから解析する。欠落と未知の値は解析エラーにします。
+fn parse_run_status(value: Option<&Value>) -> Result<RunStatus, ToolError> {
+  let text =
+    value.and_then(Value::as_str).ok_or_else(|| ToolError::Parse("run の status が文字列ではありません".to_owned()))?;
+  domain_value("run の status", RunStatus::try_from(text))
 }
 
 /// 本文つきの stepLogs のうち、時刻を持つものの最新を返す。
@@ -129,7 +129,7 @@ pub(super) fn step_log_next_offset(value: &Value) -> Option<usize> {
 
 pub(super) fn parse_run_detail(
   value: &Value,
-  run_slug: &str,
+  run_slug: &RunSlug,
   task: Option<&TaskEntry>,
   step_logs: Vec<StepLogEntry>,
   reports: Vec<RunReportEntry>,
@@ -138,17 +138,25 @@ pub(super) fn parse_run_detail(
   let started_at = parse_run_start_time(value)?;
   let current_step_started_at = parse_time(value.get("currentStepStartedAt"))?;
   let last_log_at = resolve_last_log_at(value, &step_logs, current_step_started_at, started_at)?;
-  let task_name = optional_string(value, "taskName").or_else(|| task.map(|task| task.name.clone())).unwrap_or_default();
-  let goal_id = optional_string(value, "goalId").or_else(|| task.and_then(|task| task.goal_id.clone()));
+  let task_name = match optional_string(value, "taskName") {
+    | Some(text) if text.is_empty() => task.map(|task| task.name.clone()),
+    | Some(text) => Some(domain_value("タスク名", TaskName::try_from(text.as_str()))?),
+    | None => task.map(|task| task.name.clone()),
+  };
+  let goal_id = match optional_string(value, "goalId") {
+    | Some(text) if text.is_empty() => task.and_then(|task| task.goal_id.clone()),
+    | Some(text) => Some(domain_value("ゴール ID", GoalId::try_from(text.as_str()))?),
+    | None => task.and_then(|task| task.goal_id.clone()),
+  };
   Ok(RunDetail {
-    run_slug: run_slug.to_owned(),
+    run_slug: run_slug.clone(),
     session_id: optional_string(value, "sessionId").unwrap_or_default(),
     task_name,
     goal_id,
     task_text: optional_string(value, "taskText").unwrap_or_default(),
     summary: optional_string(value, "summary").unwrap_or_default(),
     workflow: optional_string(value, "workflow").unwrap_or_default(),
-    status: parse_run_status(value.get("status")),
+    status: parse_run_status(value.get("status"))?,
     started_at,
     current_step: optional_string(value, "currentStep"),
     current_iteration: value.get("currentIteration").and_then(Value::as_i64).map(|value| value as i32),
