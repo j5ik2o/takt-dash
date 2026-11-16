@@ -7,8 +7,9 @@ import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { ConnectionState, DashboardState } from "../../src/proto/taktdash.ts";
-import { createDashboardState, NOW } from "../support/fixtures.ts";
+import { createDashboardState, BACKEND_BRANCH, BACKEND_COMMIT, NOW } from "../support/fixtures.ts";
 import { openStateStream, type EventSourceLike } from "../../src/components/state-stream.ts";
+import { reduceLiveState } from "../../src/components/state-provider.tsx";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import { restoreDashboardState } from "../../src/state/restore-state.ts";
 import { DecisionsContent } from "../../src/components/decisions-content.tsx";
@@ -278,3 +279,28 @@ test("受信したプロジェクトの最後に読めた時刻を復元する",
   assert.ok(restored.projects[0]?.lastReadAt instanceof Date);
   assert.equal(restored.projects[0]?.lastReadAt?.toISOString(), "2026-11-13T07:09:00.000Z");
 });
+
+test("SSE を受信して状態が置き換わっても backend のビルド情報を保持する", () => {
+  const Ctor = freshFakes();
+  const before = createDashboardState();
+  // 受信前は切断中としておき、受信で接続中へ戻ることも同じ実体で観測する。
+  let live: { state: DashboardState; disconnected: boolean } = { state: before, disconnected: true };
+  const stream = open(Ctor, {
+    onState: (next) => {
+      live = reduceLiveState(live, { type: "state", state: next });
+    },
+    onError: () => {
+      live = reduceLiveState(live, { type: "error" });
+    },
+  });
+
+  // 送信側と同じ DashboardState.toJSON の JSON を受信する。
+  Ctor.instances[0]!.onmessage?.({ data: JSON.stringify(DashboardState.toJSON(before)) });
+
+  assert.equal(live.disconnected, false, "受信で接続中へ戻る");
+  assert.equal(live.state.buildInfo?.commit, BACKEND_COMMIT, "受信後も backend の短縮 SHA を保持する");
+  assert.equal(live.state.buildInfo?.branch, BACKEND_BRANCH, "受信後も backend のブランチ名を保持する");
+
+  stream.close();
+});
+

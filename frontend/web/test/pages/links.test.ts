@@ -50,7 +50,14 @@ const renderProjectsWithState = (state = createDashboardState()): string =>
   renderPage(ProjectsPage, { response: { ...createProjectsResponse(), state }, now: NOW });
 
 const renderSidebarWithState = (state = createDashboardState()): string =>
-  renderToStaticMarkup(createElement(Sidebar, { servers: state.servers, pendingCount: 0 }));
+  renderToStaticMarkup(
+    createElement(Sidebar, {
+      servers: state.servers,
+      pendingCount: 0,
+      frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
+      backendBuild: { commit: "a1b2c3d", branch: "takt/backend" },
+    }),
+  );
 
 test("概要のプロジェクトカードは当該プロジェクトのカードへのリンクで、カード全体が1つのリンクになる", () => {
   const state = createDashboardState();

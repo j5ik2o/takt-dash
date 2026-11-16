@@ -482,7 +482,12 @@ test("760px 以下でもサーバーの状態テキストを隠さない", async
   );
 
   const html = renderToStaticMarkup(
-    createElement(Sidebar, { servers: createDashboardState().servers, pendingCount: 0 }),
+    createElement(Sidebar, {
+      servers: createDashboardState().servers,
+      pendingCount: 0,
+      frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
+      backendBuild: { commit: "a1b2c3d", branch: "takt/backend" },
+    }),
   );
   assert.match(html, /class="srv-state">動作中</, "動作中の状態テキストが DOM に残る");
   assert.match(html, /class="srv-state">応答なし</, "応答なしの状態テキストが DOM に残る");

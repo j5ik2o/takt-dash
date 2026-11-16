@@ -821,6 +821,7 @@ fn assemble_state_for(store: &StateStore, activity: &ActivityStore, now: DateTim
       pending_decision_stale_minutes: thresholds.pending_decision_stale_minutes as i32,
       run_log_silent_minutes:         thresholds.run_log_silent_minutes as i32,
     }),
+    build_info:        Some(crate::build_info::current()),
   }
 }
 

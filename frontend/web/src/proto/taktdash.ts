@@ -746,6 +746,14 @@ export interface AnomalyThresholds {
   runLogSilentMinutes: number;
 }
 
+/** ビルド元の情報を表す。 */
+export interface BuildInfo {
+  /** ビルド元の短縮コミット SHA（取得できない場合は "unknown"） */
+  commit: string;
+  /** ビルド元のブランチ名（取得できない場合は "unknown"） */
+  branch: string;
+}
+
 /** 集約した状態のまとまりを表す。 */
 export interface DashboardState {
   /** この状態を読んだ時刻 */
@@ -763,7 +771,11 @@ export interface DashboardState {
   /** 判断待ち */
   pendingDecisions: PendingDecision[];
   /** 異常判定の基準 */
-  thresholds: AnomalyThresholds | undefined;
+  thresholds:
+    | AnomalyThresholds
+    | undefined;
+  /** backend 自身のビルド元 */
+  buildInfo: BuildInfo | undefined;
 }
 
 /** 概要の取得を要求する。 */
@@ -3011,6 +3023,91 @@ export const AnomalyThresholds: MessageFns<AnomalyThresholds> = {
   },
 };
 
+function createBaseBuildInfo(): BuildInfo {
+  return { commit: "", branch: "" };
+}
+
+export const BuildInfo: MessageFns<BuildInfo> = {
+  encode(message: BuildInfo, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.commit !== "") {
+      writer.uint32(10).string(message.commit);
+    }
+    if (message.branch !== "") {
+      writer.uint32(18).string(message.branch);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BuildInfo {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseBuildInfo();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.commit = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.branch = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): BuildInfo {
+    return {
+      commit: isSet(object.commit) ? globalThis.String(object.commit) : "",
+      branch: isSet(object.branch) ? globalThis.String(object.branch) : "",
+    };
+  },
+
+  toJSON(message: BuildInfo): unknown {
+    const obj: any = {};
+    if (message.commit !== "") {
+      obj.commit = message.commit;
+    }
+    if (message.branch !== "") {
+      obj.branch = message.branch;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<BuildInfo>, I>>(base?: I): BuildInfo {
+    return BuildInfo.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BuildInfo>, I>>(object: I): BuildInfo {
+    const message = createBaseBuildInfo();
+    message.commit = object.commit ?? "";
+    message.branch = object.branch ?? "";
+    return message;
+  },
+};
+
 function createBaseDashboardState(): DashboardState {
   return {
     readAt: undefined,
@@ -3020,6 +3117,7 @@ function createBaseDashboardState(): DashboardState {
     runs: [],
     pendingDecisions: [],
     thresholds: undefined,
+    buildInfo: undefined,
   };
 }
 
@@ -3045,6 +3143,9 @@ export const DashboardState: MessageFns<DashboardState> = {
     }
     if (message.thresholds !== undefined) {
       AnomalyThresholds.encode(message.thresholds, writer.uint32(58).fork()).join();
+    }
+    if (message.buildInfo !== undefined) {
+      BuildInfo.encode(message.buildInfo, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -3118,6 +3219,14 @@ export const DashboardState: MessageFns<DashboardState> = {
             message.thresholds = AnomalyThresholds.decode(reader, reader.uint32());
             continue;
           }
+          case 8: {
+            if (tag !== 66) {
+              break;
+            }
+
+            message.buildInfo = BuildInfo.decode(reader, reader.uint32());
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -3147,6 +3256,11 @@ export const DashboardState: MessageFns<DashboardState> = {
         ? object.pending_decisions.map((e: any) => PendingDecision.fromJSON(e))
         : [],
       thresholds: isSet(object.thresholds) ? AnomalyThresholds.fromJSON(object.thresholds) : undefined,
+      buildInfo: isSet(object.buildInfo)
+        ? BuildInfo.fromJSON(object.buildInfo)
+        : isSet(object.build_info)
+        ? BuildInfo.fromJSON(object.build_info)
+        : undefined,
     };
   },
 
@@ -3173,6 +3287,9 @@ export const DashboardState: MessageFns<DashboardState> = {
     if (message.thresholds !== undefined) {
       obj.thresholds = AnomalyThresholds.toJSON(message.thresholds);
     }
+    if (message.buildInfo !== undefined) {
+      obj.buildInfo = BuildInfo.toJSON(message.buildInfo);
+    }
     return obj;
   },
 
@@ -3189,6 +3306,9 @@ export const DashboardState: MessageFns<DashboardState> = {
     message.pendingDecisions = object.pendingDecisions?.map((e) => PendingDecision.fromPartial(e)) || [];
     message.thresholds = (object.thresholds !== undefined && object.thresholds !== null)
       ? AnomalyThresholds.fromPartial(object.thresholds)
+      : undefined;
+    message.buildInfo = (object.buildInfo !== undefined && object.buildInfo !== null)
+      ? BuildInfo.fromPartial(object.buildInfo)
       : undefined;
     return message;
   },

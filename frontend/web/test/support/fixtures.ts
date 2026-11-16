@@ -26,6 +26,11 @@ import {
 export const STALE_MINUTES = 240;
 export const SILENT_MINUTES = 10;
 
+// backend が自身のビルド元として返す値。frontend のビルド情報とは別の値にして、
+// サイドバーが両者を区別して表示できることを観測できるようにする。
+export const BACKEND_COMMIT = "d4e5f6a";
+export const BACKEND_BRANCH = "takt/20261116-backend";
+
 export const NOW = new Date("2026-11-13T07:30:00Z");
 
 const minutesAgo = (minutes: number): Date => new Date(NOW.getTime() - minutes * 60_000);
@@ -40,6 +45,7 @@ export function createThresholds(): AnomalyThresholds {
 export function createDashboardState(): DashboardState {
   return DashboardState.create({
     readAt: NOW,
+    buildInfo: { commit: BACKEND_COMMIT, branch: BACKEND_BRANCH },
     servers: [
       {
         serverId: "mini",

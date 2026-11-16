@@ -8,6 +8,7 @@
 // test/state/dashboard.test.ts と test/components/state-stream.test.ts で確認する。
 import type {
   AnomalyThresholds,
+  BuildInfo,
   DashboardState,
   Goal,
   PendingDecision,
@@ -161,6 +162,17 @@ const toThresholds = (raw: unknown): AnomalyThresholds | undefined => {
   };
 };
 
+const toBuildInfo = (raw: unknown): BuildInfo | undefined => {
+  if (raw === undefined || raw === null || typeof raw !== "object") {
+    return undefined;
+  }
+  const value = raw as Record<string, unknown>;
+  return {
+    commit: String(value.commit ?? ""),
+    branch: String(value.branch ?? ""),
+  };
+};
+
 // proto の JSON 表現（文字列の時刻を含む）を、内部の DashboardState へ復元する。
 export function restoreDashboardState(payload: unknown): DashboardState {
   const raw = (payload ?? {}) as Record<string, unknown>;
@@ -174,5 +186,6 @@ export function restoreDashboardState(payload: unknown): DashboardState {
     runs: arrayOf(raw.runs).map(toRun),
     pendingDecisions: arrayOf(raw.pendingDecisions).map(toPendingDecision),
     thresholds: toThresholds(raw.thresholds),
+    buildInfo: toBuildInfo(raw.buildInfo),
   };
 }

@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import Link from "next/link";
 import type { Run, Server } from "../proto/taktdash";
 import { serverHref } from "../state/anchors";
+import { commitsDiffer, type BuildInfo } from "../state/build-info";
 import { formatClock } from "../state/format";
 
 type SidebarProps = {
@@ -10,6 +11,8 @@ type SidebarProps = {
   currentPath?: string;
   readAt?: Date;
   runs?: Run[];
+  frontendBuild: BuildInfo;
+  backendBuild: BuildInfo;
 };
 
 const PAGES = [
@@ -31,6 +34,8 @@ export function Sidebar({
   currentPath,
   readAt,
   runs,
+  frontendBuild,
+  backendBuild,
 }: SidebarProps): ReactElement {
   const connectedCount = servers.filter((server) => server.connected).length;
   return (
@@ -81,6 +86,13 @@ export function Sidebar({
         <p>
           {servers.length}台中{connectedCount}台から読めています
         </p>
+        <p style={{ overflowWrap: "anywhere" }}>
+          frontend {frontendBuild.commit} ({frontendBuild.branch})
+        </p>
+        <p style={{ overflowWrap: "anywhere" }}>
+          backend {backendBuild.commit} ({backendBuild.branch})
+        </p>
+        {commitsDiffer(frontendBuild, backendBuild) ? <p>コミットが不一致です</p> : null}
       </div>
     </nav>
   );

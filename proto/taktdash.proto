@@ -236,6 +236,12 @@ message AnomalyThresholds {
   int32 run_log_silent_minutes = 2;          // ログの無音の基準（分）
 }
 
+// ビルド元の情報を表す。
+message BuildInfo {
+  string commit = 1;  // ビルド元の短縮コミット SHA（取得できない場合は "unknown"）
+  string branch = 2;  // ビルド元のブランチ名（取得できない場合は "unknown"）
+}
+
 // 集約した状態のまとまりを表す。
 message DashboardState {
   google.protobuf.Timestamp read_at = 1;    // この状態を読んだ時刻
@@ -245,6 +251,7 @@ message DashboardState {
   repeated Run runs = 5;                    // run
   repeated PendingDecision pending_decisions = 6;  // 判断待ち
   AnomalyThresholds thresholds = 7;         // 異常判定の基準
+  BuildInfo build_info = 8;                 // backend 自身のビルド元
 }
 
 // 概要の取得を要求する。

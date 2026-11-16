@@ -21,6 +21,8 @@ const renderSidebar = (currentPath?: string): string =>
     createElement(Sidebar, {
       servers: createDashboardState().servers,
       pendingCount: 0,
+      frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
+      backendBuild: { commit: "a1b2c3d", branch: "takt/backend" },
       ...(currentPath === undefined ? {} : { currentPath }),
     }),
   );
