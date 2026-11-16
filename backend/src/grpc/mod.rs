@@ -1,10 +1,11 @@
-//! proto/taktdash.proto の TaktDashService（読み取り系 API）の実装。
+//! proto/taktdash.proto の TaktDashService（読み取り系と書き込み系の API）の実装。
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
 //! GetRunDetail は要求時に takt-mcp の takt_get_run を呼びます。GetConversation は保存領域の
-//! manager の会話を読みます。WatchState は接続時に全件を返し、
-//! 定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
+//! manager の会話を読みます。GetGoals・GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
+//! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
+//! 全件を返し、定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
 
 pub mod mapping;
 
@@ -12,8 +13,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use mapping::{
-  activity_kind, connection_state, conversation_speaker, execution_status, goal_status, inquiry_kind,
-  optional_timestamp, pending_decision_type, run_status, step_log, task_status, timestamp,
+  activity_kind, connection_state, conversation_speaker, execution_status, goal_question, goal_status, goal_task,
+  goal_work_log, inquiry_kind, optional_timestamp, pending_decision_type, run_status, step_log, task_status, timestamp,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
@@ -21,7 +22,7 @@ use tonic::{Request, Response, Status};
 
 use crate::{
   activity::ActivityStore,
-  config::load_config,
+  config::{load_config, Config},
   conversation::{ConversationPage, ConversationQuery, ConversationReader},
   mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
   model::{self, TaskEntry},
@@ -29,9 +30,10 @@ use crate::{
   takt_dash::v1::{
     self, ActivityEvent, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
     ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse, DashboardState,
-    GetActivityRequest, GetActivityResponse, GetConversationRequest, GetConversationResponse, GetOverviewRequest,
-    GetPendingDecisionsRequest, GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse,
-    GetRunDetailRequest, GetRunDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
+    GetActivityRequest, GetActivityResponse, GetConversationRequest, GetConversationResponse, GetGoalDetailRequest,
+    GetGoalDetailResponse, GetGoalsRequest, GetGoalsResponse, GetOverviewRequest, GetPendingDecisionsRequest,
+    GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse, GetRunDetailRequest, GetRunDetailResponse,
+    GetTaskDetailRequest, GetTaskDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
     ListGoalRegistrationProposalsResponse, OperationAnswerReport, PendingDecision, Project,
     RejectGoalRegistrationRequest, RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, Server,
     TaskStatusCounts, WatchStateRequest,
@@ -305,6 +307,29 @@ struct ResolvedProject {
   cwd:           PathBuf,
 }
 
+/// 読み込み済みの設定から、`server_id` と `project` の起動方法と cwd を解決する。
+///
+/// 設定に無いサーバー・プロジェクトは `unavailable` で返し、takt-mcp を起動しません。
+fn resolve_project_in(config: &Config, server_id: &str, project: &str) -> Result<ResolvedProject, Status> {
+  let server = config
+    .servers
+    .get(server_id)
+    .ok_or_else(|| Status::unavailable(format!("サーバー {server_id} の起動方法が設定にありません。")))?
+    .clone();
+  let cwd = config
+    .projects
+    .iter()
+    .find(|entry| entry.name == project && entry.server == server_id)
+    .map(|entry| entry.cwd.clone())
+    .ok_or_else(|| Status::unavailable(format!("プロジェクト {project} の cwd が設定にありません。")))?;
+  Ok(ResolvedProject {
+    server_id: server_id.to_owned(),
+    project: project.to_owned(),
+    client_config: client_config(&server, &cwd),
+    cwd,
+  })
+}
+
 impl TaktDashServiceImpl {
   /// 設定を読み、`server_id` と `project` から対象サーバーの起動方法と cwd を解決する。
   ///
@@ -312,23 +337,7 @@ impl TaktDashServiceImpl {
   fn resolve_project(&self, server_id: &str, project: &str) -> Result<ResolvedProject, Status> {
     let config = load_config(&self.config_path)
       .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
-    let server = config
-      .servers
-      .get(server_id)
-      .ok_or_else(|| Status::unavailable(format!("サーバー {server_id} の起動方法が設定にありません。")))?
-      .clone();
-    let cwd = config
-      .projects
-      .iter()
-      .find(|entry| entry.name == project && entry.server == server_id)
-      .map(|entry| entry.cwd.clone())
-      .ok_or_else(|| Status::unavailable(format!("プロジェクト {project} の cwd が設定にありません。")))?;
-    Ok(ResolvedProject {
-      server_id: server_id.to_owned(),
-      project: project.to_owned(),
-      client_config: client_config(&server, &cwd),
-      cwd,
-    })
+    resolve_project_in(&config, server_id, project)
   }
 
   /// 書き込み RPC の共通の入口。`server_id` と `project` の空文字を拒否し、対象を解決する。
@@ -521,6 +530,107 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       log_silent,
       server_connected: view.connected,
       server_last_read_at: optional_timestamp(view.last_read_at),
+    }))
+  }
+
+  async fn get_goals(&self, _request: Request<GetGoalsRequest>) -> Result<Response<GetGoalsResponse>, Status> {
+    let goals = assemble_goals(&self.store.project_views());
+    Ok(Response::new(GetGoalsResponse { goals }))
+  }
+
+  async fn get_goal_detail(
+    &self,
+    request: Request<GetGoalDetailRequest>,
+  ) -> Result<Response<GetGoalDetailResponse>, Status> {
+    let goal_id = request.into_inner().goal_id;
+    if goal_id.trim().is_empty() {
+      return Err(Status::invalid_argument("goalId が空です。"));
+    }
+    let view = self
+      .store
+      .find_goal_project(&goal_id)
+      .ok_or_else(|| Status::not_found(format!("goalId {goal_id} は状態ストアにありません。")))?;
+    let resolved = self.resolve_project(&view.server_id, &view.name)?;
+    let mut client = McpClient::new(resolved.client_config);
+    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_goal_detail(&goal_id).await {
+      | Ok(detail) => detail,
+      | Err(error) => {
+        client.shutdown().await;
+        return Err(tool_error_status(error));
+      },
+    };
+    client.shutdown().await;
+    Ok(Response::new(GetGoalDetailResponse {
+      goal_id:             detail.goal_id,
+      server_id:           view.server_id.clone(),
+      project:             view.name.clone(),
+      status:              goal_status(detail.status) as i32,
+      execution_status:    execution_status(detail.execution_status) as i32,
+      objective:           detail.objective,
+      out_of_scope:        detail.out_of_scope,
+      acceptance_criteria: detail.acceptance_criteria,
+      constraints:         detail.constraints,
+      specifications:      detail.specifications.into_iter().collect(),
+      branch:              detail.branch,
+      integration_branch:  detail.integration_branch,
+      work_log:            detail.work_log.into_iter().map(goal_work_log).collect(),
+      questions:           detail.questions.into_iter().map(goal_question).collect(),
+      tasks:               detail.tasks.into_iter().map(goal_task).collect(),
+    }))
+  }
+
+  async fn get_task_detail(
+    &self,
+    request: Request<GetTaskDetailRequest>,
+  ) -> Result<Response<GetTaskDetailResponse>, Status> {
+    let request = request.into_inner();
+    if request.project.trim().is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    if request.task_name.trim().is_empty() {
+      return Err(Status::invalid_argument("taskName が空です。"));
+    }
+    let config = load_config(&self.config_path)
+      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
+    let configured = config
+      .projects
+      .iter()
+      .find(|project| project.name == request.project)
+      .ok_or_else(|| Status::not_found(format!("プロジェクト {} は設定にありません。", request.project)))?;
+    let resolved = resolve_project_in(&config, &configured.server, &request.project)?;
+    let mut client = McpClient::new(resolved.client_config);
+    let detail = match ToolSet::new(&mut client, resolved.cwd.clone())
+      .read_task_detail(&request.project, &request.task_name, request.goal_id.as_deref())
+      .await
+    {
+      | Ok(Some(detail)) => detail,
+      | Ok(None) => {
+        client.shutdown().await;
+        return Err(Status::not_found(format!(
+          "タスク {} はプロジェクト {} にありません。",
+          request.task_name, request.project
+        )));
+      },
+      | Err(error) => {
+        client.shutdown().await;
+        return Err(tool_error_status(error));
+      },
+    };
+    client.shutdown().await;
+    Ok(Response::new(GetTaskDetailResponse {
+      project:             detail.project,
+      task_name:           detail.task_name,
+      goal_id:             detail.goal_id,
+      status:              task_status(detail.status) as i32,
+      summary:             detail.summary,
+      created_at:          optional_timestamp(detail.created_at),
+      started_at:          optional_timestamp(detail.started_at),
+      completed_at:        optional_timestamp(detail.completed_at),
+      run_slug:            detail.run_slug,
+      pull_request_number: detail.pull_request_number,
+      linked_run_slugs:    detail.linked_run_slugs,
+      branch:              detail.branch,
+      pull_request_url:    detail.pull_request_url,
     }))
   }
 

@@ -81,6 +81,7 @@ export function ProjectsContent({ response, now }: ProjectsContentProps): ReactE
               </div>
               <p className="k">判断待ち {projectPending.length}件</p>
               <div>
+
                 <p className="k">走っている run（{runs.length}件）</p>
                 <ul className="mini-runs">
                   {runs.map((run) => {

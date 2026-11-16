@@ -1,11 +1,14 @@
 import type {
   AnomalyThresholds,
   DashboardState,
+  ExecutionStatus,
   Goal,
+  GoalStatus,
   PendingDecision,
   Project,
   Run,
   Server,
+  TaskStatus,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
 import {
@@ -332,4 +335,65 @@ export function buildOverviewView(state: DashboardState, now: Date): OverviewVie
     pendingCounts,
     pendingDecisions,
   };
+}
+
+export const goalStatusLabel = (status: GoalStatus): string => {
+  switch (status) {
+    case GOAL_STATUS.CREATED:
+      return "作成済み";
+    case GOAL_STATUS.AWAITING_MERGE:
+      return "人のマージ待ち";
+    case GOAL_STATUS.COMPLETED:
+      return "完了";
+    default:
+      return "不明";
+  }
+};
+
+export const executionStatusLabel = (status: ExecutionStatus): string => {
+  switch (status) {
+    case EXECUTION_STATUS.ACTIVE:
+      return "稼働中";
+    case EXECUTION_STATUS.PAUSED:
+      return "一時停止中";
+    case EXECUTION_STATUS.ABORTED:
+      return "中止";
+    default:
+      return "不明";
+  }
+};
+
+export const taskStatusLabel = (status: TaskStatus): string => {
+  switch (status) {
+    case TASK_STATUS.PENDING:
+      return "未着手";
+    case TASK_STATUS.RUNNING:
+      return "実行中";
+    case TASK_STATUS.COMPLETED:
+      return "完了";
+    case TASK_STATUS.FAILED:
+      return "失敗";
+    case TASK_STATUS.EXCEEDED:
+      return "上限超過";
+    case TASK_STATUS.PR_FAILED:
+      return "PR 失敗";
+    default:
+      return "不明";
+  }
+};
+
+// 仕上げタスクの末尾状態だけで人のマージ待ちかどうかを判定する。通常タスクの pending/running は
+// 判定に影響しない。awaiting_merge で、末尾が pending/running/failed/exceeded/pr_failed で
+// なければ人のマージ待ちになる。
+export function isHumanMergeWaiting(goal: Goal): boolean {
+  if (goal.status !== GOAL_STATUS.AWAITING_MERGE) {
+    return false;
+  }
+  return (
+    goal.mergeTaskLast !== TASK_STATUS.PENDING &&
+    goal.mergeTaskLast !== TASK_STATUS.RUNNING &&
+    goal.mergeTaskLast !== TASK_STATUS.FAILED &&
+    goal.mergeTaskLast !== TASK_STATUS.EXCEEDED &&
+    goal.mergeTaskLast !== TASK_STATUS.PR_FAILED
+  );
 }

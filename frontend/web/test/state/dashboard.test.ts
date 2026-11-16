@@ -18,6 +18,7 @@ import {
   createDashboardStateWithProjectConnection,
   createHealthyDashboardState,
   createNestedStepDashboardState,
+  createGoal,
   NOW,
   SILENT_MINUTES,
 } from "../support/fixtures.ts";
@@ -25,6 +26,7 @@ import {
   buildOverviewView,
   DEFAULT_ANOMALY_THRESHOLDS,
   projectKey,
+  isHumanMergeWaiting,
   resolveThresholds,
   sortPendingDecisions,
   summarizePendingDecisions,
@@ -497,4 +499,57 @@ test("失敗タスクは失敗・上限超過・PR作成失敗の3分類を合�
   const view = buildOverviewView(state, NOW);
 
   assert.equal(view.failedTaskCount, 6, "failed 1 + exceeded 2 + prFailed 3 を合計する");
+});
+test("人のマージ待ちは仕上げタスクの末尾状態だけで判定する", () => {
+  const awaiting = (mergeTaskLast?: TaskStatus): ReturnType<typeof createGoal> =>
+    createGoal({ status: GoalStatus.GOAL_STATUS_AWAITING_MERGE, mergeTaskLast });
+
+  assert.equal(
+    isHumanMergeWaiting(awaiting(TaskStatus.TASK_STATUS_COMPLETED)),
+    true,
+    "仕上げタスクが完了していれば人のマージ待ちです",
+  );
+  assert.equal(
+    isHumanMergeWaiting(awaiting(undefined)),
+    true,
+    "仕上げタスクの末尾状態が未設定でも人のマージ待ちです",
+  );
+
+  for (const status of [
+    TaskStatus.TASK_STATUS_PENDING,
+    TaskStatus.TASK_STATUS_RUNNING,
+    TaskStatus.TASK_STATUS_FAILED,
+    TaskStatus.TASK_STATUS_EXCEEDED,
+    TaskStatus.TASK_STATUS_PR_FAILED,
+  ]) {
+    assert.equal(
+      isHumanMergeWaiting(awaiting(status)),
+      false,
+      `仕上げタスクの末尾状態が ${TaskStatus[status]} なら人のマージ待ちではありません`,
+    );
+  }
+
+  assert.equal(
+    isHumanMergeWaiting(
+      createGoal({ status: GoalStatus.GOAL_STATUS_CREATED, mergeTaskLast: TaskStatus.TASK_STATUS_COMPLETED }),
+    ),
+    false,
+    "awaiting_merge 以外のゴールは人のマージ待ちではありません",
+  );
+});
+
+test("通常タスクの未着手・実行中は人のマージ待ちの判定に影響しない", () => {
+  const base = createGoal({
+    status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+    mergeTaskLast: TaskStatus.TASK_STATUS_COMPLETED,
+    taskCounts: { pending: 0, running: 0, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+
+  assert.equal(isHumanMergeWaiting(base), true, "通常タスクが動いていなくても人のマージ待ちです");
+
+  const withRunning = { ...base, taskCounts: { ...base.taskCounts, pending: 0, running: 1 } };
+  assert.equal(isHumanMergeWaiting(withRunning), true, "通常タスクが実行中でも人のマージ待ちです");
+
+  const withPending = { ...base, taskCounts: { ...base.taskCounts, pending: 1, running: 0 } };
+  assert.equal(isHumanMergeWaiting(withPending), true, "通常タスクが未着手でも人のマージ待ちです");
 });

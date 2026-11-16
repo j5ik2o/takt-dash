@@ -9,7 +9,10 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createDashboardState } from "../support/fixtures.ts";
+import { createDashboardState, createProjectsResponse, NOW } from "../support/fixtures.ts";
+import { buildOverviewView } from "../../src/state/dashboard.ts";
+import { OverviewContent } from "../../src/components/overview-content.tsx";
+import { ProjectsContent } from "../../src/components/projects-content.tsx";
 import { Sidebar } from "../../src/components/sidebar.tsx";
 
 const cssPath = fileURLToPath(new URL("../../app/globals.css", import.meta.url));
@@ -49,7 +52,7 @@ const currentLinks = (html: string): NavLink[] => navLinks(html).filter(hasCurre
 test("判断待ちのパスでは判断待ちのリンクだけを現在ページにする", () => {
   const links = navLinks(renderSidebar("/decisions"));
 
-  assert.equal(links.length, 5, "ナビのリンクは5件（会話ページを含む）");
+  assert.equal(links.length, 6, "ナビのリンクは6件（ゴールと会話ページを含む）");
   const current = links.filter(hasCurrentAttribute);
   assert.equal(current.length, 1, "aria-current=\"page\" を持つリンクは1件だけ");
   assert.equal(current[0]?.href, "/decisions", "現在ページは判断待ちのリンク");
@@ -102,4 +105,42 @@ test("現在ページのリンクは淡い緑の背景で強調される", async
     /\.nav\s+a\.on\s*\{[^}]*background\s*:\s*var\(--/,
     ".nav a.on は変数で背景色を指定する",
   );
+});
+
+test("プロジェクト画面にプロジェクトごとの進行中ゴールが並ぶ", () => {
+  const html = renderToStaticMarkup(
+    createElement(ProjectsContent, { response: createProjectsResponse(), now: NOW }),
+  );
+  assert.match(html, /進行中のゴール/);
+  assert.match(html, /採用ページのレイアウトを直す/);
+  assert.match(html, /v2\.4\.0 を公開する/);
+  // 既存の run への導線を壊していない。
+  assert.match(html, /href="\/runs\/run-aaa"/);
+});
+
+test("概要のプロジェクトカードからプロジェクトで絞り込んだゴール一覧へ入れる", () => {
+  const view = buildOverviewView(createDashboardState(), NOW);
+  const html = renderToStaticMarkup(createElement(OverviewContent, { view }));
+  assert.match(html, /href="\/goals\?project=corporate-site"/);
+  assert.match(html, /href="\/goals\?project=esa"/);
+  // 既存の run への導線を壊していない。
+  assert.match(html, /href="\/runs\/run-aaa"/);
+});
+
+test("sidebar にゴール一覧の項目が既存項目と同じ並びで加わる", () => {
+  const state = createDashboardState();
+  const html = renderToStaticMarkup(
+    createElement(Sidebar, {
+      servers: state.servers,
+      pendingCount: 2,
+      frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
+      backendBuild: { commit: "a1b2c3d", branch: "takt/backend" },
+    }),
+  );
+  assert.match(html, /href="\/goals"/);
+  assert.match(html, />ゴール</);
+  for (const href of ['href="/"', 'href="/decisions"', 'href="/projects"', 'href="/activity"']) {
+    assert.ok(html.includes(href), `${href} の既存項目が残る`);
+  }
+  assert.match(html, /2件/);
 });

@@ -3,6 +3,8 @@
 //! これらの型は lib の公開 API の一部であり、後続のタスクの gRPC サーバーが
 //! 読み取り系 API の応答を組み立てるために使います。
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 
 /// ゴールの状態。
@@ -136,14 +138,83 @@ pub struct GoalEntry {
 /// タスクの一覧に含まれるタスク。配列順は tasks.yaml の順を保ちます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEntry {
-  pub name:         String,
-  pub goal_id:      Option<String>,
-  pub status:       TaskStatus,
-  pub started_at:   Option<DateTime<Utc>>,
-  pub run_slug:     Option<String>,
-  pub current_step: Option<String>,
+  pub name:            String,
+  pub goal_id:         Option<String>,
+  pub status:          TaskStatus,
+  pub started_at:      Option<DateTime<Utc>>,
+  pub run_slug:        Option<String>,
+  /// takt_list_tasks の sourceRunSlug。完了タスクが元 run を指すときに持ちます。
+  pub source_run_slug: Option<String>,
+  pub current_step:    Option<String>,
   /// ゴールの仕上げタスクかどうか。
-  pub merge_task:   bool,
+  pub merge_task:      bool,
+}
+
+/// takt_get_goal から得たゴールの詳細。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalDetail {
+  pub goal_id:             String,
+  pub status:              GoalStatus,
+  pub execution_status:    ExecutionStatus,
+  pub objective:           String,
+  pub out_of_scope:        Vec<String>,
+  pub acceptance_criteria: Vec<String>,
+  pub constraints:         Vec<String>,
+  pub specifications:      BTreeMap<String, String>,
+  pub branch:              String,
+  pub integration_branch:  String,
+  pub work_log:            Vec<GoalWorkLogEntry>,
+  pub questions:           Vec<GoalQuestionEntry>,
+  pub tasks:               Vec<GoalTaskEntry>,
+}
+
+/// ゴールの作業記録。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalWorkLogEntry {
+  pub work_log_id: String,
+  pub recorded_at: DateTime<Utc>,
+  pub summary:     String,
+}
+
+/// ゴールに対する manager の質問と回答。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalQuestionEntry {
+  pub question_id:     String,
+  pub kind:            String,
+  pub status:          String,
+  pub body:            String,
+  pub options:         Vec<String>,
+  pub answer_text:     Option<String>,
+  pub answer_decision: Option<String>,
+  pub answer_report:   Option<String>,
+  pub created_at:      Option<DateTime<Utc>>,
+  pub answered_at:     Option<DateTime<Utc>>,
+}
+
+/// ゴールに紐づくタスク。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalTaskEntry {
+  pub task_name: String,
+  pub status:    TaskStatus,
+  pub run_slug:  Option<String>,
+}
+
+/// takt_list_tasks から得たタスクの詳細。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDetail {
+  pub project:             String,
+  pub task_name:           String,
+  pub goal_id:             Option<String>,
+  pub status:              TaskStatus,
+  pub summary:             String,
+  pub created_at:          Option<DateTime<Utc>>,
+  pub started_at:          Option<DateTime<Utc>>,
+  pub completed_at:        Option<DateTime<Utc>>,
+  pub run_slug:            Option<String>,
+  pub linked_run_slugs:    Vec<String>,
+  pub pull_request_number: Option<i64>,
+  pub branch:              Option<String>,
+  pub pull_request_url:    Option<String>,
 }
 
 /// ゴールに属する問い合わせ。
