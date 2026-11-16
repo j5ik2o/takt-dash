@@ -330,3 +330,16 @@ test("更新の失敗は本文を保って警告し、成功で警告を解除�
     [1, 2, 3],
   );
 });
+
+test("対象外の発話者は未知の名称と欠落を不明(-1)にし、未知の数値はそのまま保つ", () => {
+  const unknownName = restoreConversationResponse({
+    messages: [{ seq: 1, speaker: "CONVERSATION_SPEAKER_UNKNOWN", text: "本文" }],
+  });
+  assert.equal(unknownName.messages[0]?.speaker, -1);
+
+  const missing = restoreConversationResponse({ messages: [{ seq: 2, text: "本文" }] });
+  assert.equal(missing.messages[0]?.speaker, -1);
+
+  const numeric = restoreConversationResponse({ messages: [{ seq: 3, speaker: 99, text: "本文" }] });
+  assert.equal(numeric.messages[0]?.speaker, 99, "対象外の列挙は未知の数値をそのまま通す");
+});
