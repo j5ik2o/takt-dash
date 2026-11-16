@@ -4,7 +4,7 @@ issue #119（画面のレイアウトの土台作り）の一部として、fron
 
 - 部品の定義: `frontend/web/app/globals.css` の末尾にある「レイアウトの基本部品」の節
 - 変数の定義: `frontend/web/app/globals.css` の `:root`
-- 検査: `frontend/web/test/pages/layout.test.ts`（部品）、`frontend/web/test/pages/tokens.test.ts`（余白・文字サイズ・角丸の変数）
+- 検査: `frontend/web/test/pages/layout.test.ts`（部品）、`frontend/web/test/pages/tokens.test.ts`（余白・文字サイズ・角丸の変数）、`tools/repo-gate` の `frontend-style`（色の直書きと列数の固定。「機械の検査」の節を参照）
 
 ## 基本部品の一覧
 
@@ -108,3 +108,64 @@ issue #119（画面のレイアウトの土台作り）の一部として、fron
 - 規則に `#fff` のような 16 進数、`rgb()`、`rgba()`、`hsl()` を直書きしません。
 - 必要な色の変数が無いときは、`:root` に変数を追加してから参照します。
 - 部品の規則は、枠や罫線の色にも変数（`--surface`、`--line`、`--line2`）を使います。
+
+## 機械の検査
+
+「列数を固定しない原則」と「色を直書きしない原則」は、`tools/repo-gate` の `frontend-style` 検査で機械的に確かめます。判定は `tools/repo-gate/gate_frontend_style.py` にあります。判定を変えるときは、この節も合わせて直してください。
+
+### 実行の経路
+
+- `make done` は `make test` を実行し、`make test` は `python3 tools/repo-gate/repo_gate_test.py` を実行します。このテストの中で実リポジトリの `frontend/web` を検査し、違反があると `make test` と `make done` が失敗します。
+- `python3 tools/repo-gate/repo_gate.py --root .`（`--skip-make` を付けた場合も）でも `frontend-style` として実行され、違反は stderr の `frontend-style:` の 1 行に、`ファイル:行` と文脈、宣言、種別（`色` または `列数`）を並べて出ます。
+
+### 対象のファイル
+
+- `frontend/web` の下の `*.css` と `*.tsx`（コンポーネント）です。
+- 次は対象外です。
+  - ディレクトリ `node_modules`、`.next`、`out`、`coverage`（どの深さでも）
+  - `frontend/web/src/proto`（生成物）、`frontend/web/test`（テスト）、`frontend/web/public`（静的ファイル）
+  - ファイル名が `*.test.tsx` のもの
+- `.ts` のファイル（状態や API の処理）は、拡張子が対象外のため検査しません。
+- CSS が 1 件も見つからないときは、探索先の誤りとして検査が失敗します。
+
+### 色として検出するもの
+
+CSS では、コメントを除いたすべての宣言の値を調べます。
+
+- 16 進数の色（`#fff`、`#fffcf9` など）
+- 色の関数（`rgb()`、`rgba()`、`hsl()`、`hsla()`、`hwb()`、`lab()`、`lch()`、`oklab()`、`oklch()`、`color()`）
+- CSS の色の名前（`red`、`white`、`orange` など 148 色）
+
+コンポーネントでは、コメントを除いた各行を調べます。
+
+- 引用符または backtick で囲んだ文字列の中にある 16 進数の色
+- 色の関数
+- 色を持つ style のキー（`color`、`background`、`backgroundColor`、`border*`、`outline*`、`fill`、`stroke`、`boxShadow`、`textShadow`、`caretColor`、`accentColor`、`textDecorationColor`、`columnRuleColor`）の文字列の値にある色の名前
+
+次は検出しません。
+
+- `:root` の規則の中の変数の定義（`--surface: #fff` など）
+- `var(--teal)` のような変数の参照（`--teal` は `teal` として一致しません）
+- `transparent`、`currentcolor`、`inherit`、`initial`、`unset`
+- コメント、CSS の値の中の引用符で囲んだ文字列と `url()`
+- コンポーネントの JSX の本文（`issue #119` など）、クラス名などの style 以外の文字列にある色の名前、URL の `//`
+
+### 列数の固定として検出するもの
+
+- CSS の `grid-template-columns`、`grid-template`、`grid` の値にある `repeat(数, …)`（`@media` の中も含みます）
+- CSS の `columns` と `column-count` の値が数で始まるもの
+- コンポーネントの `repeat(` の直後が数か `${…}`（式の値で列数を決めるもの）、`columnCount:`、数で始まる `columns:`
+
+次は検出しません。
+
+- `repeat(auto-fit, minmax(…))` と `repeat(auto-fill, minmax(…))`
+- `96px minmax(0, 1fr) 200px` のように個々の幅を並べたトラック指定。1 つの要素の中の区画を決めるもので、データの数から列数を決めるものではないためです。
+- `className` の三項演算子などで、件数によってクラスを切り替える分岐。静的には判別できないため、レビューで確かめます。
+
+### 既存の例外
+
+部品を適用する前の既存の宣言（`.tiles`、`.cards`、`.scards`、`.sum-grid` の列数と、`.run-row .bar.live > i`、`.dot.live`、`@keyframes pulse`、`@keyframes flash`、`.scard.down`、`.dialog-backdrop` の色、計 14 件）は、`tools/repo-gate/gate_frontend_style.py` の `EXISTING_EXCEPTIONS` に載せて通しています。
+
+- 例外は、ファイル、文脈（`@media` などの入れ子とセレクタ）、プロパティ、値（空白を 1 つに詰めたもの）が完全に一致するときだけ通します。値を変えた宣言や、同じセレクタに新しく書いた違反は検出されます。
+- 部品の適用（issue #120・#121）などで宣言が消えたり値が変わったりしたら、一覧から外してください。一覧に残った項目が CSS に見つからないと、検査が失敗します。
+- 新しい例外は足しません。色は `:root` の変数で、列数は部品か `auto-fit` で書いてください。
