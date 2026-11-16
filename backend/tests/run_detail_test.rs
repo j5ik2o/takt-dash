@@ -4,13 +4,14 @@
 mod common;
 mod grpc_harness;
 
-use std::path::Path;
+use std::{io::Write, path::Path};
 
 use chrono::{Duration, Utc};
 use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
+  domain::{GoalId, RunSlug, TaskName},
   model::{ExecutionStatus, GoalStatus, ProjectSnapshot, TaskEntry, TaskStatus},
   poller::Poller,
   takt_dash::v1::{GetRunDetailRequest, RunStatus},
@@ -18,6 +19,13 @@ use takt_dash_backend::{
 
 fn project_dir() -> &'static Path {
   Path::new("/abs/takt-dash")
+}
+
+fn write_mock_state(directory: &Path, state: serde_json::Value) -> std::path::PathBuf {
+  let path = directory.join("state.json");
+  let mut file = std::fs::File::create(&path).expect("状態ファイルを作れます");
+  file.write_all(state.to_string().as_bytes()).expect("状態ファイルへ書けます");
+  path
 }
 
 /// 状態ストアに run-1 を持つ 1 プロジェクト分の状態を入れる。
@@ -46,6 +54,13 @@ fn run_state_with_last_log_at(last_log_at: &str) -> serde_json::Value {
   if let Some(last) = step_logs.last_mut() {
     last["timestamp"] = serde_json::Value::String(last_log_at.to_owned());
   }
+  state
+}
+
+/// `run_state()` から run の `status` を除いた状態。欠落した状態の扱いを観測する。
+fn run_state_without_status() -> serde_json::Value {
+  let mut state = run_state();
+  state["runs"]["run-1"].as_object_mut().expect("run はオブジェクトです").remove("status");
   state
 }
 
@@ -83,6 +98,176 @@ fn run_state() -> serde_json::Value {
       }
     }
   })
+}
+
+/// `run_state()` の `runs.run-1` から、`startedAt` を消して `startTime` だけを持つ実行中の run
+/// にする。実 takt-mcp が実行中の run で返す形（issue #33）です。タスク側の `startedAt` も
+/// 消し、`startedAt` 由来の補完が働かないことを確かめられるようにします。
+fn run_state_with_start_time_only(start_time: &str) -> serde_json::Value {
+  let mut state = run_state();
+  let mut run = state["runs"]["run-1"].clone();
+  run.as_object_mut().expect("run-1 はオブジェクトです").remove("startedAt");
+  run["startTime"] = serde_json::Value::String(start_time.to_owned());
+  state["runs"]["run-1"] = run;
+  let tasks = state["tasks"].as_array_mut().expect("tasks は配列です");
+  for task in tasks {
+    task.as_object_mut().expect("task はオブジェクトです").remove("startedAt");
+  }
+  state
+}
+
+/// `run_state()` の `runs.run-1` から開始時刻のフィールド（`startedAt`/`startTime`）をすべて
+/// 消し、`lastLogAt` と stepLogs の時刻も消す。開始時刻も最後のログの時刻も無い run を表します。
+fn run_state_without_any_start_or_log_time() -> serde_json::Value {
+  let mut state = run_state_with_start_time_only("2026-11-13T09:00:00Z");
+  let mut run = state["runs"]["run-1"].clone();
+  let run = run.as_object_mut().expect("run-1 はオブジェクトです");
+  run.remove("startTime");
+  run.remove("lastLogAt");
+  run.remove("currentStepStartedAt");
+  for step_log in run["stepLogs"].as_array_mut().expect("stepLogs は配列です") {
+    step_log.as_object_mut().expect("stepLog はオブジェクトです").remove("timestamp");
+  }
+  state["runs"]["run-1"] = serde_json::Value::Object(run.clone());
+  state
+}
+
+#[tokio::test]
+async fn a_run_without_any_start_time_is_listed_and_reaches_run_detail() {
+  // 実行中の run が開始時刻も最後のログの時刻も持たない場合でも、一覧の読み取りが失敗せず
+  // run が状態ストアに入り、詳細取得に到達できることを観測する。一覧が解析エラーで全体
+  // 失敗すると run が状態ストアに現れず GetRunDetail が NOT_FOUND になるため、その経路を閉じる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state_path = write_mock_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "implement", "status": "running", "runSlug": "run-1" } ],
+      "runs": { "run-1": { "runSlug": "run-1", "status": "running", "currentStep": "implement", "stepLogs": [] } }
+    }),
+  );
+  let mut reader = mock_client(mock_config(directory.path(), &state_path, None));
+  let written = tool_set(&mut reader, directory.path())
+    .read_snapshot(None)
+    .await
+    .expect("開始時刻もログ時刻も無い run でも一覧を読み取れます");
+  reader.shutdown().await;
+  assert_eq!(written.runs.len(), 1, "開始時刻が無くても run は一覧に含まれます");
+  assert_eq!(written.runs[0].started_at, None, "開始時刻は未設定として保持します");
+
+  let harness = seeded_harness(run_state_without_any_start_or_log_time());
+  harness.store.record_success("takt-dash", written, time("2026-11-13T12:00:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("一覧に載った run は詳細取得に到達できます")
+    .into_inner();
+  assert_eq!(detail.started_at, None, "詳細の開始時刻も未設定で返ります");
+  assert_eq!(detail.run_slug, "run-1");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_reads_start_time_when_started_at_is_absent() {
+  // 実行中の run は開始時刻を `startTime` で返す。`startedAt` だけを読む実装では解析エラーに
+  // なり詳細が取れないため、開始時刻として `startTime` の値を返すことを観測する。
+  let harness = seeded_harness(run_state_with_start_time_only("2026-11-13T08:40:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("startTime だけを持つ run でも詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(detail.started_at, Some(timestamp("2026-11-13T08:40:00Z")), "開始時刻は startTime の値です");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_prefers_started_at_over_start_time() {
+  // 両方ある場合は `startedAt` を採る（既存の観測可能な挙動を維持する）。
+  let mut state = run_state();
+  state["runs"]["run-1"]["startTime"] = serde_json::Value::String("2026-11-13T08:40:00Z".to_owned());
+  let harness = seeded_harness(state);
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("run 詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(detail.started_at, Some(timestamp("2026-11-13T09:00:00Z")), "startedAt を startTime で上書きしません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_returns_without_start_time_instead_of_failing() {
+  // 開始時刻がどのフィールドにも無くても詳細は成功し、開始時刻は未設定で返る。他の項目は
+  // 従来どおり返るので、ページ全体が 500 にならないことを観測する。
+  let harness = seeded_harness(run_state_without_any_start_or_log_time());
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("開始時刻が無い run でも詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(detail.started_at, None, "開始時刻が取れないときは未設定で返します");
+  assert_eq!(detail.run_slug, "run-1");
+  assert_eq!(detail.task_name, "implement", "開始時刻が無くても他の項目は返ります");
+  assert_eq!(detail.step_logs.len(), 2, "ステップの一覧も返ります");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_does_not_mark_log_silent_when_no_log_time_and_no_start_time() {
+  // 最後のログの時刻も開始時刻も無い run で、無音と誤判定しない。開始時刻を最後のログの
+  // 時刻の代用にすると、古い開始時刻で無音と判定され誤る。最後のログが分からないことは
+  // 「無音」ではない。
+  let harness = seeded_harness(run_state_without_any_start_or_log_time());
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("run 詳細を取得できます")
+    .into_inner();
+
+  assert!(!detail.log_silent, "最後のログの時刻が分からない run を無音と判定しません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_rejects_a_malformed_started_at() {
+  // 欠損の許容は、不正な値の許容に読み替えない。RFC3339 でない `startedAt` は従来どおり
+  // 解析エラー（INTERNAL）で詳細取得が失敗する。
+  let mut state = run_state();
+  state["runs"]["run-1"]["startedAt"] = serde_json::Value::String("not-a-time".to_owned());
+  let harness = seeded_harness(state);
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect_err("不正な開始時刻は解析エラーです");
+
+  assert_eq!(status.code(), tonic::Code::Internal, "不正な開始時刻は内部エラーです: {status:?}");
+
+  server.stop().await;
 }
 
 #[tokio::test]
@@ -140,9 +325,31 @@ async fn get_run_detail_assembles_the_response_from_the_mock_takt_get_run() {
 }
 
 #[tokio::test]
+async fn get_run_detail_keeps_server_connected_while_the_project_is_delayed() {
+  let harness = seeded_harness(run_state());
+  harness.store.record_failure("takt-dash", time("2026-11-13T12:00:30Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("遅延中も run 詳細を組み立てられます")
+    .into_inner();
+
+  assert!(detail.server_connected, "遅延中は接続中として扱います");
+  assert_eq!(detail.server_last_read_at, Some(timestamp("2026-11-13T12:00:00Z")), "最後に読めた時刻を返します");
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn get_run_detail_reports_server_disconnected_while_keeping_last_read_at() {
   let harness = seeded_harness(run_state());
-  harness.store.record_failure("takt-dash");
+  let failed_at = time("2026-11-13T12:02:00Z");
+  for _ in 0..3 {
+    harness.store.record_failure("takt-dash", failed_at);
+  }
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -186,6 +393,48 @@ async fn get_run_detail_rejects_an_empty_run_slug_as_invalid_argument() {
     .expect_err("空の runSlug は拒否します");
 
   assert_eq!(status.code(), tonic::Code::InvalidArgument, "空の runSlug は Invalid Argument です: {status:?}");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_rejects_a_run_slug_that_is_not_a_single_directory_name() {
+  let harness = seeded_harness(run_state());
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  for run_slug in ["runs/1", "runs\\1", "..", "."] {
+    let status = client
+      .get_run_detail(GetRunDetailRequest { run_slug: run_slug.to_owned() })
+      .await
+      .expect_err("run ディレクトリ名にならない runSlug は拒否します");
+
+    assert_eq!(
+      status.code(),
+      tonic::Code::InvalidArgument,
+      "runSlug={run_slug:?} は入力の誤りとして拒否します: {status:?}"
+    );
+  }
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_rejects_a_run_response_without_a_status() {
+  let harness = seeded_harness(run_state_without_status());
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect_err("run の状態が欠落した応答は失敗します");
+
+  assert_eq!(
+    status.code(),
+    tonic::Code::Internal,
+    "欠落した run の状態は Running に丸めず、応答の解析エラーにします: {status:?}"
+  );
 
   server.stop().await;
 }
@@ -260,11 +509,11 @@ async fn 完了した実行の詳細は実行中一覧になくても取得で�
   let snapshot = ProjectSnapshot {
     goals:         vec![],
     tasks:         vec![TaskEntry {
-      name:            "implement".to_owned(),
-      goal_id:         Some("g1".to_owned()),
+      name:            TaskName::try_from("implement").expect("テストのタスク名は有効です"),
+      goal_id:         Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
       status:          TaskStatus::Completed,
       started_at:      Some(time("2026-11-13T09:00:00Z")),
-      run_slug:        Some("run-1".to_owned()),
+      run_slug:        Some(RunSlug::try_from("run-1").expect("テストの run slug は有効です")),
       source_run_slug: None,
       current_step:    Some("review".to_owned()),
       merge_task:      false,

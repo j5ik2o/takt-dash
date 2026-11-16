@@ -27,3 +27,6 @@ next-env.d.ts
 .DS_Store
 .idea/
 .vscode/
+
+# takt-dash のローカル設定（環境依存のため追跡しない）
+taktdash.config.json

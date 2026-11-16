@@ -2,7 +2,8 @@
 
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import type { DashboardState } from "../proto/taktdash";
+import type { DashboardState as ProtoDashboardState } from "../proto/taktdash";
+import { dashboardStateFromProto, type DashboardState } from "../state/restore-state";
 import { createStateHandlers, openStateStream, type EventSourceLike } from "./state-stream";
 
 export type StateStreamContextValue = {
@@ -57,7 +58,7 @@ export function reduceLiveState(current: StateStreamContextValue, event: LiveSta
 }
 
 type StateStreamProviderProps = {
-  initialState: DashboardState;
+  initialState: ProtoDashboardState;
   revalidate?: () => void;
   children: ReactNode;
 };
@@ -66,7 +67,10 @@ type StateStreamProviderProps = {
 // SSE を受信するたびに同じ画面の状態を置き換えます。revalidate が渡された場合は、
 // 状態の受信ごとに RSC で取得している画面の再取得を促します。
 export function StateStreamProvider({ initialState, revalidate, children }: StateStreamProviderProps) {
-  const [value, setValue] = useState<StateStreamContextValue>({ state: initialState, disconnected: false });
+  const [value, setValue] = useState<StateStreamContextValue>(() => ({
+    state: dashboardStateFromProto(initialState),
+    disconnected: false,
+  }));
 
   useEffect(() => {
     const handlers = stateStreamHandlers((event) => {

@@ -72,6 +72,17 @@ pub fn activity_kind(kind: model::EventKind) -> v1::ActivityKind {
     | model::EventKind::Paused => v1::ActivityKind::Paused,
     | model::EventKind::Blocked => v1::ActivityKind::Blocked,
     | model::EventKind::ConnectionLost => v1::ActivityKind::ConnectionLost,
+    | model::EventKind::ConnectionRestored => v1::ActivityKind::ConnectionRestored,
+  }
+}
+
+/// プロジェクトの接続状態を proto の列挙値へ変換する。まだ読めていない場合は未指定です。
+pub fn connection_state(state: Option<model::ConnectionState>) -> v1::ConnectionState {
+  match state {
+    | Some(model::ConnectionState::Connected) => v1::ConnectionState::Connected,
+    | Some(model::ConnectionState::Delayed) => v1::ConnectionState::Delayed,
+    | Some(model::ConnectionState::Unresponsive) => v1::ConnectionState::Unresponsive,
+    | None => v1::ConnectionState::Unspecified,
   }
 }
 

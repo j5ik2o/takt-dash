@@ -443,6 +443,31 @@ fn answer_requires_text_or_report() {
   assert!(recorded.is_empty(), "使い方の誤りでは backend を呼んではいけません: {recorded:?}");
 }
 
+#[test]
+fn blank_project_is_rejected_without_calling_backend() {
+  let rt = runtime();
+  let server = rt.block_on(start_dummy_server(DummyConfig::default()));
+
+  let (code, stdout, stderr) = run_against(&server, &[
+    "answer",
+    "--server",
+    "mac-mini",
+    "--project",
+    "   ",
+    "--question",
+    "q-1",
+    "--text",
+    "はい",
+  ]);
+  let recorded = server.recorded();
+  rt.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_USAGE, "空白だけのプロジェクト名は使い方の誤りで終わる必要があります");
+  assert!(stdout.is_empty(), "使い方の誤りで標準出力へ出してはいけません: {stdout}");
+  assert!(stderr.contains("使い方: takt-dash-cli"), "使い方を示す必要があります: {stderr}");
+  assert!(recorded.is_empty(), "使い方の誤りでは backend を呼んではいけません: {recorded:?}");
+}
+
 // ----------------------------------------------------------------------------
 // merge --goal <ID> --pr <番号> [--until prepare|merge]
 // ----------------------------------------------------------------------------
@@ -737,6 +762,7 @@ fn pending_state() -> v1::DashboardState {
       pending_decision_stale_minutes: 240,
       run_log_silent_minutes:         10,
     }),
+    build_info:        None,
   }
 }
 
@@ -891,6 +917,30 @@ fn decisions_requires_server_and_project() {
 
   assert_eq!(code, EXIT_USAGE, "--server と --project の無い decisions は使い方の誤りで終わる必要があります");
   assert!(recorded.is_empty(), "使い方の誤りでは backend を呼んではいけません: {recorded:?}");
+}
+
+#[test]
+fn decisions_rejects_non_positive_pull_request_number_from_backend() {
+  let rt = runtime();
+  let mut state = pending_state();
+  let merge = state
+    .pending_decisions
+    .iter_mut()
+    .find(|decision| decision.r#type == v1::PendingDecisionType::AwaitingMerge as i32)
+    .expect("判断待ちの状態にはマージ待ちが必要です");
+  merge.pull_request = Some(v1::PullRequest { number: 0, url: "https://example.test/pr/0".to_owned() });
+  let server = rt.block_on(start_dummy_server(DummyConfig { pending: Some(state), ..DummyConfig::default() }));
+
+  let (code, stdout, stderr) = run_against(&server, &["decisions", "--server", "mac-mini", "--project", "takt-dash"]);
+  rt.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_FAILURE, "正でない PR 番号の応答は取得の失敗として終わる必要があります: {stderr}");
+  assert!(stdout.is_empty(), "不正な応答を表示してはいけません: {stdout}");
+  assert!(stderr.contains("不正な値"), "応答が不正であることを示す必要があります: {stderr}");
+  assert!(
+    !stderr.contains("backend に接続できません。"),
+    "backend が応答した不正値を接続不能として表示してはいけません: {stderr}"
+  );
 }
 
 // ----------------------------------------------------------------------------

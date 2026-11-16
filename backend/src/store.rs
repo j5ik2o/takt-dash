@@ -1,8 +1,9 @@
 //! 集約した状態の保持と投影。
 //!
 //! プロジェクトごとに、直近に読めた状態（snapshot）と読めた時刻（last_read_at）を保持します。
-//! 応答がない間は snapshot と last_read_at を保持し、connected だけを偽にします。
-//! 判断待ち・滞留・ログの無音は正規状態から都度計算します。
+//! 1回の読み取り失敗は Delayed（接続中）とし、連続失敗回数と遅延時間の両方を満たす最初の失敗で
+//! Unresponsive（応答なし）へ移します。Unresponsive が続く間は snapshot と last_read_at を保持し、
+//! 起点も更新しません。判断待ち・滞留・ログの無音は正規状態から都度計算します。
 
 use std::{
   collections::BTreeMap,
@@ -13,24 +14,67 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::{
   config::{Project, ServerMeta, Thresholds},
+  domain::{GoalId, ProjectName, RunSlug, ServerId},
   model::{
-    GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot, ProjectView,
-    RegistrationProposalEntry, RunEntry, TaskEntry, TaskStatus,
+    ConnectionState, ConnectionTransition, GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType,
+    ProjectSnapshot, ProjectView, RegistrationProposalEntry, RunEntry, TaskEntry, TaskStatus,
   },
 };
 
-/// 1プロジェクト分の保持スロット。読み取り成功で更新し、失敗では connected だけを変えます。
+/// 1プロジェクト分の保持スロット。読み取り成功で更新し、失敗では接続状態だけを変えます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSlot {
-  pub connected:    bool,
-  pub last_read_at: Option<DateTime<Utc>>,
-  pub snapshot:     Option<ProjectSnapshot>,
+  /// まだ一度も読めていない場合は None。
+  pub connection_state:     Option<ConnectionState>,
+  /// 直近の読み取りに連続して失敗した回数。
+  pub consecutive_failures: u32,
+  /// 応答なしへ移った時刻。応答なしが続く間は更新しません。
+  pub unresponsive_since:   Option<DateTime<Utc>>,
+  pub last_read_at:         Option<DateTime<Utc>>,
+  pub snapshot:             Option<ProjectSnapshot>,
 }
 
 impl ProjectSlot {
   /// まだ一度も読めていないスロット。
   pub fn unread() -> Self {
-    ProjectSlot { connected: false, last_read_at: None, snapshot: None }
+    ProjectSlot {
+      connection_state:     None,
+      consecutive_failures: 0,
+      unresponsive_since:   None,
+      last_read_at:         None,
+      snapshot:             None,
+    }
+  }
+
+  /// 接続中または遅延中なら真。応答なしと未読は偽です。
+  pub fn is_connected(&self) -> bool {
+    matches!(self.connection_state, Some(ConnectionState::Connected) | Some(ConnectionState::Delayed))
+  }
+}
+
+/// 成功時の遷移を、状態を変えずに組み立てる。
+fn success_transition_of(slot: &ProjectSlot, read_at: DateTime<Utc>) -> ConnectionTransition {
+  let previous = slot.connection_state;
+  let outage = if previous == Some(ConnectionState::Unresponsive) {
+    slot.unresponsive_since.map(|since| read_at.signed_duration_since(since))
+  } else {
+    None
+  };
+  ConnectionTransition { previous, next: Some(ConnectionState::Connected), outage }
+}
+
+/// この失敗の後の接続状態を返す。`slot.consecutive_failures` は今回の失敗を含む回数です。
+fn connection_state_on_failure(slot: &ProjectSlot, thresholds: Thresholds, now: DateTime<Utc>) -> ConnectionState {
+  if slot.connection_state == Some(ConnectionState::Unresponsive) {
+    return ConnectionState::Unresponsive;
+  }
+  let count_reached = slot.consecutive_failures >= thresholds.connection_failure_count;
+  let delay = Duration::seconds(i64::from(thresholds.connection_delay_seconds));
+  let delay_elapsed = slot.last_read_at.is_none_or(|last_read_at| now.signed_duration_since(last_read_at) >= delay);
+  if count_reached && delay_elapsed {
+    ConnectionState::Unresponsive
+  } else {
+    ConnectionState::Delayed
   }
 }
 
@@ -58,14 +102,34 @@ impl StateStore {
     StateStore { inner: Arc::new(Mutex::new(StoreInner { servers, projects, thresholds, slots })) }
   }
 
+  /// 読み取りが成功したときの接続状態の遷移を、状態を変えずに返す。
+  ///
+  /// `record_success` で確定する前の遷移を、出来事の検出に使います。出来事の記録に失敗した
+  /// サイクルでは `record_success` を呼ばず、差分基準を進めません。
+  pub fn success_transition(&self, project: &str, read_at: DateTime<Utc>) -> Option<ConnectionTransition> {
+    let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    let slot = inner.slots.get(project)?;
+    Some(success_transition_of(slot, read_at))
+  }
+
   /// 読み取りが成功したプロジェクトの状態を新しい snapshot と読めた時刻で置き換える。
-  pub fn record_success(&self, project: &str, snapshot: ProjectSnapshot, read_at: DateTime<Utc>) {
+  ///
+  /// 応答なしから戻った場合は、応答なしだった時間を `outage` に入れた遷移を返します。
+  pub fn record_success(
+    &self,
+    project: &str,
+    snapshot: ProjectSnapshot,
+    read_at: DateTime<Utc>,
+  ) -> Option<ConnectionTransition> {
     let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
-    if let Some(slot) = inner.slots.get_mut(project) {
-      slot.connected = true;
-      slot.last_read_at = Some(read_at);
-      slot.snapshot = Some(snapshot);
-    }
+    let slot = inner.slots.get_mut(project)?;
+    let transition = success_transition_of(slot, read_at);
+    slot.connection_state = Some(ConnectionState::Connected);
+    slot.consecutive_failures = 0;
+    slot.unresponsive_since = None;
+    slot.last_read_at = Some(read_at);
+    slot.snapshot = Some(snapshot);
+    Some(transition)
   }
 
   /// 稼働中に再読み込みした設定の閾値を反映する。次の投影から新しい閾値に従う。
@@ -107,12 +171,22 @@ impl StateStore {
     }
   }
 
-  /// 読み取りが失敗したプロジェクトを接続断として扱う。snapshot と last_read_at は保持する。
-  pub fn record_failure(&self, project: &str) {
+  /// 読み取りが失敗したプロジェクトの接続状態を進める。snapshot と last_read_at は保持する。
+  ///
+  /// 連続失敗回数がしきい値以上で、最後に読めてから遅延の秒数以上経過したとき（未読なら回数だけ）に
+  /// 応答なしへ移ります。応答なしが続く間は起点を更新しません。
+  pub fn record_failure(&self, project: &str, now: DateTime<Utc>) -> Option<ConnectionTransition> {
     let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
-    if let Some(slot) = inner.slots.get_mut(project) {
-      slot.connected = false;
+    let thresholds = inner.thresholds;
+    let slot = inner.slots.get_mut(project)?;
+    let previous = slot.connection_state;
+    slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
+    let next = connection_state_on_failure(slot, thresholds, now);
+    if next == ConnectionState::Unresponsive && previous != Some(ConnectionState::Unresponsive) {
+      slot.unresponsive_since = Some(now);
     }
+    slot.connection_state = Some(next);
+    Some(ConnectionTransition { previous, next: Some(next), outage: None })
   }
 
   /// 指定したプロジェクトのスロットを返す。
@@ -136,7 +210,8 @@ impl StateStore {
           name: project.name.clone(),
           about: project.about.clone(),
           server_id: project.server.clone(),
-          connected: slot.connected,
+          connected: slot.is_connected(),
+          connection_state: slot.connection_state,
           last_read_at: slot.last_read_at,
           goals,
           tasks,
@@ -163,13 +238,12 @@ impl StateStore {
   /// から解決するため、この投影を使います。実行中の run 一覧に無くても、
   /// 完了タスクが runSlug または sourceRunSlug を保持していれば解決できます。run が完了すると
   /// run 一覧から消えるため、詳細 URL を同じまま取得できるようにします。
-  pub fn find_run_project(&self, run_slug: &str) -> Option<ProjectView> {
+  pub fn find_run_project(&self, run_slug: &RunSlug) -> Option<ProjectView> {
     self.project_views().into_iter().find(|view| {
-      view.runs.iter().any(|run| run.run_slug == run_slug)
-        || view
-          .tasks
-          .iter()
-          .any(|task| task.run_slug.as_deref() == Some(run_slug) || task.source_run_slug.as_deref() == Some(run_slug))
+      view.runs.iter().any(|run| run.run_slug == run_slug.as_str())
+        || view.tasks.iter().any(|task| {
+          task.run_slug.as_ref() == Some(run_slug) || task.source_run_slug.as_deref() == Some(run_slug.as_str())
+        })
     })
   }
 
@@ -178,13 +252,13 @@ impl StateStore {
   /// GetGoalDetail は読み先の cwd とサーバーを状態ストアのゴール
   /// から解決するため、この投影を使います。
   pub fn find_goal_project(&self, goal_id: &str) -> Option<ProjectView> {
-    self.project_views().into_iter().find(|view| view.goals.iter().any(|goal| goal.goal_id == goal_id))
+    self.project_views().into_iter().find(|view| view.goals.iter().any(|goal| goal.goal_id.as_str() == goal_id))
   }
 
   /// 判断待ちの一覧を、`filter` の見方で組み立てる。
   pub fn pending_decisions(&self, now: DateTime<Utc>, filter: PendingDecisionFilter) -> Vec<PendingDecision> {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
-    let stale_threshold = Duration::minutes(i64::from(inner.thresholds.pending_decision_stale_minutes));
+    let stale_threshold = Duration::minutes(i64::from(inner.thresholds.pending_decision_stale_minutes.get()));
     let mut decisions = Vec::new();
     for project in &inner.projects {
       let Some(slot) = inner.slots.get(&project.name) else {
@@ -210,12 +284,12 @@ impl StateStore {
   ///
   /// `pending_decisions` の承認待ち射影と同じデータ源（各プロジェクトの
   /// snapshot.proposals）を読みます。
-  pub fn registration_proposals(&self, server_id: &str, project: &str) -> Vec<RegistrationProposalEntry> {
+  pub fn registration_proposals(&self, server_id: &ServerId, project: &ProjectName) -> Vec<RegistrationProposalEntry> {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
     inner
       .projects
       .iter()
-      .filter(|entry| entry.server == server_id && entry.name == project)
+      .filter(|entry| entry.server == server_id.as_str() && entry.name == project.as_str())
       .filter_map(|entry| inner.slots.get(&entry.name))
       .filter_map(|slot| slot.snapshot.as_ref())
       .flat_map(|snapshot| snapshot.proposals.iter().cloned())
@@ -224,13 +298,22 @@ impl StateStore {
 
   /// ログの無音の判定を、run ごとに返す。
   pub fn is_log_silent(&self, run: &RunEntry, now: DateTime<Utc>) -> bool {
+    self.is_log_silent_at(run.last_log_at, now)
+  }
+
+  /// 最後のログの時刻が分からない場合を「無音」と判定しない無音判定。takt_get_run の応答に
+  /// 最後のログの時刻が無い run の詳細取得で使います。
+  pub fn is_log_silent_at(&self, last_log_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
-    is_log_silent(run, now, inner.thresholds.run_log_silent_minutes)
+    is_log_silent_at(last_log_at, now, inner.thresholds.run_log_silent_minutes.get())
   }
 }
 
-fn is_log_silent(run: &RunEntry, now: DateTime<Utc>, silent_minutes: u32) -> bool {
-  now.signed_duration_since(run.last_log_at) > Duration::minutes(i64::from(silent_minutes))
+fn is_log_silent_at(last_log_at: Option<DateTime<Utc>>, now: DateTime<Utc>, silent_minutes: i32) -> bool {
+  let Some(last_log_at) = last_log_at else {
+    return false;
+  };
+  now.signed_duration_since(last_log_at) > Duration::minutes(i64::from(silent_minutes))
 }
 
 fn inquiry_decisions(
@@ -249,7 +332,7 @@ fn inquiry_decisions(
         decision_type:       PendingDecisionType::Inquiry,
         server_id:           project.server.clone(),
         project:             project.name.clone(),
-        goal_id:             inquiry.goal_id.clone(),
+        goal_id:             inquiry.goal_id.as_ref().map(|goal_id| goal_id.as_str().to_owned()),
         inquiry_kind:        Some(inquiry.kind),
         created_at:          inquiry.created_at,
         body:                inquiry.body.clone(),
@@ -257,7 +340,7 @@ fn inquiry_decisions(
         pull_request_number: None,
         pull_request_url:    None,
         stale:               wait >= stale_threshold,
-        inquiry_id:          inquiry.inquiry_id.clone(),
+        inquiry_id:          Some(inquiry.inquiry_id.clone()),
         revision:            None,
       }
     })
@@ -282,7 +365,7 @@ fn merge_decisions(
         decision_type: PendingDecisionType::AwaitingMerge,
         server_id: project.server.clone(),
         project: project.name.clone(),
-        goal_id: Some(goal.goal_id.clone()),
+        goal_id: Some(goal.goal_id.as_str().to_owned()),
         // マージ待ちは問い合わせではないため、問い合わせの種類は持たない。
         inquiry_kind: None,
         created_at,
@@ -291,7 +374,7 @@ fn merge_decisions(
         pull_request_number: goal.pull_request_number,
         pull_request_url: goal.pull_request_url.clone(),
         stale: wait >= stale_threshold,
-        inquiry_id: String::new(),
+        inquiry_id: None,
         revision: None,
       }
     })
@@ -318,7 +401,7 @@ fn registration_decisions(project: &Project, snapshot: &ProjectSnapshot, now: Da
       pull_request_number: None,
       pull_request_url:    None,
       stale:               false,
-      inquiry_id:          String::new(),
+      inquiry_id:          None,
       revision:            Some(proposal.revision),
     })
     .collect()
@@ -328,12 +411,12 @@ fn registration_decisions(project: &Project, snapshot: &ProjectSnapshot, now: Da
 ///
 /// awaiting_merge で、ゴールの仕上げタスクに pending/running がなく、
 /// 配列末尾の仕上げタスクの状態が failed/exceeded/pr_failed でもないときに人のマージ待ちです。
-pub fn is_human_merge_wait(status: GoalStatus, goal_id: &str, merge_tasks: &[&TaskEntry]) -> bool {
+pub fn is_human_merge_wait(status: GoalStatus, goal_id: &GoalId, merge_tasks: &[&TaskEntry]) -> bool {
   if status != GoalStatus::AwaitingMerge {
     return false;
   }
   let goal_merge_tasks: Vec<&TaskEntry> =
-    merge_tasks.iter().copied().filter(|task| task.goal_id.as_deref() == Some(goal_id)).collect();
+    merge_tasks.iter().copied().filter(|task| task.goal_id.as_ref() == Some(goal_id)).collect();
   if goal_merge_tasks.iter().any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running)) {
     return false;
   }

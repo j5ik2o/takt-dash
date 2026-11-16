@@ -140,6 +140,28 @@ fn generated_dashboard_state_carries_the_read_state() {
 }
 
 #[test]
+fn proto_declares_build_info_on_dashboard_state() {
+  assert!(
+    PROTO_SOURCE.lines().any(|line| line.trim().starts_with("message BuildInfo")),
+    "proto に message BuildInfo を定義する必要があります"
+  );
+  let field = PROTO_SOURCE.lines().map(str::trim).find(|line| line.starts_with("BuildInfo build_info"));
+  assert!(field.is_some(), "DashboardState のビルド情報は BuildInfo 型の build_info として定義する必要があります");
+}
+
+#[test]
+fn generated_dashboard_state_carries_build_info() {
+  let state = v1::DashboardState {
+    build_info: Some(v1::BuildInfo { commit: "a1b2c3d".to_owned(), branch: "takt/20261116-build-info".to_owned() }),
+    ..Default::default()
+  };
+
+  let info = state.build_info.expect("build_info が設定されている");
+  assert_eq!(info.commit, "a1b2c3d");
+  assert_eq!(info.branch, "takt/20261116-build-info");
+}
+
+#[test]
 fn generated_client_exposes_the_read_and_write_calls() {
   fn client_type(
     client: v1::takt_dash_service_client::TaktDashServiceClient<tonic::transport::Channel>,
