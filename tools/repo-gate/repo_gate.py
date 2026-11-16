@@ -14,9 +14,11 @@
                        関門のコマンドを実際に走らせ、終了コードで成否を導出する。
   ci-runs-make-done    .github/workflows/ の各 CI が make done を呼び、Rust の stable と
                        nightly（rustfmt）と Node をセットアップする。
-  workflow-machine-gate taktdash-change に make done を実行する mode が system の
-                       ステップがあり、develop の後ろに置かれ、make done の出力を修正
-                       ステップへ渡し、成功で完了・失敗で修正へ回る遷移を持つ。
+  workflow-machine-gate taktdash-change の machine_gate が mode: system で、
+                       fmt・clippy・test・typecheck・lint の5検査を system_inputs の
+                       command として実行し、各検査の make ターゲットを呼ぶ。5検査の
+                       exit_code == 0 の同時成立で aislop_gate へ進み、検査ごとの
+                       失敗は対応する修正ステップへ回して machine_gate へ戻る。
   gitignore-rules      .gitignore が Rust と Node とローカルデータの生成物を除外する。
   stable-toolchain     rust-toolchain.toml のチャネルが stable のままである。
 
@@ -51,6 +53,29 @@ GATE_EXIT_CODE_REFERENCE = re.compile(r"context\.([A-Za-z0-9_]+)\.result\.exit_c
 GATE_SUCCESS_CONDITION = re.compile(
     r"when\(\s*context\.([A-Za-z0-9_]+)\.result\.exit_code\s*==\s*0\s*\)"
 )
+MACHINE_GATE_SUCCESS_TERM = re.compile(
+    r"context\.machine_gate\.([A-Za-z0-9_]+)\.exit_code\s*==\s*0"
+)
+MACHINE_GATE_FAILURE_CONDITION = re.compile(
+    r"when\(\s*context\.machine_gate\.([A-Za-z0-9_]+)\.exit_code\s*!=\s*0\s*\)"
+)
+CONTEXT_REFERENCE = re.compile(r"\{context:([^}]+)\}")
+SHELL_SEPARATORS = {";", "&", "|", "&&", "||", "(", ")", "\n"}
+SHELL_KEYWORDS = {
+    "if",
+    "then",
+    "else",
+    "elif",
+    "fi",
+    "do",
+    "done",
+    "while",
+    "until",
+    "!",
+    "{",
+    "}",
+}
+REDIRECTION = re.compile(r"^\d*[<>]")
 
 
 class GateError(Exception):
@@ -379,24 +404,6 @@ def rules_of(step):
     return [rule for rule in rules if isinstance(rule, dict)]
 
 
-def runs_command(step, prefix):
-    """mode が system のステップで、指定した語で始まる固定コマンドを実行するかを判定する。"""
-    if step.get("mode") != "system":
-        return False
-    for item in step.get("system_inputs") or []:
-        if not isinstance(item, dict) or item.get("type") != "command":
-            continue
-        tokens = [token for token in str(item.get("command", "")).split() if token]
-        if tokens[: len(prefix)] == prefix:
-            return True
-    return False
-
-
-def runs_make_done(step):
-    """mode が system のステップで、make done を固定コマンドとして実行するかを判定する。"""
-    return runs_command(step, ["make", "done"])
-
-
 def strip_shell_comments(command):
     """シェルのコメントを、クォートとバックスラッシュを考慮して除去する。
 
@@ -477,6 +484,227 @@ def runs_aislop_gate(step):
     )
 
 
+def shell_tokens(command):
+    """シェルのコマンド文字列を、クォートを保ったままトークンへ分ける。"""
+    lexer = shlex.shlex(
+        strip_shell_comments(command),
+        posix=True,
+        punctuation_chars=";&|\n()",
+    )
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.whitespace = " \t\r"
+    return list(lexer)
+
+
+def simple_commands(tokens):
+    """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。"""
+    current = []
+    for token in tokens:
+        if token in SHELL_SEPARATORS:
+            if current:
+                yield current
+            current = []
+            continue
+        current.append(token)
+    if current:
+        yield current
+
+
+def invoked_make_targets(command, depth=0):
+    """コマンド文字列が実際に起動する make のターゲットを集める。
+
+    bash -c や sh -c の内側のスクリプトへ再帰し、if/then などの制御語を除いた
+    単純コマンドの先頭が make のときだけ、フラグと変数代入を除いたターゲットを
+    拾う。echo の引数や引用符内の文字列、コメントは起動として扱わない。
+    """
+    found = set()
+    if depth > 5:
+        return found
+    try:
+        tokens = shell_tokens(command)
+    except ValueError:
+        return found
+    for tokens_of_command in simple_commands(tokens):
+        while tokens_of_command and tokens_of_command[0] in SHELL_KEYWORDS:
+            tokens_of_command = tokens_of_command[1:]
+        if not tokens_of_command:
+            continue
+        head = tokens_of_command[0]
+        if head in ("bash", "sh") and "-c" in tokens_of_command:
+            index = tokens_of_command.index("-c")
+            if index + 1 < len(tokens_of_command):
+                found |= invoked_make_targets(tokens_of_command[index + 1], depth + 1)
+            continue
+        if head != "make":
+            continue
+        for token in tokens_of_command[1:]:
+            if REDIRECTION.match(token):
+                break
+            if token.startswith("-"):
+                continue
+            if "=" in token and token.split("=", 1)[0].isidentifier():
+                continue
+            found.add(token)
+    return found
+
+
+def machine_gate_success_checks(condition):
+    """成功条件が5検査の exit_code == 0 の同時成立なら、その検査名を返す。
+
+    when(...) 全体を && で区切った各節が、machine_gate の検査の exit_code == 0 に
+    完全一致する場合だけ受理する。|| や単一キーの result、別ゲートの参照、重複した
+    検査は、空のリストとして拒否する。
+    """
+    text = str(condition or "").strip()
+    if "||" in text:
+        return []
+    outer = re.fullmatch(r"when\((.*)\)", text, re.DOTALL)
+    if outer is None:
+        return []
+    checks = []
+    for term in outer.group(1).split("&&"):
+        match = MACHINE_GATE_SUCCESS_TERM.fullmatch(term.strip())
+        if match is None:
+            return []
+        checks.append(match.group(1))
+    return checks
+
+
+def instruction_text(step):
+    instruction = step.get("instruction")
+    if isinstance(instruction, list):
+        return "\n".join(str(item) for item in instruction)
+    return str(instruction or "")
+
+
+def check_machine_gate_inputs(gate):
+    """machine_gate が mode: system で5検査を command として実行するかを検査する。"""
+    if gate.get("mode") != "system":
+        raise GateError(f"machine_gate は mode: system でなければなりません: {gate.get('mode')!r}")
+
+    inputs = gate.get("system_inputs")
+    if not isinstance(inputs, list):
+        raise GateError("machine_gate に system_inputs がありません")
+    by_name = {}
+    for item in inputs:
+        if not isinstance(item, dict):
+            raise GateError(f"machine_gate の system_inputs に辞書でない要素があります: {item!r}")
+        alias = item.get("as")
+        if not isinstance(alias, str):
+            raise GateError(
+                f"machine_gate の system_inputs の as が文字列ではありません: {alias!r}"
+            )
+        if alias in by_name:
+            raise GateError(f"machine_gate の system_inputs に同じ as が重複しています: {alias!r}")
+        by_name[alias] = item
+    missing = [name for name in GATE_TARGETS if name not in by_name]
+    extra = sorted(name for name in by_name if name not in GATE_TARGETS)
+    if missing or extra:
+        raise GateError(
+            f"machine_gate の system_inputs の as が5検査と一致しません: missing={missing}, extra={extra}"
+        )
+    for name in GATE_TARGETS:
+        item = by_name[name]
+        if item.get("type") != "command":
+            raise GateError(
+                f"machine_gate の {name} の system_input が type: command ではありません: "
+                f"{item.get('type')!r}"
+            )
+        targets = invoked_make_targets(str(item.get("command", "")))
+        if name not in targets:
+            raise GateError(f"{name} の command が make {name} を呼んでいません: {item.get('command')!r}")
+        others = sorted(targets & (set(GATE_TARGETS) - {name}))
+        if others:
+            raise GateError(
+                f"{name} の command が別の検査 {', '.join(others)} を呼んでいます: "
+                f"{item.get('command')!r}"
+            )
+
+
+def check_machine_gate_success_rule(gate_rules, aislop_name):
+    """成功規則が5検査の exit_code == 0 の同時成立で aislop_gate へ進むかを検査する。"""
+    success_rules = [rule for rule in gate_rules if rule.get("next") == aislop_name]
+    if len(success_rules) != 1:
+        raise GateError(
+            f"machine_gate に {aislop_name} へ進む成功規則が 1 つだけありません: {len(success_rules)}"
+        )
+    success_checks = machine_gate_success_checks(success_rules[0].get("condition"))
+    if sorted(success_checks) != sorted(GATE_TARGETS):
+        raise GateError(
+            "machine_gate の成功条件が5検査（fmt・clippy・test・typecheck・lint）の "
+            f"exit_code == 0 の同時成立になっていません: {success_rules[0].get('condition')!r}"
+        )
+
+
+def check_machine_gate_failure_rules(gate_rules):
+    """失敗規則が検査ごとに対応する修正ステップへ1件ずつ分岐するかを検査する。"""
+    for name in GATE_TARGETS:
+        fix_name = f"fix_machine_gate_{name}"
+        failure_rules = [rule for rule in gate_rules if rule.get("next") == fix_name]
+        if len(failure_rules) != 1:
+            raise GateError(
+                f"machine_gate に {name} の失敗（exit_code != 0）で {fix_name} へ進む規則が "
+                f"1 つだけありません: {len(failure_rules)}"
+            )
+        condition = str(failure_rules[0].get("condition") or "").strip()
+        match = MACHINE_GATE_FAILURE_CONDITION.fullmatch(condition)
+        if match is None or match.group(1) != name:
+            raise GateError(
+                f"machine_gate の {name} の失敗条件が "
+                f"when(context.machine_gate.{name}.exit_code != 0) ではありません: {condition!r}"
+            )
+
+
+def check_machine_gate_fix_steps(named):
+    """各修正ステップが当該検査の出力だけを参照し、machine_gate へ戻るかを検査する。"""
+    for name in GATE_TARGETS:
+        fix_name = f"fix_machine_gate_{name}"
+        fix = named.get(fix_name)
+        if fix is None:
+            raise GateError(f"machine_gate の {name} の修正ステップ {fix_name} がありません")
+        references = set(CONTEXT_REFERENCE.findall(instruction_text(fix)))
+        expected = {f"machine_gate.{name}.stdout", f"machine_gate.{name}.stderr"}
+        if references != expected:
+            raise GateError(
+                f"{fix_name} の instruction が参照する出力が {name} の stdout と stderr だけでは"
+                f"ありません: {sorted(references)}"
+            )
+        if not any(rule.get("next") == "machine_gate" for rule in rules_of(fix)):
+            raise GateError(f"{fix_name} から machine_gate へ戻る遷移がありません")
+
+
+def check_machine_gate_transitions(gate_rules, aislop_name):
+    """machine_gate の遷移先が既知のものだけで、ABORT が最後の when(true) かを検査する。"""
+    allowed = {f"fix_machine_gate_{name}" for name in GATE_TARGETS} | {aislop_name, "ABORT"}
+    for rule in gate_rules:
+        next_value = rule.get("next")
+        if next_value not in allowed:
+            raise GateError(f"machine_gate に許可されない遷移先があります: {next_value!r}")
+    for index, rule in enumerate(gate_rules):
+        if rule.get("next") != "ABORT":
+            continue
+        if str(rule.get("condition") or "").strip() != "when(true)":
+            raise GateError(
+                f"machine_gate の ABORT への遷移条件が when(true) ではありません: "
+                f"{rule.get('condition')!r}"
+            )
+        if index != len(gate_rules) - 1:
+            raise GateError("machine_gate の when(true) -> ABORT が規則列の最後にありません")
+
+
+def check_machine_gate_five_checks(named, aislop_name):
+    """machine_gate が5検査を実行し、検査ごとに失敗を振り分けるかを検査する。"""
+    gate = named["machine_gate"]
+    check_machine_gate_inputs(gate)
+    gate_rules = rules_of(gate)
+    check_machine_gate_success_rule(gate_rules, aislop_name)
+    check_machine_gate_failure_rules(gate_rules)
+    check_machine_gate_fix_steps(named)
+    check_machine_gate_transitions(gate_rules, aislop_name)
+    return [f"fix_machine_gate_{name}" for name in GATE_TARGETS]
+
+
 def transition(rules, predicate):
     for rule in rules:
         if predicate(rule):
@@ -544,10 +772,9 @@ def check_machine_gate_step(named, name, return_to):
     fix = named.get(failure_next)
     if fix is None:
         raise GateError(f"{name} の失敗時の遷移先 {failure_next!r} のステップがありません")
-    instruction = fix.get("instruction")
-    instruction_text = "\n".join(instruction) if isinstance(instruction, list) else str(instruction or "")
-    if f"context:{name}.result.stdout" not in instruction_text and (
-        f"context:{name}.result.stderr" not in instruction_text
+    text = instruction_text(fix)
+    if f"context:{name}.result.stdout" not in text and (
+        f"context:{name}.result.stderr" not in text
     ):
         raise GateError(f"{failure_next} の instruction に {name} の出力の参照がありません")
     if transition(rules_of(fix), lambda rule: rule.get("next") == return_to) != return_to:
@@ -564,38 +791,33 @@ def check_workflow_machine_gate(root):
         raise GateError("taktdash-change に develop ステップがありません")
     complete_next = transition(rules_of(named["develop"]), lambda rule: rule.get("condition") == "COMPLETE")
     if complete_next is None:
-        raise GateError("develop に COMPLETE の遷移がありません")
-
-    matching = [step for step in steps if isinstance(step, dict) and runs_make_done(step)]
-    if not matching:
-        raise GateError("make done を実行する mode: system のステップがありません")
-    gate = matching[0]
-    gate_name = gate["name"]
-    if complete_next != gate_name:
-        raise GateError(f"develop の COMPLETE が {gate_name} へ遷移していません: {complete_next!r}")
+        raise GateError("develop の COMPLETE 遷移がありません")
+    if "machine_gate" not in named:
+        raise GateError("taktdash-change に machine_gate ステップがありません")
+    if complete_next != "machine_gate":
+        raise GateError(f"develop の COMPLETE が machine_gate へ遷移していません: {complete_next!r}")
 
     aislop_steps = [step for step in steps if isinstance(step, dict) and runs_aislop_gate(step)]
     if not aislop_steps:
         raise GateError("aislop-gate を実行する mode: system のステップがありません")
     aislop_name = aislop_steps[0]["name"]
 
+    fix_names = check_machine_gate_five_checks(named, aislop_name)
+
     order = [step.get("name") for step in steps if isinstance(step, dict)]
-    if order.index("develop") > order.index(gate_name):
-        raise GateError(f"{gate_name} が develop より前の位置にあります")
-    if order.index(gate_name) > order.index(aislop_name):
-        raise GateError(f"{aislop_name} が {gate_name} より前の位置にあります")
+    if order.index("develop") > order.index("machine_gate"):
+        raise GateError("machine_gate が develop より前の位置にあります")
+    if order.index("machine_gate") > order.index(aislop_name):
+        raise GateError(f"{aislop_name} が machine_gate より前の位置にあります")
 
-    make_done_next, make_done_fix = check_machine_gate_step(named, gate_name, gate_name)
-    if make_done_next != aislop_name:
-        raise GateError(f"{gate_name} の成功が {aislop_name} へ遷移していません: {make_done_next!r}")
-
-    aislop_next, aislop_fix = check_machine_gate_step(named, aislop_name, gate_name)
+    aislop_next, aislop_fix = check_machine_gate_step(named, aislop_name, "machine_gate")
     if aislop_next != "COMPLETE":
         raise GateError(f"{aislop_name} の成功（exit_code == 0）で COMPLETE へ遷移していません: {aislop_next!r}")
 
     return {
-        "gates": [gate_name, aislop_name],
-        "failure_steps": [make_done_fix, aislop_fix],
+        "gates": ["machine_gate", aislop_name],
+        "checks": list(GATE_TARGETS),
+        "failure_steps": fix_names + [aislop_fix],
         "develop_complete": complete_next,
         "max_steps": workflow.get("max_steps"),
     }
