@@ -10,6 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { DashboardState } from "../../src/proto/taktdash.ts";
 import { createDashboardState } from "../support/fixtures.ts";
 import { LiveOverview } from "../../src/components/live-overview.tsx";
 import { LiveDecisions } from "../../src/components/live-decisions.tsx";
@@ -19,6 +20,7 @@ import {
   StateStreamProvider,
   type StateStreamContextValue,
 } from "../../src/components/state-provider.tsx";
+import { DomainPrimitiveError } from "../../src/state/domain-primitives.ts";
 
 // 本番と同じ結線（stateStreamHandlers → reduceLiveState）を通して、現在の Context 値を
 // 進めるハンドラを作る。テスト内の値はこの関数だけで更新し、結線の取り違えを検出する。
@@ -59,9 +61,9 @@ test("概要は Provider の Context が接続中なら useLiveState 経由で�
   assert.doesNotMatch(html, /backend に接続できません/);
 });
 
-test("概要は Provider の Context が接続中でも最後に読めた状態の表示を残す", () => {
+test("概要は Provider の Context が接続中なら最終読み取り時刻のタイルを持たない", () => {
   const html = renderLive(LiveOverview, connected().state);
-  assert.match(html, /最終読み取り時刻/, "最後に読めた時刻の表示を残す");
+  assert.doesNotMatch(html, /最終読み取り時刻/, "最終読み取り時刻のタイルはサイドバーへ移した");
   assert.match(html, /Mac mini/, "サーバーの表示を残す");
 });
 
@@ -77,4 +79,16 @@ test("判断待ちは Provider の Context が接続中でも最後に読めた�
   // Context の state が一覧へ届いていることを確かめる。
   assert.match(html, /corporate-site/, "最後に読めた判断待ちの対象プロジェクトを残します");
   assert.match(html, /プルリクエスト #418/, "最後に読めた判断待ちの本文を残します");
+});
+
+test("RSC の初期状態は検証を通してから Context に載せ、必須の値が空なら描画しない", () => {
+  const invalid = DashboardState.create({ servers: [{ serverId: "" }] });
+
+  assert.throws(
+    () =>
+      renderToStaticMarkup(
+        createElement(StateStreamProvider, { initialState: invalid }, createElement(LiveOverview)),
+      ),
+    (error) => error instanceof DomainPrimitiveError && error.stage === "size",
+  );
 });

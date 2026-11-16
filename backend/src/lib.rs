@@ -6,8 +6,10 @@
 //! [`grpc`] モジュールが実装します。
 
 pub mod activity;
+pub mod build_info;
 pub mod config;
 pub mod conversation;
+pub mod domain;
 pub mod events;
 pub mod grpc;
 pub mod mcp;
