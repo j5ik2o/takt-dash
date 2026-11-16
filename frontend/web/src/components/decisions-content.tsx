@@ -4,21 +4,20 @@
 // 結果は decisionKey で項目に紐づけて保持するため、SSE の再描画で並び順が変わっても
 // 同じ項目の結果として残る。
 import { useCallback, useState, type ReactElement } from "react";
-import type { DashboardState } from "../proto/taktdash";
 import {
   decisionKey,
   decisionTypeLabel,
   upsertDecisionResult,
   type DecisionResult,
 } from "../state/decision-actions";
-import { resolveThresholds, sortPendingDecisions } from "../state/dashboard";
+import { resolveThresholds, sortPendingDecisions, type DecisionsStateInput } from "../state/dashboard";
 import { formatDuration } from "../state/format";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { DecisionActions } from "./decision-actions";
 import { DecisionResults } from "./decision-results";
 
 type DecisionsContentProps = {
-  state: DashboardState;
+  state: DecisionsStateInput;
   now: Date;
   disconnected: boolean;
 };

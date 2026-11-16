@@ -1,29 +1,124 @@
-// SSE で受信した proto の JSON 表現を、画面が使う内部の型へ復元する。
+// SSE で受信した proto の JSON 表現と、RSC が渡す proto の初期状態を、画面が使う
+// 内部の型へ復元する。
 //
 // 送信側（app/api/state/route.ts）は DashboardState.toJSON の JSON を送る。これは
 // proto の JSON 形式で、時刻は ISO 文字列になる。生成コード（src/proto/taktdash.ts）の
 // fromJSON は @grpc/grpc-js を値として読み込むため、ブラウザ側のバンドルへ持ち込めない。
-// そこで、時刻の復元には gRPC に依存しない Timestamp.fromJSON を使い、必要な
-// フィールドだけを内部の型へ正規化する。生成コードとの意味の一致は
+// そこで、時刻の復元には gRPC に依存しない Timestamp.fromJSON を使い、ドメイン上の値は
+// domain-primitives.ts の検証関数を通して内部の型へ復元する。生成コードとの意味の一致は
 // test/state/dashboard.test.ts と test/components/state-stream.test.ts で確認する。
 import type {
-  AnomalyThresholds,
-  DashboardState,
-  Goal,
-  PendingDecision,
-  Project,
-  ReportSummary,
-  Run,
-  RunStep,
-  Server,
-  TaskStatusCounts,
+  DashboardState as ProtoDashboardState,
+  Goal as ProtoGoal,
+  PendingDecision as ProtoPendingDecision,
+  Project as ProtoProject,
+  PullRequest as ProtoPullRequest,
+  Run as ProtoRun,
+  Server as ProtoServer,
 } from "../proto/taktdash";
 import { Timestamp } from "../proto/google/protobuf/timestamp";
-import { enumFromWire } from "./proto-values";
+import {
+  toGoalId,
+  toInquiryId,
+  toProjectName,
+  toPullRequestNumber,
+  toRegistrationRevision,
+  toRunSlug,
+  toServerId,
+  toSilentMinutes,
+  toStaleMinutes,
+  toTaskCount,
+  toTaskName,
+  type GoalId,
+  type InquiryId,
+  type ProjectName,
+  type PullRequestNumber,
+  type RegistrationRevision,
+  type RunSlug,
+  type ServerId,
+  type TaskCount,
+  type TaskName,
+  type ValidatedAnomalyThresholds,
+} from "./domain-primitives";
+import { enumFromWire, enumFromWireOrUnrecognizedName } from "./proto-values";
+
+export type ValidatedTaskStatusCounts = {
+  pending: TaskCount;
+  running: TaskCount;
+  completed: TaskCount;
+  failed: TaskCount;
+  exceeded: TaskCount;
+  prFailed: TaskCount;
+};
+
+export type DashboardPullRequest = Omit<ProtoPullRequest, "number"> & {
+  number: PullRequestNumber;
+};
+
+export type DashboardServer = Omit<ProtoServer, "serverId"> & {
+  serverId: ServerId;
+};
+
+export type DashboardProject = Omit<ProtoProject, "name" | "serverId"> & {
+  name: ProjectName;
+  serverId: ServerId;
+};
+
+export type DashboardGoal = Omit<
+  ProtoGoal,
+  "goalId" | "serverId" | "project" | "taskCounts" | "pullRequest"
+> & {
+  goalId: GoalId;
+  serverId: ServerId;
+  project: ProjectName;
+  taskCounts: ValidatedTaskStatusCounts | undefined;
+  pullRequest: DashboardPullRequest | undefined;
+};
+
+// run はどのゴールにも属さない場合がある（backend の RunEntry.goal_id は Option）。wire は
+// 空文字または欠落になるため、未指定を undefined で表す。
+export type DashboardRun = Omit<
+  ProtoRun,
+  "runSlug" | "serverId" | "project" | "goalId" | "taskName"
+> & {
+  runSlug: RunSlug;
+  serverId: ServerId;
+  project: ProjectName;
+  goalId: GoalId | undefined;
+  taskName: TaskName;
+};
+
+export type DashboardPendingDecision = Omit<
+  ProtoPendingDecision,
+  "serverId" | "project" | "goalId" | "pullRequest" | "inquiryId" | "revision"
+> & {
+  serverId: ServerId;
+  project: ProjectName;
+  goalId: GoalId | undefined;
+  pullRequest: DashboardPullRequest | undefined;
+  // 問い合わせ以外の判断待ちでは未指定。proto の文字列境界では空文字へ射影する。
+  inquiryId: InquiryId | undefined;
+  revision: RegistrationRevision | undefined;
+};
+
+export type DashboardState = Omit<
+  ProtoDashboardState,
+  "servers" | "projects" | "goals" | "runs" | "pendingDecisions" | "thresholds"
+> & {
+  servers: DashboardServer[];
+  projects: DashboardProject[];
+  goals: DashboardGoal[];
+  runs: DashboardRun[];
+  pendingDecisions: DashboardPendingDecision[];
+  thresholds: ValidatedAnomalyThresholds | undefined;
+};
 
 const toDate = (value: unknown): Date | undefined => {
   if (value === undefined || value === null) {
     return undefined;
+  }
+  if (value instanceof Date) {
+    return value;
   }
   const timestamp = Timestamp.fromJSON(value);
   return new Date(timestamp.seconds * 1_000 + Math.round(timestamp.nanos / 1_000_000));
@@ -31,128 +126,173 @@ const toDate = (value: unknown): Date | undefined => {
 
 const asNumber = (value: unknown): number => (typeof value === "number" ? value : Number(value ?? 0));
 
-const toServer = (raw: Record<string, unknown>): Server => ({
-  serverId: String(raw.serverId ?? ""),
-  name: String(raw.name ?? ""),
-  kind: String(raw.kind ?? ""),
-  connected: raw.connected === true,
-  lastReadAt: toDate(raw.lastReadAt),
-  concurrency: asNumber(raw.concurrency),
-});
+const recordOf = (value: unknown): Record<string, unknown> =>
+  value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 
-const toProject = (raw: Record<string, unknown>): Project => ({
-  name: String(raw.name ?? ""),
-  about: String(raw.about ?? ""),
-  serverId: String(raw.serverId ?? ""),
-  completedTasks24h: asNumber(raw.completedTasks24h),
-  connected: raw.connected === true,
-  lastReadAt: toDate(raw.lastReadAt),
-});
+const arrayOf = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 
-const toTaskCounts = (raw: unknown): TaskStatusCounts | undefined => {
-  if (raw === undefined || raw === null) {
+// 任意のゴール ID。欠落・空文字は未指定の run やゴール非所属の判断待ちとして undefined にする。
+const optionalGoalId = (value: unknown): GoalId | undefined => {
+  if (value === undefined || value === null || value === "") {
     return undefined;
   }
-  const value = raw as Record<string, unknown>;
+  return toGoalId(value);
+};
+
+// 任意の inquiry ID。欠落・空文字は「問い合わせ以外」として undefined にし、空白のみは
+// テキスト検証で lexical 拒否する。"" as InquiryId のような検証の迂回はしない。
+const optionalInquiryId = (value: unknown): InquiryId | undefined => {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  return toInquiryId(value);
+};
+
+const toPullRequest = (raw: unknown): DashboardPullRequest | undefined => {
+  if (raw === undefined || raw === null || typeof raw !== "object") {
+    return undefined;
+  }
+  const value = recordOf(raw);
   return {
-    pending: asNumber(value.pending),
-    running: asNumber(value.running),
-    completed: asNumber(value.completed),
-    failed: asNumber(value.failed),
-    exceeded: asNumber(value.exceeded),
-    prFailed: asNumber(value.prFailed),
+    number: toPullRequestNumber(value.number),
+    url: String(value.url ?? ""),
   };
 };
 
-const toGoal = (raw: Record<string, unknown>): Goal => ({
-  goalId: String(raw.goalId ?? ""),
-  serverId: String(raw.serverId ?? ""),
-  project: String(raw.project ?? ""),
-  name: String(raw.name ?? ""),
-  status: enumFromWire("GoalStatus", raw.status),
-  executionStatus: enumFromWire("ExecutionStatus", raw.executionStatus),
-  taskCounts: toTaskCounts(raw.taskCounts),
-  pausedReason: typeof raw.pausedReason === "string" ? raw.pausedReason : undefined,
-  pullRequest:
-    raw.pullRequest !== null && typeof raw.pullRequest === "object"
-      ? {
-          number: asNumber((raw.pullRequest as Record<string, unknown>).number),
-          url: String((raw.pullRequest as Record<string, unknown>).url ?? ""),
-        }
-      : undefined,
-  awaitingMergeAt: toDate(raw.awaitingMergeAt),
-  mergeTaskLast:
-    raw.mergeTaskLast === undefined || raw.mergeTaskLast === null
-      ? undefined
-      : enumFromWire("TaskStatus", raw.mergeTaskLast),
-});
-
-const toRunStep = (raw: Record<string, unknown>): RunStep => ({
-  stepName: String(raw.stepName ?? ""),
-  model: String(raw.model ?? ""),
-  startedAt: toDate(raw.startedAt),
-  endedAt: toDate(raw.endedAt),
-});
-
-const toReportSummary = (raw: Record<string, unknown>): ReportSummary => ({
-  filename: String(raw.filename ?? ""),
-  sizeBytes: asNumber(raw.sizeBytes),
-});
-
-const toRun = (raw: Record<string, unknown>): Run => ({
-  runSlug: String(raw.runSlug ?? ""),
-  sessionId: String(raw.sessionId ?? ""),
-  serverId: String(raw.serverId ?? ""),
-  project: String(raw.project ?? ""),
-  goalId: String(raw.goalId ?? ""),
-  taskName: String(raw.taskName ?? ""),
-  summary: String(raw.summary ?? ""),
-  startedAt: toDate(raw.startedAt),
-  steps: Array.isArray(raw.steps) ? raw.steps.map((step) => toRunStep(step as Record<string, unknown>)) : [],
-  currentStepStartedAt: toDate(raw.currentStepStartedAt),
-  lastLogAt: toDate(raw.lastLogAt),
-  reports: Array.isArray(raw.reports) ? raw.reports.map((report) => toReportSummary(report as Record<string, unknown>)) : [],
-  status: enumFromWire("RunStatus", raw.status),
-  logSilent: raw.logSilent === true,
-});
-
-const toPendingDecision = (raw: Record<string, unknown>): PendingDecision => ({
-  type: enumFromWire("PendingDecisionType", raw.type),
-  serverId: String(raw.serverId ?? ""),
-  project: String(raw.project ?? ""),
-  goalId: typeof raw.goalId === "string" ? raw.goalId : undefined,
-  inquiryKind: enumFromWire("InquiryKind", raw.inquiryKind),
-  createdAt: toDate(raw.createdAt),
-  body: String(raw.body ?? ""),
-  options: Array.isArray(raw.options) ? raw.options.map((option) => String(option)) : [],
-  pullRequest:
-    raw.pullRequest !== null && typeof raw.pullRequest === "object"
-      ? {
-          number: asNumber((raw.pullRequest as Record<string, unknown>).number),
-          url: String((raw.pullRequest as Record<string, unknown>).url ?? ""),
-        }
-      : undefined,
-  stale: raw.stale === true,
-  inquiryId: String(raw.inquiryId ?? ""),
-  revision: typeof raw.revision === "number" ? raw.revision : undefined,
-});
-
-const toThresholds = (raw: unknown): AnomalyThresholds | undefined => {
+const toTaskCounts = (raw: unknown): ValidatedTaskStatusCounts | undefined => {
   if (raw === undefined || raw === null) {
     return undefined;
   }
-  const value = raw as Record<string, unknown>;
+  const value = recordOf(raw);
+  // wire が 0 を省略するため、欠落は 0 として復元する。負数・上限超・非整数は拒否する。
   return {
-    pendingDecisionStaleMinutes: asNumber(value.pendingDecisionStaleMinutes),
-    runLogSilentMinutes: asNumber(value.runLogSilentMinutes),
+    pending: toTaskCount(value.pending ?? 0),
+    running: toTaskCount(value.running ?? 0),
+    completed: toTaskCount(value.completed ?? 0),
+    failed: toTaskCount(value.failed ?? 0),
+    exceeded: toTaskCount(value.exceeded ?? 0),
+    prFailed: toTaskCount(value.prFailed ?? 0),
+  };
+};
+
+const toServer = (raw: unknown): DashboardServer => {
+  const value = recordOf(raw);
+  return {
+    serverId: toServerId(value.serverId),
+    name: String(value.name ?? ""),
+    kind: String(value.kind ?? ""),
+    connected: value.connected === true,
+    lastReadAt: toDate(value.lastReadAt),
+    concurrency: asNumber(value.concurrency),
+  };
+};
+
+const toProject = (raw: unknown): DashboardProject => {
+  const value = recordOf(raw);
+  return {
+    name: toProjectName(value.name),
+    about: String(value.about ?? ""),
+    serverId: toServerId(value.serverId),
+    completedTasks24h: asNumber(value.completedTasks24h),
+    connected: value.connected === true,
+    lastReadAt: toDate(value.lastReadAt),
+  };
+};
+
+const toGoal = (raw: unknown): DashboardGoal => {
+  const value = recordOf(raw);
+  return {
+    goalId: toGoalId(value.goalId),
+    serverId: toServerId(value.serverId),
+    project: toProjectName(value.project),
+    name: String(value.name ?? ""),
+    status: enumFromWire("GoalStatus", value.status),
+    executionStatus: enumFromWire("ExecutionStatus", value.executionStatus),
+    taskCounts: toTaskCounts(value.taskCounts),
+    pausedReason: typeof value.pausedReason === "string" ? value.pausedReason : undefined,
+    pullRequest: toPullRequest(value.pullRequest),
+    awaitingMergeAt: toDate(value.awaitingMergeAt),
+    mergeTaskLast:
+      value.mergeTaskLast === undefined || value.mergeTaskLast === null
+        ? undefined
+        : enumFromWire("TaskStatus", value.mergeTaskLast),
+  };
+};
+
+const toRunStep = (raw: unknown) => {
+  const value = recordOf(raw);
+  return {
+    stepName: String(value.stepName ?? ""),
+    model: String(value.model ?? ""),
+    startedAt: toDate(value.startedAt),
+    endedAt: toDate(value.endedAt),
+  };
+};
+
+const toReportSummary = (raw: unknown) => {
+  const value = recordOf(raw);
+  return {
+    filename: String(value.filename ?? ""),
+    sizeBytes: asNumber(value.sizeBytes),
+  };
+};
+
+const toRun = (raw: unknown): DashboardRun => {
+  const value = recordOf(raw);
+  return {
+    runSlug: toRunSlug(value.runSlug),
+    sessionId: String(value.sessionId ?? ""),
+    serverId: toServerId(value.serverId),
+    project: toProjectName(value.project),
+    goalId: optionalGoalId(value.goalId),
+    taskName: toTaskName(value.taskName),
+    summary: String(value.summary ?? ""),
+    startedAt: toDate(value.startedAt),
+    steps: arrayOf(value.steps).map(toRunStep),
+    currentStepStartedAt: toDate(value.currentStepStartedAt),
+    lastLogAt: toDate(value.lastLogAt),
+    reports: arrayOf(value.reports).map(toReportSummary),
+    status: enumFromWire("RunStatus", value.status),
+    logSilent: value.logSilent === true,
+  };
+};
+
+const toPendingDecision = (raw: unknown): DashboardPendingDecision => {
+  const value = recordOf(raw);
+  return {
+    type: enumFromWire("PendingDecisionType", value.type),
+    serverId: toServerId(value.serverId),
+    project: toProjectName(value.project),
+    goalId: optionalGoalId(value.goalId),
+    inquiryKind: enumFromWireOrUnrecognizedName("InquiryKind", value.inquiryKind),
+    createdAt: toDate(value.createdAt),
+    body: String(value.body ?? ""),
+    options: Array.isArray(value.options) ? value.options.map((option) => String(option)) : [],
+    pullRequest: toPullRequest(value.pullRequest),
+    stale: value.stale === true,
+    inquiryId: optionalInquiryId(value.inquiryId),
+    revision:
+      value.revision === undefined || value.revision === null
+        ? undefined
+        : toRegistrationRevision(value.revision),
+  };
+};
+
+const toThresholds = (raw: unknown): ValidatedAnomalyThresholds | undefined => {
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  const value = recordOf(raw);
+  // wire が 0 を省略するため、欠落は 0 として復元する。範囲外・非整数は拒否する。
+  return {
+    pendingDecisionStaleMinutes: toStaleMinutes(value.pendingDecisionStaleMinutes ?? 0),
+    runLogSilentMinutes: toSilentMinutes(value.runLogSilentMinutes ?? 0),
   };
 };
 
 // proto の JSON 表現（文字列の時刻を含む）を、内部の DashboardState へ復元する。
 export function restoreDashboardState(payload: unknown): DashboardState {
-  const raw = (payload ?? {}) as Record<string, unknown>;
-  const arrayOf = (value: unknown): Record<string, unknown>[] =>
-    Array.isArray(value) ? value.map((item) => item as Record<string, unknown>) : [];
+  const raw = recordOf(payload);
   return {
     readAt: toDate(raw.readAt),
     servers: arrayOf(raw.servers).map(toServer),
@@ -161,5 +301,19 @@ export function restoreDashboardState(payload: unknown): DashboardState {
     runs: arrayOf(raw.runs).map(toRun),
     pendingDecisions: arrayOf(raw.pendingDecisions).map(toPendingDecision),
     thresholds: toThresholds(raw.thresholds),
+  };
+}
+
+// RSC が渡す proto の初期状態も、SSE と同じエンティティ単位の正規化関数を通してから
+// 画面の型にする。フィールドの列挙と検証規則は各エンティティ関数に1か所だけ置く。
+export function dashboardStateFromProto(state: ProtoDashboardState): DashboardState {
+  return {
+    readAt: toDate(state.readAt),
+    servers: state.servers.map(toServer),
+    projects: state.projects.map(toProject),
+    goals: state.goals.map(toGoal),
+    runs: state.runs.map(toRun),
+    pendingDecisions: state.pendingDecisions.map(toPendingDecision),
+    thresholds: toThresholds(state.thresholds),
   };
 }

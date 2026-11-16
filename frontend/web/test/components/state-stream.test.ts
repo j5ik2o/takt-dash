@@ -11,6 +11,7 @@ import { createDashboardState } from "../support/fixtures.ts";
 import { openStateStream, type EventSourceLike } from "../../src/components/state-stream.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import { restoreDashboardState } from "../../src/state/restore-state.ts";
+import { DomainPrimitiveError } from "../../src/state/domain-primitives.ts";
 import { DecisionsContent } from "../../src/components/decisions-content.tsx";
 import { OverviewContent } from "../../src/components/overview-content.tsx";
 
@@ -242,4 +243,18 @@ test("受信したプロジェクトの接続状態と最後に読めた時刻�
   assert.equal(restored.projects[0]?.connected, false);
   assert.ok(restored.projects[0]?.lastReadAt instanceof Date);
   assert.equal(restored.projects[0]?.lastReadAt?.toISOString(), "2026-11-13T07:09:00.000Z");
+});
+
+test("不正な値を受信したときは状態を置き換えず、onState を呼ばない", () => {
+  const Ctor = freshFakes();
+  const received: DashboardState[] = [];
+  const stream = open(Ctor, { onState: (state) => received.push(state) });
+
+  assert.throws(
+    () => Ctor.instances[0]!.onmessage?.({ data: JSON.stringify({ servers: [{ serverId: "" }] }) }),
+    (error) => error instanceof DomainPrimitiveError && error.stage === "size",
+  );
+  assert.equal(received.length, 0, "検証に失敗した状態は画面へ渡さない");
+
+  stream.close();
 });

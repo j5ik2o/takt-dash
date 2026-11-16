@@ -9,20 +9,37 @@ import type {
   Server,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
+import { toSilentMinutes, toStaleMinutes, type ValidatedAnomalyThresholds } from "./domain-primitives";
 import { EXECUTION_STATUS, GOAL_STATUS, PENDING_DECISION_TYPE, RUN_STATUS } from "./proto-values";
 
 // 判断待ちの滞留とログの無音の既定値。要件定義 2.7 節の値で、backend が proto の
 // AnomalyThresholds を返さないときだけ使う。値を決める場所はここ1か所に閉じる。
-export const DEFAULT_ANOMALY_THRESHOLDS: AnomalyThresholds = {
-  pendingDecisionStaleMinutes: 240,
-  runLogSilentMinutes: 10,
+export const DEFAULT_ANOMALY_THRESHOLDS: ValidatedAnomalyThresholds = {
+  pendingDecisionStaleMinutes: toStaleMinutes(240),
+  runLogSilentMinutes: toSilentMinutes(10),
 };
 
-// proto の閾値があればそれを使い、無い応答だけ既定値へ解決する。全画面がこの関数を
-// 通すことで、既定値の食い違いを防ぐ。
-export function resolveThresholds(thresholds: AnomalyThresholds | undefined): AnomalyThresholds {
-  return thresholds ?? DEFAULT_ANOMALY_THRESHOLDS;
+// proto の閾値があればそれを検証して使い、無い応答だけ既定値へ解決する。全画面がこの関数を
+// 通すことで、既定値の食い違いと範囲外の値の混入を防ぐ。
+export function resolveThresholds(
+  thresholds: AnomalyThresholds | undefined,
+): ValidatedAnomalyThresholds {
+  if (thresholds === undefined) {
+    return DEFAULT_ANOMALY_THRESHOLDS;
+  }
+  return {
+    pendingDecisionStaleMinutes: toStaleMinutes(thresholds.pendingDecisionStaleMinutes),
+    runLogSilentMinutes: toSilentMinutes(thresholds.runLogSilentMinutes),
+  };
 }
+
+// 復元境界の内部状態は、proto の必須フィールドが未指定になる場合がある。
+// Run.goalId はゴール非所属の run で、PendingDecision.inquiryId は問い合わせ以外で未指定に
+// なるため、表示用の変換は proto の必須形ではなく未指定を許す入力型で受ける。
+export type RunInput = Omit<Run, "goalId"> & { goalId: string | undefined };
+export type PendingDecisionInput = Omit<PendingDecision, "inquiryId"> & {
+  inquiryId: string | undefined;
+};
 
 export type PendingDecisionView = PendingDecision & {
   waitMinutes: number;
@@ -30,7 +47,7 @@ export type PendingDecisionView = PendingDecision & {
 };
 
 type RunView = {
-  run: Run;
+  run: RunInput;
   server: Server | undefined;
   connected: boolean;
   label: string;
@@ -56,7 +73,7 @@ export type OverviewView = {
   servers: OverviewServerView[];
   projects: Project[];
   runs: RunView[];
-  thresholds: AnomalyThresholds;
+  thresholds: ValidatedAnomalyThresholds;
   runningRuns: number;
   pendingCounts: PendingCounts;
   pendingDecisions: PendingDecisionView[];
@@ -66,12 +83,24 @@ export type SortOptions = {
   staleThresholdMinutes?: number;
 };
 
+// 概要と判断待ちの表示は、SSE の JSON 復元結果・RSC の proto 初期状態・proto の応答の
+// いずれも同じ関数へ渡せるようにする。未指定を許す runs / pendingDecisions だけを入力型で表す。
+export type OverviewStateInput = Omit<DashboardState, "runs" | "pendingDecisions"> & {
+  runs: readonly RunInput[];
+  pendingDecisions: readonly PendingDecisionInput[];
+};
+
+export type DecisionsStateInput = {
+  thresholds: AnomalyThresholds | undefined;
+  pendingDecisions: readonly PendingDecisionInput[];
+};
+
 const minutesSince = (from: Date, now: Date): number => Math.max(0, (now.getTime() - from.getTime()) / 60_000);
 
 const staleThreshold = (options: SortOptions): number =>
   options.staleThresholdMinutes ?? DEFAULT_ANOMALY_THRESHOLDS.pendingDecisionStaleMinutes;
 export function sortPendingDecisions(
-  decisions: readonly PendingDecision[],
+  decisions: readonly PendingDecisionInput[],
   now: Date,
   options: SortOptions = {},
 ): PendingDecisionView[] {
@@ -79,7 +108,9 @@ export function sortPendingDecisions(
   return decisions
     .map((decision) => {
       const waitMinutes = decision.createdAt ? minutesSince(decision.createdAt, now) : 0;
-      return { ...decision, waitMinutes, stale: waitMinutes >= threshold };
+      // 未指定の inquiryId は、proto の文字列境界で空文字へ射影する。識別子生成・
+      // 真偽判定・表示は従来どおり空文字を受け取る。
+      return { ...decision, inquiryId: decision.inquiryId ?? "", waitMinutes, stale: waitMinutes >= threshold };
     })
     .sort((a, b) => b.waitMinutes - a.waitMinutes);
 }
@@ -98,7 +129,7 @@ export function summarizePendingDecisions(decisions: readonly PendingDecisionVie
 }
 
 export function toRunView(
-  run: Run,
+  run: RunInput,
   serverById: ReadonlyMap<string, Server>,
   projectById: ReadonlyMap<string, Project>,
   now: Date,
@@ -124,7 +155,7 @@ export function toRunView(
   return { run, server, connected: true, label: "実行中", note: "" };
 }
 
-const serverState = (server: Server, runs: readonly Run[]): OverviewServerView["state"] => {
+const serverState = (server: Server, runs: readonly RunInput[]): OverviewServerView["state"] => {
   if (!server.connected) {
     return "down";
   }
@@ -142,7 +173,7 @@ const serverStateLabel = (state: OverviewServerView["state"]): string => {
   }
 };
 
-export function buildOverviewView(state: DashboardState, now: Date): OverviewView {
+export function buildOverviewView(state: OverviewStateInput, now: Date): OverviewView {
   const thresholds = resolveThresholds(state.thresholds);
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
   const projectById = new Map(state.projects.map((project) => [project.name, project]));
