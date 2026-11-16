@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use takt_dash_backend::{
   config::{McpServer, Project, ServerMeta, Thresholds},
+  domain::{GoalId, InquiryId, PullRequestNumber, SilentMinutes, StaleMinutes, TaskName},
   mcp::{McpClient, McpClientConfig, ToolSet},
   model::{
     ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, RunEntry,
@@ -101,7 +102,7 @@ pub fn time(text: &str) -> DateTime<Utc> {
 
 pub fn goal(id: &str, status: GoalStatus, execution: ExecutionStatus) -> GoalEntry {
   GoalEntry {
-    goal_id: id.to_owned(),
+    goal_id: GoalId::try_from(id).expect("テストのゴール ID は有効です"),
     status,
     execution_status: execution,
     objective: format!("ゴール {id}"),
@@ -115,7 +116,7 @@ pub fn goal(id: &str, status: GoalStatus, execution: ExecutionStatus) -> GoalEnt
 
 pub fn merge_goal(id: &str, pull_request: i64) -> GoalEntry {
   GoalEntry {
-    pull_request_number: Some(pull_request),
+    pull_request_number: Some(PullRequestNumber::try_from(pull_request).expect("テストの PR 番号は正です")),
     pull_request_url: Some(format!("https://example.test/pr/{pull_request}")),
     ..goal(id, GoalStatus::AwaitingMerge, ExecutionStatus::Active)
   }
@@ -123,7 +124,7 @@ pub fn merge_goal(id: &str, pull_request: i64) -> GoalEntry {
 
 pub fn task(name: &str, status: TaskStatus) -> TaskEntry {
   TaskEntry {
-    name: name.to_owned(),
+    name: TaskName::try_from(name).expect("テストのタスク名は有効です"),
     goal_id: None,
     status,
     started_at: None,
@@ -135,12 +136,16 @@ pub fn task(name: &str, status: TaskStatus) -> TaskEntry {
 }
 
 pub fn task_for_goal(name: &str, goal_id: &str, status: TaskStatus, merge_task: bool) -> TaskEntry {
-  TaskEntry { goal_id: Some(goal_id.to_owned()), merge_task, ..task(name, status) }
+  TaskEntry {
+    goal_id: Some(GoalId::try_from(goal_id).expect("テストのゴール ID は有効です")),
+    merge_task,
+    ..task(name, status)
+  }
 }
 
 pub fn inquiry(id: &str, answered: bool, created_at: DateTime<Utc>) -> InquiryEntry {
   InquiryEntry {
-    inquiry_id: id.to_owned(),
+    inquiry_id: InquiryId::try_from(id).expect("テストの inquiry ID は有効です"),
     goal_id: None,
     kind: InquiryKind::Question,
     body: format!("問い合わせ {id}"),
@@ -153,7 +158,7 @@ pub fn inquiry(id: &str, answered: bool, created_at: DateTime<Utc>) -> InquiryEn
 pub fn notification(id: &str, kind: &str, recorded_at: DateTime<Utc>) -> NotificationEntry {
   NotificationEntry {
     notification_id: id.to_owned(),
-    goal_id: "g1".to_owned(),
+    goal_id: GoalId::try_from("g1").expect("テストのゴール ID は有効です"),
     kind: kind.to_owned(),
     body: format!("通知 {id}"),
     recorded_at,
@@ -164,7 +169,7 @@ pub fn run(run_slug: &str, task_name: &str, last_log_at: DateTime<Utc>) -> RunEn
   RunEntry {
     run_slug:                run_slug.to_owned(),
     session_id:              String::new(),
-    task_name:               task_name.to_owned(),
+    task_name:               TaskName::try_from(task_name).expect("テストのタスク名は有効です"),
     goal_id:                 None,
     summary:                 String::new(),
     status:                  takt_dash_backend::model::RunStatus::Running,
@@ -214,8 +219,8 @@ pub fn mcp_server() -> McpServer {
 
 pub fn thresholds() -> Thresholds {
   Thresholds {
-    pending_decision_stale_minutes: 240,
-    run_log_silent_minutes:         10,
+    pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
+    run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
     connection_failure_count:       3,
     connection_delay_seconds:       120,
   }

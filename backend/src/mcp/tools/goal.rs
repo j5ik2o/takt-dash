@@ -5,19 +5,22 @@ use serde_json::Value;
 
 use super::{
   super::client::ToolCallError,
-  parse::{optional_string, parse_time, string_field},
+  parse::{domain_value, optional_string, parse_time, string_field},
   ToolError,
 };
-use crate::model::{
-  ExecutionStatus, GoalEntry, GoalQuestionEntry, GoalStatus, GoalWorkLogEntry, InquiryEntry, InquiryKind,
-  NotificationEntry, ProjectSnapshot, TaskDetail, TaskEntry, TaskStatus,
+use crate::{
+  domain::{GoalId, InquiryId, PullRequestNumber, RunSlug, TaskName},
+  model::{
+    ExecutionStatus, GoalEntry, GoalQuestionEntry, GoalStatus, GoalWorkLogEntry, InquiryEntry, InquiryKind,
+    NotificationEntry, ProjectSnapshot, TaskDetail, TaskEntry, TaskStatus,
+  },
 };
 
 /// 前回 snapshot の問い合わせのうち、`matches` に合うものを解析済みの形で取り出す。
 /// 道具エラー時に該当項目だけを引き継ぐために使います。前回が無ければ空です。
 pub(super) fn prev_inquiries(
   prev: Option<&ProjectSnapshot>,
-  matches: impl Fn(Option<&str>) -> bool,
+  matches: impl Fn(Option<&GoalId>) -> bool,
 ) -> Vec<ParsedInquiry> {
   let Some(prev) = prev else {
     return Vec::new();
@@ -25,7 +28,7 @@ pub(super) fn prev_inquiries(
   prev
     .inquiries
     .iter()
-    .filter(|entry| matches(entry.goal_id.as_deref()))
+    .filter(|entry| matches(entry.goal_id.as_ref()))
     .map(|entry| ParsedInquiry {
       inquiry_id: entry.inquiry_id.clone(),
       goal_id:    entry.goal_id.clone(),
@@ -103,11 +106,14 @@ fn parse_task_status(value: Option<&Value>) -> Result<TaskStatus, ToolError> {
 }
 
 pub(super) fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
-  let goal_id = string_field(value, "id")?;
+  let goal_id = domain_value("ゴール ID", GoalId::try_from(string_field(value, "id")?.as_str()))?;
   let status = parse_goal_status(value.get("status"))?;
   let execution_status = parse_goal_execution_status(value.get("executionStatus"))?;
   let pull_request = value.get("pullRequest");
-  let pull_request_number = pull_request.and_then(|value| value.get("number")).and_then(Value::as_i64);
+  let pull_request_number = match pull_request.and_then(|value| value.get("number")).and_then(Value::as_i64) {
+    | Some(number) => Some(domain_value("プルリクエスト番号", PullRequestNumber::try_from(number))?),
+    | None => None,
+  };
   let pull_request_url = pull_request.and_then(|value| value.get("url")).and_then(Value::as_str).map(str::to_owned);
   Ok(GoalEntry {
     goal_id,
@@ -125,12 +131,23 @@ pub(super) fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
 pub(super) fn parse_task(value: &Value) -> Result<TaskEntry, ToolError> {
   let status = parse_task_status(value.get("status"))?;
   let started_at = parse_time(value.get("startedAt"))?;
+  let name = domain_value("タスク名", TaskName::try_from(string_field(value, "name")?.as_str()))?;
+  let goal_id = match optional_string(value, "goalId") {
+    | Some(text) if text.is_empty() => None,
+    | Some(text) => Some(domain_value("ゴール ID", GoalId::try_from(text.as_str()))?),
+    | None => None,
+  };
+  let run_slug = match optional_string(value, "runSlug") {
+    | Some(text) if text.is_empty() => None,
+    | Some(text) => Some(domain_value("run slug", RunSlug::try_from(text.as_str()))?),
+    | None => None,
+  };
   Ok(TaskEntry {
-    name: string_field(value, "name")?,
-    goal_id: optional_string(value, "goalId"),
+    name,
+    goal_id,
     status,
     started_at,
-    run_slug: optional_string(value, "runSlug"),
+    run_slug,
     source_run_slug: optional_string(value, "sourceRunSlug"),
     current_step: optional_string(value, "currentStep"),
     merge_task: value.get("mergeTask").and_then(Value::as_bool).unwrap_or(false),
@@ -204,8 +221,8 @@ pub(super) fn parse_task_detail(project: &str, value: &Value, links: TaskLinkFie
 /// 解析直後の問い合わせ。`created_at` は応答での有無を保持し、前回値の引き継ぎと
 /// 初回観測の既定は `read_snapshot` の解像で決めます。
 pub(super) struct ParsedInquiry {
-  inquiry_id: String,
-  goal_id:    Option<String>,
+  inquiry_id: InquiryId,
+  goal_id:    Option<GoalId>,
   kind:       InquiryKind,
   body:       String,
   options:    Vec<String>,
@@ -216,7 +233,7 @@ pub(super) struct ParsedInquiry {
 /// 1件の問い合わせを解析する。`approval` は判断待ちの種類（問い合わせとマージ待ち）に
 /// 対応する値が無いため、判定対象外として `Ok(None)` を返して読み飛ばします。未知の種類は
 /// 解析エラーにします。
-pub(super) fn parse_inquiry(value: &Value, goal_id: Option<&str>) -> Result<Option<ParsedInquiry>, ToolError> {
+pub(super) fn parse_inquiry(value: &Value, goal_id: Option<&GoalId>) -> Result<Option<ParsedInquiry>, ToolError> {
   let kind = match value.get("kind").and_then(Value::as_str) {
     | Some("question") => InquiryKind::Question,
     | Some("operation_request") => InquiryKind::OperationRequest,
@@ -233,9 +250,18 @@ pub(super) fn parse_inquiry(value: &Value, goal_id: Option<&str>) -> Result<Opti
     .and_then(Value::as_array)
     .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
     .unwrap_or_default();
+  let inquiry_id = domain_value("inquiry ID", InquiryId::try_from(string_field(value, "id")?.as_str()))?;
+  let goal_id = match goal_id {
+    | Some(goal_id) => Some(goal_id.clone()),
+    | None => match optional_string(value, "goalId") {
+      | Some(text) if text.is_empty() => None,
+      | Some(text) => Some(domain_value("ゴール ID", GoalId::try_from(text.as_str()))?),
+      | None => None,
+    },
+  };
   Ok(Some(ParsedInquiry {
-    inquiry_id: string_field(value, "id")?,
-    goal_id: goal_id.map(str::to_owned).or_else(|| optional_string(value, "goalId")),
+    inquiry_id,
+    goal_id,
     kind,
     body: optional_string(value, "body").unwrap_or_default(),
     options,
@@ -273,12 +299,12 @@ pub(super) fn resolve_inquiry(
   }
 }
 
-pub(super) fn parse_notification(goal_id: &str, value: &Value) -> Result<NotificationEntry, ToolError> {
+pub(super) fn parse_notification(goal_id: &GoalId, value: &Value) -> Result<NotificationEntry, ToolError> {
   let recorded_at = parse_time(value.get("recordedAt"))?
     .ok_or_else(|| ToolError::Parse("通知の recordedAt がありません".to_owned()))?;
   Ok(NotificationEntry {
     notification_id: string_field(value, "id")?,
-    goal_id: goal_id.to_owned(),
+    goal_id: goal_id.clone(),
     kind: string_field(value, "kind")?,
     body: optional_string(value, "body").unwrap_or_default(),
     recorded_at,

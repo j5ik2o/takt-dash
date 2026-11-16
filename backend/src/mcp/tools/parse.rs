@@ -4,6 +4,12 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::ToolError;
+use crate::domain::DomainError;
+
+/// 値オブジェクトの検証失敗を、takt 応答の解析エラーへ写す。
+pub(super) fn domain_value<T>(label: &str, result: Result<T, DomainError>) -> Result<T, ToolError> {
+  result.map_err(|error| ToolError::Parse(format!("{label}: {error}")))
+}
 
 pub(super) struct Page {
   pub(super) items:       Vec<Value>,

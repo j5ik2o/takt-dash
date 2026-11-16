@@ -19,6 +19,7 @@ use super::{
 };
 use crate::{
   config::McpServer,
+  domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   model::{
     ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
     InquiryEntry, NotificationEntry, ProjectSnapshot, RegistrationProposalEntry, RunDetail, RunEntry,
@@ -36,7 +37,7 @@ use self::{
     parse_goal_work_log, parse_inquiry, parse_notification, parse_task, parse_task_detail, prev_inquiries,
     registration_summary_text, resolve_awaiting_merge_at, resolve_inquiry, ParsedInquiry, TaskLinkFields,
   },
-  parse::{checked_i32, optional_string, parse_time, required_i32, required_string, string_field, Page},
+  parse::{checked_i32, domain_value, optional_string, parse_time, required_i32, required_string, string_field, Page},
   run::{parse_run, parse_run_detail, report_summaries, step_entries, step_log_entries, step_log_next_offset},
 };
 
@@ -210,13 +211,13 @@ impl<'a> ToolSet<'a> {
     };
     for goal in goals {
       if is_unchanged_terminal_goal(goal, prev) {
-        inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(goal.goal_id.as_str())));
+        inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id)));
         continue;
       }
       match self.list_goal_questions(&goal.goal_id).await {
         | Ok(mut entries) => inquiries.append(&mut entries),
         | Err(error) if is_degradable_auxiliary_error(&error) => {
-          inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(goal.goal_id.as_str())))
+          inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id)))
         },
         | Err(error) => return Err(error),
       }
@@ -224,11 +225,12 @@ impl<'a> ToolSet<'a> {
     Ok(inquiries.into_iter().map(|parsed| resolve_inquiry(parsed, prev, observed_at)).collect())
   }
 
-  async fn list_goal_questions(&mut self, goal_id: &str) -> Result<Vec<ParsedInquiry>, ToolError> {
+  async fn list_goal_questions(&mut self, goal_id: &GoalId) -> Result<Vec<ParsedInquiry>, ToolError> {
     let mut entries = Vec::new();
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
-      let value = self.call_json("takt_list_goal_questions", json!({ "goalId": goal_id, "offset": offset })).await?;
+      let value =
+        self.call_json("takt_list_goal_questions", json!({ "goalId": goal_id.as_str(), "offset": offset })).await?;
       let page = Page::from_value(&value, "questions")?;
       for item in &page.items {
         if let Some(entry) = parse_inquiry(item, Some(goal_id))? {
@@ -279,7 +281,7 @@ impl<'a> ToolSet<'a> {
         | Ok(run) => runs.push(run),
         | Err(error) if is_degradable_auxiliary_error(&error) => {
           if let Some(previous) =
-            prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug))
+            prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str()))
           {
             runs.push(previous.clone());
           }
@@ -292,16 +294,15 @@ impl<'a> ToolSet<'a> {
 
   async fn read_run(
     &mut self,
-    run_slug: &str,
+    run_slug: &RunSlug,
     task: &TaskEntry,
     prev: Option<&ProjectSnapshot>,
   ) -> Result<RunEntry, ToolError> {
-    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug })).await?;
-    let prev_run = prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug));
+    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
+    let prev_run = prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str()));
     self.parse_run_with_pages(&value, task, prev_run).await
   }
 
-  /// takt_get_run の応答を解析する。stepLogs は先頭 50 件のウィンドウで返るため、
   /// stepLogPage.nextOffset が残っていれば追加ページを取得して末尾のログの時刻を求める。
   ///
   /// 前回の run に同じ stepLog の並びが残っていれば、先頭ページの同一性と総件数を確かめ、
@@ -351,14 +352,15 @@ impl<'a> ToolSet<'a> {
       },
       | None => (latest_step_timestamp(value), first_page_steps, step_log_next_offset(value)),
     };
-    let run_slug = string_field(value, "runSlug")?;
+    let run_slug = domain_value("run slug", RunSlug::try_from(string_field(value, "runSlug")?.as_str()))?;
     let mut pages_taken = 0;
     while let Some(offset) = next_offset {
       if pages_taken >= MAX_PAGES {
         return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
       }
       pages_taken += 1;
-      let page_value = self.call_json("takt_get_run", json!({ "runSlug": run_slug, "offset": offset })).await?;
+      let page_value =
+        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
       if let Some(timestamp) = latest_step_timestamp(&page_value) {
         latest_seen = Some(latest_seen.map_or(timestamp, |current| current.max(timestamp)));
       }
@@ -458,7 +460,7 @@ impl<'a> ToolSet<'a> {
     &mut self,
     goals: &[GoalEntry],
     prev: Option<&ProjectSnapshot>,
-  ) -> Result<(Vec<NotificationEntry>, BTreeMap<String, DateTime<Utc>>), ToolError> {
+  ) -> Result<(Vec<NotificationEntry>, BTreeMap<GoalId, DateTime<Utc>>), ToolError> {
     let mut notifications = Vec::new();
     let mut awaiting_merge_at = BTreeMap::new();
     for goal in goals {
@@ -486,14 +488,14 @@ impl<'a> ToolSet<'a> {
   /// awaiting_merge 通知のうち最も新しい recordedAt を返す。
   async fn list_goal_notifications(
     &mut self,
-    goal_id: &str,
+    goal_id: &GoalId,
   ) -> Result<(Vec<NotificationEntry>, Option<DateTime<Utc>>), ToolError> {
     let mut notifications = Vec::new();
     let mut awaiting_merge_at: Option<DateTime<Utc>> = None;
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
       let value = self
-        .call_json("takt_get_goal", json!({ "goalId": goal_id, "path": "notifications", "offset": offset }))
+        .call_json("takt_get_goal", json!({ "goalId": goal_id.as_str(), "path": "notifications", "offset": offset }))
         .await?;
       let page = Page::from_value(&value, "items")?;
       for item in &page.items {
@@ -548,17 +550,16 @@ fn is_degradable_auxiliary_error(error: &ToolError) -> bool {
 /// 前回 snapshot の同じゴールの通知と、マージ待ちの起点時刻を引き継ぐ。前回が無ければ何もしません。
 fn inherit_previous_notifications(
   notifications: &mut Vec<NotificationEntry>,
-  awaiting_merge_at: &mut BTreeMap<String, DateTime<Utc>>,
+  awaiting_merge_at: &mut BTreeMap<GoalId, DateTime<Utc>>,
   goal: &GoalEntry,
   prev: Option<&ProjectSnapshot>,
 ) {
   let Some(prev) = prev else {
     return;
   };
-  let goal_id = goal.goal_id.as_str();
-  notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal_id).cloned());
+  notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal.goal_id).cloned());
   if let Some(recorded_at) =
-    prev.goals.iter().find(|entry| entry.goal_id == goal_id).and_then(|entry| entry.awaiting_merge_at)
+    prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id).and_then(|entry| entry.awaiting_merge_at)
   {
     awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
   }
@@ -630,8 +631,12 @@ impl<'a> ToolSet<'a> {
       .list_tasks()
       .await?
       .into_iter()
-      .filter(|task| task.goal_id.as_deref() == Some(goal_id))
-      .map(|task| GoalTaskEntry { task_name: task.name, status: task.status, run_slug: task.run_slug })
+      .filter(|task| task.goal_id.as_ref().map(|goal_id| goal_id.as_str()) == Some(goal_id))
+      .map(|task| GoalTaskEntry {
+        task_name: task.name.as_str().to_owned(),
+        status:    task.status,
+        run_slug:  task.run_slug.as_ref().map(|run_slug| run_slug.as_str().to_owned()),
+      })
       .collect();
     Ok(GoalDetail {
       goal_id: goal_id.to_owned(),
@@ -807,9 +812,9 @@ impl<'a> ToolSet<'a> {
   /// stepLogs は先頭 50 件のウィンドウで返るため、stepLogPage.nextOffset が残っていれば追加ページを
   /// 取得して全件を集めます。レポートと指示書の本文は一覧に含まれないため、一覧の filename と
   /// instructionId を使って1件ずつ本文を取得します。
-  pub async fn read_run_detail(&mut self, run_slug: &str) -> Result<RunDetail, ToolError> {
-    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug })).await?;
-    let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_deref() == Some(run_slug));
+  pub async fn read_run_detail(&mut self, run_slug: &RunSlug) -> Result<RunDetail, ToolError> {
+    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
+    let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_ref() == Some(run_slug));
     let mut step_logs = step_log_entries(&value);
     let mut next_offset = step_log_next_offset(&value);
     let mut pages_taken = 0;
@@ -818,14 +823,15 @@ impl<'a> ToolSet<'a> {
         return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
       }
       pages_taken += 1;
-      let page_value = self.call_json("takt_get_run", json!({ "runSlug": run_slug, "offset": offset })).await?;
+      let page_value =
+        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
       step_logs.extend(step_log_entries(&page_value));
       next_offset = step_log_next_offset(&page_value);
     }
     let mut reports = Vec::new();
     for summary in report_summaries(&value) {
       let report_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug, "report": summary.filename })).await?;
+        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "report": summary.filename })).await?;
       reports.push(RunReportEntry {
         filename:   summary.filename.clone(),
         content:    optional_string(&report_value, "content").unwrap_or_default(),
@@ -838,8 +844,9 @@ impl<'a> ToolSet<'a> {
         | None => 0,
         | Some(field) => checked_i32(Some(field), "instructionId")?,
       };
-      let instruction_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug, "instructionId": instruction_id })).await?;
+      let instruction_value = self
+        .call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "instructionId": instruction_id }))
+        .await?;
       instructions.push(RunInstructionEntry {
         instruction_id,
         issued_at: parse_time(instruction_value.get("issuedAt"))
@@ -861,15 +868,19 @@ impl<'a> ToolSet<'a> {
   /// `goal_id` は必須の引数として受け取ります。
   pub async fn answer_goal_question(
     &mut self,
-    goal_id: &str,
-    question_id: &str,
+    goal_id: &GoalId,
+    question_id: &InquiryId,
     answer: Value,
-  ) -> Result<String, ToolError> {
+  ) -> Result<InquiryId, ToolError> {
     let value = self
-      .call_json("takt_answer_goal_question", json!({ "goalId": goal_id, "questionId": question_id, "answer": answer }))
+      .call_json(
+        "takt_answer_goal_question",
+        json!({ "goalId": goal_id.as_str(), "questionId": question_id.as_str(), "answer": answer }),
+      )
       .await?;
-    optional_string(&value, "questionId")
-      .ok_or_else(|| ToolError::Parse("takt_answer_goal_question の応答に questionId がありません".to_owned()))
+    let question_id = optional_string(&value, "questionId")
+      .ok_or_else(|| ToolError::Parse("takt_answer_goal_question の応答に questionId がありません".to_owned()))?;
+    domain_value("inquiry ID", InquiryId::try_from(question_id.as_str()))
   }
 
   /// ゴール登録の承認待ちを取得する。提案が無ければ空の並びを返します。
@@ -882,7 +893,10 @@ impl<'a> ToolSet<'a> {
       .iter()
       .map(|proposal| {
         Ok(RegistrationProposalEntry {
-          revision:             required_i32(proposal, "revision")?,
+          revision:             domain_value(
+            "revision",
+            RegistrationRevision::try_from(required_i32(proposal, "revision")?),
+          )?,
           repository_directory: required_string(proposal, "repositoryDirectory")?,
           summary:              registration_summary_text(proposal.get("summary"))?,
         })
@@ -891,30 +905,41 @@ impl<'a> ToolSet<'a> {
   }
 
   /// ゴール登録の承認待ちを承認する。承認した revision と、登録されたゴールの ID を返します。
-  pub async fn approve_goal_registration(&mut self, revision: i32) -> Result<ApproveGoalRegistrationResult, ToolError> {
-    let value = self.call_json("takt_approve_goal_registration", json!({ "revision": revision })).await?;
-    let goal_id =
-      required_string(value.get("goal").ok_or_else(|| ToolError::Parse("応答に goal がありません".to_owned()))?, "id")?;
-    Ok(ApproveGoalRegistrationResult { revision: required_i32(&value, "revision")?, goal_id })
+  pub async fn approve_goal_registration(
+    &mut self,
+    revision: RegistrationRevision,
+  ) -> Result<ApproveGoalRegistrationResult, ToolError> {
+    let value = self.call_json("takt_approve_goal_registration", json!({ "revision": revision.get() })).await?;
+    let goal = value.get("goal").ok_or_else(|| ToolError::Parse("応答に goal がありません".to_owned()))?;
+    let goal_id = domain_value("ゴール ID", GoalId::try_from(required_string(goal, "id")?.as_str()))?;
+    let revision = domain_value("revision", RegistrationRevision::try_from(required_i32(&value, "revision")?))?;
+    Ok(ApproveGoalRegistrationResult { revision, goal_id })
   }
 
   /// ゴール登録の承認待ちを却下する。却下した revision を返します。
-  pub async fn reject_goal_registration(&mut self, revision: i32) -> Result<i32, ToolError> {
-    let value = self.call_json("takt_reject_goal_registration", json!({ "revision": revision })).await?;
-    required_i32(&value, "revision")
+  pub async fn reject_goal_registration(
+    &mut self,
+    revision: RegistrationRevision,
+  ) -> Result<RegistrationRevision, ToolError> {
+    let value = self.call_json("takt_reject_goal_registration", json!({ "revision": revision.get() })).await?;
+    domain_value("revision", RegistrationRevision::try_from(required_i32(&value, "revision")?))
   }
 
   /// プルリクエストのマージを承認する。依頼したタスク名とワークフローを返します。
   pub async fn merge_goal_pr(
     &mut self,
-    goal_id: &str,
-    pr_number: i64,
-    until: &str,
+    goal_id: &GoalId,
+    pr_number: PullRequestNumber,
+    until: MergeUntil,
   ) -> Result<MergeGoalPrResult, ToolError> {
-    let value =
-      self.call_json("takt_merge_goal_pr", json!({ "goalId": goal_id, "prNumber": pr_number, "until": until })).await?;
+    let value = self
+      .call_json(
+        "takt_merge_goal_pr",
+        json!({ "goalId": goal_id.as_str(), "prNumber": pr_number.get(), "until": until.as_str() }),
+      )
+      .await?;
     Ok(MergeGoalPrResult {
-      task_name: required_string(&value, "taskName")?,
+      task_name: domain_value("タスク名", TaskName::try_from(required_string(&value, "taskName")?.as_str()))?,
       workflow:  required_string(&value, "workflow")?,
     })
   }
@@ -923,14 +948,14 @@ impl<'a> ToolSet<'a> {
 /// takt_approve_goal_registration の結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApproveGoalRegistrationResult {
-  pub revision: i32,
-  pub goal_id:  String,
+  pub revision: RegistrationRevision,
+  pub goal_id:  GoalId,
 }
 
 /// takt_merge_goal_pr の結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeGoalPrResult {
-  pub task_name: String,
+  pub task_name: TaskName,
   pub workflow:  String,
 }
 

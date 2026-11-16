@@ -8,6 +8,7 @@ use std::io::Write;
 use common::*;
 use serde_json::{json, Value};
 use takt_dash_backend::{
+  domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   mcp::{CallError, ToolError, TransportError},
   model::{
     ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, RunEntry,
@@ -15,6 +16,30 @@ use takt_dash_backend::{
   },
 };
 use tokio::time::timeout;
+
+fn goal_id(value: &str) -> GoalId {
+  GoalId::try_from(value).expect("テストのゴール ID は有効です")
+}
+
+fn inquiry_id(value: &str) -> InquiryId {
+  InquiryId::try_from(value).expect("テストの inquiry ID は有効です")
+}
+
+fn run_slug(value: &str) -> RunSlug {
+  RunSlug::try_from(value).expect("テストの run slug は有効です")
+}
+
+fn task_name(value: &str) -> TaskName {
+  TaskName::try_from(value).expect("テストのタスク名は有効です")
+}
+
+fn revision(value: i32) -> RegistrationRevision {
+  RegistrationRevision::try_from(value).expect("テストの revision は正です")
+}
+
+fn pull_request(value: i64) -> PullRequestNumber {
+  PullRequestNumber::try_from(value).expect("テストの PR 番号は正です")
+}
 
 fn transport(error: CallError) -> TransportError {
   match error {
@@ -42,7 +67,7 @@ fn running_run_state(step_log_count: usize) -> serde_json::Value {
     .collect();
   json!({
     "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-    "runs": { "r1": { "runSlug": "r1", "currentStep": "step0", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": step_logs } }
+    "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "step0", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": step_logs } }
   })
 }
 
@@ -65,7 +90,7 @@ fn running_run_state_with_ended(step_log_count: usize, ended: &[usize]) -> serde
     .collect();
   json!({
     "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-    "runs": { "r1": { "runSlug": "r1", "currentStep": "step0", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": step_logs } }
+    "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "step0", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": step_logs } }
   })
 }
 
@@ -75,7 +100,7 @@ fn previous_run_snapshot(last_log_at: &str) -> ProjectSnapshot {
     runs: vec![RunEntry {
       run_slug:                "r1".to_owned(),
       session_id:              String::new(),
-      task_name:               "a".to_owned(),
+      task_name:               TaskName::try_from("a").expect("テストのタスク名は有効です"),
       goal_id:                 None,
       summary:                 String::new(),
       status:                  RunStatus::Running,
@@ -102,7 +127,7 @@ fn previous_run_snapshot(last_log_at: &str) -> ProjectSnapshot {
 fn previous_goal_question_snapshot() -> ProjectSnapshot {
   ProjectSnapshot {
     goals: vec![GoalEntry {
-      goal_id:             "g1".to_owned(),
+      goal_id:             GoalId::try_from("g1").expect("テストのゴール ID は有効です"),
       status:              GoalStatus::Created,
       execution_status:    ExecutionStatus::Active,
       objective:           "ゴール g1".to_owned(),
@@ -113,8 +138,8 @@ fn previous_goal_question_snapshot() -> ProjectSnapshot {
       paused_reason:       None,
     }],
     inquiries: vec![InquiryEntry {
-      inquiry_id: "q1".to_owned(),
-      goal_id:    Some("g1".to_owned()),
+      inquiry_id: InquiryId::try_from("q1").expect("テストの inquiry ID は有効です"),
+      goal_id:    Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
       kind:       InquiryKind::Question,
       body:       "前回の質問".to_owned(),
       options:    Vec::new(),
@@ -129,19 +154,19 @@ fn previous_goal_question_snapshot() -> ProjectSnapshot {
 fn previous_notification_snapshot() -> ProjectSnapshot {
   ProjectSnapshot {
     goals: vec![GoalEntry {
-      goal_id:             "g1".to_owned(),
+      goal_id:             GoalId::try_from("g1").expect("テストのゴール ID は有効です"),
       status:              GoalStatus::AwaitingMerge,
       execution_status:    ExecutionStatus::Active,
       objective:           "ゴール g1".to_owned(),
       integration_branch:  "takt/g1".to_owned(),
-      pull_request_number: Some(5),
+      pull_request_number: Some(PullRequestNumber::try_from(5_i64).expect("テストのプルリクエスト番号は有効です")),
       pull_request_url:    Some("https://example.test/pr/5".to_owned()),
       awaiting_merge_at:   Some(time("2026-11-13T02:00:00Z")),
       paused_reason:       None,
     }],
     notifications: vec![NotificationEntry {
       notification_id: "n-merge".to_owned(),
-      goal_id:         "g1".to_owned(),
+      goal_id:         GoalId::try_from("g1").expect("テストのゴール ID は有効です"),
       kind:            "awaiting_merge".to_owned(),
       body:            "前回のマージ待ち".to_owned(),
       recorded_at:     time("2026-11-13T02:00:00Z"),
@@ -154,7 +179,7 @@ fn previous_notification_snapshot() -> ProjectSnapshot {
 fn previous_standalone_inquiry_snapshot() -> ProjectSnapshot {
   ProjectSnapshot {
     inquiries: vec![InquiryEntry {
-      inquiry_id: "s1".to_owned(),
+      inquiry_id: InquiryId::try_from("s1").expect("テストの inquiry ID は有効です"),
       goal_id:    None,
       kind:       InquiryKind::OperationRequest,
       body:       "前回の作業依頼".to_owned(),
@@ -224,7 +249,11 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
     let error = tool_set(&mut client, cwd)
-      .answer_goal_question("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11", "q1", json!({ "text": "はい" }))
+      .answer_goal_question(
+        &goal_id("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11"),
+        &inquiry_id("q1"),
+        json!({ "text": "はい" }),
+      )
       .await
       .map(|_| ())
       .expect_err("応答がなければタイムアウトします");
@@ -244,7 +273,7 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
     let error = tool_set(&mut client, cwd)
-      .approve_goal_registration(3)
+      .approve_goal_registration(revision(3))
       .await
       .map(|_| ())
       .expect_err("応答がなければタイムアウトします");
@@ -254,7 +283,7 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
     let error = tool_set(&mut client, cwd)
-      .reject_goal_registration(3)
+      .reject_goal_registration(revision(3))
       .await
       .map(|_| ())
       .expect_err("応答がなければタイムアウトします");
@@ -264,7 +293,7 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
     let error = tool_set(&mut client, cwd)
-      .merge_goal_pr("g1", 42, "merge")
+      .merge_goal_pr(&goal_id("g1"), pull_request(42), MergeUntil::Merge)
       .await
       .map(|_| ())
       .expect_err("応答がなければタイムアウトします");
@@ -373,7 +402,7 @@ async fn tools_parse_goals_and_tasks_into_typed_snapshot() {
         { "name": "a", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "implement" },
         { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true }
       ],
-      "runs": { "r1": { "runSlug": "r1", "currentStep": "implement", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:05:00Z" } ] } }
+      "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "implement", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:05:00Z" } ] } }
     }),
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
@@ -381,7 +410,7 @@ async fn tools_parse_goals_and_tasks_into_typed_snapshot() {
   let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
 
   assert_eq!(snapshot.goals[0].status, GoalStatus::AwaitingMerge);
-  assert_eq!(snapshot.goals[0].pull_request_number, Some(12));
+  assert_eq!(snapshot.goals[0].pull_request_number, Some(pull_request(12)));
   assert_eq!(snapshot.tasks[0].status, TaskStatus::Running);
   assert!(snapshot.tasks[1].merge_task, "仕上げタスクを読み取ります");
   assert_eq!(snapshot.runs.len(), 1);
@@ -546,7 +575,7 @@ async fn awaiting_merge_wait_start_is_resolved_per_goal_without_reusing_another_
 
   let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
 
-  let g2 = snapshot.goals.iter().find(|goal| goal.goal_id == "g2").expect("g2 を含みます");
+  let g2 = snapshot.goals.iter().find(|goal| goal.goal_id.as_str() == "g2").expect("g2 を含みます");
   assert_eq!(g2.awaiting_merge_at, Some(time("2026-11-13T02:00:00Z")), "g2 は同じゴール ID の前回起点を引き継ぎます");
   assert_ne!(g2.awaiting_merge_at, Some(time("2026-11-13T01:00:00Z")), "g1 の起点時刻を g2 へ使い回しません");
   client.shutdown().await;
@@ -588,10 +617,11 @@ async fn goal_questions_and_notifications_beyond_the_first_page_are_collected() 
 
   assert_eq!(snapshot.goals.len(), 60, "50 件を超えるゴールも全件集めます");
   assert_eq!(snapshot.inquiries.len(), 60, "50 件を超えるゴール質問も全件集めます");
-  let last = snapshot.inquiries.iter().find(|inquiry| inquiry.inquiry_id == "q59").expect("2 ページ目の質問 g59");
-  assert_eq!(last.goal_id.as_deref(), Some("g59"));
+  let last =
+    snapshot.inquiries.iter().find(|inquiry| inquiry.inquiry_id.as_str() == "q59").expect("2 ページ目の質問 g59");
+  assert_eq!(last.goal_id.as_ref().map(GoalId::as_str), Some("g59"));
   assert_eq!(
-    snapshot.goals.iter().find(|goal| goal.goal_id == "g0").and_then(|goal| goal.awaiting_merge_at),
+    snapshot.goals.iter().find(|goal| goal.goal_id.as_str() == "g0").and_then(|goal| goal.awaiting_merge_at),
     Some(time("2026-11-13T07:00:00Z")),
     "2 ページ目の awaiting_merge 通知の recordedAt を起点に採ります"
   );
@@ -627,7 +657,7 @@ async fn inquiry_without_created_at_is_kept_with_first_observation_time() {
     tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("createdAt 欠落でも解析できます");
 
   assert!(
-    snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id == "q-x"),
+    snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id.as_str() == "q-x"),
     "createdAt のない質問を判断待ちに含めます"
   );
   client.shutdown().await;
@@ -646,8 +676,8 @@ async fn inquiry_without_created_at_inherits_previous_created_at() {
   let mut client = mock_client(mock_config(directory.path(), &state, None));
   let prev = takt_dash_backend::model::ProjectSnapshot {
     inquiries: vec![takt_dash_backend::model::InquiryEntry {
-      inquiry_id: "q-x".to_owned(),
-      goal_id:    Some("g1".to_owned()),
+      inquiry_id: inquiry_id("q-x"),
+      goal_id:    Some(goal_id("g1")),
       kind:       takt_dash_backend::model::InquiryKind::Question,
       body:       "どうしますか".to_owned(),
       options:    Vec::new(),
@@ -660,7 +690,7 @@ async fn inquiry_without_created_at_inherits_previous_created_at() {
   let snapshot =
     tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("前回値を引き継げます");
 
-  let inquiry = snapshot.inquiries.iter().find(|entry| entry.inquiry_id == "q-x").expect("q-x を含みます");
+  let inquiry = snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "q-x").expect("q-x を含みます");
   assert_eq!(inquiry.created_at, time("2026-11-13T01:00:00Z"), "createdAt 欠落は前回の created_at を引き継ぎます");
   client.shutdown().await;
 }
@@ -680,8 +710,8 @@ async fn approval_kind_is_skipped_and_unknown_kind_is_rejected() {
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
   let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("approval を読み飛ばせます");
-  assert!(snapshot.inquiries.iter().all(|entry| entry.inquiry_id != "q-a"), "approval は判断待ちに含めません");
-  assert!(snapshot.inquiries.iter().any(|entry| entry.inquiry_id == "q-q"), "question は含めます");
+  assert!(snapshot.inquiries.iter().all(|entry| entry.inquiry_id.as_str() != "q-a"), "approval は判断待ちに含めません");
+  assert!(snapshot.inquiries.iter().any(|entry| entry.inquiry_id.as_str() == "q-q"), "question は含めます");
   client.shutdown().await;
 
   let directory2 = tempfile::tempdir().expect("一時ディレクトリを作れます");
@@ -714,28 +744,33 @@ async fn write_tool_responses_missing_required_fields_are_parse_errors() {
   }
 
   let error = expect_parse("takt_approve_goal_registration", async |mut tools| {
-    tools.approve_goal_registration(3).await.map(|_| ())
+    tools.approve_goal_registration(revision(3)).await.map(|_| ())
   })
   .await
   .expect_err("応答に revision が無ければ解析エラーです");
   assert!(matches!(error, ToolError::Parse(_)), "takt_approve_goal_registration の欠落は解析エラー: {error}");
 
   let error = expect_parse("takt_reject_goal_registration", async |mut tools| {
-    tools.reject_goal_registration(3).await.map(|_| ())
+    tools.reject_goal_registration(revision(3)).await.map(|_| ())
   })
   .await
   .expect_err("応答に revision が無ければ解析エラーです");
   assert!(matches!(error, ToolError::Parse(_)), "takt_reject_goal_registration の欠落は解析エラー: {error}");
 
-  let error =
-    expect_parse("takt_merge_goal_pr", async |mut tools| tools.merge_goal_pr("g1", 42, "merge").await.map(|_| ()))
-      .await
-      .expect_err("応答に taskName が無ければ解析エラーです");
+  let error = expect_parse("takt_merge_goal_pr", async |mut tools| {
+    tools.merge_goal_pr(&goal_id("g1"), pull_request(42), MergeUntil::Merge).await.map(|_| ())
+  })
+  .await
+  .expect_err("応答に taskName が無ければ解析エラーです");
   assert!(matches!(error, ToolError::Parse(_)), "takt_merge_goal_pr の欠落は解析エラー: {error}");
 
   let error = expect_parse("takt_answer_goal_question", async |mut tools| {
     tools
-      .answer_goal_question("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11", "q1", json!({ "text": "はい" }))
+      .answer_goal_question(
+        &goal_id("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11"),
+        &inquiry_id("q1"),
+        json!({ "text": "はい" }),
+      )
       .await
       .map(|_| ())
   })
@@ -749,6 +784,74 @@ async fn write_tool_responses_missing_required_fields_are_parse_errors() {
   .await
   .expect_err("応答に proposals が無ければ解析エラーです");
   assert!(matches!(error, ToolError::Parse(_)), "takt_list_goal_registration_proposals の欠落は解析エラー: {error}");
+}
+
+#[tokio::test]
+async fn write_tool_responses_convert_task_name_and_inquiry_id() {
+  // takt 応答の taskName と questionId を専用の型へ変換し、有効値は保持し、
+  // 空・空白のみ・ASCII 制御文字は解析エラーにすることを観測する。
+  async fn with_responses(
+    responses: Value,
+    behavior: impl AsyncFnOnce(takt_dash_backend::mcp::ToolSet<'_>) -> Result<(), ToolError>,
+  ) -> Result<(), ToolError> {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let state = write_state(directory.path(), json!({ "responses": responses }));
+    let mut client = mock_client(mock_config(directory.path(), &state, None));
+    let result = behavior(tool_set(&mut client, directory.path())).await;
+    client.shutdown().await;
+    result
+  }
+
+  with_responses(
+    json!({ "takt_merge_goal_pr": { "taskName": "merge", "workflow": "merge-goal-pr" } }),
+    async |mut tools| {
+      let result = tools.merge_goal_pr(&goal_id("g1"), pull_request(42), MergeUntil::Merge).await?;
+      assert_eq!(result.task_name.as_str(), "merge", "有効な taskName を保持します");
+      Ok(())
+    },
+  )
+  .await
+  .expect("有効な taskName は受理します");
+
+  for invalid in ["", "  ", "a\n"] {
+    let error = with_responses(
+      json!({ "takt_merge_goal_pr": { "taskName": invalid, "workflow": "merge-goal-pr" } }),
+      async |mut tools| tools.merge_goal_pr(&goal_id("g1"), pull_request(42), MergeUntil::Merge).await.map(|_| ()),
+    )
+    .await
+    .expect_err("不正な taskName は解析エラーです");
+    assert!(matches!(error, ToolError::Parse(_)), "taskName {invalid:?} は解析エラー: {error}");
+  }
+
+  with_responses(json!({ "takt_answer_goal_question": { "questionId": "q-1" } }), async |mut tools| {
+    let question_id = tools
+      .answer_goal_question(
+        &goal_id("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11"),
+        &inquiry_id("q-1"),
+        json!({ "text": "回答" }),
+      )
+      .await?;
+    assert_eq!(question_id.as_str(), "q-1", "有効な questionId を保持します");
+    Ok(())
+  })
+  .await
+  .expect("有効な questionId は受理します");
+
+  for invalid in ["", "  ", "q\n1"] {
+    let error = with_responses(json!({ "takt_answer_goal_question": { "questionId": invalid } }), async |mut tools| {
+      tools
+        .answer_goal_question(
+          &goal_id("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11"),
+          &inquiry_id("q-1"),
+          json!({ "text": "回答" }),
+        )
+        .await
+        .map(|_| ())
+    })
+    .await
+    .expect_err("不正な questionId は解析エラーです");
+    assert!(matches!(error, ToolError::Parse(_)), "questionId {invalid:?} は解析エラー: {error}");
+  }
 }
 
 #[tokio::test]
@@ -789,7 +892,7 @@ async fn summary_object_is_composed_into_the_body() {
 
   assert_eq!(proposals.len(), 1, "提案を1件取得します");
   let proposal = &proposals[0];
-  assert_eq!(proposal.revision, 6, "revision を写します");
+  assert_eq!(proposal.revision.get(), 6, "revision を写します");
   assert_eq!(proposal.repository_directory, "/abs/takt-dash", "repositoryDirectory を写します");
   for expected in [
     "稼働状況を一覧できるようにする",
@@ -886,7 +989,7 @@ async fn malformed_proposal_summary_keeps_previous_proposals() {
   let mut client = mock_client(mock_config(directory.path(), &state, None));
   let prev = takt_dash_backend::model::ProjectSnapshot {
     proposals: vec![takt_dash_backend::model::RegistrationProposalEntry {
-      revision:             5,
+      revision:             revision(5),
       repository_directory: "/abs/takt-dash".to_owned(),
       summary:              "前回の提案".to_owned(),
     }],
@@ -938,7 +1041,7 @@ async fn proposal_transport_error_is_not_degraded_to_the_previous_proposals() {
   let mut client = mock_client(mock_config(directory.path(), &state, None));
   let prev = takt_dash_backend::model::ProjectSnapshot {
     proposals: vec![takt_dash_backend::model::RegistrationProposalEntry {
-      revision:             5,
+      revision:             revision(5),
       repository_directory: "/abs/takt-dash".to_owned(),
       summary:              "前回の提案".to_owned(),
     }],
@@ -967,7 +1070,7 @@ async fn run_with_more_than_one_page_of_step_logs_uses_the_last_step_time() {
     directory.path(),
     json!({
       "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "runs": { "r1": { "runSlug": "r1", "currentStep": "step50", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": step_logs } }
+      "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "step50", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": step_logs } }
     }),
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
@@ -989,7 +1092,7 @@ async fn read_snapshot_reads_start_time_only_run() {
     directory.path(),
     json!({
       "tasks": [ { "name": "a", "status": "running", "runSlug": "r1" } ],
-      "runs": { "r1": { "runSlug": "r1", "currentStep": "implement", "startTime": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ] } }
+      "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "implement", "startTime": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ] } }
     }),
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
@@ -1012,7 +1115,7 @@ async fn read_snapshot_keeps_a_run_without_any_start_or_log_time() {
     directory.path(),
     json!({
       "tasks": [ { "name": "a", "status": "running", "runSlug": "r1" } ],
-      "runs": { "r1": { "runSlug": "r1", "currentStep": "implement", "stepLogs": [] } }
+      "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "implement", "stepLogs": [] } }
     }),
   );
   let mut client = mock_client(mock_config(directory.path(), &state, None));
@@ -1041,7 +1144,7 @@ async fn is_error_on_get_run_keeps_previous_runs_without_transport_failure() {
     runs: vec![takt_dash_backend::model::RunEntry {
       run_slug:                "r1".to_owned(),
       session_id:              String::new(),
-      task_name:               "a".to_owned(),
+      task_name:               task_name("a"),
       goal_id:                 None,
       summary:                 String::new(),
       status:                  takt_dash_backend::model::RunStatus::Running,
@@ -1085,7 +1188,7 @@ async fn one_run_tool_error_keeps_only_that_run_previous_and_updates_the_healthy
         { "name": "a", "status": "running", "runSlug": "runA", "startedAt": "2026-11-13T10:00:00Z" },
         { "name": "b", "status": "running", "runSlug": "runB", "startedAt": "2026-11-13T10:00:00Z" }
       ],
-      "runs": { "runB": { "runSlug": "runB", "currentStep": "implement", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ] } },
+      "runs": { "runB": { "runSlug": "runB", "status": "running", "currentStep": "implement", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ] } },
       "isError": ["takt_get_run:runA"]
     }),
   );
@@ -1094,7 +1197,7 @@ async fn one_run_tool_error_keeps_only_that_run_previous_and_updates_the_healthy
     runs: vec![takt_dash_backend::model::RunEntry {
       run_slug:                "runA".to_owned(),
       session_id:              String::new(),
-      task_name:               "a".to_owned(),
+      task_name:               task_name("a"),
       goal_id:                 None,
       summary:                 String::new(),
       status:                  takt_dash_backend::model::RunStatus::Running,
@@ -1151,8 +1254,8 @@ async fn goal_question_tool_error_inherits_only_that_goal_and_leaves_the_healthy
   let mut client = mock_client(mock_config(directory.path(), &state, None));
   let prev = takt_dash_backend::model::ProjectSnapshot {
     inquiries: vec![takt_dash_backend::model::InquiryEntry {
-      inquiry_id: "q1".to_owned(),
-      goal_id:    Some("g1".to_owned()),
+      inquiry_id: inquiry_id("q1"),
+      goal_id:    Some(goal_id("g1")),
       kind:       takt_dash_backend::model::InquiryKind::Question,
       body:       "g1 の質問（前回）".to_owned(),
       options:    Vec::new(),
@@ -1167,13 +1270,17 @@ async fn goal_question_tool_error_inherits_only_that_goal_and_leaves_the_healthy
     .await
     .expect("g1 の質問の道具エラーで全体は失敗しません");
 
-  let q1 =
-    snapshot.inquiries.iter().find(|entry| entry.inquiry_id == "q1").expect("道具エラーの g1 の質問を引き継ぎます");
-  assert_eq!(q1.goal_id.as_deref(), Some("g1"));
+  let q1 = snapshot
+    .inquiries
+    .iter()
+    .find(|entry| entry.inquiry_id.as_str() == "q1")
+    .expect("道具エラーの g1 の質問を引き継ぎます");
+  assert_eq!(q1.goal_id.as_ref().map(GoalId::as_str), Some("g1"));
   assert_eq!(q1.body, "g1 の質問（前回）", "g1 の質問は前回値を引き継ぎます");
   assert_eq!(q1.created_at, time("2026-11-13T01:00:00Z"), "g1 の質問の created_at も前回値を保ちます");
-  let q2 = snapshot.inquiries.iter().find(|entry| entry.inquiry_id == "q2").expect("健常な g2 の質問は今回値です");
-  assert_eq!(q2.goal_id.as_deref(), Some("g2"));
+  let q2 =
+    snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "q2").expect("健常な g2 の質問は今回値です");
+  assert_eq!(q2.goal_id.as_ref().map(GoalId::as_str), Some("g2"));
   assert_eq!(q2.body, "g2 の質問", "健常なゴールの質問は今回値を採ります");
   client.shutdown().await;
 }
@@ -1467,8 +1574,11 @@ async fn timeout_on_goal_questions_keeps_project_connected_and_previous_inquirie
     .await
     .expect("ゴール質問のタイムアウトはプロジェクト全体を失敗にしません");
 
-  let inquiry =
-    snapshot.inquiries.iter().find(|entry| entry.inquiry_id == "q1").expect("前回の問い合わせを引き継ぎます");
+  let inquiry = snapshot
+    .inquiries
+    .iter()
+    .find(|entry| entry.inquiry_id.as_str() == "q1")
+    .expect("前回の問い合わせを引き継ぎます");
   assert_eq!(inquiry.body, "前回の質問", "タイムアウトしたゴールの問い合わせは前回値です");
   client.shutdown().await;
 }
@@ -1570,7 +1680,7 @@ async fn timeout_on_standalone_inquiries_keeps_project_success() {
   let inquiry = snapshot
     .inquiries
     .iter()
-    .find(|entry| entry.inquiry_id == "s1")
+    .find(|entry| entry.inquiry_id.as_str() == "s1")
     .expect("前回のゴールに属さない問い合わせを引き継ぎます");
   assert_eq!(inquiry.body, "前回の作業依頼", "タイムアウトした問い合わせは前回値です");
   client.shutdown().await;
@@ -1585,6 +1695,7 @@ async fn run_step_progress_is_derived_from_the_workflow_step_list() {
       "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
       "runs": { "r1": {
         "runSlug": "r1",
+        "status": "running",
         "workflow": "wf",
         "currentStep": "implement",
         "currentIteration": 2,
@@ -1614,6 +1725,7 @@ async fn run_step_position_uses_the_current_step_even_when_the_last_log_is_a_nes
       "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
       "runs": { "r1": {
         "runSlug": "r1",
+        "status": "running",
         "workflow": "wf",
         "currentStep": "develop",
         "currentIteration": 3,
@@ -1649,6 +1761,7 @@ async fn run_step_position_is_unset_when_the_current_step_is_not_in_the_workflow
       "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
       "runs": { "r1": {
         "runSlug": "r1",
+        "status": "running",
         "workflow": "wf",
         "currentStep": "implement",
         "currentIteration": 2,
@@ -1678,6 +1791,7 @@ async fn workflow_tool_error_keeps_the_run_without_step_progress() {
       "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
       "runs": { "r1": {
         "runSlug": "r1",
+        "status": "running",
         "workflow": "wf",
         "currentStep": "implement",
         "currentIteration": 2,
@@ -1731,7 +1845,7 @@ async fn revision_at_the_i32_maximum_is_accepted() {
     .expect("i32 の上限の revision は受理します");
 
   assert_eq!(proposals.len(), 1);
-  assert_eq!(proposals[0].revision, i32::MAX, "i32 の上限をそのまま返します");
+  assert_eq!(proposals[0].revision.get(), i32::MAX, "i32 の上限をそのまま返します");
   client.shutdown().await;
 }
 
@@ -1774,6 +1888,7 @@ async fn instruction_id_beyond_i32_is_a_parse_error_and_is_not_sent_truncated() 
       "runs": {
         "r1": {
           "runSlug": "r1",
+          "status": "running",
           "startedAt": "2026-11-13T10:00:00Z",
           "instructions": [
             { "instructionId": 4294967298i64, "issuedAt": "2026-11-13T10:05:00Z", "state": "issued", "content": "指示書" }
@@ -1786,7 +1901,7 @@ async fn instruction_id_beyond_i32_is_a_parse_error_and_is_not_sent_truncated() 
   let mut client = mock_client(mock_config_with_calls(directory.path(), &state, &calls_path));
 
   let error = tool_set(&mut client, directory.path())
-    .read_run_detail("r1")
+    .read_run_detail(&run_slug("r1"))
     .await
     .expect_err("i32 の範囲外の instructionId は受理しません");
 
@@ -1818,6 +1933,7 @@ async fn 一覧の最終ログ時刻は応答の最終ログ時刻を最優先�
       "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T11:30:00Z", "runSlug": "r1", "currentStep": "implement" } ],
       "runs": { "r1": {
         "runSlug": "r1",
+        "status": "running",
         "startedAt": "2026-11-13T11:30:00Z",
         "currentStep": "implement",
         "currentStepStartedAt": "2026-11-13T11:50:00Z",
@@ -1829,7 +1945,8 @@ async fn 一覧の最終ログ時刻は応答の最終ログ時刻を最優先�
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
   let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+  let detail =
+    tool_set(&mut client, directory.path()).read_run_detail(&run_slug("r1")).await.expect("run 詳細を読み取れます");
 
   assert_eq!(detail.last_log_at, Some(time("2026-11-13T11:59:00Z")), "詳細は応答の lastLogAt を最終ログ時刻に使います");
   assert_eq!(
@@ -1851,6 +1968,7 @@ async fn 最終ログ時刻がないときは現在ステップの開始時刻�
       "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T11:30:00Z", "runSlug": "r1", "currentStep": "implement" } ],
       "runs": { "r1": {
         "runSlug": "r1",
+        "status": "running",
         "startedAt": "2026-11-13T11:30:00Z",
         "currentStep": "implement",
         "currentStepStartedAt": "2026-11-13T11:59:00Z",
@@ -1861,7 +1979,8 @@ async fn 最終ログ時刻がないときは現在ステップの開始時刻�
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
   let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+  let detail =
+    tool_set(&mut client, directory.path()).read_run_detail(&run_slug("r1")).await.expect("run 詳細を読み取れます");
 
   assert_eq!(
     detail.last_log_at,
@@ -1888,6 +2007,7 @@ async fn 一覧と詳細の最終ログ時刻はステップ記録と現在ス�
       "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "implement" } ],
       "runs": { "r1": {
         "runSlug": "r1",
+        "status": "running",
         "startedAt": "2026-11-13T10:00:00Z",
         "currentStep": "implement",
         "currentStepStartedAt": "2026-11-13T10:02:00Z",
@@ -1898,7 +2018,8 @@ async fn 一覧と詳細の最終ログ時刻はステップ記録と現在ス�
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
   let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+  let detail =
+    tool_set(&mut client, directory.path()).read_run_detail(&run_slug("r1")).await.expect("run 詳細を読み取れます");
 
   assert_eq!(
     snapshot.runs[0].last_log_at,
@@ -1929,6 +2050,7 @@ async fn 一覧と詳細の最終ログ時刻は複数ページの末尾ステ�
       "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "step50" } ],
       "runs": { "r1": {
         "runSlug": "r1",
+        "status": "running",
         "startedAt": "2026-11-13T10:00:00Z",
         "currentStep": "step50",
         "stepLogs": step_logs
@@ -1938,7 +2060,8 @@ async fn 一覧と詳細の最終ログ時刻は複数ページの末尾ステ�
   let mut client = mock_client(mock_config(directory.path(), &state, None));
 
   let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
-  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+  let detail =
+    tool_set(&mut client, directory.path()).read_run_detail(&run_slug("r1")).await.expect("run 詳細を読み取れます");
 
   assert_eq!(
     snapshot.runs[0].last_log_at,
@@ -1951,4 +2074,76 @@ async fn 一覧と詳細の最終ログ時刻は複数ページの末尾ステ�
     "詳細も末尾ページの最終ステップを採り、一覧と一致します"
   );
   client.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_run_without_a_status_is_a_parse_error_instead_of_running() {
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+      "runs": { "r1": { "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [] } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let error = tool_set(&mut client, directory.path())
+    .read_snapshot(None)
+    .await
+    .expect_err("run の状態が欠落した応答は解析エラーです");
+
+  assert!(matches!(error, ToolError::Parse(_)), "欠落した run の状態は Running に丸めません: {error}");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_run_with_an_unknown_status_is_a_parse_error() {
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+      "runs": { "r1": { "runSlug": "r1", "status": "queued", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [] } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let error =
+    tool_set(&mut client, directory.path()).read_snapshot(None).await.expect_err("未知の run の状態は解析エラーです");
+
+  assert!(matches!(error, ToolError::Parse(_)), "未知の run の状態は Running に丸めません: {error}");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_non_positive_pull_request_number_is_a_parse_error() {
+  for number in [0, -1] {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let state = write_state(
+      directory.path(),
+      json!({
+        "goals": [ {
+          "id": "g1",
+          "status": "awaiting_merge",
+          "executionStatus": "active",
+          "objective": "目標",
+          "integrationBranch": "takt/g1",
+          "pullRequest": { "number": number, "url": "https://example.test/pr/1" }
+        } ]
+      }),
+    );
+    let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+    let error = tool_set(&mut client, directory.path())
+      .read_snapshot(None)
+      .await
+      .expect_err("0 以下のプルリクエスト番号は解析エラーです");
+
+    assert!(
+      matches!(error, ToolError::Parse(_)),
+      "プルリクエスト番号 {number} は正の整数でなければなりません: {error}"
+    );
+    client.shutdown().await;
+  }
 }

@@ -5,6 +5,7 @@ mod common;
 
 use common::*;
 use takt_dash_backend::{
+  domain::RunSlug,
   events::detect,
   model::{
     ConnectionState, ConnectionTransition, EventKind, ExecutionStatus, GoalStatus, ProjectSnapshot, TaskEntry,
@@ -75,13 +76,16 @@ fn new_goal_is_detected_as_goal_created() {
 fn task_becoming_running_is_detected_as_run_started_with_run_slug() {
   let now = time("2026-11-13T10:00:00Z");
   let prev = snapshot(vec![], vec![task("a", TaskStatus::Pending)], vec![], vec![], vec![]);
-  let running = TaskEntry { run_slug: Some("20261113-abc".to_owned()), ..task("a", TaskStatus::Running) };
+  let running = TaskEntry {
+    run_slug: Some(RunSlug::try_from("20261113-abc").expect("テストの run slug は有効です")),
+    ..task("a", TaskStatus::Running)
+  };
   let next = snapshot(vec![], vec![running], vec![], vec![], vec![]);
 
   let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::RunStarted]);
-  assert_eq!(events[0].run_slug.as_deref(), Some("20261113-abc"));
+  assert_eq!(events[0].run_slug.as_ref().map(RunSlug::as_str), Some("20261113-abc"));
 }
 
 #[test]

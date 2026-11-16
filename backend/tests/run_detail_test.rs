@@ -11,6 +11,7 @@ use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::{
+  domain::{GoalId, RunSlug, TaskName},
   model::{ExecutionStatus, GoalStatus, ProjectSnapshot, TaskEntry, TaskStatus},
   poller::Poller,
   takt_dash::v1::{GetRunDetailRequest, RunStatus},
@@ -53,6 +54,13 @@ fn run_state_with_last_log_at(last_log_at: &str) -> serde_json::Value {
   if let Some(last) = step_logs.last_mut() {
     last["timestamp"] = serde_json::Value::String(last_log_at.to_owned());
   }
+  state
+}
+
+/// `run_state()` から run の `status` を除いた状態。欠落した状態の扱いを観測する。
+fn run_state_without_status() -> serde_json::Value {
+  let mut state = run_state();
+  state["runs"]["run-1"].as_object_mut().expect("run はオブジェクトです").remove("status");
   state
 }
 
@@ -134,7 +142,7 @@ async fn a_run_without_any_start_time_is_listed_and_reaches_run_detail() {
     directory.path(),
     json!({
       "tasks": [ { "name": "implement", "status": "running", "runSlug": "run-1" } ],
-      "runs": { "run-1": { "runSlug": "run-1", "currentStep": "implement", "stepLogs": [] } }
+      "runs": { "run-1": { "runSlug": "run-1", "status": "running", "currentStep": "implement", "stepLogs": [] } }
     }),
   );
   let mut reader = mock_client(mock_config(directory.path(), &state_path, None));
@@ -389,6 +397,48 @@ async fn get_run_detail_rejects_an_empty_run_slug_as_invalid_argument() {
   server.stop().await;
 }
 
+#[tokio::test]
+async fn get_run_detail_rejects_a_run_slug_that_is_not_a_single_directory_name() {
+  let harness = seeded_harness(run_state());
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  for run_slug in ["runs/1", "runs\\1", "..", "."] {
+    let status = client
+      .get_run_detail(GetRunDetailRequest { run_slug: run_slug.to_owned() })
+      .await
+      .expect_err("run ディレクトリ名にならない runSlug は拒否します");
+
+    assert_eq!(
+      status.code(),
+      tonic::Code::InvalidArgument,
+      "runSlug={run_slug:?} は入力の誤りとして拒否します: {status:?}"
+    );
+  }
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_rejects_a_run_response_without_a_status() {
+  let harness = seeded_harness(run_state_without_status());
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect_err("run の状態が欠落した応答は失敗します");
+
+  assert_eq!(
+    status.code(),
+    tonic::Code::Internal,
+    "欠落した run の状態は Running に丸めず、応答の解析エラーにします: {status:?}"
+  );
+
+  server.stop().await;
+}
+
 fn timestamp(text: &str) -> prost_types::Timestamp {
   let time = time(text);
   prost_types::Timestamp { seconds: time.timestamp(), nanos: time.timestamp_subsec_nanos() as i32 }
@@ -459,11 +509,11 @@ async fn 完了した実行の詳細は実行中一覧になくても取得で�
   let snapshot = ProjectSnapshot {
     goals:         vec![],
     tasks:         vec![TaskEntry {
-      name:            "implement".to_owned(),
-      goal_id:         Some("g1".to_owned()),
+      name:            TaskName::try_from("implement").expect("テストのタスク名は有効です"),
+      goal_id:         Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
       status:          TaskStatus::Completed,
       started_at:      Some(time("2026-11-13T09:00:00Z")),
-      run_slug:        Some("run-1".to_owned()),
+      run_slug:        Some(RunSlug::try_from("run-1").expect("テストの run slug は有効です")),
       source_run_slug: None,
       current_step:    Some("review".to_owned()),
       merge_task:      false,
