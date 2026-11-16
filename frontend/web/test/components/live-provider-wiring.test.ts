@@ -8,7 +8,7 @@
 // initialState から決めるため、SSR では切断状態の Live* を描画しない（未確認として扱う）。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createElement } from "react";
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createDashboardState } from "../support/fixtures.ts";
 import { LiveOverview } from "../../src/components/live-overview.tsx";
@@ -35,8 +35,13 @@ const drive = (initial: StateStreamContextValue) => {
 const renderLive = (
   page: typeof LiveOverview | typeof LiveDecisions,
   state: StateStreamContextValue["state"],
-): string =>
-  renderToStaticMarkup(createElement(StateStreamProvider, { initialState: state }, createElement(page)));
+): string => {
+  const props = {
+    initialState: state,
+    children: createElement(page),
+  } satisfies ComponentProps<typeof StateStreamProvider>;
+  return renderToStaticMarkup(createElement(StateStreamProvider, props));
+};
 
 const connected = (): StateStreamContextValue => ({ state: createDashboardState(), disconnected: false });
 

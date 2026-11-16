@@ -47,7 +47,7 @@ const stateWith = (items: PendingDecision[]): DashboardState => ({
 });
 
 const renderDecisions = (state: DashboardState): string =>
-  renderToStaticMarkup(createElement(DecisionsContent, { state, now: NOW }));
+  renderToStaticMarkup(createElement(DecisionsContent, { state, now: NOW, disconnected: false }));
 
 const noop = (): void => {};
 

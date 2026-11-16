@@ -4,16 +4,19 @@
 // 判断待ち件数を表示する。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createElement } from "react";
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createDashboardState } from "../support/fixtures.ts";
 import { StateStreamProvider } from "../../src/components/state-provider.tsx";
 import { LiveSidebar } from "../../src/components/live-sidebar.tsx";
 
-const renderSidebar = (initialState: ReturnType<typeof createDashboardState>): string =>
-  renderToStaticMarkup(
-    createElement(StateStreamProvider, { initialState }, createElement(LiveSidebar)),
-  );
+const renderSidebar = (initialState: ReturnType<typeof createDashboardState>): string => {
+  const props = {
+    initialState,
+    children: createElement(LiveSidebar),
+  } satisfies ComponentProps<typeof StateStreamProvider>;
+  return renderToStaticMarkup(createElement(StateStreamProvider, props));
+};
 
 test("サイドバーはライブ状態のサーバー一覧と判断待ち件数を表示する", () => {
   const html = renderSidebar(createDashboardState());

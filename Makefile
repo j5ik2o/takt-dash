@@ -12,6 +12,7 @@ test:
 
 typecheck:
 	npm --prefix frontend/web run typecheck
+	npm --prefix frontend/web run typecheck:test
 
 lint:
 	npm --prefix frontend/web run lint

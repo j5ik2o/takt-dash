@@ -57,7 +57,9 @@ test("承認待ちを独立の区分として数え、内訳の和を total に�
     createdAt: new Date(NOW.getTime() - 60 * 60_000),
     body: "新しいゴール",
     options: [],
+    pullRequest: undefined,
     stale: false,
+    inquiryId: "",
     revision: 3,
   };
   const counts = summarizePendingDecisions(
