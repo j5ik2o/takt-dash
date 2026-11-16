@@ -78,5 +78,9 @@ e2e-prod:
 	$(MAKE) e2e-skip-only-check
 	npm --prefix e2e run test:prod
 
+# 終了コードで判定するジョブは make を経由しないこと。GNU make はレシピの
+# 失敗を一律に 2 へ変えるため、prod_check.py の 1（不合格）と 2（確認
+# できず）を区別できない。ジョブからは python3 tools/prod-check/prod_check.py
+# を直接実行する。
 prod-check:
 	python3 tools/prod-check/prod_check.py --base-url $(BASE_URL) $(if $(WITH_E2E),--with-e2e,)

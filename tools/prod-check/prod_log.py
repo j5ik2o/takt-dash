@@ -16,6 +16,12 @@ CYCLE_RE = re.compile(
     r"cycle_ms=(\d+)\s+projects=(\d+)\s+projects_read=(\d+)\s+projects_failed=(\d+)\s+"
     r"events_recorded=(\d+)\s+tool_calls=(\d+)\s+tool_failures=(\d+)\s+tool_timeouts=(\d+)"
 )
+# 計測の項目が無い backend（main の run_until_stopped が debug で出す形）用。
+# 道具の内訳は分からないため、tool_calls と tool_timeouts は None にする。
+CYCLE_SIMPLE_RE = re.compile(
+    r"定期読み取りの1サイクルを終えました。\s+"
+    r"projects_read=(\d+)\s+projects_failed=(\d+)\s+events_recorded=(\d+)"
+)
 TOOL_TIMEOUT_RE = re.compile(r"(\w+)\(calls=\d+, failures=\d+, timeouts=(\d+)")
 
 
@@ -68,6 +74,17 @@ def cycles_since_start(log_text):
                 "tool_timeouts_by_name": {
                     name: int(n) for name, n in TOOL_TIMEOUT_RE.findall(line) if int(n) > 0
                 },
+                "line": line,
+            })
+            continue
+        m = CYCLE_SIMPLE_RE.search(line)
+        if m:
+            cycles.append({
+                "cycle_ms": None,
+                "projects_failed": int(m.group(2)),
+                "tool_calls": None,
+                "tool_timeouts": None,
+                "tool_timeouts_by_name": {},
                 "line": line,
             })
     return cycles

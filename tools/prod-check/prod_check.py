@@ -9,14 +9,19 @@
 次のとおり。
 
   - 版の一致: 画面の frontend と backend のコミットが一致し、状態の
-    buildInfo とも一致すること。
+    buildInfo とも一致し、稼働中のコミットが展開先の HEAD とも一致
+    すること。buildInfo が無ければ確認できずにする。
   - main の展開: 展開先の HEAD が origin/main を含むこと。版が一致して
-    いても、修正が未展開なら不合格にする。
+    いても、修正が未展開なら不合格にする。origin の取得に失敗したら、
+    古い参照では判定せず確認できずにする。
   - データの鮮度: 状態配信の readAt とプロジェクトごとの lastReadAt が
     読み取り間隔の 2 倍以内で、切断や遅延のプロジェクトが無いこと。
+    最終読み取り時刻が無いプロジェクトは、まだ読めていないとして
+    不合格にする。
   - 読み取りサイクル: backend の起動後のサイクルを集計し、成功率と、
     起動・初期化の失敗（道具の呼び出しが 0 件の失敗サイクル）と道具ごと
-    の時間切れを分けて数えること。
+    の時間切れを分けて数えること。計測の項目が無いサイクルの行（main の
+    backend が出す形）も数え、その場合は道具の内訳は不明として扱う。
   - ページ: 主要ページが 200 で、エラーの文言が無いこと。
   - 書き込みの境界: 空の本文の POST が、同じオリジンで 400（入力検証）、
     別のオリジンで 403、text/plain で 415 になること。空の本文は route の
@@ -28,7 +33,9 @@
 含める。全文は出力先のフォルダへ書き、報告には場所だけを載せる。
 
 終了コード: 0 = 合格、1 = 不合格、2 = 確認できず（合格でも不合格でも
-ない検査がある）。
+ない検査がある）。make 経由では GNU make がレシピの失敗を一律に 2 へ
+変えるため、終了コードで判定するジョブはこのスクリプトを直接実行する
+こと。
 """
 
 import argparse
@@ -38,11 +45,10 @@ import re
 import shutil
 import subprocess
 import sys
-import urllib.error
-import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from prod_http import fetch_state, http  # noqa: E402
 from prod_log import (  # noqa: E402
     JST,
     backend_started_at,
@@ -75,34 +81,7 @@ def now_jst():
     return datetime.now(JST)
 
 
-def http(method, url, timeout=15, headers=None, data=None):
-    req = urllib.request.Request(url, method=method, headers=headers or {}, data=data)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            return res.status, res.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
-    except Exception as e:
-        raise ConnectionError(str(e))
-
-
-def fetch_state(base_url, timeout=20):
-    """状態配信の最初のイベントを読み、JSON として返す。"""
-    req = urllib.request.Request(base_url + "/api/state", method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as res:
-        buf = b""
-        while b"\n\n" not in buf and len(buf) < 4_000_000:
-            chunk = res.read(65536)
-            if not chunk:
-                break
-            buf += chunk
-    for line in buf.decode("utf-8", errors="replace").splitlines():
-        if line.startswith("data: "):
-            return json.loads(line[len("data: "):])
-    raise ValueError("状態配信に data 行がありません")
-
-
-def check_versions(base_url):
+def check_versions(base_url, head=""):
     name = "版の一致"
     try:
         _, body = http("GET", base_url + "/")
@@ -121,8 +100,14 @@ def check_versions(base_url):
         return Result(name, UNKNOWN, "状態配信を読めません: %s" % e)
     if front != back:
         return Result(name, FAIL, "frontend %s と backend %s が一致しません" % (front, back))
-    if build and build != back:
+    if not build:
+        return Result(name, UNKNOWN,
+                      "状態の buildInfo にコミットがありません。三者の一致を確認できません")
+    if build != back:
         return Result(name, FAIL, "backend %s と状態の buildInfo %s が一致しません" % (back, build))
+    if head and not (head.startswith(back) or back.startswith(head)):
+        return Result(name, FAIL,
+                      "稼働中の backend %s が展開先の HEAD %s と違います。再起動が要ります" % (back, head))
     return Result(name, PASS, "frontend と backend はともに %s" % back)
 
 
@@ -134,7 +119,13 @@ def check_main_deployed(deploy_dir):
             capture_output=True, text=True, timeout=60,
         )
     try:
-        git("fetch", "origin", "-q")
+        fetched = git("fetch", "origin", "-q")
+        if fetched.returncode != 0:
+            return Result(
+                name, UNKNOWN,
+                "origin の取得に失敗したため、古い参照では判定しません: %s"
+                % fetched.stderr.strip()[:200],
+            ), ""
         head = git("rev-parse", "--short", "HEAD").stdout.strip()
         main = git("rev-parse", "--short", "origin/main").stdout.strip()
         r = git("merge-base", "--is-ancestor", "origin/main", "HEAD")
@@ -165,10 +156,17 @@ def check_freshness(base_url, interval):
             problems.append("readAt が %d 秒前です（上限 %d 秒）" % (age, limit))
     for project in state.get("projects", []):
         last = parse_iso(project.get("lastReadAt", ""))
-        state_name = project.get("connectionState", "")
-        if project.get("connected") is False or "DELAYED" in state_name or "UNAVAILABLE" in state_name:
+        state_name = project.get("connectionState", "") or ""
+        # proto の JSON では false や未設定の項目が省略されるため、connected が
+        # 無いこと自体は切断とみなさない。状態の名前は CONNECTION_STATE_
+        # UNRESPONSIVE が実際の値で、UNAVAILABLE では検出できない。
+        bad_state = any(k in state_name for k in ("UNRESPONSIVE", "UNAVAILABLE", "DELAYED"))
+        if project.get("connected") is False or bad_state:
             problems.append("%s は %s です" % (project.get("name"), state_name or "未接続"))
-        elif last is not None:
+        elif last is None:
+            problems.append("%s の最終読み取り時刻がありません（まだ読めていません）"
+                            % project.get("name"))
+        else:
             age = (datetime.now(timezone.utc) - last).total_seconds()
             if age > limit:
                 problems.append("%s の最終読み取りが %d 秒前です" % (project.get("name"), age))
@@ -188,10 +186,13 @@ def check_cycles(deploy_dir):
     total = len(cycles)
     succeeded = sum(1 for c in cycles if c["projects_failed"] == 0)
     spawn_failed = sum(1 for c in cycles if c["projects_failed"] > 0 and c["tool_calls"] == 0)
-    timeouts = sum(c["tool_timeouts"] for c in cycles)
+    timeouts = sum(c["tool_timeouts"] or 0 for c in cycles)
+    unmeasured = sum(1 for c in cycles if c["tool_calls"] is None)
     rate = succeeded * 100 // total
     detail = "起動後の %d サイクル中 %d 件が成功（%d%%）。起動・初期化の失敗 %d 件、道具の時間切れ %d 件" % (
         total, succeeded, rate, spawn_failed, timeouts)
+    if unmeasured:
+        detail += "。道具の内訳が無いサイクル %d 件を含みます" % unmeasured
     if spawn_failed > 0:
         return Result(name, FAIL, detail + "。起動・初期化の失敗が残っています"), cycles
     if rate < 80:
@@ -227,6 +228,9 @@ def check_pages(base_url, state, main_checkout):
         try:
             status, body = http("GET", base_url + path, timeout=30)
         except ConnectionError as e:
+            if problems:
+                return Result(name, FAIL, "。".join(problems)
+                              + "。その後の %s へ接続できませんでした（%s）" % (label, e))
             return Result(name, UNKNOWN, "%s へ接続できません（%s）" % (label, e))
         text = body.decode("utf-8", errors="replace")
         if status != 200:
@@ -251,7 +255,7 @@ def first_task_name(main_checkout):
                 if m:
                     return m.group(1)
     except OSError:
-        pass
+        return None
     return None
 
 
@@ -280,6 +284,9 @@ def check_write_boundary(base_url):
             if status != 415:
                 problems.append("%s が text/plain で %s です（期待は 415）" % (path, status))
         except ConnectionError as e:
+            if problems:
+                return Result(name, FAIL, "。".join(problems)
+                              + "。その後の書き込み経路へ接続できませんでした: %s" % e)
             return Result(name, UNKNOWN, "書き込み経路へ接続できません: %s" % e)
     if problems:
         return Result(name, FAIL, "。".join(problems))
@@ -287,13 +294,14 @@ def check_write_boundary(base_url):
 
 
 def check_config(deploy_dir, expect_projects, expect_interval):
+    """設定の縮退を警告として返し、あわせて実際の読み取り間隔を返す。"""
     name = "設定の縮退"
     path = os.path.join(deploy_dir, "taktdash.config.json")
     try:
         with open(path) as f:
             config = json.load(f)
     except Exception as e:
-        return Result(name, UNKNOWN, "設定ファイルを読めません: %s" % e)
+        return Result(name, UNKNOWN, "設定ファイルを読めません: %s" % e), None
     count = len(config.get("projects", []))
     interval = config.get("intervalSeconds")
     notes = []
@@ -302,8 +310,8 @@ def check_config(deploy_dir, expect_projects, expect_interval):
     if interval != expect_interval:
         notes.append("読み取り間隔が %s 秒です（期待は %d 秒）" % (interval, expect_interval))
     if notes:
-        return Result(name, WARN, "。".join(notes))
-    return Result(name, PASS, "プロジェクト %d 件、間隔 %d 秒です" % (count, expect_interval))
+        return Result(name, WARN, "。".join(notes)), interval
+    return Result(name, PASS, "プロジェクト %d 件、間隔 %d 秒です" % (count, expect_interval)), interval
 
 
 def check_e2e(repo_root, base_url):
@@ -353,14 +361,10 @@ def main():
     results = []
     deployed, head = check_main_deployed(args.deploy_dir)
     results.append(deployed)
-    results.append(check_versions(base_url))
-    config_result = check_config(args.deploy_dir, args.expect_projects, args.expect_interval)
-    interval = args.expect_interval
-    try:
-        with open(os.path.join(args.deploy_dir, "taktdash.config.json")) as f:
-            interval = json.load(f).get("intervalSeconds", interval)
-    except Exception:
-        pass
+    results.append(check_versions(base_url, head))
+    config_result, config_interval = check_config(
+        args.deploy_dir, args.expect_projects, args.expect_interval)
+    interval = config_interval if config_interval is not None else args.expect_interval
     freshness, state = check_freshness(base_url, interval)
     results.append(freshness)
     cycles_result, cycles = check_cycles(args.deploy_dir)
