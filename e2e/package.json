@@ -3,7 +3,8 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "test": "playwright test"
+    "test": "playwright test",
+    "test:prod": "playwright test --config playwright.prod.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.65.1"
