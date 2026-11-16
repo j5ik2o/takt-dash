@@ -10,7 +10,7 @@ export type DecisionsPageProps = {
 
 export default function DecisionsPage({ state, now }: DecisionsPageProps): ReactElement {
   if (state !== undefined) {
-    return <DecisionsContent state={state} now={now ?? new Date()} />;
+    return <DecisionsContent state={state} now={now ?? new Date()} disconnected={false} />;
   }
   return <LiveDecisions />;
 }

@@ -186,6 +186,29 @@ impl ActivityStore {
     Ok(())
   }
 
+  /// 出来事群を1つのトランザクションとして記録する。
+  ///
+  /// 群の途中で保存に失敗した場合は、それまでの INSERT を残さず群全体を記録しません。
+  pub fn record_all(&self, events: &[ActivityEvent]) -> rusqlite::Result<()> {
+    let mut connection = self.writer();
+    let transaction = connection.transaction()?;
+    for event in events {
+      transaction.execute(
+        "INSERT INTO events (occurred_at, server_id, project, kind, body, run_slug)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+          format_timestamp(event.occurred_at),
+          event.server_id,
+          event.project,
+          event.kind.as_str(),
+          event.body,
+          event.run_slug,
+        ],
+      )?;
+    }
+    transaction.commit()
+  }
+
   /// 出来事の一覧を新しい順に指定件数だけ返す。
   pub fn recent_events(&self, limit: usize) -> rusqlite::Result<Vec<ActivityEvent>> {
     self.with_reader(|connection| {

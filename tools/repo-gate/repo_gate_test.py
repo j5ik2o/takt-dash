@@ -15,11 +15,29 @@ make は呼ばない。
      それぞれ別の違反として報告する。
   3. make done が検査を省略する、clippy を -- -D warnings なしで呼ぶ、依存の導入手順を
      持たない、検査が失敗する、のそれぞれで失敗する。
-  4. develop の COMPLETE が機械ゲートへ遷移しない、修正ステップが make done の出力を
-     参照しない、修正から機械ゲートへ戻らない、のそれぞれで失敗する。
-  5. CI が make done を呼ばない、nightly と rustfmt をセットアップしない、Node を
+  4. machine_gate が mode: system で、proto-check・fmt・clippy・test・typecheck・lint の
+     6つの system_input を過不足なく持ち、各 command が対応する make ターゲットを起動する。
+     検査の欠落・重複・別ターゲットの起動は失敗させる。検査を実行させない制御演算子
+     （例: `true || make fmt`）を含む command も、正規形との照合で失敗させる。
+  5. machine_gate の成功条件が6つの exit_code == 0 の同時成立で次のステップへ進み、
+     失敗条件が検査ごとの修正ステップへ分岐する。公開ステップを置く場合は公開へ、
+     置かない場合は aislop_gate へ進む。1検査の抜け、別の遷移先、単一キーの条件は
+     失敗させる。
+  6. 各修正ステップが当該検査の stdout と stderr だけを参照し、machine_gate へ戻る。
+     別検査の出力参照・戻り遷移の欠落・別の遷移先は失敗させる。戻り遷移を残したまま
+     COMPLETE などへ抜ける迂回規則を足した場合も失敗させる。
+  7. aislop_gate の既存の契約（成功で COMPLETE、失敗で修正へ、修正は machine_gate へ
+     戻る）と develop → machine_gate → aislop_gate の順序を維持する。
+  8. 公開ステップ（publish.py）を置く場合の配線を確かめる。公開ステップが 4 段階
+     （commit/push/pr/status）を実行しない、公開の成功条件が commit/push/pr の
+     exit_code を含まない、|| で結合されている、複数の rule に分かれている、status の
+     exit_code を含む、公開の成功が aislop ステップへ渡らない、公開の失敗が修正ステップ
+     （fix_publish）へ遷移しない、公開の修正が公開の出力を参照しない、修正から公開へ
+     戻らない、修正が ABORT へ遷移する、のそれぞれで失敗する。status だけを実行する
+     ステップは公開とみなさない。
+  9. CI が make done を呼ばない、nightly と rustfmt をセットアップしない、Node を
      セットアップしない、のそれぞれで失敗する。
-  6. .gitignore に生成物の除外が無い、rust-toolchain.toml のチャネルが stable でない、
+  10. .gitignore に生成物の除外が無い、rust-toolchain.toml のチャネルが stable でない、
      のそれぞれで失敗する。
 """
 import importlib.util
@@ -123,7 +141,7 @@ WEB_MANIFEST = json.dumps(
 )
 
 MAKEFILE = """\
-.PHONY: fmt clippy test typecheck lint done
+.PHONY: fmt clippy test typecheck lint proto-check done
 
 fmt:
 	cargo +nightly fmt --all -- --check
@@ -141,8 +159,13 @@ typecheck:
 lint:
 	npm --prefix frontend/web run lint
 
+proto-check:
+	$(MAKE) proto-gen
+	git diff --exit-code -- frontend/web/src/proto
+
 done:
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
+	$(MAKE) proto-check
 	$(MAKE) fmt
 	$(MAKE) clippy
 	$(MAKE) test
@@ -169,13 +192,11 @@ jobs:
         with:
           node-version: 22
       - run: make done
+      - run: npm ci
+      - run: node scripts/aislop-check-bootstrap.mjs check
 """
 
-WORKFLOW = """\
-name: taktdash-change
-max_steps: 70
-initial_step: develop
-steps:
+DEVELOP_STEP = """\
   - name: develop
     description: development-core を呼ぶ
     kind: workflow_call
@@ -185,34 +206,275 @@ steps:
         next: machine_gate
       - condition: ABORT
         next: ABORT
-  - name: machine_gate
-    description: make done を実行する
+"""
+
+FMT_INPUT = """\
+      - type: command
+        as: fmt
+        command: "bash -o pipefail -c 'make fmt 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+"""
+
+CLIPPY_INPUT = """\
+      - type: command
+        as: clippy
+        command: "bash -o pipefail -c 'make clippy 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+"""
+
+TEST_INPUT = """\
+      - type: command
+        as: test
+        command: >-
+          bash -c 'if [ ! -d frontend/web/node_modules ]; then bash -o pipefail -c "npm --prefix frontend/web ci 2>&1 | tail -c 4000" || exit $?; fi; bash -o pipefail -c "make test 2>&1 | tail -c 56000"'
+        timeout_ms: 1800000
+"""
+
+TYPECHECK_INPUT = """\
+      - type: command
+        as: typecheck
+        command: "bash -o pipefail -c 'make typecheck 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+"""
+
+LINT_INPUT = """\
+      - type: command
+        as: lint
+        command: "bash -o pipefail -c 'make lint 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+"""
+
+PROTO_CHECK_INPUT = """\
+      - type: command
+        as: proto_check
+        command: "bash -o pipefail -c 'make proto-check 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+"""
+
+EXTRA_INPUT = """\
+      - type: command
+        as: coverage
+        command: "bash -o pipefail -c 'make coverage 2>&1 | tail -c 60000'"
+        timeout_ms: 1800000
+"""
+
+FMT_FAILURE_RULE = """\
+      - condition: when(context.machine_gate.fmt.exit_code != 0)
+        next: fix_machine_gate_fmt
+"""
+
+CLIPPY_FAILURE_RULE = """\
+      - condition: when(context.machine_gate.clippy.exit_code != 0)
+        next: fix_machine_gate_clippy
+"""
+
+LINT_FAILURE_RULE = """\
+      - condition: when(context.machine_gate.lint.exit_code != 0)
+        next: fix_machine_gate_lint
+"""
+
+PROTO_CHECK_FAILURE_RULE = """\
+      - condition: when(context.machine_gate.proto_check.exit_code != 0)
+        next: fix_machine_gate_proto_check
+"""
+
+MACHINE_GATE_FAILURE_RULES = """\
+      - condition: when(context.machine_gate.fmt.exit_code != 0)
+        next: fix_machine_gate_fmt
+      - condition: when(context.machine_gate.clippy.exit_code != 0)
+        next: fix_machine_gate_clippy
+      - condition: when(context.machine_gate.test.exit_code != 0)
+        next: fix_machine_gate_test
+      - condition: when(context.machine_gate.typecheck.exit_code != 0)
+        next: fix_machine_gate_typecheck
+      - condition: when(context.machine_gate.lint.exit_code != 0)
+        next: fix_machine_gate_lint
+      - condition: when(context.machine_gate.proto_check.exit_code != 0)
+        next: fix_machine_gate_proto_check
+"""
+
+MACHINE_GATE_SUCCESS_RULE = """\
+      - condition: when(context.machine_gate.proto_check.exit_code == 0 && context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0 && context.machine_gate.lint.exit_code == 0)
+        next: aislop_gate
+"""
+
+MACHINE_GATE_ABORT_RULE = """\
+      - condition: when(true)
+        next: ABORT
+"""
+
+MACHINE_GATE_STEP = (
+    "  - name: machine_gate\n"
+    "    description: proto-check・fmt・clippy・test・typecheck・lint を検査ごとに実行する\n"
+    "    mode: system\n"
+    "    system_inputs:\n"
+    + FMT_INPUT
+    + CLIPPY_INPUT
+    + TEST_INPUT
+    + TYPECHECK_INPUT
+    + LINT_INPUT
+    + PROTO_CHECK_INPUT
+    + "    rules:\n"
+    + MACHINE_GATE_FAILURE_RULES
+    + MACHINE_GATE_SUCCESS_RULE
+    + MACHINE_GATE_ABORT_RULE
+)
+
+AISLOP_GATE_STEP = """\
+  - name: aislop_gate
+    description: aislop で警告以上の指摘を検査する
     mode: system
     system_inputs:
       - type: command
         as: result
-        command: make done
-        timeout_ms: 1800000
+        command: npm ci && node scripts/aislop-check-bootstrap.mjs check
+        timeout_ms: 900000
     rules:
-      - condition: when(context.machine_gate.result.exit_code == 0)
+      - condition: when(context.aislop_gate.result.exit_code == 0)
         next: COMPLETE
       - condition: when(true)
-        next: fix_machine_gate
-  - name: fix_machine_gate
-    description: make done の失敗を修正する
+        next: fix_aislop_gate
+"""
+
+
+def fix_machine_gate_step(name, check, failure, alias=None):
+    key = alias or check
+    return (
+        f"  - name: {name}\n"
+        f"    description: make {check} の失敗出力を確認して修正し、機械ゲートへ戻る\n"
+        "    capabilities: edit\n"
+        "    edit: true\n"
+        "    instruction:\n"
+        "      - fix-supervisor\n"
+        "      - |\n"
+        f"        make {check} が失敗しました。次の出力の{failure}を修正してください。\n"
+        f"        --- make {check} の stdout ---\n"
+        f"        {{context:machine_gate.{key}.stdout}}\n"
+        f"        --- make {check} の stderr ---\n"
+        f"        {{context:machine_gate.{key}.stderr}}\n"
+        "    rules:\n"
+        f"      - condition: make {check} の失敗を修正して検証した\n"
+        "        next: machine_gate\n"
+        "      - condition: 裏付けられた原因を安全に修正または検証できない\n"
+        "        next: ABORT\n"
+    )
+
+
+FIX_MACHINE_GATE_FMT_STEP = fix_machine_gate_step("fix_machine_gate_fmt", "fmt", "整形の失敗")
+FIX_MACHINE_GATE_CLIPPY_STEP = fix_machine_gate_step(
+    "fix_machine_gate_clippy", "clippy", "clippy の警告とエラー"
+)
+FIX_MACHINE_GATE_TEST_STEP = fix_machine_gate_step(
+    "fix_machine_gate_test", "test", "テストの失敗"
+)
+FIX_MACHINE_GATE_TYPECHECK_STEP = fix_machine_gate_step(
+    "fix_machine_gate_typecheck", "typecheck", "型検査の失敗"
+)
+FIX_MACHINE_GATE_LINT_STEP = fix_machine_gate_step("fix_machine_gate_lint", "lint", "lint の指摘")
+FIX_MACHINE_GATE_PROTO_CHECK_STEP = fix_machine_gate_step(
+    "fix_machine_gate_proto_check",
+    "proto-check",
+    "生成物と proto の不一致",
+    alias="proto_check",
+)
+FIX_MACHINE_GATE_STEPS = [
+    FIX_MACHINE_GATE_FMT_STEP,
+    FIX_MACHINE_GATE_CLIPPY_STEP,
+    FIX_MACHINE_GATE_TEST_STEP,
+    FIX_MACHINE_GATE_TYPECHECK_STEP,
+    FIX_MACHINE_GATE_LINT_STEP,
+    FIX_MACHINE_GATE_PROTO_CHECK_STEP,
+]
+
+FIX_AISLOP_GATE_STEP = """\
+  - name: fix_aislop_gate
+    description: aislop の警告以上の指摘を修正する
     capabilities: edit
     edit: true
     instruction:
       - fix-supervisor
       - |
-        {context:machine_gate.result.stdout}
-        {context:machine_gate.result.stderr}
+        {context:aislop_gate.result.stdout}
+        {context:aislop_gate.result.stderr}
     rules:
-      - condition: make done の失敗を修正して検証した
+      - condition: aislop の指摘を修正して検証した
         next: machine_gate
       - condition: 修正できない
         next: ABORT
 """
+
+WORKFLOW_HEADER = """\
+name: taktdash-change
+max_steps: 70
+initial_step: develop
+steps:
+"""
+
+WORKFLOW = (
+    WORKFLOW_HEADER
+    + DEVELOP_STEP
+    + MACHINE_GATE_STEP
+    + AISLOP_GATE_STEP
+    + "".join(FIX_MACHINE_GATE_STEPS)
+    + FIX_AISLOP_GATE_STEP
+)
+
+
+def workflow_with(*steps):
+    return WORKFLOW_HEADER + "".join(steps)
+
+
+# 公開ステップを置く場合の形。置くかどうかは任意で、置く場合は公開の段階・成功条件・
+# 失敗時の修正が検査される。
+PUBLISH_STEPS = """\
+  - name: create_pr
+    description: コミット・push・PR 作成・Status 更新を段階実行する
+    mode: system
+    system_inputs:
+      - type: command
+        as: commit
+        command: |
+          python3 tools/project-status/publish.py commit
+      - type: command
+        as: push
+        command: |
+          python3 tools/project-status/publish.py push
+      - type: command
+        as: pr
+        command: |
+          python3 tools/project-status/publish.py pr
+      - type: command
+        as: status
+        command: |
+          python3 tools/project-status/publish.py status --status "In Review"
+    rules:
+      - condition: when(context.create_pr.commit.exit_code == 0 && context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)
+        next: aislop_gate
+      - condition: when(true)
+        next: fix_publish
+  - name: fix_publish
+    description: 公開の失敗を修正する
+    capabilities: edit
+    edit: true
+    pass_previous_response: false
+    instruction:
+      - fix-supervisor
+      - |
+        {context:create_pr.commit.stdout}
+        {context:create_pr.push.stderr}
+        {context:create_pr.pr.stdout}
+        {context:create_pr.status.stderr}
+    rules:
+      - condition: 公開の失敗を修正して再試行する
+        next: create_pr
+      - condition: コードを修正する
+        next: machine_gate
+"""
+
+PUBLISH_WORKFLOW = WORKFLOW.replace(
+    MACHINE_GATE_SUCCESS_RULE,
+    MACHINE_GATE_SUCCESS_RULE.replace("next: aislop_gate", "next: create_pr"),
+) + PUBLISH_STEPS
 
 GITIGNORE = """\
 /target
@@ -322,6 +584,14 @@ def assert_failure(sandbox, label, name, snippet):
     assert snippet in lines[0], f"{label}: 違反の理由に {snippet!r} が含まれません: {lines[0]!r}"
 
 
+def assert_gate_rejects(sandbox, label, name="workflow-machine-gate"):
+    """ほかの検査が通る前提で、対象の検査だけが違反として報告されることを確かめる。"""
+    code, out, err = sandbox.run([])
+    assert code != 0, f"{label}: 違反があるのに成功しました。stdout={out!r}"
+    lines = [line for line in err.splitlines() if line.startswith(f"{name}:")]
+    assert len(lines) == 1, f"{label}: {name} の違反が 1 行で報告されません: {err!r}"
+
+
 def assert_success(sandbox, label):
     code, out, err = sandbox.run([])
     assert code == 0, f"{label}: 成功するはずのリポジトリが失敗しました: {err!r}"
@@ -406,14 +676,22 @@ def test_proto_directory_is_required() -> None:
 
 
 def test_make_done_must_run_every_check() -> None:
-    for target in ("fmt", "clippy", "test", "typecheck", "lint"):
+    checks = (
+        ("proto-check", "proto_check"),
+        ("fmt", "fmt"),
+        ("clippy", "clippy"),
+        ("test", "test"),
+        ("typecheck", "typecheck"),
+        ("lint", "lint"),
+    )
+    for target, reported in checks:
         with Sandbox() as sandbox:
             makefile = "\n".join(
                 line for line in MAKEFILE.splitlines() if line.strip() != f"$(MAKE) {target}"
             )
             repository(sandbox, makefile=makefile + "\n")
             stub_external_tools(sandbox)
-            assert_failure(sandbox, f"done が {target} を実行しない", "machine-gate", target)
+            assert_failure(sandbox, f"done が {target} を実行しない", "machine-gate", reported)
 
 
 def test_make_done_must_fail_when_a_check_fails() -> None:
@@ -438,7 +716,7 @@ def test_clippy_must_reject_warnings() -> None:
 
 def test_done_must_install_node_dependencies_when_missing() -> None:
     makefile = """\
-.PHONY: fmt clippy test typecheck lint done
+.PHONY: fmt clippy test typecheck lint proto-check done
 
 fmt:
 	cargo +nightly fmt --all -- --check
@@ -456,7 +734,12 @@ typecheck:
 lint:
 	npm --prefix frontend/web run lint
 
+proto-check:
+	$(MAKE) proto-gen
+	git diff --exit-code -- frontend/web/src/proto
+
 done:
+	$(MAKE) proto-check
 	$(MAKE) fmt
 	$(MAKE) clippy
 	$(MAKE) test
@@ -469,26 +752,143 @@ done:
         assert_failure(sandbox, "依存の導入が無い", "machine-gate", "node_modules")
 
 
-def test_workflow_gate_wiring() -> None:
+def test_machine_gate_develop_complete_and_mode() -> None:
+    success_condition = (
+        "context.create_pr.commit.exit_code == 0 && "
+        "context.create_pr.push.exit_code == 0 && "
+        "context.create_pr.pr.exit_code == 0"
+    )
     cases = {
         "develop が機械ゲートへ遷移しない": (
-            WORKFLOW.replace("      - condition: COMPLETE\n        next: machine_gate", "      - condition: COMPLETE\n        next: COMPLETE"),
+            workflow_with(
+                DEVELOP_STEP.replace("        next: machine_gate", "        next: COMPLETE"),
+                MACHINE_GATE_STEP,
+                AISLOP_GATE_STEP,
+                *FIX_MACHINE_GATE_STEPS,
+                FIX_AISLOP_GATE_STEP,
+            ),
             "develop の COMPLETE",
         ),
-        "成功で完了しない": (
-            WORKFLOW.replace("next: COMPLETE\n      - condition: when(true)", "next: fix_machine_gate\n      - condition: when(true)"),
-            "COMPLETE",
+        "機械ゲートが system でない": (
+            workflow_with(
+                DEVELOP_STEP,
+                MACHINE_GATE_STEP.replace("    mode: system\n", "    capabilities: readonly\n", 1),
+                AISLOP_GATE_STEP,
+                *FIX_MACHINE_GATE_STEPS,
+                FIX_AISLOP_GATE_STEP,
+            ),
+            "mode: system",
         ),
-        "修正が make done の出力を参照しない": (
-            WORKFLOW.replace("        {context:machine_gate.result.stdout}\n        {context:machine_gate.result.stderr}\n", "        make done の出力を確認してください\n"),
-            "instruction",
-        ),
-        "修正から機械ゲートへ戻らない": (
-            WORKFLOW.replace("        next: machine_gate\n      - condition: 修正できない", "        next: COMPLETE\n      - condition: 修正できない"),
+        "機械ゲートのステップが無い": (
+            workflow_with(DEVELOP_STEP, AISLOP_GATE_STEP, *FIX_MACHINE_GATE_STEPS, FIX_AISLOP_GATE_STEP),
             "machine_gate",
         ),
-        "機械ゲートが system でない": (
-            WORKFLOW.replace("    mode: system\n    system_inputs:", "    capabilities: readonly\n    system_inputs:"),
+        "機械ゲートの成功が aislop へ遷移しない": (
+            WORKFLOW.replace("        next: aislop_gate\n", "        next: COMPLETE\n", 1),
+            "aislop_gate",
+        ),
+        "公開ステップを置く場合に機械ゲートの成功が公開へ遷移しない": (
+            PUBLISH_WORKFLOW.replace(
+                "        next: create_pr\n      - condition: when(true)\n        next: ABORT",
+                "        next: COMPLETE\n      - condition: when(true)\n        next: ABORT",
+            ),
+            "create_pr",
+        ),
+        "公開の成功が aislop ステップへ渡さない": (
+            PUBLISH_WORKFLOW.replace(
+                "        next: aislop_gate\n      - condition: when(true)\n        next: fix_publish",
+                "        next: COMPLETE\n      - condition: when(true)\n        next: fix_publish",
+            ),
+            "aislop",
+        ),
+        "公開に push の入力が無い": (
+            PUBLISH_WORKFLOW.replace(
+                "      - type: command\n        as: push\n        command: |\n          python3 tools/project-status/publish.py push\n",
+                "",
+            ),
+            "push",
+        ),
+        "公開に commit の入力が無い": (
+            PUBLISH_WORKFLOW.replace(
+                "      - type: command\n        as: commit\n        command: |\n          python3 tools/project-status/publish.py commit\n",
+                "",
+            ),
+            "commit",
+        ),
+        "公開に status の入力が無い": (
+            PUBLISH_WORKFLOW.replace(
+                "      - type: command\n        as: status\n        command: |\n          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+                "",
+            ),
+            "status",
+        ),
+        "公開の成功条件に push の exit_code が無い": (
+            PUBLISH_WORKFLOW.replace(
+                success_condition,
+                "context.create_pr.commit.exit_code == 0 && context.create_pr.pr.exit_code == 0",
+            ),
+            "push",
+        ),
+        "公開の成功条件に pr の exit_code が無い": (
+            PUBLISH_WORKFLOW.replace(
+                success_condition,
+                "context.create_pr.commit.exit_code == 0 && context.create_pr.push.exit_code == 0",
+            ),
+            "pr",
+        ),
+        "公開の成功条件に status の exit_code を含む": (
+            PUBLISH_WORKFLOW.replace(
+                "&& context.create_pr.pr.exit_code == 0)",
+                "&& context.create_pr.pr.exit_code == 0 && context.create_pr.status.exit_code == 0)",
+            ),
+            "status",
+        ),
+        "公開の成功条件が || で結合されている": (
+            PUBLISH_WORKFLOW.replace(
+                success_condition,
+                "context.create_pr.commit.exit_code == 0 || context.create_pr.push.exit_code == 0 || context.create_pr.pr.exit_code == 0",
+            ),
+            "||",
+        ),
+        "公開の完了条件が複数の rule に分かれている": (
+            PUBLISH_WORKFLOW.replace(
+                "      - condition: when(" + success_condition + ")\n        next: aislop_gate\n",
+                "      - condition: when(context.create_pr.commit.exit_code == 0)\n        next: aislop_gate\n"
+                "      - condition: when(context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)\n"
+                "        next: aislop_gate\n",
+            ),
+            "1件",
+        ),
+        "公開の失敗が修正ステップへ遷移しない": (
+            PUBLISH_WORKFLOW.replace("next: fix_publish", "next: COMPLETE"),
+            "fix_publish",
+        ),
+        "公開の修正が公開の出力を参照しない": (
+            PUBLISH_WORKFLOW.replace(
+                "        {context:create_pr.commit.stdout}\n        {context:create_pr.push.stderr}\n        {context:create_pr.pr.stdout}\n        {context:create_pr.status.stderr}\n",
+                "        公開の出力を確認してください\n",
+            ),
+            "instruction",
+        ),
+        "公開の修正から公開へ戻らない": (
+            PUBLISH_WORKFLOW.replace(
+                "next: create_pr\n      - condition: コードを修正する",
+                "next: COMPLETE\n      - condition: コードを修正する",
+            ),
+            "create_pr",
+        ),
+        "公開の修正が ABORT へ遷移する": (
+            PUBLISH_WORKFLOW.replace(
+                "      - condition: コードを修正する\n        next: machine_gate",
+                "      - condition: コードを修正する\n        next: ABORT",
+            ),
+            "ABORT",
+        ),
+        "公開ステップが system でない": (
+            PUBLISH_WORKFLOW.replace(
+                "  - name: create_pr\n    description: コミット・push・PR 作成・Status 更新を段階実行する\n    mode: system",
+                "  - name: create_pr\n    description: コミット・push・PR 作成・Status 更新を段階実行する\n    capabilities: readonly",
+            ),
             "mode: system",
         ),
     }
@@ -497,6 +897,716 @@ def test_workflow_gate_wiring() -> None:
             repository(sandbox, workflow=workflow)
             stub_external_tools(sandbox)
             assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+
+def test_machine_gate_requires_six_system_inputs() -> None:
+    cases = {
+        "lint の system_input が無い": (
+            MACHINE_GATE_STEP.replace(LINT_INPUT, ""),
+            "system_inputs",
+        ),
+        "proto_check の system_input が無い": (
+            MACHINE_GATE_STEP.replace(PROTO_CHECK_INPUT, ""),
+            "system_inputs",
+        ),
+        "7 個目の system_input がある": (
+            MACHINE_GATE_STEP.replace(LINT_INPUT, LINT_INPUT + EXTRA_INPUT),
+            "system_inputs",
+        ),
+        "同じ as の system_input が重複する": (
+            MACHINE_GATE_STEP.replace(LINT_INPUT, FMT_INPUT),
+            "system_inputs",
+        ),
+        "as が検査名と一致しない": (
+            MACHINE_GATE_STEP.replace(LINT_INPUT, LINT_INPUT.replace("as: lint", "as: linting")),
+            "system_inputs",
+        ),
+        "system_input の type が command でない": (
+            MACHINE_GATE_STEP.replace(LINT_INPUT, LINT_INPUT.replace("type: command", "type: file")),
+            "command",
+        ),
+    }
+    for label, (machine_step, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    machine_step,
+                    AISLOP_GATE_STEP,
+                    *FIX_MACHINE_GATE_STEPS,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+
+def test_machine_gate_commands_invoke_their_make_targets() -> None:
+    fmt_command = 'command: "bash -o pipefail -c \'make fmt 2>&1 | tail -c 60000\'"'
+    cases = {
+        "fmt が別の検査を呼ぶ": (
+            MACHINE_GATE_STEP.replace(FMT_INPUT, FMT_INPUT.replace("make fmt 2>&1", "make lint 2>&1")),
+            "make fmt を呼んでいません",
+        ),
+        "fmt が echo で表示するだけ": (
+            MACHINE_GATE_STEP.replace(
+                FMT_INPUT,
+                FMT_INPUT.replace(fmt_command, 'command: "echo make fmt"'),
+            ),
+            "make fmt を呼んでいません",
+        ),
+        "fmt が make done を呼ぶ": (
+            MACHINE_GATE_STEP.replace(
+                FMT_INPUT,
+                FMT_INPUT.replace(fmt_command, 'command: "make done"'),
+            ),
+            "make fmt を呼んでいません",
+        ),
+        "fmt が別の検査も一緒に呼ぶ": (
+            MACHINE_GATE_STEP.replace(
+                FMT_INPUT,
+                FMT_INPUT.replace(
+                    "make fmt 2>&1 | tail -c 60000",
+                    "make fmt && make lint 2>&1 | tail -c 60000",
+                ),
+            ),
+            "lint",
+        ),
+        "clippy が make clippy を呼ばない": (
+            MACHINE_GATE_STEP.replace(
+                CLIPPY_INPUT,
+                CLIPPY_INPUT.replace("make clippy 2>&1", "make fmt 2>&1"),
+            ),
+            "make clippy を呼んでいません",
+        ),
+        "proto_check が make proto-check を呼ばない": (
+            MACHINE_GATE_STEP.replace(
+                PROTO_CHECK_INPUT,
+                PROTO_CHECK_INPUT.replace("make proto-check 2>&1", "make fmt 2>&1"),
+            ),
+            "make proto-check を呼んでいません",
+        ),
+        "proto_check が別の検査も一緒に呼ぶ": (
+            MACHINE_GATE_STEP.replace(
+                PROTO_CHECK_INPUT,
+                PROTO_CHECK_INPUT.replace(
+                    "make proto-check 2>&1 | tail -c 60000",
+                    "make proto-check && make lint 2>&1 | tail -c 60000",
+                ),
+            ),
+            "lint",
+        ),
+        "fmt が制御演算子で検査を実行させない": (
+            MACHINE_GATE_STEP.replace(
+                FMT_INPUT,
+                FMT_INPUT.replace("make fmt 2>&1 | tail -c 60000", "true || make fmt"),
+            ),
+            "正規形",
+        ),
+        "test が制御演算子で make test を実行させない": (
+            MACHINE_GATE_STEP.replace(
+                TEST_INPUT,
+                TEST_INPUT.replace(
+                    'bash -o pipefail -c "make test 2>&1 | tail -c 56000"',
+                    'bash -o pipefail -c "true || make test 2>&1 | tail -c 56000"',
+                ),
+            ),
+            "正規形",
+        ),
+    }
+    for label, (machine_step, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    machine_step,
+                    AISLOP_GATE_STEP,
+                    *FIX_MACHINE_GATE_STEPS,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+
+def test_machine_gate_success_requires_all_six_exit_codes() -> None:
+    four_check_success = """\
+      - condition: when(context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0)
+        next: aislop_gate
+"""
+    five_check_success = """\
+      - condition: when(context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0 && context.machine_gate.lint.exit_code == 0)
+        next: aislop_gate
+"""
+    or_success = """\
+      - condition: when(context.machine_gate.proto_check.exit_code == 0 || context.machine_gate.fmt.exit_code == 0 || context.machine_gate.clippy.exit_code == 0 || context.machine_gate.test.exit_code == 0 || context.machine_gate.typecheck.exit_code == 0 || context.machine_gate.lint.exit_code == 0)
+        next: aislop_gate
+"""
+    result_success = """\
+      - condition: when(context.machine_gate.result.exit_code == 0)
+        next: aislop_gate
+"""
+    when_true_success = """\
+      - condition: when(true)
+        next: aislop_gate
+"""
+    foreign_key_success = MACHINE_GATE_SUCCESS_RULE.replace(
+        "context.machine_gate.lint.exit_code == 0",
+        "context.aislop_gate.result.exit_code == 0",
+    )
+    cases = {
+        "成功条件から lint の検査が抜けている": (
+            MACHINE_GATE_STEP.replace(MACHINE_GATE_SUCCESS_RULE, four_check_success),
+            "6検査",
+        ),
+        "成功条件から proto_check の検査が抜けている": (
+            MACHINE_GATE_STEP.replace(MACHINE_GATE_SUCCESS_RULE, five_check_success),
+            "6検査",
+        ),
+        "成功の遷移先が aislop_gate でない": (
+            MACHINE_GATE_STEP.replace(
+                MACHINE_GATE_SUCCESS_RULE,
+                MACHINE_GATE_SUCCESS_RULE.replace("next: aislop_gate", "next: COMPLETE"),
+            ),
+            "aislop_gate",
+        ),
+    }
+    for label, (machine_step, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    machine_step,
+                    AISLOP_GATE_STEP,
+                    *FIX_MACHINE_GATE_STEPS,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+    rejected = {
+        "成功条件が OR で結ばれている": MACHINE_GATE_STEP.replace(MACHINE_GATE_SUCCESS_RULE, or_success),
+        "成功条件が単一キーの result を見る": MACHINE_GATE_STEP.replace(
+            MACHINE_GATE_SUCCESS_RULE, result_success
+        ),
+        "成功条件が別ゲートのキーを見る": MACHINE_GATE_STEP.replace(
+            MACHINE_GATE_SUCCESS_RULE, foreign_key_success
+        ),
+        "when(true) で aislop_gate へ進む": MACHINE_GATE_STEP.replace(
+            MACHINE_GATE_SUCCESS_RULE, when_true_success
+        ),
+        "when(true) が成功条件より前にある": MACHINE_GATE_STEP.replace(
+            MACHINE_GATE_SUCCESS_RULE + MACHINE_GATE_ABORT_RULE,
+            MACHINE_GATE_ABORT_RULE + MACHINE_GATE_SUCCESS_RULE,
+        ),
+    }
+    for label, machine_step in rejected.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    machine_step,
+                    AISLOP_GATE_STEP,
+                    *FIX_MACHINE_GATE_STEPS,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, label)
+
+
+def test_machine_gate_requires_single_success_rule() -> None:
+    """machine_gate の aislop_gate 成功規則は、ちょうど 1 件でなければならない。
+
+    成功条件そのものが正規形でも、別ゲートの成功で aislop_gate へ進む規則を
+    前後に足すと、先に一致した規則で成功条件を迂回できる。
+    """
+    extra_success_rule = (
+        "      - condition: when(context.aislop_gate.result.exit_code == 0)\n"
+        "        next: aislop_gate\n"
+    )
+    cases = {
+        "成功条件の規則より前に別の aislop_gate 規則がある": (
+            extra_success_rule + MACHINE_GATE_SUCCESS_RULE
+        ),
+        "成功条件の規則より後に別の aislop_gate 規則がある": (
+            MACHINE_GATE_SUCCESS_RULE + extra_success_rule
+        ),
+    }
+    for label, replaced in cases.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    MACHINE_GATE_STEP.replace(MACHINE_GATE_SUCCESS_RULE, replaced),
+                    AISLOP_GATE_STEP,
+                    *FIX_MACHINE_GATE_STEPS,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_failure(
+                sandbox, label, "workflow-machine-gate", "成功規則が 1 つだけありません"
+            )
+
+
+def test_machine_gate_failure_routes_to_matching_fix_step() -> None:
+    cases = {
+        "fmt の失敗条件が無い": (
+            MACHINE_GATE_STEP.replace(FMT_FAILURE_RULE, ""),
+            "fmt",
+        ),
+        "clippy の失敗条件が exit_code != 0 でない": (
+            MACHINE_GATE_STEP.replace(
+                CLIPPY_FAILURE_RULE,
+                CLIPPY_FAILURE_RULE.replace("!= 0", "== 0"),
+            ),
+            "clippy",
+        ),
+    }
+    for label, (machine_step, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    machine_step,
+                    AISLOP_GATE_STEP,
+                    *FIX_MACHINE_GATE_STEPS,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+    rejected = {
+        "lint の失敗が fmt の修正ステップへ遷移する": MACHINE_GATE_STEP.replace(
+            LINT_FAILURE_RULE,
+            LINT_FAILURE_RULE.replace("next: fix_machine_gate_lint", "next: fix_machine_gate_fmt"),
+        ),
+    }
+    for label, machine_step in rejected.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    machine_step,
+                    AISLOP_GATE_STEP,
+                    *FIX_MACHINE_GATE_STEPS,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, label)
+
+    without_lint_fix = [step for step in FIX_MACHINE_GATE_STEPS if step is not FIX_MACHINE_GATE_LINT_STEP]
+    with Sandbox() as sandbox:
+        repository(
+            sandbox,
+            workflow=workflow_with(
+                DEVELOP_STEP,
+                MACHINE_GATE_STEP,
+                AISLOP_GATE_STEP,
+                *without_lint_fix,
+                FIX_AISLOP_GATE_STEP,
+            ),
+        )
+        stub_external_tools(sandbox)
+        assert_failure(sandbox, "lint の修正ステップが無い", "workflow-machine-gate", "fix_machine_gate_lint")
+
+
+def test_machine_gate_fix_steps_only_use_their_own_output() -> None:
+    cases = {
+        "lint の修正が fmt の出力を参照する": (
+            FIX_MACHINE_GATE_LINT_STEP,
+            FIX_MACHINE_GATE_LINT_STEP.replace(
+                "{context:machine_gate.lint.stdout}",
+                "{context:machine_gate.fmt.stdout}",
+            ),
+        ),
+        "lint の修正が stderr を参照しない": (
+            FIX_MACHINE_GATE_LINT_STEP,
+            FIX_MACHINE_GATE_LINT_STEP.replace(
+                "        {context:machine_gate.lint.stderr}\n", ""
+            ),
+        ),
+        "lint の修正が aislop の出力も参照する": (
+            FIX_MACHINE_GATE_LINT_STEP,
+            FIX_MACHINE_GATE_LINT_STEP.replace(
+                "        {context:machine_gate.lint.stderr}\n",
+                "        {context:machine_gate.lint.stderr}\n        {context:aislop_gate.result.stdout}\n",
+            ),
+        ),
+        "fmt の修正が clippy の出力を参照する": (
+            FIX_MACHINE_GATE_FMT_STEP,
+            FIX_MACHINE_GATE_FMT_STEP.replace(
+                "{context:machine_gate.fmt.stdout}",
+                "{context:machine_gate.clippy.stdout}",
+            ),
+        ),
+    }
+    for label, (original, mutated) in cases.items():
+        steps = [mutated if step is original else step for step in FIX_MACHINE_GATE_STEPS]
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    MACHINE_GATE_STEP,
+                    AISLOP_GATE_STEP,
+                    *steps,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, label)
+
+
+def test_machine_gate_fix_steps_return_to_machine_gate() -> None:
+    cases = {
+        "lint の修正が aislop へ戻る": FIX_MACHINE_GATE_LINT_STEP.replace(
+            "        next: machine_gate", "        next: aislop_gate"
+        ),
+        "lint の修正が COMPLETE へ進む": FIX_MACHINE_GATE_LINT_STEP.replace(
+            "        next: machine_gate", "        next: COMPLETE"
+        ),
+        "lint の修正に戻りの遷移が無い": FIX_MACHINE_GATE_LINT_STEP.replace(
+            "        next: machine_gate\n", ""
+        ),
+        "lint の修正に COMPLETE への迂回規則を足す": FIX_MACHINE_GATE_LINT_STEP.replace(
+            "    rules:\n",
+            "    rules:\n      - condition: when(true)\n        next: COMPLETE\n",
+        ),
+        "lint の修正に aislop への迂回規則を足す": FIX_MACHINE_GATE_LINT_STEP.replace(
+            "    rules:\n",
+            "    rules:\n      - condition: when(true)\n        next: aislop_gate\n",
+        ),
+    }
+    for label, mutated in cases.items():
+        steps = [mutated if step is FIX_MACHINE_GATE_LINT_STEP else step for step in FIX_MACHINE_GATE_STEPS]
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    MACHINE_GATE_STEP,
+                    AISLOP_GATE_STEP,
+                    *steps,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "machine_gate")
+
+
+def test_status_only_step_is_not_a_publish_step() -> None:
+    """開始時の Status 更新のように publish.py status だけを実行するステップは公開とみなさない。"""
+    workflow = WORKFLOW.replace(
+        "steps:\n  - name: develop",
+        "steps:\n"
+        "  - name: mark_in_progress\n"
+        "    description: 開始時に対象 issue を In Progress にする\n"
+        "    mode: system\n"
+        "    system_inputs:\n"
+        "      - type: command\n"
+        "        as: status\n"
+        "        command: |\n"
+        "          python3 tools/project-status/publish.py status --status \"In Progress\"\n"
+        "    rules:\n"
+        "      - condition: when(true)\n"
+        "        next: develop\n"
+        "  - name: develop",
+    )
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=workflow)
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "status だけを実行する開始ステップ")
+
+
+def test_workflow_requires_aislop_gate_step() -> None:
+    """aislop の機械ゲートが無い、順序が違う、失敗時に戻らない、のそれぞれで失敗する。"""
+    machine_success_complete = MACHINE_GATE_STEP.replace(
+        MACHINE_GATE_SUCCESS_RULE,
+        MACHINE_GATE_SUCCESS_RULE.replace("next: aislop_gate", "next: COMPLETE"),
+    )
+    without_step = workflow_with(
+        DEVELOP_STEP,
+        machine_success_complete,
+        *FIX_MACHINE_GATE_STEPS,
+        FIX_AISLOP_GATE_STEP,
+    )
+    reordered = workflow_with(
+        DEVELOP_STEP,
+        AISLOP_GATE_STEP,
+        MACHINE_GATE_STEP,
+        *FIX_MACHINE_GATE_STEPS,
+        FIX_AISLOP_GATE_STEP,
+    )
+    cases = {
+        "aislop ステップが無い": (without_step, "aislop"),
+        "aislop ステップが machine_gate より前にある": (reordered, "aislop"),
+        "aislop の失敗で修正へ遷移しない": (
+            workflow_with(
+                DEVELOP_STEP,
+                MACHINE_GATE_STEP,
+                AISLOP_GATE_STEP.replace("        next: fix_aislop_gate", "        next: ABORT"),
+                *FIX_MACHINE_GATE_STEPS,
+                FIX_AISLOP_GATE_STEP,
+            ),
+            "fix_aislop_gate",
+        ),
+        "aislop の修正から machine_gate へ戻らない": (
+            workflow_with(
+                DEVELOP_STEP,
+                MACHINE_GATE_STEP,
+                AISLOP_GATE_STEP,
+                *FIX_MACHINE_GATE_STEPS,
+                FIX_AISLOP_GATE_STEP.replace("        next: machine_gate", "        next: aislop_gate"),
+            ),
+            "machine_gate",
+        ),
+    }
+    for label, (workflow, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+
+def test_aislop_fix_must_reenter_machine_gate() -> None:
+    """aislop の修正は、machine_gate をやり直す機械ゲートへ戻らなければならない。
+
+    修正後の成果物に machine_gate を再実行せず COMPLETE へ到達できる遷移と、
+    aislop だけを再実行して COMPLETE へ到達できる遷移を拒否する。
+    """
+    cases = {
+        "aislop の修正が COMPLETE へ直接遷移する": FIX_AISLOP_GATE_STEP.replace(
+            "        next: machine_gate", "        next: COMPLETE"
+        ),
+        "aislop の修正が aislop へ直接戻る": FIX_AISLOP_GATE_STEP.replace(
+            "        next: machine_gate", "        next: aislop_gate"
+        ),
+    }
+    for label, fix_step in cases.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    MACHINE_GATE_STEP,
+                    AISLOP_GATE_STEP,
+                    *FIX_MACHINE_GATE_STEPS,
+                    fix_step,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "machine_gate")
+
+
+def test_aislop_gate_command_detection() -> None:
+    """aislop チェックを実際に起動するコマンドだけを aislop ゲートと判定する。
+
+    echo・引用符内の文字列・コメントは実行扱いせず、mode が system でないステップも
+    対象にしない。
+    """
+    with Sandbox() as sandbox:
+        module = sandbox.module
+
+        def step(command, mode="system"):
+            return {
+                "name": "aislop_gate",
+                "mode": mode,
+                "system_inputs": [{"type": "command", "as": "result", "command": command}],
+            }
+
+        assert module.runs_aislop_gate(step("node scripts/aislop-check-bootstrap.mjs check")), "単独の起動を許可する"
+        assert module.runs_aislop_gate(step("npm ci && node scripts/aislop-check-bootstrap.mjs check")), "前段付きの起動を許可する"
+        assert module.runs_aislop_gate(
+            step("echo 準備 # コメント\nnode scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント行の次の実起動を許可する"
+        assert not module.runs_aislop_gate(step("echo scripts/aislop-check-bootstrap.mjs check")), "echo を実行扱いしない"
+        assert not module.runs_aislop_gate(step('echo "node scripts/aislop-check-bootstrap.mjs check"')), "引用符内を実行扱いしない"
+        assert not module.runs_aislop_gate(step("# node scripts/aislop-check-bootstrap.mjs check")), "コメントを実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("echo skipped # && node scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント内の && の後ろを実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("# 実行例: npm ci || node scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント行内の || の後ろを実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("echo skipped # ; node scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント内の ; の後ろを実行扱いしない"
+        assert not module.runs_aislop_gate(
+            step("echo skipped # | node scripts/aislop-check-bootstrap.mjs check")
+        ), "コメント内の | の後ろを実行扱いしない"
+        assert module.runs_aislop_gate(
+            step('echo "参照: # ではない" # コメント\nnode scripts/aislop-check-bootstrap.mjs check')
+        ), "引用符内の # をコメント開始とみなさない"
+        assert not module.runs_aislop_gate(
+            step("node scripts/aislop-check-bootstrap.mjs check", mode="agent")
+        ), "mode が system でないステップを対象にしない"
+
+
+def test_aislop_gate_command_must_invoke_the_check() -> None:
+    """echo やコメント内の文字列を aislop ゲートとして扱わない。"""
+    cases = {
+        "echo で文字列を表示するだけ": "        command: 'echo scripts/aislop-check-bootstrap.mjs check'",
+        "コメント内の演算子の後ろにだけ書く": (
+            "        command: 'echo skipped # && node scripts/aislop-check-bootstrap.mjs check'"
+        ),
+        "コメント行にだけ書く": "        command: '# node scripts/aislop-check-bootstrap.mjs check'",
+    }
+    for label, replacement in cases.items():
+        with Sandbox() as sandbox:
+            workflow = WORKFLOW.replace(
+                "        command: npm ci && node scripts/aislop-check-bootstrap.mjs check",
+                replacement,
+            )
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "aislop-gate を実行する")
+
+
+def test_ci_aislop_gate_command_must_invoke_the_check() -> None:
+    """CI でも、aislop チェックを実際に起動しないコマンドを呼び出しとみなさない。"""
+    cases = {
+        "echo で文字列を表示するだけ": "      - run: echo scripts/aislop-check-bootstrap.mjs check\n",
+        "引用符の中にだけコマンドを書く": '      - run: echo "node scripts/aislop-check-bootstrap.mjs check"\n',
+        "コメント内の演算子の後ろにだけ書く": (
+            "      - run: echo skipped # && node scripts/aislop-check-bootstrap.mjs check\n"
+        ),
+        "コメント行にだけ書く": "      - run: '# node scripts/aislop-check-bootstrap.mjs check'\n",
+    }
+    for label, run in cases.items():
+        with Sandbox() as sandbox:
+            ci = CI.replace("      - run: node scripts/aislop-check-bootstrap.mjs check\n", run)
+            repository(sandbox, ci=ci)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "ci-runs-make-done", "aislop のゲート")
+
+
+def test_ci_aislop_gate_accepts_multiline_run_with_comment() -> None:
+    """コメント行を含む複数行の run でも、実際に起動していれば受理する。"""
+    multi_line = (
+        "      - run: |\n"
+        "          # 依存を導入する\n"
+        "          npm ci\n"
+        "          node scripts/aislop-check-bootstrap.mjs check\n"
+    )
+    with Sandbox() as sandbox:
+        ci = CI.replace("      - run: node scripts/aislop-check-bootstrap.mjs check\n", multi_line)
+        repository(sandbox, ci=ci)
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "コメント行を含む複数行の run")
+
+
+def test_aislop_gate_success_condition_must_reference_its_own_gate() -> None:
+    """aislop_gate の成功条件は、別ゲートではなく aislop_gate 自身の exit_code だけを見る。"""
+    success = "      - condition: when(context.aislop_gate.result.exit_code == 0)"
+    cases = {
+        "aislop_gate が machine_gate の exit_code を成功条件にする": (
+            AISLOP_GATE_STEP.replace(
+                success,
+                "      - condition: when(context.machine_gate.result.exit_code == 0)",
+            ),
+            "aislop_gate",
+        ),
+        "aislop_gate が別ゲートの成功を AND で併記する": (
+            AISLOP_GATE_STEP.replace(
+                success,
+                "      - condition: when(context.aislop_gate.result.exit_code != 0 "
+                "&& context.machine_gate.result.exit_code == 0)",
+            ),
+            "aislop_gate",
+        ),
+        "aislop_gate が別ゲートの成功を OR で併記する": (
+            AISLOP_GATE_STEP.replace(
+                success,
+                "      - condition: when(context.aislop_gate.result.exit_code == 0 "
+                "|| context.machine_gate.result.exit_code == 0)",
+            ),
+            "aislop_gate",
+        ),
+        "aislop_gate が自ゲートの否定とリテラル真を併記する": (
+            AISLOP_GATE_STEP.replace(
+                success,
+                "      - condition: when(context.aislop_gate.result.exit_code != 0 || 0 == 0)",
+            ),
+            "aislop_gate",
+        ),
+    }
+    # 成功条件の規則そのものが正規形でも、別の規則が別ゲートの exit_code == 0 を見ると、
+    # 規則は先に一致したものが選ばれるため、そのゲートの成功で次へ進めてしまう。
+    aislop_success_rule = (
+        "      - condition: when(context.aislop_gate.result.exit_code == 0)\n"
+        "        next: COMPLETE\n"
+    )
+    extra_rule = (
+        "      - condition: when(context.machine_gate.result.exit_code == 0)\n"
+        "        next: COMPLETE\n"
+    )
+    for position, replaced in (
+        ("成功条件の規則より前", extra_rule + aislop_success_rule),
+        ("成功条件の規則より後", aislop_success_rule + extra_rule),
+    ):
+        cases[f"aislop_gate の別規則が{position}に別ゲートの成功を見る"] = (
+            AISLOP_GATE_STEP.replace(aislop_success_rule, replaced),
+            "別ゲート machine_gate",
+        )
+    for label, (aislop_step, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    MACHINE_GATE_STEP,
+                    aislop_step,
+                    *FIX_MACHINE_GATE_STEPS,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", snippet)
+
+
+def test_aislop_gate_success_must_complete() -> None:
+    """aislop_gate の成功は COMPLETE へ遷移しなければならない。
+
+    成功条件は aislop_gate 自身の exit_code == 0 のまま、遷移先だけを変異させる。
+    """
+    success_rule = (
+        "      - condition: when(context.aislop_gate.result.exit_code == 0)\n"
+        "        next: COMPLETE\n"
+    )
+    cases = {
+        "aislop の成功が修正ステップへ遷移する": success_rule.replace(
+            "next: COMPLETE", "next: fix_aislop_gate"
+        ),
+        "aislop の成功が ABORT へ遷移する": success_rule.replace("next: COMPLETE", "next: ABORT"),
+    }
+    for label, replaced in cases.items():
+        with Sandbox() as sandbox:
+            repository(
+                sandbox,
+                workflow=workflow_with(
+                    DEVELOP_STEP,
+                    MACHINE_GATE_STEP,
+                    AISLOP_GATE_STEP.replace(success_rule, replaced),
+                    *FIX_MACHINE_GATE_STEPS,
+                    FIX_AISLOP_GATE_STEP,
+                ),
+            )
+            stub_external_tools(sandbox)
+            assert_failure(
+                sandbox, label, "workflow-machine-gate", "COMPLETE へ遷移していません"
+            )
 
 
 def test_ci_must_run_make_done_with_toolchains() -> None:
@@ -525,6 +1635,80 @@ def test_ci_must_run_make_done_with_toolchains() -> None:
         repository(sandbox, ci=None)
         stub_external_tools(sandbox)
         assert_failure(sandbox, "CI の定義が無い", "ci-runs-make-done", ".github/workflows/")
+
+
+def test_ci_must_call_aislop_gate() -> None:
+    """CI から aislop のゲートを呼ぶ。チェックアウトの前に呼ぶ構成も失敗にする。"""
+    aislop_run = "      - run: node scripts/aislop-check-bootstrap.mjs check\n"
+    cases = {
+        "aislop ゲートを呼ばない": (
+            CI.replace(aislop_run, ""),
+            "aislop",
+        ),
+        "チェックアウトの前に aislop を呼ぶ": (
+            CI.replace(aislop_run, "").replace(
+                "      - uses: actions/checkout@v5\n",
+                aislop_run + "      - uses: actions/checkout@v5\n",
+            ),
+            "aislop",
+        ),
+    }
+    for label, (ci, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=ci)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "ci-runs-make-done", snippet)
+
+
+def test_ci_checkout_order_is_per_job() -> None:
+    """チェックアウト順はジョブ単位で判定する。
+
+    先のジョブの checkout が後続ジョブへ累積してはならない。aislop を呼ぶジョブが
+    自身の checkout を持たない場合は、他ジョブに checkout があっても失敗にする。
+    併せて、問題のない複数ジョブ構成と、make done を持たないジョブの混在が
+    判定を変えないことも確かめる。
+    """
+    aislop_only_job = (
+        "  extra:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: node scripts/aislop-check-bootstrap.mjs check\n"
+    )
+    cases = {
+        "aislop を呼ぶジョブに checkout が無い": (
+            # done ジョブが checkout と make done を持ち、extra ジョブが aislop のみを持つ。
+            CI.rstrip("\n") + "\n" + aislop_only_job,
+            "チェックアウトより前に呼んでいます",
+        ),
+        "aislop を呼ぶ別ジョブに自身の checkout がある": (
+            CI.rstrip("\n")
+            + "\n"
+            + "  extra:\n"
+            + "    runs-on: ubuntu-latest\n"
+            + "    steps:\n"
+            + "      - uses: actions/checkout@v5\n"
+            + "      - run: node scripts/aislop-check-bootstrap.mjs check\n",
+            None,
+        ),
+        "make done を持たないジョブが混在しても結果が変わらない": (
+            CI.rstrip("\n")
+            + "\n"
+            + "  unrelated:\n"
+            + "    runs-on: ubuntu-latest\n"
+            + "    steps:\n"
+            + "      - run: echo ok\n",
+            None,
+        ),
+    }
+    for label, (ci, snippet) in cases.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=ci)
+            stub_external_tools(sandbox)
+            if snippet is None:
+                code, out, err = sandbox.run([])
+                assert code == 0, f"{label}: 成功するはずが失敗しました: {err!r}"
+            else:
+                assert_failure(sandbox, label, "ci-runs-make-done", snippet)
 
 
 def test_gitignore_and_toolchain_rules() -> None:
@@ -584,8 +1768,25 @@ def main() -> int:
         test_make_done_must_fail_when_a_check_fails,
         test_clippy_must_reject_warnings,
         test_done_must_install_node_dependencies_when_missing,
-        test_workflow_gate_wiring,
+        test_machine_gate_develop_complete_and_mode,
+        test_machine_gate_requires_six_system_inputs,
+        test_machine_gate_commands_invoke_their_make_targets,
+        test_machine_gate_success_requires_all_six_exit_codes,
+        test_machine_gate_requires_single_success_rule,
+        test_machine_gate_failure_routes_to_matching_fix_step,
+        test_machine_gate_fix_steps_only_use_their_own_output,
+        test_machine_gate_fix_steps_return_to_machine_gate,
+        test_workflow_requires_aislop_gate_step,
+        test_aislop_fix_must_reenter_machine_gate,
+        test_aislop_gate_command_detection,
+        test_aislop_gate_command_must_invoke_the_check,
+        test_aislop_gate_success_condition_must_reference_its_own_gate,
+        test_aislop_gate_success_must_complete,
         test_ci_must_run_make_done_with_toolchains,
+        test_ci_must_call_aislop_gate,
+        test_ci_aislop_gate_command_must_invoke_the_check,
+        test_ci_aislop_gate_accepts_multiline_run_with_comment,
+        test_ci_checkout_order_is_per_job,
         test_gitignore_and_toolchain_rules,
         test_skip_make_omits_the_command_run,
         test_install_guard_detection,

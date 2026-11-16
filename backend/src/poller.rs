@@ -13,14 +13,14 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use crate::{
   activity::ActivityStore,
-  config::{load_config, Config, Project, Thresholds, DEFAULT_INTERVAL_SECONDS},
+  config::{load_config, Config, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
-  mcp::{client_config, McpClient, ToolCallMetrics, ToolError, ToolSet},
-  model::ProjectSnapshot,
+  mcp::{client_config, McpClientRegistry, ToolCallMetrics, ToolError, ToolSet},
+  model::{PendingDecisionFilter, PendingDecisionType, ProjectSnapshot},
   store::StateStore,
 };
 
@@ -29,10 +29,11 @@ pub struct Poller {
   config_path:        PathBuf,
   activity:           Arc<ActivityStore>,
   store:              Arc<StateStore>,
-  clients:            BTreeMap<String, McpClient>,
+  registry:           McpClientRegistry,
   previous:           BTreeMap<String, ProjectSnapshot>,
   previous_connected: BTreeMap<String, bool>,
   changes:            broadcast::Sender<()>,
+  last_signature:     Option<StoreSignature>,
 }
 
 /// 1サイクルで読み取った件数と、記録した出来事の件数、次の待機に使う間隔。
@@ -55,27 +56,48 @@ impl Poller {
     activity: Arc<ActivityStore>,
     store: Arc<StateStore>,
     changes: broadcast::Sender<()>,
+    registry: McpClientRegistry,
   ) -> Self {
     Poller {
       config_path,
       activity,
       store,
-      clients: BTreeMap::new(),
+      registry,
       previous: BTreeMap::new(),
       previous_connected: BTreeMap::new(),
       changes,
+      last_signature: None,
     }
   }
 
   /// 1サイクル分、全プロジェクトの状態を読み取って差し替え、出来事を記録する。
   ///
-  /// 設定ファイルを再読み込みし、プロジェクト一覧の変化（追加・削除）を状態ストアと clients へ
-  /// 追随させます。読み取り間隔もこのサイクルで解決し、[`CycleReport::interval`] で返します。
+  /// 設定ファイルを再読み込みし、プロジェクト一覧の変化（追加・削除）を状態ストアと
+  /// takt-mcp のクライアントのレジストリへ追随させます。読み取り間隔もこのサイクルで解決し、
+  /// [`CycleReport::interval`] で返します。
   pub async fn read_cycle_once(&mut self) -> Result<CycleReport, crate::config::ConfigError> {
+    let now = Utc::now();
+    self.read_cycle_once_at(now).await
+  }
+
+  /// 指定した時刻を異常判定に使って1サイクル分を実行する。
+  ///
+  /// ログの無音と判断待ちの滞留は時刻から導出されるため、テストでは固定時刻を渡して
+  /// 実時間に依存せず閾値の跨ぎを検証します。出来事の記録時刻と `last_read_at` は
+  /// 従来どおり読み取り時点の実時刻です。
+  ///
+  /// プロジェクトごとの読み取りは子プロセスのクライアントを排他取得したうえで並列に走らせ、
+  /// 設定順に結果を回収します。回収した道具呼び出しの集計はマージし、サイクルの末尾で
+  /// 1行のログに出します。
+  pub async fn read_cycle_once_at(&mut self, now: DateTime<Utc>) -> Result<CycleReport, crate::config::ConfigError> {
     let started = Instant::now();
     let config = load_config(&self.config_path)?;
-    let before = StoreSignature::capture(&self.store);
+    let before = match self.last_signature.take() {
+      | Some(signature) => signature,
+      | None => StoreSignature::capture(&self.store, now),
+    };
     self.store.set_thresholds(config.thresholds);
+    self.store.set_servers(config.server_meta.clone());
     self.store.set_projects(config.projects.clone());
     self.sync_clients(&config);
     let mut report = CycleReport {
@@ -85,18 +107,27 @@ impl Poller {
       interval:        Duration::from_secs(config.interval_seconds),
     };
     let mut metrics = ToolCallMetrics::default();
+    // 記録に失敗したプロジェクトがあっても、残りのプロジェクトの読み取りと状態変化の通知を
+    // 続けるため、最初の記録エラーだけを保持してサイクルの末尾で返します。
+    let mut record_error: Option<crate::config::ConfigError> = None;
     let mut handles = Vec::with_capacity(config.projects.len());
     for project in &config.projects {
-      match self.clients.remove(&project.name) {
-        | Some(mut client) => {
+      // 設定変更（読み取り側・書き込み RPC 経由の双方）でクライアントを作り直した
+      // プロジェクトは、旧接続先の差分基準を新接続先へ投影しないよう読み取り前にリセットします。
+      if self.registry.take_rebuilt_for(&project.server, &project.name) {
+        self.reset_project_baseline(&project.name);
+      }
+      let prev = self.previous.get(&project.name).cloned();
+      match self.registry.get(&project.server, &project.name) {
+        | Some(handle) => {
           let project = project.clone();
-          let prev = self.previous.get(&project.name).cloned();
           handles.push(Some(tokio::spawn(async move {
             let read_at = Utc::now();
+            let mut client = handle.lock().await;
             let mut tools = ToolSet::new(&mut client, project.cwd.clone());
             let result = tools.read_snapshot(prev.as_ref()).await;
             let metrics = tools.take_metrics();
-            (client, read_at, result, metrics)
+            (read_at, result, metrics)
           })));
         },
         | None => handles.push(None),
@@ -107,30 +138,66 @@ impl Poller {
       let prev_connected = self.previous_connected.get(&project.name).copied().unwrap_or(false);
       let Some(handle) = handle else {
         let error = ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name));
-        self.record_failure(project, &error, prev.as_ref(), prev_connected, Utc::now(), &mut report)?;
+        self.apply_failure(
+          project,
+          &error,
+          prev.as_ref().map(|snapshot| (snapshot, prev_connected)),
+          Utc::now(),
+          &mut report,
+          &mut record_error,
+        );
         continue;
       };
       match handle.await {
-        | Ok((client, read_at, result, project_metrics)) => {
-          self.clients.insert(project.name.clone(), client);
+        | Ok((read_at, result, project_metrics)) => {
           metrics.merge(project_metrics);
           match result {
             | Ok(snapshot) => {
-              self.record_success(project, prev.as_ref(), prev_connected, read_at, snapshot, &mut report)?;
+              let events =
+                detect(&project.server, &project.name, prev.as_ref(), prev_connected, true, &snapshot, read_at);
+              match self.record_events(&events) {
+                | Ok(()) => {
+                  self.store.record_success(&project.name, snapshot.clone(), read_at);
+                  self.previous.insert(project.name.clone(), snapshot);
+                  self.previous_connected.insert(project.name.clone(), true);
+                  report.projects_read += 1;
+                  report.events_recorded += events.len();
+                },
+                | Err(error) => {
+                  record_error.get_or_insert(error);
+                },
+              }
             },
             | Err(error) => {
-              self.record_failure(project, &error, prev.as_ref(), prev_connected, read_at, &mut report)?;
+              self.apply_failure(
+                project,
+                &error,
+                prev.as_ref().map(|snapshot| (snapshot, prev_connected)),
+                read_at,
+                &mut report,
+                &mut record_error,
+              );
             },
           }
         },
         | Err(error) => {
           let error =
             ToolError::Parse(format!("プロジェクト {} の読み取りタスクが異常終了しました: {error}", project.name));
-          self.record_failure(project, &error, prev.as_ref(), prev_connected, Utc::now(), &mut report)?;
+          self.apply_failure(
+            project,
+            &error,
+            prev.as_ref().map(|snapshot| (snapshot, prev_connected)),
+            Utc::now(),
+            &mut report,
+            &mut record_error,
+          );
         },
       }
     }
-    if StoreSignature::capture(&self.store) != before {
+    let after = StoreSignature::capture(&self.store, now);
+    let changed = after != before;
+    self.last_signature = Some(after);
+    if changed {
       let _ = self.changes.send(());
     }
     tracing::info!(
@@ -145,119 +212,176 @@ impl Poller {
       tools = %metrics,
       "定期読み取りの1サイクルを終えました。"
     );
-    Ok(report)
+    match record_error {
+      | Some(error) => Err(error),
+      | None => Ok(report),
+    }
+  }
+
+  /// 1 プロジェクトの読み取り失敗を、設定順でストア・前回値・出来事へ反映する。
+  ///
+  /// 接続断の記録に失敗したサイクルは接続状態の比較基準を据え置き、次サイクルで同じ
+  /// 差分を再検出します。前回の状態を持たない初回は再検出する差分がないため、現行どおり
+  /// 接続状態を偽として記録します。
+  fn apply_failure(
+    &mut self,
+    project: &Project,
+    error: &ToolError,
+    prev: Option<(&ProjectSnapshot, bool)>,
+    read_at: DateTime<Utc>,
+    report: &mut CycleReport,
+    record_error: &mut Option<crate::config::ConfigError>,
+  ) {
+    let baseline_advanced = if let Some((prev, prev_connected)) = prev {
+      let events = detect(&project.server, &project.name, Some(prev), prev_connected, false, prev, read_at);
+      match self.record_events(&events) {
+        | Ok(()) => {
+          report.events_recorded += events.len();
+          true
+        },
+        | Err(record_failure) => {
+          record_error.get_or_insert(record_failure);
+          false
+        },
+      }
+    } else {
+      true
+    };
+    self.store.record_failure(&project.name);
+    if baseline_advanced {
+      self.previous_connected.insert(project.name.clone(), false);
+    }
+    report.projects_failed += 1;
+    tracing::warn!(project = %project.name, error = %error, "プロジェクトの読み取りに失敗しました。");
   }
 
   fn record_events(&self, events: &[crate::model::ActivityEvent]) -> Result<(), crate::config::ConfigError> {
-    for event in events {
-      self
-        .activity
-        .record(event)
-        .map_err(|error| crate::config::ConfigError::Invalid(format!("出来事を記録できませんでした: {error}")))?;
-    }
-    Ok(())
+    self
+      .activity
+      .record_all(events)
+      .map_err(|error| crate::config::ConfigError::Invalid(format!("出来事を記録できませんでした: {error}")))
   }
 
   /// すべてのプロジェクトの子プロセスを終了する。
   pub async fn shutdown(&mut self) {
-    for client in self.clients.values_mut() {
-      client.shutdown().await;
-    }
-    self.clients.clear();
+    self.registry.shutdown_all().await;
   }
 
-  fn sync_clients(&mut self, config: &Config) {
-    let wanted: Vec<&str> = config.projects.iter().map(|project| project.name.as_str()).collect();
-    self.clients.retain(|project, _| wanted.contains(&project.as_str()));
+  fn sync_clients(&self, config: &Config) {
+    let wanted: Vec<(String, String)> =
+      config.projects.iter().map(|project| (project.server.clone(), project.name.clone())).collect();
+    self.registry.retain(&wanted);
     for project in &config.projects {
       let Some(server) = config.servers.get(&project.server) else {
         continue;
       };
-      self.clients.entry(project.name.clone()).or_insert_with(|| McpClient::new(client_config(server, &project.cwd)));
+      self.registry.client(&project.server, &project.name, || client_config(server, &project.cwd));
     }
   }
 
-  /// 1 プロジェクトの読み取り成功を、設定順でストア・前回値・出来事へ反映する。
-  fn record_success(
-    &mut self,
-    project: &Project,
-    prev: Option<&ProjectSnapshot>,
-    prev_connected: bool,
-    read_at: DateTime<Utc>,
-    snapshot: ProjectSnapshot,
-    report: &mut CycleReport,
-  ) -> Result<(), crate::config::ConfigError> {
-    let events = detect(&project.server, &project.name, prev, prev_connected, true, &snapshot, read_at);
-    self.store.record_success(&project.name, snapshot.clone(), read_at);
-    self.previous.insert(project.name.clone(), snapshot);
-    self.previous_connected.insert(project.name.clone(), true);
-    self.record_events(&events)?;
-    report.projects_read += 1;
-    report.events_recorded += events.len();
-    Ok(())
-  }
-
-  /// 1 プロジェクトの読み取り失敗を、設定順でストア・前回値・出来事へ反映する。
-  fn record_failure(
-    &mut self,
-    project: &Project,
-    error: &ToolError,
-    prev: Option<&ProjectSnapshot>,
-    prev_connected: bool,
-    read_at: DateTime<Utc>,
-    report: &mut CycleReport,
-  ) -> Result<(), crate::config::ConfigError> {
-    if let Some(prev) = prev {
-      let events = detect(&project.server, &project.name, Some(prev), prev_connected, false, prev, read_at);
-      self.record_events(&events)?;
-      report.events_recorded += events.len();
-    }
-    self.store.record_failure(&project.name);
-    self.previous_connected.insert(project.name.clone(), false);
-    report.projects_failed += 1;
-    tracing::warn!(project = %project.name, error = %error, "プロジェクトの読み取りに失敗しました。");
-    Ok(())
+  /// クライアントを作り直したプロジェクトの差分基準と状態をリセットする。
+  ///
+  /// 旧接続先の snapshot と接続状態を新接続先の所属で投影しないよう、スロットを未読へ戻し、
+  /// 前サイクルの差分基準も捨てます。新接続先の初回読み取りは基準化のみになります。
+  fn reset_project_baseline(&mut self, project: &str) {
+    self.previous.remove(project);
+    self.previous_connected.remove(project);
+    self.store.reset_project(project);
   }
 }
 
 /// サイクルの前後で観測可能な状態が変わったかを判定するための指紋。
 ///
 /// WatchState
-/// は「状態が変わるたび送る」ため、プロジェクトの並び・読み取り成否・状態・閾値のいずれかが
-/// 変わったサイクルだけを変化とみなします。読めた時刻（last_read_at）は読み取りのたびに進むため、
-/// 内容が同じサイクルを変化として扱わないよう指紋から除きます。
+/// は「状態が変わるたび送る」ため、プロジェクトの並び・読み取り成否・状態・閾値・サーバーの
+/// 表示情報に加えて、時刻から導出されるログの無音と判断待ちの滞留の真偽が変わったサイクルだけを
+/// 変化とみなします。読めた時刻（last_read_at）は読み取りのたびに進むため、内容が同じサイクルを
+/// 変化として扱わないよう指紋から除きます。
 #[derive(Debug, PartialEq, Eq)]
 struct StoreSignature {
-  thresholds: Thresholds,
-  projects:   Vec<(String, bool, Option<ProjectSnapshot>)>,
+  thresholds:        Thresholds,
+  servers:           BTreeMap<String, ServerMeta>,
+  projects:          Vec<ProjectSignature>,
+  pending_decisions: Vec<PendingDecisionSignature>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ProjectSignature {
+  name:        String,
+  connected:   bool,
+  snapshot:    Option<ProjectSnapshot>,
+  silent_runs: Vec<(String, bool)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PendingDecisionSignature {
+  decision_type: PendingDecisionType,
+  project:       String,
+  goal_id:       Option<String>,
+  stale:         bool,
 }
 
 impl StoreSignature {
-  fn capture(store: &StateStore) -> Self {
-    let projects = store.project_views().into_iter().map(|view| (view.name, view.connected, view.snapshot)).collect();
-    StoreSignature { thresholds: store.thresholds(), projects }
+  fn capture(store: &StateStore, now: DateTime<Utc>) -> Self {
+    let projects = store
+      .project_views()
+      .into_iter()
+      .map(|view| {
+        let silent_runs = view.runs.iter().map(|run| (run.run_slug.clone(), store.is_log_silent(run, now))).collect();
+        ProjectSignature { name: view.name, connected: view.connected, snapshot: view.snapshot, silent_runs }
+      })
+      .collect();
+    let pending_decisions = store
+      .pending_decisions(now, PendingDecisionFilter::All)
+      .into_iter()
+      .map(|decision| PendingDecisionSignature {
+        decision_type: decision.decision_type,
+        project:       decision.project,
+        goal_id:       decision.goal_id,
+        stale:         decision.stale,
+      })
+      .collect();
+    StoreSignature { thresholds: store.thresholds(), servers: store.servers(), projects, pending_decisions }
   }
 }
 
 /// 読み取りサイクルを周期実行する。停止の合図が立つまで回ります。
 ///
 /// 各サイクルの設定解決は 1 回で、read_cycle_once が返す間隔をそのまま次の待機に使います。
-/// 設定読み込みに失敗したサイクルは既定の間隔で待ちます。
-pub async fn run_until_stopped<F>(poller: &mut Poller, mut stop: F)
-where
-  F: FnMut() -> bool, {
-  while !stop() {
+/// 設定読み込みに失敗したサイクルは既定の間隔で待ちます。待機中も停止要求を監視し、
+/// 要求を受けたら間隔の満了を待たずにループを抜けて子プロセスを終了します。
+pub async fn run_until_stopped(poller: &mut Poller, mut stop: watch::Receiver<bool>) {
+  while !*stop.borrow() {
     let started = Utc::now();
     let interval = match poller.read_cycle_once().await {
-      | Ok(report) => report.interval,
+      | Ok(report) => {
+        tracing::debug!(
+          projects_read = report.projects_read,
+          projects_failed = report.projects_failed,
+          events_recorded = report.events_recorded,
+          "定期読み取りの1サイクルを終えました。"
+        );
+        report.interval
+      },
       | Err(error) => {
         tracing::warn!(error = %error, "定期読み取りの1サイクルで設定を読み込めませんでした。");
         Duration::from_secs(DEFAULT_INTERVAL_SECONDS)
       },
     };
-    sleep_until_next(started, interval).await;
+    tokio::select! {
+      _ = sleep_until_next(started, interval) => {}
+      _ = wait_for_stop(&mut stop) => break,
+    }
   }
   poller.shutdown().await;
+}
+
+async fn wait_for_stop(stop: &mut watch::Receiver<bool>) {
+  while !*stop.borrow() {
+    if stop.changed().await.is_err() {
+      return;
+    }
+  }
 }
 
 async fn sleep_until_next(started: DateTime<Utc>, interval: Duration) {

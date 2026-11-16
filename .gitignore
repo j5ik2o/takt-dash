@@ -4,6 +4,7 @@
 
 # Node.js / Next.js
 node_modules/
+.aislop-check/
 .next/
 out/
 next-env.d.ts

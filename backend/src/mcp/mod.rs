@@ -7,8 +7,10 @@
 mod client;
 mod metrics;
 mod protocol;
+mod registry;
 pub mod tools;
 
 pub use client::{CallError, McpClient, McpClientConfig, ToolCallError, TransportError};
 pub use metrics::{ToolCallMetrics, ToolCallOutcome, ToolCallStat};
-pub use tools::{client_config, ToolError, ToolSet};
+pub use registry::McpClientRegistry;
+pub use tools::{client_config, ApproveGoalRegistrationResult, MergeGoalPrResult, ToolError, ToolSet};

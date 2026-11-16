@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { reserveClosedAddress } from "../support/grpc-server.ts";
 import { closeBackendClient } from "../../src/grpc/client.ts";
 import { ActivityLoader } from "../../src/components/activity-loader.tsx";
+import { ConversationsLoader } from "../../src/components/conversations-loader.tsx";
 import { ProjectsLoader } from "../../src/components/projects-loader.tsx";
 import { RunDetailLoader } from "../../src/components/run-detail-loader.tsx";
 
@@ -48,5 +49,10 @@ test("backend に接続できないとき run 詳細のローダーは落ちず�
   const html = await withClosedBackend(async () =>
     renderToStaticMarkup(await RunDetailLoader({ params: Promise.resolve({ slug: "run-aaa" }) })),
   );
+  assertUnavailableNotice(html);
+});
+
+test("backend に接続できないとき会話のローダーは落ちず不通の旨を描画する", async () => {
+  const html = await withClosedBackend(async () => renderToStaticMarkup(await ConversationsLoader()));
   assertUnavailableNotice(html);
 });

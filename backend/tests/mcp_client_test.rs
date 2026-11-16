@@ -6,14 +6,15 @@ mod common;
 use std::io::Write;
 
 use common::*;
-use serde_json::json;
+use serde_json::{json, Value};
 use takt_dash_backend::{
-  mcp::{CallError, TransportError},
+  mcp::{CallError, ToolError, TransportError},
   model::{
     ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, RunEntry,
     RunStatus, RunStepEntry, TaskStatus,
   },
 };
+use tokio::time::timeout;
 
 fn transport(error: CallError) -> TransportError {
   match error {
@@ -209,6 +210,102 @@ async fn hanging_server_times_out() {
 }
 
 #[tokio::test]
+async fn write_tools_time_out_finitely_when_the_server_hangs() {
+  // 書き込み系の5道具が応答しないサーバでも、有限のタイムアウトで輸送エラーとして終わる。
+  // これが unary の書き込み RPC の有限性の根拠です。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let cwd = directory.path();
+  let mut errors: Vec<(&str, ToolError)> = Vec::new();
+
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .answer_goal_question("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11", "q1", json!({ "text": "はい" }))
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_answer_goal_question", error));
+  }
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .list_goal_registration_proposals()
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_list_goal_registration_proposals", error));
+  }
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .approve_goal_registration(3)
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_approve_goal_registration", error));
+  }
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .reject_goal_registration(3)
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_reject_goal_registration", error));
+  }
+  {
+    let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
+    let error = tool_set(&mut client, cwd)
+      .merge_goal_pr("g1", 42, "merge")
+      .await
+      .map(|_| ())
+      .expect_err("応答がなければタイムアウトします");
+    client.shutdown().await;
+    errors.push(("takt_merge_goal_pr", error));
+  }
+
+  for (name, error) in errors {
+    assert!(
+      matches!(error, ToolError::Transport(TransportError::Timeout(_))),
+      "{name} は有限時間でタイムアウトとして終わる必要があります: {error}"
+    );
+  }
+}
+
+#[tokio::test]
+async fn drip_feed_that_keeps_the_connection_busy_still_times_out_on_the_whole_call() {
+  // 応答を細切れに返し続けるサーバーは、行単位のタイムアウトを満たし続ける。
+  // 呼び出し全体の期限で打ち切る実装では Timeout になり、行単位だけで判定する実装では
+  // 期限を超えても呼び出しが返らない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, Some("drip"), 1));
+
+  let started = std::time::Instant::now();
+  let error = transport(
+    timeout(
+      std::time::Duration::from_secs(10),
+      client.call_tool("takt_list_goals", with_cwd(directory.path(), json!({}))),
+    )
+    .await
+    .expect("全体の期限を超えたら呼び出しは打ち切られます")
+    .expect_err("細切れの応答だけでは完了しません"),
+  );
+
+  assert!(matches!(error, TransportError::Timeout(_)), "全体の期限超過はタイムアウトとして扱います: {error}");
+  assert!(
+    started.elapsed() < std::time::Duration::from_secs(5),
+    "呼び出し全体の期限で打ち切ります（経過: {:?}）",
+    started.elapsed()
+  );
+}
+
+#[tokio::test]
 async fn invalid_response_is_a_transport_error() {
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let state = write_state(directory.path(), json!({}));
@@ -340,7 +437,9 @@ async fn awaiting_merge_at_comes_from_the_awaiting_merge_notification_recorded_a
 }
 
 #[tokio::test]
-async fn goal_without_awaiting_merge_notification_keeps_no_wait_start() {
+async fn goal_without_awaiting_merge_notification_gets_first_observed_wait_start() {
+  // 初回読み取り（prev=None）でも、awaiting_merge 通知が無いゴールは観測時刻を起点に確定する。
+  // 起点を持たせないと、以降の投影で待ち時間が読み取りごとに現在時刻へリセットされ滞留しなくなる。
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let state = write_state(
     directory.path(),
@@ -353,7 +452,96 @@ async fn goal_without_awaiting_merge_notification_keeps_no_wait_start() {
 
   let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
 
-  assert_eq!(snapshot.goals[0].awaiting_merge_at, None, "awaiting_merge 通知がないゴールは起点を持ちません");
+  assert!(
+    snapshot.goals[0].awaiting_merge_at.is_some(),
+    "初回読み取りでも awaiting_merge 通知がないゴールは観測時刻を起点に確定します"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn awaiting_merge_goal_without_notification_mechanism_keeps_previous_wait_start() {
+  // awaiting_merge 通知が無いゴールでも、前回の起点時刻を引き継ぐ。都度読み取り時刻へ
+  // 起点を既定化すると、待ち時間が毎サイクル 0 に戻り滞留しなくなる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "目標", "integrationBranch": "takt/g1" } ],
+      "notifications": { "g1": [ { "id": "n-progress", "kind": "progress", "body": "進捗", "recordedAt": "2026-11-13T08:00:00Z" } ] }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let mut previous_goal = goal("g1", GoalStatus::AwaitingMerge, takt_dash_backend::model::ExecutionStatus::Active);
+  previous_goal.awaiting_merge_at = Some(time("2026-11-13T01:00:00Z"));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    goals: vec![previous_goal],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
+
+  assert_eq!(
+    snapshot.goals[0].awaiting_merge_at,
+    Some(time("2026-11-13T01:00:00Z")),
+    "awaiting_merge 通知が無いゴールは前回の起点時刻を引き継ぎます"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn awaiting_merge_goal_new_to_awaiting_merge_gets_a_first_observed_start() {
+  // 前回は awaiting_merge でなかったゴールが今回 awaiting_merge に入り、通知も無い場合は、
+  // 初回観測の時刻を起点にする。起点なし（None）で滞留判定を保留にはしない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "目標", "integrationBranch": "takt/g1" } ]
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    goals: vec![goal("g1", GoalStatus::Created, takt_dash_backend::model::ExecutionStatus::Active)],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
+
+  assert!(
+    snapshot.goals[0].awaiting_merge_at.is_some(),
+    "通知のない新しい人のマージ待ちは初回観測の時刻を起点にします"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn awaiting_merge_wait_start_is_resolved_per_goal_without_reusing_another_goals_start() {
+  // 前回の起点はゴール ID で識別する。前回 snapshot に同じゴール g2 の起点があればそれを引き継ぎ、
+  // 別ゴール g1 の起点は使わない。不等式だけでは任意の起点を返す誤実装を検出できないため、
+  // g2 の起点を等値で観測する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "goals": [ { "id": "g2", "status": "awaiting_merge", "executionStatus": "active", "objective": "目標 g2", "integrationBranch": "takt/g2" } ]
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let mut g1_start = goal("g1", GoalStatus::AwaitingMerge, takt_dash_backend::model::ExecutionStatus::Active);
+  g1_start.awaiting_merge_at = Some(time("2026-11-13T01:00:00Z"));
+  let mut g2_start = goal("g2", GoalStatus::AwaitingMerge, takt_dash_backend::model::ExecutionStatus::Active);
+  g2_start.awaiting_merge_at = Some(time("2026-11-13T02:00:00Z"));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    goals: vec![g1_start, g2_start],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(Some(&prev)).await.expect("状態を読み取れます");
+
+  let g2 = snapshot.goals.iter().find(|goal| goal.goal_id == "g2").expect("g2 を含みます");
+  assert_eq!(g2.awaiting_merge_at, Some(time("2026-11-13T02:00:00Z")), "g2 は同じゴール ID の前回起点を引き継ぎます");
+  assert_ne!(g2.awaiting_merge_at, Some(time("2026-11-13T01:00:00Z")), "g1 の起点時刻を g2 へ使い回しません");
   client.shutdown().await;
 }
 
@@ -501,6 +689,262 @@ async fn approval_kind_is_skipped_and_unknown_kind_is_rejected() {
   let error = tool_set(&mut client2, directory2.path()).read_snapshot(None).await.expect_err("未知の種類は拒否します");
   assert!(matches!(error, takt_dash_backend::mcp::ToolError::Parse(_)), "未知の kind は解析エラーになります: {error}");
   client2.shutdown().await;
+}
+
+#[tokio::test]
+async fn write_tool_responses_missing_required_fields_are_parse_errors() {
+  // 応答の必須値が欠けていても既定値で補完せず、解析エラーにすることを、各書き込み道具で観測する。
+  async fn expect_parse(
+    tool_name: &str,
+    behavior: impl AsyncFnOnce(takt_dash_backend::mcp::ToolSet<'_>) -> Result<(), ToolError>,
+  ) -> Result<(), ToolError> {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let state = write_state(directory.path(), json!({ "responses": { tool_name: {} } }));
+    let mut client = mock_client(mock_config(directory.path(), &state, None));
+    let result = behavior(tool_set(&mut client, directory.path())).await;
+    client.shutdown().await;
+    result
+  }
+
+  let error = expect_parse("takt_approve_goal_registration", async |mut tools| {
+    tools.approve_goal_registration(3).await.map(|_| ())
+  })
+  .await
+  .expect_err("応答に revision が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_approve_goal_registration の欠落は解析エラー: {error}");
+
+  let error = expect_parse("takt_reject_goal_registration", async |mut tools| {
+    tools.reject_goal_registration(3).await.map(|_| ())
+  })
+  .await
+  .expect_err("応答に revision が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_reject_goal_registration の欠落は解析エラー: {error}");
+
+  let error =
+    expect_parse("takt_merge_goal_pr", async |mut tools| tools.merge_goal_pr("g1", 42, "merge").await.map(|_| ()))
+      .await
+      .expect_err("応答に taskName が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_merge_goal_pr の欠落は解析エラー: {error}");
+
+  let error = expect_parse("takt_answer_goal_question", async |mut tools| {
+    tools
+      .answer_goal_question("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11", "q1", json!({ "text": "はい" }))
+      .await
+      .map(|_| ())
+  })
+  .await
+  .expect_err("応答に questionId が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_answer_goal_question の欠落は解析エラー: {error}");
+
+  let error = expect_parse("takt_list_goal_registration_proposals", async |mut tools| {
+    tools.list_goal_registration_proposals().await.map(|_| ())
+  })
+  .await
+  .expect_err("応答に proposals が無ければ解析エラーです");
+  assert!(matches!(error, ToolError::Parse(_)), "takt_list_goal_registration_proposals の欠落は解析エラー: {error}");
+}
+
+#[tokio::test]
+async fn summary_object_is_composed_into_the_body() {
+  // 実 takt-mcp の応答（order.md の ac7-evidence）を模し、summary がオブジェクトでも提案を
+  // 1件取得でき、本文に各項目の値が入り、未知キーは本文へ漏れないことを観測する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            {
+              "revision": 6,
+              "repositoryDirectory": "/abs/takt-dash",
+              "summary": {
+                "objective": "稼働状況を一覧できるようにする",
+                "outOfScope": ["認証", "ネイティブ版"],
+                "acceptanceCriteria": ["判断待ちに表示される"],
+                "constraints": ["proto を変えない"],
+                "startBranch": "main",
+                "integrationBranch": "takt/goal-6",
+                "unexpectedKey": "本文に漏れてはいけない値"
+              }
+            }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let proposals = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect("summary がオブジェクトでも提案を取得できます");
+
+  assert_eq!(proposals.len(), 1, "提案を1件取得します");
+  let proposal = &proposals[0];
+  assert_eq!(proposal.revision, 6, "revision を写します");
+  assert_eq!(proposal.repository_directory, "/abs/takt-dash", "repositoryDirectory を写します");
+  for expected in [
+    "稼働状況を一覧できるようにする",
+    "認証",
+    "ネイティブ版",
+    "判断待ちに表示される",
+    "proto を変えない",
+    "main",
+    "takt/goal-6",
+  ] {
+    assert!(proposal.summary.contains(expected), "本文に存在する項目 {expected} を含みます: {}", proposal.summary);
+  }
+  assert!(!proposal.summary.contains("本文に漏れてはいけない値"), "未知のキーは本文へ含めません: {}", proposal.summary);
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn summary_object_with_missing_and_unknown_keys_is_accepted() {
+  // 任意項目の欠落と未知キーがあっても失敗させず、objective だけで本文を組み立てる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            {
+              "revision": 7,
+              "repositoryDirectory": "/abs/takt-dash",
+              "summary": { "objective": "目標だけを持つ提案", "unexpectedKey": "無視する値" }
+            }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let proposals = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect("任意項目の欠落と未知キーでは失敗しません");
+
+  assert_eq!(proposals.len(), 1, "提案を1件取得します");
+  assert!(proposals[0].summary.contains("目標だけを持つ提案"), "本文に objective を含みます: {}", proposals[0].summary);
+  assert!(!proposals[0].summary.contains("無視する値"), "未知のキーは本文へ含めません: {}", proposals[0].summary);
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn summary_string_is_kept_as_the_body() {
+  // summary が文字列の既存応答は、その文字列をそのまま本文にする。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 8, "repositoryDirectory": "/abs/takt-dash", "summary": "文字列の要約" }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let proposals = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect("summary が文字列でも提案を取得できます");
+
+  assert_eq!(proposals.len(), 1, "提案を1件取得します");
+  assert_eq!(proposals[0].summary, "文字列の要約", "文字列の summary はそのまま本文になります");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_proposal_summary_keeps_previous_proposals() {
+  // 提案1件の解析に失敗しても snapshot 全体を落とさず、前回の提案を保持する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 6, "repositoryDirectory": "/abs/takt-dash", "summary": 123 }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    proposals: vec![takt_dash_backend::model::RegistrationProposalEntry {
+      revision:             5,
+      repository_directory: "/abs/takt-dash".to_owned(),
+      summary:              "前回の提案".to_owned(),
+    }],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev))
+    .await
+    .expect("提案の解析失敗は前回の提案へ縮退します");
+
+  assert_eq!(snapshot.proposals, prev.proposals, "前回の提案を保持します");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_proposal_summary_without_previous_yields_empty_proposals() {
+  // 前回の提案が無いときの解析失敗は、提案だけを空にして周期を失敗させない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 6, "repositoryDirectory": "/abs/takt-dash", "summary": 123 }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None)
+    .await
+    .expect("前回の提案が無くても解析失敗で snapshot を落としません");
+
+  assert!(snapshot.proposals.is_empty(), "前回の提案が無ければ空へ縮退します");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn proposal_transport_error_is_not_degraded_to_the_previous_proposals() {
+  // 解析失敗だけを縮退させ、輸送エラーは従来どおり伝播させることを観測する。
+  // 子プロセスが提案の取得中に応答せず終了する状態で、前回の提案へ置き換えないことを確かめる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "transportErrors": ["takt_list_goal_registration_proposals"] }));
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    proposals: vec![takt_dash_backend::model::RegistrationProposalEntry {
+      revision:             5,
+      repository_directory: "/abs/takt-dash".to_owned(),
+      summary:              "前回の提案".to_owned(),
+    }],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let error = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev))
+    .await
+    .expect_err("輸送エラーは縮退せず伝播します");
+
+  assert!(matches!(error, ToolError::Transport(_)), "輸送エラーは解析失敗と区別します: {error}");
+  client.shutdown().await;
 }
 
 #[tokio::test]
@@ -1070,5 +1514,251 @@ async fn timeout_on_standalone_inquiries_keeps_project_success() {
     .find(|entry| entry.inquiry_id == "s1")
     .expect("前回のゴールに属さない問い合わせを引き継ぎます");
   assert_eq!(inquiry.body, "前回の作業依頼", "タイムアウトした問い合わせは前回値です");
+  client.shutdown().await;
+}
+
+// ----------------------------------------------------------------------------
+// takt から受け取る整数の範囲検査
+// ----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revision_at_the_i32_maximum_is_accepted() {
+  // i32 の上限はそのまま受理し、切り詰めません。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 2147483647, "repositoryDirectory": "/abs/takt-dash", "summary": "上限の提案" }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let proposals = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect("i32 の上限の revision は受理します");
+
+  assert_eq!(proposals.len(), 1);
+  assert_eq!(proposals[0].revision, i32::MAX, "i32 の上限をそのまま返します");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn revision_beyond_i32_is_a_parse_error() {
+  // 4294967297 を `as i32` で切り詰めると 1 になる。切り詰めずに解析エラーにする。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [
+            { "revision": 4294967297i64, "repositoryDirectory": "/abs/takt-dash", "summary": "範囲外の提案" }
+          ]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let error = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect_err("i32 の範囲外の revision は受理しません");
+
+  assert!(matches!(error, ToolError::Parse(_)), "範囲外の revision は解析エラーです: {error}");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn instruction_id_beyond_i32_is_a_parse_error_and_is_not_sent_truncated() {
+  // run の指示書が i32 の範囲外の instructionId を持つ場合、2 に切り詰めて
+  // takt_get_run を呼ばずに解析エラーにする。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+      "runs": {
+        "r1": {
+          "runSlug": "r1",
+          "startedAt": "2026-11-13T10:00:00Z",
+          "instructions": [
+            { "instructionId": 4294967298i64, "issuedAt": "2026-11-13T10:05:00Z", "state": "issued", "content": "指示書" }
+          ]
+        }
+      }
+    }),
+  );
+  let calls_path = directory.path().join("tool-calls.jsonl");
+  let mut client = mock_client(mock_config_with_calls(directory.path(), &state, &calls_path));
+
+  let error = tool_set(&mut client, directory.path())
+    .read_run_detail("r1")
+    .await
+    .expect_err("i32 の範囲外の instructionId は受理しません");
+
+  assert!(matches!(error, ToolError::Parse(_)), "範囲外の instructionId は解析エラーです: {error}");
+
+  let recorded: Vec<Value> = match std::fs::read_to_string(&calls_path) {
+    | Ok(text) => {
+      text.lines().filter(|line| !line.trim().is_empty()).filter_map(|line| serde_json::from_str(line).ok()).collect()
+    },
+    | Err(_) => Vec::new(),
+  };
+  assert!(
+    recorded
+      .iter()
+      .all(|call| !(call["name"] == json!("takt_get_run") && call["arguments"]["instructionId"] == json!(2))),
+    "instructionId を 2 に切り詰めた takt_get_run を記録しません: {recorded:?}"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn 一覧の最終ログ時刻は応答の最終ログ時刻を最優先する() {
+  // 応答の lastLogAt がステップ記録と現在ステップの開始時刻より新しいとき、一覧の
+  // last_log_at は lastLogAt を採ります。同じ状態の詳細も同じ値になることを観測します。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T11:30:00Z", "runSlug": "r1", "currentStep": "implement" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "startedAt": "2026-11-13T11:30:00Z",
+        "currentStep": "implement",
+        "currentStepStartedAt": "2026-11-13T11:50:00Z",
+        "lastLogAt": "2026-11-13T11:59:00Z",
+        "stepLogs": [ { "step": "plan", "status": "completed", "timestamp": "2026-11-13T11:40:00Z" } ]
+      } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+
+  assert_eq!(detail.last_log_at, time("2026-11-13T11:59:00Z"), "詳細は応答の lastLogAt を最終ログ時刻に使います");
+  assert_eq!(
+    snapshot.runs[0].last_log_at,
+    time("2026-11-13T11:59:00Z"),
+    "一覧の最終ログ時刻は応答の lastLogAt を最優先します"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn 最終ログ時刻がないときは現在ステップの開始時刻を採る() {
+  // lastLogAt が無いとき、古い完了ステップの記録ではなく、現在ステップの開始時刻が
+  // 新しければそちらを採ります。一覧と詳細の無音判定が食い違わないことを観測します。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T11:30:00Z", "runSlug": "r1", "currentStep": "implement" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "startedAt": "2026-11-13T11:30:00Z",
+        "currentStep": "implement",
+        "currentStepStartedAt": "2026-11-13T11:59:00Z",
+        "stepLogs": [ { "step": "plan", "status": "completed", "timestamp": "2026-11-13T11:40:00Z" } ]
+      } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+
+  assert_eq!(
+    detail.last_log_at,
+    time("2026-11-13T11:59:00Z"),
+    "詳細は lastLogAt が無ければ現在ステップの開始時刻を使います"
+  );
+  assert_eq!(snapshot.runs[0].last_log_at, time("2026-11-13T11:59:00Z"), "一覧も現在ステップの開始時刻を使います");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn 一覧と詳細の最終ログ時刻はステップ記録と現在ステップの開始時刻の新しい方で一致する() {
+  // lastLogAt が無く、ステップ記録が現在ステップの開始時刻より新しいとき、一覧と詳細の
+  // 最終ログ時刻が同じ値になることを観測します。片方だけが現在ステップの開始時刻に落ちると
+  // 無音判定が食い違います。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "implement" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "startedAt": "2026-11-13T10:00:00Z",
+        "currentStep": "implement",
+        "currentStepStartedAt": "2026-11-13T10:02:00Z",
+        "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:05:00Z" } ]
+      } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+
+  assert_eq!(
+    snapshot.runs[0].last_log_at,
+    time("2026-11-13T10:05:00Z"),
+    "一覧は現在ステップの開始時刻より新しいステップ記録を最終ログ時刻に採ります"
+  );
+  assert_eq!(
+    detail.last_log_at,
+    time("2026-11-13T10:05:00Z"),
+    "詳細も同じステップ記録を最終ログ時刻に採り、一覧と一致します"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn 一覧と詳細の最終ログ時刻は複数ページの末尾ステップで一致する() {
+  // 51 ステップの run。lastLogAt と currentStepStartedAt が無いとき、先頭ページだけでなく
+  // 2 ページ目の末尾ステップの時刻を一覧と詳細の両方が採ることを観測します。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let mut step_logs = Vec::new();
+  for index in 0..51 {
+    let minute = index;
+    step_logs.push(json!({ "step": format!("step{index}"), "timestamp": format!("2026-11-13T10:{minute:02}:00Z") }));
+  }
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T10:00:00Z", "runSlug": "r1", "currentStep": "step50" } ],
+      "runs": { "r1": {
+        "runSlug": "r1",
+        "startedAt": "2026-11-13T10:00:00Z",
+        "currentStep": "step50",
+        "stepLogs": step_logs
+      } }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path()).read_snapshot(None).await.expect("状態を読み取れます");
+  let detail = tool_set(&mut client, directory.path()).read_run_detail("r1").await.expect("run 詳細を読み取れます");
+
+  assert_eq!(
+    snapshot.runs[0].last_log_at,
+    time("2026-11-13T10:50:00Z"),
+    "一覧は末尾ページの最終ステップを最終ログ時刻に採ります"
+  );
+  assert_eq!(
+    detail.last_log_at,
+    time("2026-11-13T10:50:00Z"),
+    "詳細も末尾ページの最終ステップを採り、一覧と一致します"
+  );
   client.shutdown().await;
 }

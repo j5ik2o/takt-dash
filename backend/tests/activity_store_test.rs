@@ -167,3 +167,49 @@ fn completed_tasks_since_counts_only_completed_in_window() {
 
   assert_eq!(count, 1, "窓の中のタスク完了だけを数えます");
 }
+
+#[test]
+fn record_all_saves_every_event_of_a_group() {
+  // 1サイクルで検出した出来事群は、まとめて1回の呼び出しで保存します。
+  let store = ActivityStore::open_in_memory().expect("SQLite を開けます");
+  let group = vec![
+    event("2026-11-13T09:00:00Z", "mac-mini", Some("p"), EventKind::GoalCreated, "1件目"),
+    event("2026-11-13T09:00:00Z", "mac-mini", Some("p"), EventKind::RunStarted, "2件目"),
+    event("2026-11-13T09:00:00Z", "mac-mini", Some("p"), EventKind::TaskCompleted, "3件目"),
+  ];
+
+  store.record_all(&group).expect("出来事群をまとめて記録できます");
+
+  let mut bodies: Vec<String> =
+    store.recent_events(10).expect("一覧を取得できます").into_iter().map(|event| event.body).collect();
+  bodies.sort();
+  assert_eq!(bodies, vec!["1件目", "2件目", "3件目"], "出来事群の全件を保存します");
+}
+
+#[test]
+fn record_all_saves_nothing_when_a_member_cannot_be_saved() {
+  // 出来事群の途中に保存できない要素がある場合、それまでの要素も残さず、群全体を保存しません。
+  // 1件ずつ INSERT して途中まで残す実装では、先頭の出来事が残ってこの観測が失敗します。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let path = directory.path().join("events.sqlite");
+  let store = ActivityStore::open(&path).expect("ファイルの SQLite を開けます");
+  // 直接接続して、特定の本文を保存しようとすると中断するトリガーを仕込みます。
+  {
+    let connection = rusqlite::Connection::open(&path).expect("同じファイルへ直接接続できます");
+    connection
+      .execute_batch(
+        "CREATE TRIGGER reject_poison BEFORE INSERT ON events WHEN NEW.body = '保存できない出来事'
+         BEGIN SELECT RAISE(ABORT, '保存できない出来事'); END;",
+      )
+      .expect("中断させるトリガーを作れます");
+  }
+  let group = vec![
+    event("2026-11-13T09:00:00Z", "mac-mini", Some("p"), EventKind::GoalCreated, "先頭"),
+    event("2026-11-13T09:00:00Z", "mac-mini", Some("p"), EventKind::GoalCreated, "保存できない出来事"),
+    event("2026-11-13T09:00:00Z", "mac-mini", Some("p"), EventKind::RunStarted, "末尾"),
+  ];
+
+  store.record_all(&group).expect_err("保存できない要素を含む群は失敗します");
+
+  assert_eq!(store.recent_events(10).expect("一覧を取得できます").len(), 0, "群の途中までを残しません");
+}
