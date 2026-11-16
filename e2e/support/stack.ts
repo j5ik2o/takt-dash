@@ -422,9 +422,8 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
       "utf8",
     );
     const webPort = await freePort();
-    // Next は route handler の request.url を listen ホスト名ではなく localhost で組み立てる。
-    // origin 境界の検証と一致させるため、利用時と同じ localhost を webUrl に使う。
-    webUrl = `http://localhost:${webPort}`;
+    // 本番と同じく Web は 0.0.0.0 で待ち受け、利用側は listen 名と違う 127.0.0.1 から開く。
+    webUrl = `http://127.0.0.1:${webPort}`;
 
     backend = spawnWithLog(
       BACKEND_BIN,
@@ -443,10 +442,11 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
 
     web = spawnWithLog(
       NEXT_BIN,
-      ["start", "-H", "127.0.0.1", "-p", String(webPort)],
+      ["start", "-H", "0.0.0.0", "-p", String(webPort)],
       WEB_DIR,
       webLog,
-      { ...process.env, TAKTDASH_BACKEND_ADDR: backendAddress },
+      // 空きポートは既定の許可ホストに含まれないため、利用する URL のホストだけを許可する。
+      { ...process.env, TAKTDASH_BACKEND_ADDR: backendAddress, TAKTDASH_ALLOWED_HOSTS: `127.0.0.1:${webPort}` },
     );
     if (web.pid === undefined) {
       throw new Error("web を起動できませんでした。");

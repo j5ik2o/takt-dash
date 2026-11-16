@@ -29,6 +29,44 @@ const contentTypeIsJson = (request: Request): boolean => {
   return mediaType.trim().toLowerCase() === "application/json";
 };
 
+const ALLOWED_HOSTS_ENV = "TAKTDASH_ALLOWED_HOSTS";
+
+// 環境変数が未設定のときに許可するホスト（LAN、Tailscale、ローカル）。
+const DEFAULT_ALLOWED_HOSTS: readonly string[] = [
+  "10.0.1.143:3000",
+  "100.106.166.1:3000",
+  "127.0.0.1:3000",
+  "localhost:3000",
+];
+
+// host:port の形の値だけを小文字の host:port へ正規化する。パスや userinfo 等が付く値は無効とする。
+const normalizeHost = (value: string): string | undefined => {
+  try {
+    const url = new URL(`http://${value}`);
+    if (url.host !== value.toLowerCase() || url.username !== "" || url.password !== "") {
+      return undefined;
+    }
+    if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+      return undefined;
+    }
+    return url.host;
+  } catch {
+    return undefined;
+  }
+};
+
+// 起動設定で一覧を差し替えられるよう、リクエストのたびに環境変数から読む。
+const resolveAllowedHosts = (env: Record<string, string | undefined>): readonly string[] => {
+  const configured = env[ALLOWED_HOSTS_ENV];
+  if (configured === undefined || configured.trim() === "") {
+    return DEFAULT_ALLOWED_HOSTS;
+  }
+  return configured
+    .split(",")
+    .map((entry) => normalizeHost(entry.trim()))
+    .filter((host): host is string => host !== undefined);
+};
+
 const requestOriginIsAllowed = (request: Request): boolean => {
   if (request.headers.get("sec-fetch-site") === "cross-site") {
     return false;
@@ -37,11 +75,22 @@ const requestOriginIsAllowed = (request: Request): boolean => {
   if (origin === null) {
     return true;
   }
+  let originHost: string;
   try {
-    return new URL(origin).origin === new URL(request.url).origin;
+    originHost = new URL(origin).host;
   } catch {
     return false;
   }
+  // Web は 0.0.0.0 で待ち受けるため request.url は利用者の開いた URL と一致しない。
+  // ブラウザが開いた URL を表す Host ヘッダと比べる。x-forwarded-host は利用者が
+  // 自由に付けられ、間に信頼できるプロキシも無いので判定に使わない。
+  const hostHeader = request.headers.get("host");
+  const host = hostHeader === null ? undefined : normalizeHost(hostHeader);
+  if (host === undefined || originHost !== host) {
+    return false;
+  }
+  // Host と Origin を同時に偽れる DNS リバインディングを防ぐため、既知のホストに限る。
+  return resolveAllowedHosts(process.env).includes(host);
 };
 
 export type ReadJsonObjectResult =

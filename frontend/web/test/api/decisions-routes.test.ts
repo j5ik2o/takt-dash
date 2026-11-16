@@ -395,33 +395,243 @@ test("charset 付きの application/json は既存どおり許可する", async 
   });
 });
 
-test("外部オリジンからの書き込みは 403 で gRPC を呼ばない", async () => {
-  for (const [label, handler, path, body, behavior] of writeRoutes) {
-    await withServer(behavior, async (server) => {
-      const response = await postWithHeaders(handler, path, body, {
-        "content-type": "application/json",
-        origin: "https://evil.example",
-      });
+// 本番の Web は `next start -H 0.0.0.0` で待ち受けるため、route handler の request.url は
+// http://0.0.0.0:3000 になる。ブラウザが送る Origin・Host とは一致しないことを前提に検証する。
+const LISTEN_BASE = "http://0.0.0.0:3000";
+const ALLOWED_HOSTS_ENV = "TAKTDASH_ALLOWED_HOSTS";
+const DEFAULT_ALLOWED_HOSTS = ["10.0.1.143:3000", "100.106.166.1:3000", "127.0.0.1:3000", "localhost:3000"];
 
-      assert.equal(response.status, 403, label);
-      assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
-    });
+// 許可ホストの環境変数を設定（undefined なら削除）して実行し、終わったら元へ戻す。
+const withAllowedHostsEnv = async <T>(value: string | undefined, run: () => Promise<T>): Promise<T> => {
+  const previous = process.env[ALLOWED_HOSTS_ENV];
+  if (value === undefined) {
+    delete process.env[ALLOWED_HOSTS_ENV];
+  } else {
+    process.env[ALLOWED_HOSTS_ENV] = value;
   }
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[ALLOWED_HOSTS_ENV];
+    } else {
+      process.env[ALLOWED_HOSTS_ENV] = previous;
+    }
+  }
+};
+
+const postFromBrowser = (
+  handler: RouteHandler,
+  path: string,
+  body: unknown,
+  headers: Record<string, string>,
+): Promise<Response> =>
+  handler(
+    new NextRequest(`${LISTEN_BASE}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    }),
+  );
+
+test("外部オリジンからの書き込みは 403 で gRPC を呼ばない", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const [label, handler, path, body, behavior] of writeRoutes) {
+      await withServer(behavior, async (server) => {
+        const response = await postFromBrowser(handler, path, body, {
+          host: "localhost:3000",
+          origin: "https://evil.example",
+        });
+
+        assert.equal(response.status, 403, label);
+        assert.deepEqual(await response.json(), { ok: false, error: "このオリジンからは操作できません。" });
+        assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
+      });
+    }
+  });
 });
 
-test("同一オリジンからの application/json は許可する", async () => {
-  for (const [label, handler, path, body, behavior] of writeRoutes) {
-    await withServer(behavior, async (server) => {
-      const response = await postWithHeaders(handler, path, body, {
-        "content-type": "application/json",
-        origin: "http://localhost",
-        "sec-fetch-site": "same-origin",
+test("request.url と異なっても、許可ホストの Host と一致する Origin の書き込みは許可する", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const [label, handler, path, body, behavior] of writeRoutes) {
+      await withServer(behavior, async (server) => {
+        const response = await postFromBrowser(handler, path, body, {
+          host: "10.0.1.143:3000",
+          origin: "http://10.0.1.143:3000",
+          "sec-fetch-site": "same-origin",
+        });
+
+        assert.equal(response.status, 200, label);
+        assert.equal(server.requests.length, 1, `${label} は gRPC を呼ぶ`);
+      });
+    }
+  });
+});
+
+test("環境変数が未設定のときは既定の4ホストそれぞれからの書き込みを許可する", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const host of DEFAULT_ALLOWED_HOSTS) {
+      await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+        const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+          host,
+          origin: `http://${host}`,
+        });
+
+        assert.equal(response.status, 200, host);
+        assert.equal(server.requests.length, 1, `${host} は gRPC を呼ぶ`);
+      });
+    }
+  });
+});
+
+test("request.url のオリジンと一致するだけで Host と一致しない Origin は 403 にする", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "10.0.1.143:3000",
+        origin: LISTEN_BASE,
       });
 
-      assert.equal(response.status, 200, label);
-      assert.equal(server.requests.length, 1, `${label} は gRPC を呼ぶ`);
+      assert.equal(response.status, 403);
+      assert.equal(server.requests.length, 0);
     });
-  }
+  });
+});
+
+test("Host と Origin の host が違う書き込みは、どちらも許可ホストでも 403 にする", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const [label, handler, path, body, behavior] of writeRoutes) {
+      await withServer(behavior, async (server) => {
+        const response = await postFromBrowser(handler, path, body, {
+          host: "10.0.1.143:3000",
+          origin: "http://100.106.166.1:3000",
+        });
+
+        assert.equal(response.status, 403, label);
+        assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
+      });
+    }
+  });
+});
+
+test("Host と Origin でポートだけが違う書き込みは 403 にする", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "localhost:3000",
+        origin: "http://localhost:4000",
+      });
+
+      assert.equal(response.status, 403);
+      assert.equal(server.requests.length, 0);
+    });
+  });
+});
+
+test("x-forwarded-host だけが Origin と一致しても書き込みは 403 にする", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "0.0.0.0:3000",
+        "x-forwarded-host": "10.0.1.143:3000",
+        origin: "http://10.0.1.143:3000",
+      });
+
+      assert.equal(response.status, 403);
+      assert.equal(server.requests.length, 0);
+    });
+  });
+});
+
+test("Host と Origin が一致していれば、x-forwarded-host の値は判定を変えない", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "100.106.166.1:3000",
+        "x-forwarded-host": "evil.example",
+        origin: "http://100.106.166.1:3000",
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(server.requests.length, 1);
+    });
+  });
+});
+
+test("Host と Origin が一致していても、許可ホストに無いホストからの書き込みは 403 にする", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const [label, handler, path, body, behavior] of writeRoutes) {
+      await withServer(behavior, async (server) => {
+        const response = await postFromBrowser(handler, path, body, {
+          host: "attacker.example:3000",
+          origin: "http://attacker.example:3000",
+        });
+
+        assert.equal(response.status, 403, label);
+        assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
+      });
+    }
+  });
+});
+
+test("Origin があって Host ヘッダが無い書き込みは 403 にする", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        origin: "http://localhost:3000",
+      });
+
+      assert.equal(response.status, 403);
+      assert.equal(server.requests.length, 0);
+    });
+  });
+});
+
+test("環境変数で設定した許可ホストは、前後の空白を除いて照合する", async () => {
+  await withAllowedHostsEnv(" taktdash.lan:3000 ,127.0.0.1:3000", async () => {
+    for (const host of ["taktdash.lan:3000", "127.0.0.1:3000"]) {
+      await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+        const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+          host,
+          origin: `http://${host}`,
+        });
+
+        assert.equal(response.status, 200, host);
+        assert.equal(server.requests.length, 1, `${host} は gRPC を呼ぶ`);
+      });
+    }
+  });
+});
+
+test("環境変数で許可ホストを設定すると、既定のホストは許可しない", async () => {
+  await withAllowedHostsEnv("taktdash.lan:3000", async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "10.0.1.143:3000",
+        origin: "http://10.0.1.143:3000",
+      });
+
+      assert.equal(response.status, 403);
+      assert.equal(server.requests.length, 0);
+    });
+  });
+});
+
+test("許可ホストの環境変数はリクエストのたびに読む", async () => {
+  await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+    const send = () =>
+      postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "taktdash.lan:3000",
+        origin: "http://taktdash.lan:3000",
+      });
+
+    const before = await withAllowedHostsEnv(undefined, send);
+    const after = await withAllowedHostsEnv("taktdash.lan:3000", send);
+
+    assert.equal(before.status, 403);
+    assert.equal(after.status, 200);
+    assert.equal(server.requests.length, 1);
+  });
 });
 
 test("Origin の無い CLI の要求は許可する", async () => {
@@ -447,4 +657,19 @@ test("Sec-Fetch-Site が cross-site の書き込みは 403 で gRPC を呼ばな
       assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
     });
   }
+});
+
+test("Sec-Fetch-Site が cross-site なら、許可ホストの Host と Origin が一致していても 403 にする", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "10.0.1.143:3000",
+        origin: "http://10.0.1.143:3000",
+        "sec-fetch-site": "cross-site",
+      });
+
+      assert.equal(response.status, 403);
+      assert.equal(server.requests.length, 0);
+    });
+  });
 });

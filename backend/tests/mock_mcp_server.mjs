@@ -68,10 +68,19 @@ const callsPath = option("--calls");
 const processesPath = option("--processes");
 // 起動時の PID の書き出し先。子プロセスの終了をテストから観測するために使う。
 const pidFile = option("--pid-file");
+// initialize の応答を遅らせる時間（ミリ秒）。高負荷で起動と初期化が遅いサーバーを模す。
+const initializeDelayMs = Number(option("--initialize-delay-ms") ?? 0);
+// 起動と初期化の記録先。起動時に start、initialize の応答直前に ready を、
+// pid とミリ秒の時刻とともに追記する。テストは起動が重なる本数をこの記録で観測する。
+const spawnLogPath = option("--spawn-log");
 // 実 takt-mcp と同じページサイズ（limit 既定 50）。
 const PAGE_SIZE = 50;
 // takt の入力契約では goalId は UUID（z.uuid()）。
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+if (spawnLogPath !== undefined) {
+  appendFileSync(spawnLogPath, `start ${process.pid} ${Date.now()}\n`);
+}
 
 if (behavior === "exit") {
   process.exit(3);
@@ -384,16 +393,26 @@ const onLine = async (line) => {
     return;
   }
   if (message.method === "initialize") {
-    reply({
-      jsonrpc: "2.0",
-      id: message.id,
-      result: {
-        protocolVersion: message.params?.protocolVersion ?? "2025-06-18",
-        capabilities: { tools: {} },
-        serverInfo: { name: "taktdash-mock", version: "0.0.0" },
-      },
-    });
-    handleServerNotifications();
+    const respond = () => {
+      if (spawnLogPath !== undefined) {
+        appendFileSync(spawnLogPath, `ready ${process.pid} ${Date.now()}\n`);
+      }
+      reply({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: message.params?.protocolVersion ?? "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "taktdash-mock", version: "0.0.0" },
+        },
+      });
+      handleServerNotifications();
+    };
+    if (initializeDelayMs > 0) {
+      setTimeout(respond, initializeDelayMs);
+    } else {
+      respond();
+    }
     return;
   }
   if (message.method === "notifications/initialized") {

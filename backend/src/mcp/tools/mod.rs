@@ -962,9 +962,10 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn start_timeout_is_not_recorded_as_a_tool_call() {
+  async fn exit_before_initialize_reply_is_not_recorded_as_a_tool_call() {
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-    let config = config(directory.path(), "sh", vec!["-c".to_owned(), "exec sleep 5".to_owned()], 1);
+    // initialize の要求を読んだ後、応答せずに終了する子プロセスです。
+    let config = config(directory.path(), "sh", vec!["-c".to_owned(), "read -r _line; exit 0".to_owned()], 1);
     let mut client = McpClient::new(config);
     let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
 
@@ -976,11 +977,12 @@ mod tests {
     drop(tools);
 
     assert!(
-      matches!(error, ToolError::Transport(TransportError::Timeout(_))),
-      "起動のタイムアウトは輸送エラーです: {error}"
+      matches!(error, ToolError::Transport(TransportError::ProcessExited)),
+      "initialize の前の終了は輸送エラーです: {error}"
     );
-    assert_eq!(metrics.total_calls(), 0, "起動のタイムアウトを道具呼び出しとして記録しません");
-    assert_eq!(metrics.total_timeouts(), 0, "起動のタイムアウトを道具のタイムアウトとして記録しません");
+    assert_eq!(metrics.total_calls(), 0, "起動中の終了を道具呼び出しとして記録しません");
+    assert_eq!(metrics.total_failures(), 0, "起動中の終了を道具の失敗として記録しません");
+    assert_eq!(metrics.total_timeouts(), 0, "起動中の終了を道具のタイムアウトとして記録しません");
   }
 
   #[test]
