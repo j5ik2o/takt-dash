@@ -1630,16 +1630,19 @@ async fn slow_initialize_is_not_bound_by_the_request_timeout() {
 
 #[tokio::test]
 async fn concurrent_spawns_stay_within_the_cap() {
-  // 6本のクライアントが同時に起動しても、起動と初期化が重なるのは3本まで。
+  // 4本のクライアントが同時に起動しても、起動と初期化が重なるのは3本まで。
   // spawn-log の start から ready までの区間が重なる最大数を数える。
+  // セマフォはプロセス全体で共有されるため、並行して走る他のテストも同じ3枠を使う。
+  // 本数を増やしたり遅延を長くしたりすると、他のテストの起動が待たされて時間の
+  // 表明が崩れるため、本数と遅延は小さく保つ。
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let state = write_state(directory.path(), json!({ "goals": [] }));
   let spawn_log = directory.path().join("spawn.log");
   let mut handles = Vec::new();
-  for _ in 0..6 {
+  for _ in 0..4 {
     let mut config = mock_config_with_timeout(directory.path(), &state, None, 10);
     config.args.push("--initialize-delay-ms".to_owned());
-    config.args.push("3000".to_owned());
+    config.args.push("1500".to_owned());
     config.args.push("--spawn-log".to_owned());
     config.args.push(spawn_log.display().to_string());
     let cwd = directory.path().to_path_buf();
@@ -1671,7 +1674,7 @@ async fn concurrent_spawns_stay_within_the_cap() {
       | other => panic!("未知の起動記録です: {other}"),
     }
   }
-  assert_eq!(intervals.len(), 6, "6本とも初期化を終えます: {log}");
+  assert_eq!(intervals.len(), 4, "4本とも初期化を終えます: {log}");
   let mut events = Vec::new();
   for (start, ready) in &intervals {
     events.push((*start, 1));
