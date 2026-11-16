@@ -10,11 +10,20 @@
 //! 要約します。ログ群の最新更新時刻はファイルの更新時刻だけで決め、レコードの
 //! `timestamp` は使いません。保存先が無い場合はエラーにせず、残っていないことを
 //! 結果として返します。
+//!
+//! `meta.json`、`logs`、`logs/phase1-execution` は実パスへ正規化し、run の
+//! ディレクトリの下にあることを確かめてから読みます。シンボリックリンクで外を指すものは
+//! 無いものとして扱います。
+//!
+//! 前提:
+//! - 読み取り層は同期の関数として提供し、非同期の処理の中から直接呼びません。呼ぶ側は
+//!   `spawn_blocking` などで別スレッドから呼びます。
+//! - offset は永続化しません。再起動時は `meta.json` と本体ログの末尾の一定量だけを読みます。
 
 use std::{
   collections::BTreeMap,
   fs::{self, File},
-  io::{Read, Seek, SeekFrom},
+  io::{self, Read, Seek, SeekFrom},
   os::unix::fs::MetadataExt,
   path::{Component, Path, PathBuf},
 };
@@ -23,6 +32,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
+const META_FILE: &str = "meta.json";
+const LOGS_DIRECTORY: &str = "logs";
 const BODY_LOG_EXTENSION: &str = "jsonl";
 const PHASE1_DIRECTORY: &str = "phase1-execution";
 const MAX_SUMMARY_CHARS: usize = 512;
@@ -131,7 +142,12 @@ impl RunLogReader {
 
   /// `meta.json` から status、currentStep、currentIteration、phase、updatedAt を読む。
   pub fn read_meta(&self, run_dir: &Path) -> MetaRead {
-    let path = run_dir.join("meta.json");
+    let path = match contained_path(run_dir, Path::new(META_FILE)) {
+      | Ok(Some(path)) => path,
+      | Ok(None) => return MetaRead::Missing,
+      | Err(error) if error.kind() == io::ErrorKind::NotFound => return MetaRead::Missing,
+      | Err(error) => return MetaRead::Unreadable(format!("meta.json を読めません: {error}")),
+    };
     let text = match fs::read_to_string(&path) {
       | Ok(text) => text,
       | Err(error) if error.kind() == std::io::ErrorKind::NotFound => return MetaRead::Missing,
@@ -152,12 +168,12 @@ impl RunLogReader {
 
   /// 本体ログの追記分を読む。書きかけの最終行は消費せず、位置を行の先頭に残す。
   pub fn read_body_log(&mut self, run_dir: &Path) -> BodyLogRead {
-    let logs_dir = run_dir.join("logs");
-    let missing = !logs_dir.is_dir();
+    let logs_dir = contained_dir(run_dir, Path::new(LOGS_DIRECTORY));
+    let missing = logs_dir.is_none();
     let mut records = Vec::new();
     let mut skipped = 0;
 
-    for path in body_log_files(&logs_dir) {
+    for path in logs_dir.as_deref().map(body_log_files).unwrap_or_default() {
       let Ok(metadata) = fs::metadata(&path) else {
         continue;
       };
@@ -215,9 +231,14 @@ impl RunLogReader {
 
   /// 本体ログと `logs/phase1-execution/` のファイル更新時刻の最大値を返す。
   pub fn latest_log_update(&self, run_dir: &Path) -> Option<DateTime<Utc>> {
-    let logs_dir = run_dir.join("logs");
+    let body_logs =
+      contained_dir(run_dir, Path::new(LOGS_DIRECTORY)).as_deref().map(body_log_files).unwrap_or_default();
+    let phase1_logs = contained_dir(run_dir, &Path::new(LOGS_DIRECTORY).join(PHASE1_DIRECTORY))
+      .as_deref()
+      .map(regular_files)
+      .unwrap_or_default();
     let mut latest: Option<DateTime<Utc>> = None;
-    let paths = body_log_files(&logs_dir).into_iter().chain(regular_files(&logs_dir.join(PHASE1_DIRECTORY)));
+    let paths = body_logs.into_iter().chain(phase1_logs);
     for path in paths {
       let Ok(metadata) = fs::metadata(&path) else {
         continue;
@@ -397,6 +418,20 @@ fn sanitize(value: &mut Value) {
     },
     | _ => {},
   }
+}
+
+/// run_dir の下の `relative` を実パスへ正規化し、正規化した run_dir の下にあれば返す。
+/// シンボリックリンクで外を指す場合は `Ok(None)`、正規化できない場合はそのエラーを返す。
+fn contained_path(run_dir: &Path, relative: &Path) -> io::Result<Option<PathBuf>> {
+  let root = fs::canonicalize(run_dir)?;
+  let child = fs::canonicalize(run_dir.join(relative))?;
+  Ok(child.starts_with(&root).then_some(child))
+}
+
+/// run_dir の下に収まるディレクトリとして `relative` の実パスを返す。外を指す、無い、
+/// ディレクトリでない場合は `None` を返す。
+fn contained_dir(run_dir: &Path, relative: &Path) -> Option<PathBuf> {
+  contained_path(run_dir, relative).ok().flatten().filter(|path| path.is_dir())
 }
 
 fn body_log_files(directory: &Path) -> Vec<PathBuf> {
