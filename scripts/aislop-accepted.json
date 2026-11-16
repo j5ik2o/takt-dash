@@ -48,17 +48,6 @@
           "message": "Function too long (limit: 120, flagged above 132 lines)"
         }
       ]
-    },
-    {
-      "reason": "frontend/web/src/state/decision-actions.ts の complexity/file-too-large 指摘は、分割・改修を別作業へ切り出すまでの一時的な受け入れとする。解消は issue #103（https://github.com/j5ik2o/takt-dash/issues/103）で追跡する。受け入れ時点の実測は frontend/web/src/state/decision-actions.ts 454 行（上限 400 行）である。",
-      "findings": [
-        {
-          "engine": "code-quality",
-          "rule": "complexity/file-too-large",
-          "file": "frontend/web/src/state/decision-actions.ts",
-          "message": "File too large (limit: 400, flagged above 441 lines)"
-        }
-      ]
     }
   ]
 }
