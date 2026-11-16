@@ -10,12 +10,12 @@ use takt_dash_backend::config::{
 };
 
 fn repo_config_path() -> &'static Path {
-  Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../taktdash.config.json"))
+  Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../taktdash.config.example.json"))
 }
 
 #[test]
-fn committed_config_parses_with_four_projects_and_mac_mini_server() {
-  let config = load_config(repo_config_path()).expect("コミット済みの設定ファイルを読み込めます");
+fn example_config_parses_with_four_projects_and_mac_mini_server() {
+  let config = load_config(repo_config_path()).expect("見本の設定ファイルを読み込めます");
 
   let names: Vec<&str> = config.projects.iter().map(|project| project.name.as_str()).collect();
   assert_eq!(names, vec!["corporate-site", "event-store-adapter", "takt", "takt-dash"]);
@@ -29,7 +29,7 @@ fn committed_config_parses_with_four_projects_and_mac_mini_server() {
 }
 
 #[test]
-fn committed_config_carries_default_interval_and_thresholds() {
+fn example_config_carries_default_interval_and_thresholds() {
   let config = load_config(repo_config_path()).expect("設定ファイルを読み込めます");
   assert_eq!(config.interval_seconds, 30);
   assert_eq!(config.thresholds.pending_decision_stale_minutes.get(), 240);
@@ -39,7 +39,7 @@ fn committed_config_carries_default_interval_and_thresholds() {
 }
 
 #[test]
-fn committed_config_places_sqlite_under_gitignored_file() {
+fn example_config_places_sqlite_under_gitignored_file() {
   let config = load_config(repo_config_path()).expect("設定ファイルを読み込めます");
   let file_name = config.sqlite_path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
   assert!(file_name.ends_with(".sqlite"), "SQLite の既定は .sqlite を含みます: {}", config.sqlite_path.display());
@@ -226,7 +226,7 @@ fn malformed_json_is_reported_as_parse_error() {
 }
 
 #[test]
-fn committed_config_listens_on_the_default_address() {
+fn example_config_listens_on_the_default_address() {
   let config = load_config(repo_config_path()).expect("設定ファイルを読み込めます");
   assert_eq!(config.listen.to_string(), DEFAULT_LISTEN, "listen を書かない設定は既定の listen を使います");
 }
