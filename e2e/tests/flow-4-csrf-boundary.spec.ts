@@ -47,6 +47,24 @@ test("判断待ちへの書き込みが content-type と origin の境界で拒�
   });
   expect(crossSite.status()).toBe(403);
 
+  // 許可ホストに無いホスト名（同じポートの localhost）は、Host と Origin が一致していても拒否する。
+  const webPort = new URL(stack.webUrl).port;
+  const notAllowedHost = `localhost:${webPort}`;
+  const notAllowed = await request.post(`http://${notAllowedHost}/api/decisions/answer`, {
+    headers: { "content-type": "application/json", origin: `http://${notAllowedHost}` },
+    data: body,
+  });
+  expect(notAllowed.status()).toBe(403);
+
+  // Web は 0.0.0.0 で待ち受けており、listen 名と違う 127.0.0.1 から Origin 付きで送る。
+  // origin 境界を通過して入力検証まで届くことを、403 ではなく 400 で確かめる。
+  const invalidInput = await request.post(url, {
+    headers: { "content-type": "application/json", origin: stack.webUrl },
+    data: "{}",
+  });
+  expect(invalidInput.status()).toBe(400);
+  expect(await invalidInput.json()).toEqual({ ok: false, error: "serverId がありません。" });
+
   expect(await answerCallCount(stack)).toBe(before);
 
   const accepted = await request.post(url, {
