@@ -227,6 +227,18 @@ const logTail = async (logPath: string): Promise<string> => {
   }
 };
 
+// 設定へ書き出すプロジェクト。テスト専用に複数件を指定できるようにし、既定は現行の1件のまま。
+export type StackProject = {
+  name: string;
+  about: string;
+};
+
+// 開始するスタックの構成。プロジェクトを渡すとその件数・内容で起動し、
+// 省略すると既定の1プロジェクト（PROJECT_NAME / PROJECT_ABOUT）で起動する。
+export type StartStackOptions = {
+  projects?: readonly StackProject[];
+};
+
 type StackConfigInput = {
   backendAddress: string;
   projectDir: string;
@@ -234,6 +246,7 @@ type StackConfigInput = {
   callsPath: string;
   mockPidPath: string;
   delayPath: string;
+  projects: readonly StackProject[];
 };
 
 const buildConfig = (input: StackConfigInput): Record<string, unknown> => ({
@@ -259,7 +272,7 @@ const buildConfig = (input: StackConfigInput): Record<string, unknown> => ({
   servers: {
     [SERVER_ID]: { name: SERVER_NAME, kind: "mac-mini", concurrency: 1 },
   },
-  projects: [{ name: PROJECT_NAME, server: SERVER_ID, about: PROJECT_ABOUT, cwd: input.projectDir }],
+  projects: input.projects.map((project) => ({ name: project.name, server: SERVER_ID, about: project.about, cwd: input.projectDir })),
   intervalSeconds: 1,
   // 応答なしの判定は本番の既定（3回・120秒）だと待ち時間がテストの上限に収まらないため、
   // 固定の fixture では短い値にして画面の遷移だけを観測する。
@@ -267,7 +280,7 @@ const buildConfig = (input: StackConfigInput): Record<string, unknown> => ({
   listen: input.backendAddress,
 });
 
-export async function startStack(): Promise<Stack> {
+export async function startStack(options: StartStackOptions = {}): Promise<Stack> {
   // 状態・設定・SQLite・ログは実行ごとの一時ディレクトリへ置き、リポジトリ内に残さない。
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "taktdash-e2e-"));
   const projectDir = path.join(tempDir, "project");
@@ -392,6 +405,10 @@ export async function startStack(): Promise<Stack> {
   let backendAddress = "";
   let webUrl = "";
 
+  // 明示が無ければ既定の1プロジェクトで起動し、既存 spec の起動経路と設定を変えない。
+  const projects: readonly StackProject[] =
+    options.projects ?? [{ name: PROJECT_NAME, about: PROJECT_ABOUT }];
+
   try {
     await writeFile(statePath, JSON.stringify(buildMockState(new Date())), "utf8");
     // backend がモックを起動する前に遅延 0（透過）を用意し、ラッパーが初回から同じ契約で読めるようにする。
@@ -401,7 +418,7 @@ export async function startStack(): Promise<Stack> {
     backendAddress = `127.0.0.1:${backendPort}`;
     await writeFile(
       configPath,
-      JSON.stringify(buildConfig({ backendAddress, projectDir, statePath, callsPath, mockPidPath, delayPath })),
+      JSON.stringify(buildConfig({ backendAddress, projectDir, statePath, callsPath, mockPidPath, delayPath, projects })),
       "utf8",
     );
     const webPort = await freePort();

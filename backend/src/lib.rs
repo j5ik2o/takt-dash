@@ -15,6 +15,7 @@ pub mod grpc;
 pub mod mcp;
 pub mod model;
 pub mod poller;
+pub mod run_log;
 pub mod store;
 
 pub mod takt_dash {
