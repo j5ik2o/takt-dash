@@ -49,6 +49,90 @@
       "server": "mac-mini",
       "about": "DDD の原則の LLM Wiki。本を取り込んで構築する。",
       "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/ddd-principles"
+    },
+    {
+      "name": "event-store-adapter-go",
+      "server": "mac-mini",
+      "about": "イベントストアアダプターの Go 実装",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/event-store-adapter-go"
+    },
+    {
+      "name": "event-store-adapter-java",
+      "server": "mac-mini",
+      "about": "イベントストアアダプターの Java 実装",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/event-store-adapter-java"
+    },
+    {
+      "name": "event-store-adapter-js",
+      "server": "mac-mini",
+      "about": "イベントストアアダプターの TypeScript 実装",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/event-store-adapter-js"
+    },
+    {
+      "name": "event-store-adapter-kotlin",
+      "server": "mac-mini",
+      "about": "イベントストアアダプターの Kotlin 実装",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/event-store-adapter-kotlin"
+    },
+    {
+      "name": "event-store-adapter-rs",
+      "server": "mac-mini",
+      "about": "イベントストアアダプターの Rust 実装",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/event-store-adapter-rs"
+    },
+    {
+      "name": "event-store-adapter-scala",
+      "server": "mac-mini",
+      "about": "イベントストアアダプターの Scala 実装",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/event-store-adapter-scala"
+    },
+    {
+      "name": "cqrs-es-example-go",
+      "server": "mac-mini",
+      "about": "CQRS／イベントソーシングの実装例（Go）",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/cqrs-es-example-go"
+    },
+    {
+      "name": "cqrs-es-example-java",
+      "server": "mac-mini",
+      "about": "CQRS／イベントソーシングの実装例（Java）",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/cqrs-es-example-java"
+    },
+    {
+      "name": "cqrs-es-example-js",
+      "server": "mac-mini",
+      "about": "CQRS／イベントソーシングの実装例（TypeScript）",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/cqrs-es-example-js"
+    },
+    {
+      "name": "cqrs-es-example-kotlin",
+      "server": "mac-mini",
+      "about": "CQRS／イベントソーシングの実装例（Kotlin）",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/cqrs-es-example-kotlin"
+    },
+    {
+      "name": "cqrs-es-example-rs",
+      "server": "mac-mini",
+      "about": "CQRS／イベントソーシングの実装例（Rust）",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/cqrs-es-example-rs"
+    },
+    {
+      "name": "cqrs-es-example-scala",
+      "server": "mac-mini",
+      "about": "CQRS／イベントソーシングの実装例（Scala）",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/cqrs-es-example-scala"
+    },
+    {
+      "name": "pekko-persistence-dynamodb",
+      "server": "mac-mini",
+      "about": "Pekko Persistence の DynamoDB プラグイン",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/pekko-persistence-dynamodb"
+    },
+    {
+      "name": "pekko-cqrs-es-example",
+      "server": "mac-mini",
+      "about": "Pekko を使った CQRS／イベントソーシングの実装例",
+      "cwd": "/Users/j5ik2o/Sources/j5ik2o.github.com/j5ik2o/pekko-cqrs-es-example"
     }
   ],
   "intervalSeconds": 30,
