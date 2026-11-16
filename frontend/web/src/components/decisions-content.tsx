@@ -4,32 +4,59 @@
 // 結果は decisionKey で項目に紐づけて保持するため、SSE の再描画で並び順が変わっても
 // 同じ項目の結果として残る。
 import { useCallback, useState, type ReactElement } from "react";
-import type { DashboardState } from "../proto/taktdash";
+import type { PendingDecision } from "../proto/taktdash";
 import {
   decisionKey,
   decisionTypeLabel,
   upsertDecisionResult,
   type DecisionResult,
 } from "../state/decision-actions";
-import { resolveThresholds, sortPendingDecisions } from "../state/dashboard";
+import {
+  resolveThresholds,
+  sortPendingDecisions,
+  type DecisionsStateInput,
+  type PendingDecisionView,
+} from "../state/dashboard";
+import { decisionAnchorId } from "../state/anchors";
 import { formatDuration } from "../state/format";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { DecisionActions } from "./decision-actions";
 import { DecisionResults } from "./decision-results";
 
 type DecisionsContentProps = {
-  state: DashboardState;
+  state: DecisionsStateInput;
   now: Date;
   disconnected: boolean;
 };
 
-const waitSeconds = (waitMinutes: number): number => Math.round(waitMinutes * 60);
+const targetLabel = (decision: PendingDecision): string | undefined => {
+  if (decision.pullRequest !== undefined) {
+    return `プルリクエスト #${decision.pullRequest.number}`;
+  }
+  if (decision.goalId !== undefined) {
+    return `ゴール ${decision.goalId}`;
+  }
+  return undefined;
+};
+
+const waitSeconds = (decision: PendingDecisionView): number => Math.round(decision.waitMinutes * 60);
+
+// 本文は takt-mcp の原文をそのまま運ぶ。空行を段落の区切りとして扱い、段落内の改行は
+// 空白へ畳まずに残す（issue #37 受け入れ条件1）。
+const splitBodyParagraphs = (body: string): string[] =>
+  body
+    .replace(/\r\n?/g, "\n")
+    .split(/\n[ \t]*\n+/)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph !== "");
 
 export function DecisionsContent({ state, now, disconnected }: DecisionsContentProps): ReactElement {
   const thresholds = resolveThresholds(state.thresholds);
   const decisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
   });
+  // サーバー一覧に表示名が無い応答でも、項目を識別できるよう ID を使う。
+  const serverNames = new Map(state.servers.map((server) => [server.serverId, server.name]));
   const [results, setResults] = useState<DecisionResult[]>([]);
 
   const handleResult = useCallback((next: DecisionResult) => {
@@ -54,28 +81,51 @@ export function DecisionsContent({ state, now, disconnected }: DecisionsContentP
           <p className="note">判断待ちはありません。</p>
         ) : (
           <ul className="tray-list">
-            {decisions.map((decision) => (
-              <li className={`tray-item${decision.stale ? " stale" : ""}`} key={decisionKey(decision)}>
-                <div className="proj">
-                  <span>{decision.project}</span>
-                  <span className="srv">{decision.serverId}</span>
-                  <span className="kind">{decisionTypeLabel(decision)}</span>
-                </div>
-                <p className="desc">{decision.body}</p>
-                {decision.options.length > 0 ? <p className="opts">選択肢は {decision.options.join(" と ")} です。</p> : null}
-                <div className="wait">
-                  <b>{formatDuration(waitSeconds(decision.waitMinutes))} 待ち</b>
-                  {decision.stale ? <span className="stale-label">滞留しています。</span> : null}
-                </div>
-                <DecisionActions decision={decision} onResult={handleResult} />
-              </li>
-            ))}
+            {decisions.map((decision) => {
+              const serverName = serverNames.get(decision.serverId) ?? decision.serverId;
+              const target = targetLabel(decision);
+              return (
+                <li
+                  id={decisionAnchorId(decisionKey(decision))}
+                  className={`tray-item${decision.stale ? " stale" : ""}`}
+                  key={decisionKey(decision)}
+                >
+                  <div className="proj">
+                    <span>プロジェクト: {decision.project}</span>
+                    <span className="srv">サーバー: {serverName}</span>
+                    <span className="kind">種別: {decisionTypeLabel(decision)}</span>
+                    {target !== undefined ? <span className="target">対象: {target}</span> : null}
+                  </div>
+                  <div className="desc">
+                    {splitBodyParagraphs(decision.body).map((paragraph, paragraphIndex) => (
+                      <p key={paragraphIndex}>{paragraph}</p>
+                    ))}
+                  </div>
+                  {decision.options.length > 0 ? (
+                    <div className="opts">
+                      <span className="opts-label">選択肢</span>
+                      <ul>
+                        {decision.options.map((option, optionIndex) => (
+                          <li key={optionIndex}>{option}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  <div className="wait">
+                    <b>{formatDuration(waitSeconds(decision))} 待ち</b>
+                    {decision.stale ? <span className="stale-label">滞留しています。</span> : null}
+                  </div>
+                  <DecisionActions decision={decision} onResult={handleResult} />
+                </li>
+              );
+            })}
           </ul>
         )}
         <div className="foot-notes">
           <p>
             判断待ちは、未回答の問い合わせ、人のマージ待ちのゴール、ゴール登録の承認待ちの合計です。滞留は
-            {thresholds.pendingDecisionStaleMinutes}分を超えたものを示します。
+            {thresholds.pendingDecisionStaleMinutes}分、ログの無音は{thresholds.runLogSilentMinutes}
+            分を超えたものを示します。
           </p>
         </div>
       </section>

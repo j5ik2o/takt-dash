@@ -9,13 +9,20 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use conversation_fixture::{ConversationFixture, CONVERSATION_SCHEMA};
-use takt_dash_backend::conversation::{ConversationPage, ConversationQuery, ConversationReader, ConversationSpeaker};
+use takt_dash_backend::{
+  conversation::{ConversationPage, ConversationQuery, ConversationReader, ConversationSpeaker},
+  domain::ProjectName,
+};
 
 const FIRST_MESSAGE_AT: i64 = 1_794_613_221_331;
 
+fn project_name(value: &str) -> ProjectName {
+  ProjectName::try_from(value).expect("テストのプロジェクト名は有効です")
+}
+
 fn query(project: &str, cwd: &Path) -> ConversationQuery {
   ConversationQuery {
-    project:       project.to_owned(),
+    project:       project_name(project),
     cwd:           cwd.to_path_buf(),
     project_roots: vec![cwd.to_path_buf()],
     session_id:    None,
@@ -114,7 +121,7 @@ fn incremental_read_returns_only_rows_appended_after_the_cursor() {
     &assistant_text_data("追記", 1_794_613_229_000),
   );
   let second = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    None,
@@ -135,7 +142,7 @@ fn limit_bounds_examined_rows_and_reports_more() {
   fixture.insert_message("ses_alpha", 7, "user", 1_794_613_223_000, &user_data("3番目", 1_794_613_223_000));
 
   let first = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    None,
@@ -147,7 +154,7 @@ fn limit_bounds_examined_rows_and_reports_more() {
   assert!(first.has_more);
 
   let second = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    None,
@@ -174,7 +181,7 @@ fn skipped_rows_advance_the_cursor() {
   fixture.insert_message("ses_alpha", 7, "user", 1_794_613_223_000, &user_data("3番目", 1_794_613_223_000));
 
   let first = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    None,
@@ -186,7 +193,7 @@ fn skipped_rows_advance_the_cursor() {
   assert!(first.has_more);
 
   let second = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    None,
@@ -198,7 +205,7 @@ fn skipped_rows_advance_the_cursor() {
   assert!(second.has_more, "スキップした行の後ろに未読の行が残っています");
 
   let third = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    None,
@@ -440,7 +447,7 @@ fn session_from_another_project_is_not_returned() {
   let reader = fixture.reader();
 
   let page = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           first_cwd.clone(),
     project_roots: vec![first_cwd, second_cwd],
     session_id:    Some("ses_second".to_owned()),
@@ -469,7 +476,7 @@ fn session_directory_owned_by_another_configured_project_is_not_returned() {
   let reader = fixture.reader();
 
   let page = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           first_cwd.clone(),
     project_roots: vec![first_cwd, second_cwd],
     session_id:    None,
@@ -497,7 +504,7 @@ fn latest_manager_session_is_selected_when_session_id_is_omitted() {
 
   let latest = reader.read(&query("takt-dash", &project_cwd));
   let explicit = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    Some("ses_old".to_owned()),
@@ -587,7 +594,7 @@ fn explicit_session_id_still_selects_its_record_when_a_newer_unsupported_provide
   let reader = fixture.reader();
 
   let page = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    Some("ses_old".to_owned()),
@@ -678,7 +685,7 @@ fn uncheckpointed_wal_append_is_visible_to_the_reader() {
     .expect("追記できます");
 
   let second = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    None,
@@ -844,7 +851,7 @@ fn explicit_unsupported_provider_session_reason_is_not_hidden_by_a_missing_datab
   std::fs::remove_file(&fixture.database).expect("DB を消せます");
 
   let page = reader.read(&ConversationQuery {
-    project:       "takt-dash".to_owned(),
+    project:       project_name("takt-dash"),
     cwd:           project_cwd.clone(),
     project_roots: vec![project_cwd.clone()],
     session_id:    Some("ses_new".to_owned()),
