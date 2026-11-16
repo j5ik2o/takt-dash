@@ -32,7 +32,10 @@ export type MeasurePageOptions = {
   log?: TimingLogger;
 };
 
-const defaultLog: TimingLogger = (line) => console.info(line);
+const TIMING_LINE_PREFIX = "[taktDash][timing] ";
+
+// 監視用の1行を標準出力へ出す。行が持つ接頭辞は二重にせず、ここで1回だけ付ける。
+const defaultLog: TimingLogger = (line) => console.info(`[taktDash][timing] ${line.replace(TIMING_LINE_PREFIX, "")}`);
 
 const defaultClock = (): number => performance.now();
 

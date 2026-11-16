@@ -2,10 +2,23 @@ import * as grpc from "@grpc/grpc-js";
 import type { ClientReadableStream } from "@grpc/grpc-js";
 import {
   TaktDashServiceClient,
+  type AnswerInquiryRequest,
+  type AnswerInquiryResponse,
+  type ApproveGoalMergeRequest,
+  type ApproveGoalMergeResponse,
+  type ApproveGoalRegistrationRequest,
+  type ApproveGoalRegistrationResponse,
   type DashboardState,
   type GetActivityResponse,
+  type GetConversationRequest,
+  type GetConversationResponse,
+  type GetGoalDetailResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
+  type GetTaskDetailRequest,
+  type GetTaskDetailResponse,
+  type RejectGoalRegistrationRequest,
+  type RejectGoalRegistrationResponse,
   type WatchStateRequest,
 } from "../proto/taktdash";
 import type { TimingSink } from "../telemetry/timing";
@@ -16,6 +29,9 @@ export const BACKEND_ADDR_ENV = "TAKTDASH_BACKEND_ADDR";
 // 実環境では TAKTDASH_BACKEND_ADDR で必ず上書きできるようにする。
 export const DEFAULT_BACKEND_ADDR = "127.0.0.1:50051";
 
+// 書き込みの要求に設定する既定の期限。backend が固まっても無期限に待たないようにする。
+export const DEFAULT_WRITE_DEADLINE_MS = 30_000;
+
 export type BackendEnv = Record<string, string | undefined>;
 
 export function resolveBackendAddress(env: BackendEnv): string {
@@ -23,12 +39,25 @@ export function resolveBackendAddress(env: BackendEnv): string {
   return configured !== undefined && configured !== "" ? configured : DEFAULT_BACKEND_ADDR;
 }
 
-/** backend 自体に接続できないことを表す。応答がない対象の扱いは backend が担う。 */
+/**
+ * backend を利用できないことを表す。
+ *
+ * transport は backend へ接続できない状態、server は backend が応答の中で
+ * UNAVAILABLE を返した状態を指す。server の場合は backend が返した details を保つ。
+ * 読み取りページはどちらも従来どおり「接続できない」表示として扱う。
+ */
+export type BackendUnavailableKind = "transport" | "server";
+
 export class BackendUnavailableError extends Error {
-  constructor(cause: unknown) {
+  readonly kind: BackendUnavailableKind;
+  readonly details: string;
+
+  constructor(cause: unknown, kind: BackendUnavailableKind = "transport", details = "") {
     super("backend に接続できません。");
     this.name = "BackendUnavailableError";
     this.cause = cause;
+    this.kind = kind;
+    this.details = details;
   }
 }
 
@@ -41,6 +70,23 @@ export class RunNotFoundError extends Error {
 }
 
 // 計測の有無は呼び出しごとに決める。共有クライアントでも要求をまたいで計測が混ざらない。
+
+/** 指定した goalId のゴールが backend に存在しないことを表す。ページは 404 を返す。 */
+export class GoalNotFoundError extends Error {
+  constructor(goalId: string) {
+    super(`ゴール「${goalId}」は見つかりません。`);
+    this.name = "GoalNotFoundError";
+  }
+}
+
+/** 指定したプロジェクトとタスク名のタスクが backend に存在しないことを表す。ページは 404 を返す。 */
+export class TaskNotFoundError extends Error {
+  constructor(project: string, taskName: string) {
+    super(`プロジェクト「${project}」のタスク「${taskName}」は見つかりません。`);
+    this.name = "TaskNotFoundError";
+  }
+}
+
 export type BackendClient = {
   getOverview(timing?: TimingSink): Promise<DashboardState>;
   getProjects(timing?: TimingSink): Promise<GetProjectsResponse>;
@@ -48,28 +94,65 @@ export type BackendClient = {
   getPendingDecisions(timing?: TimingSink): Promise<DashboardState>;
   getActivity(timing?: TimingSink): Promise<GetActivityResponse>;
   getRunDetail(runSlug: string, timing?: TimingSink): Promise<GetRunDetailResponse>;
+  getConversation(request: GetConversationRequest, timing?: TimingSink): Promise<GetConversationResponse>;
+  getGoalDetail(goalId: string, timing?: TimingSink): Promise<GetGoalDetailResponse>;
+  getTaskDetail(project: string, taskName: string, goalId?: string, timing?: TimingSink): Promise<GetTaskDetailResponse>;
   watchState(): ClientReadableStream<DashboardState>;
+  answerInquiry(request: AnswerInquiryRequest): Promise<AnswerInquiryResponse>;
+  approveGoalMerge(request: ApproveGoalMergeRequest): Promise<ApproveGoalMergeResponse>;
+  approveGoalRegistration(request: ApproveGoalRegistrationRequest): Promise<ApproveGoalRegistrationResponse>;
+  rejectGoalRegistration(request: RejectGoalRegistrationRequest): Promise<RejectGoalRegistrationResponse>;
   close(): Promise<void>;
 };
 
 export type CreateBackendClientOptions = {
   env?: BackendEnv;
+  // 書き込みの要求に設定する期限（ミリ秒）。読み取りには適用しない。
+  writeDeadlineMs?: number;
+  /**
+   * unary RPC の deadline（ミリ秒）。省略時は既定の有限値を用いる。
+   * 応答を返さない backend で無期限に待たないため、テストからは短い値を注入する。
+   */
+  deadlineMs?: number;
 };
+
+// unary RPC に付ける既定の deadline。backend 側の取得上限より長く、かつ有限にする。
+const DEFAULT_UNARY_DEADLINE_MS = 30_000;
 
 const isConnectionFailure = (error: grpc.ServiceError): boolean =>
   error.code === grpc.status.UNAVAILABLE || error.code === grpc.status.DEADLINE_EXCEEDED;
 
+// server が応答として UNAVAILABLE を返した場合は応答ヘッダが metadata に載る。
+// 接続自体が成立しない transport 失敗では metadata が空になる。この差で分類する。
+const hasResponseMetadata = (error: grpc.ServiceError): boolean => {
+  const metadata = error.metadata;
+  if (metadata === undefined || metadata === null) {
+    return false;
+  }
+  return Object.keys(metadata.getMap()).length > 0;
+};
+
+const toBackendUnavailable = (error: grpc.ServiceError): BackendUnavailableError =>
+  new BackendUnavailableError(
+    error,
+    hasResponseMetadata(error) ? "server" : "transport",
+    typeof error.details === "string" ? error.details : "",
+  );
+
 const unary = <Request, Response>(
   invoke: (
     request: Request,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
     callback: (error: grpc.ServiceError | null, response: Response) => void,
   ) => unknown,
   request: Request,
+  options: grpc.CallOptions,
 ): Promise<Response> =>
   new Promise<Response>((resolve, reject) => {
-    invoke(request, (error, response) => {
+    invoke(request, new grpc.Metadata(), options, (error, response) => {
       if (error) {
-        reject(isConnectionFailure(error) ? new BackendUnavailableError(error) : error);
+        reject(isConnectionFailure(error) ? toBackendUnavailable(error) : error);
         return;
       }
       resolve(response);
@@ -95,22 +178,36 @@ const timedUnary = async <Response>(
 export function createBackendClient(options: CreateBackendClientOptions = {}): BackendClient {
   const env = options.env ?? process.env;
   const address = resolveBackendAddress(env);
+  const deadlineMs = options.deadlineMs ?? DEFAULT_UNARY_DEADLINE_MS;
+  const readOptions = (): grpc.CallOptions => ({ deadline: Date.now() + deadlineMs });
   const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
+  const writeDeadlineMs = options.writeDeadlineMs ?? DEFAULT_WRITE_DEADLINE_MS;
+  const writeOptions = (): grpc.CallOptions => ({ deadline: Date.now() + writeDeadlineMs });
 
   return {
     getOverview: (timing) =>
       timedUnary(timing, "GetOverview", () =>
-        unary<object, DashboardState>((request, callback) => client.getOverview(request, callback), {}),
+        unary<object, DashboardState>(
+          (request, metadata, callOptions, callback) => client.getOverview(request, metadata, callOptions, callback),
+          {},
+          readOptions(),
+        ),
       ),
     getProjects: (timing) =>
       timedUnary(timing, "GetProjects", () =>
-        unary<object, GetProjectsResponse>((request, callback) => client.getProjects(request, callback), {}),
+        unary<object, GetProjectsResponse>(
+          (request, metadata, callOptions, callback) => client.getProjects(request, metadata, callOptions, callback),
+          {},
+          readOptions(),
+        ),
       ),
     getPendingDecisions: async (timing) => {
       const response = await timedUnary(timing, "GetPendingDecisions", () =>
         unary<object, { state: DashboardState | undefined }>(
-          (request, callback) => client.getPendingDecisions(request, callback),
+          (request, metadata, callOptions, callback) =>
+            client.getPendingDecisions(request, metadata, callOptions, callback),
           {},
+          readOptions(),
         ),
       );
       if (response.state === undefined) {
@@ -120,13 +217,19 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
     },
     getActivity: (timing) =>
       timedUnary(timing, "GetActivity", () =>
-        unary<object, GetActivityResponse>((request, callback) => client.getActivity(request, callback), {}),
+        unary<object, GetActivityResponse>(
+          (request, metadata, callOptions, callback) => client.getActivity(request, metadata, callOptions, callback),
+          {},
+          readOptions(),
+        ),
       ),
     getRunDetail: async (runSlug, timing) => {
       const detail = await timedUnary(timing, "GetRunDetail", () =>
         unary<{ runSlug: string }, GetRunDetailResponse>(
-          (request, callback) => client.getRunDetail(request, callback),
+          (request, metadata, callOptions, callback) =>
+            client.getRunDetail(request, metadata, callOptions, callback),
           { runSlug },
+          readOptions(),
         ),
       ).catch((error: unknown) => {
         if (error instanceof BackendUnavailableError) {
@@ -142,7 +245,95 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
       }
       return detail;
     },
+    getConversation: (request, timing) =>
+      timedUnary(timing, "GetConversation", () =>
+        unary<GetConversationRequest, GetConversationResponse>(
+          (value, metadata, callOptions, callback) =>
+            client.getConversation(value, metadata, callOptions, callback),
+          {
+            project: request.project,
+            sessionId: request.sessionId,
+            afterSeq: request.afterSeq,
+            limit: request.limit,
+          },
+          readOptions(),
+        ),
+      ),
+    getGoalDetail: async (goalId, timing) => {
+      const detail = await timedUnary(timing, "GetGoalDetail", () =>
+        unary<{ goalId: string }, GetGoalDetailResponse>(
+          (request, metadata, callOptions, callback) => client.getGoalDetail(request, metadata, callOptions, callback),
+          { goalId },
+          readOptions(),
+        ),
+      ).catch((error: unknown) => {
+        if (error instanceof BackendUnavailableError) {
+          throw error;
+        }
+        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
+          throw new GoalNotFoundError(goalId);
+        }
+        throw error;
+      });
+      if (detail.goalId !== goalId) {
+        throw new GoalNotFoundError(goalId);
+      }
+      return detail;
+    },
+    getTaskDetail: async (project, taskName, goalId, timing) => {
+      const request: GetTaskDetailRequest =
+        goalId === undefined ? { project, taskName } : { project, taskName, goalId };
+      const detail = await timedUnary(timing, "GetTaskDetail", () =>
+        unary<GetTaskDetailRequest, GetTaskDetailResponse>(
+          (unaryRequest, metadata, callOptions, callback) =>
+            client.getTaskDetail(unaryRequest, metadata, callOptions, callback),
+          request,
+          readOptions(),
+        ),
+      ).catch((error: unknown) => {
+        if (error instanceof BackendUnavailableError) {
+          throw error;
+        }
+        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
+          throw new TaskNotFoundError(project, taskName);
+        }
+        throw error;
+      });
+      if (detail.project !== project || detail.taskName !== taskName) {
+        throw new TaskNotFoundError(project, taskName);
+      }
+      if (goalId !== undefined && detail.goalId !== goalId) {
+        throw new TaskNotFoundError(project, taskName);
+      }
+      return detail;
+    },
     watchState: () => client.watchState({} satisfies WatchStateRequest),
+    answerInquiry: (request) =>
+      unary<AnswerInquiryRequest, AnswerInquiryResponse>(
+        (req, metadata, callOptions, callback) => client.answerInquiry(req, metadata, callOptions, callback),
+        request,
+        writeOptions(),
+      ),
+    approveGoalMerge: (request) =>
+      unary<ApproveGoalMergeRequest, ApproveGoalMergeResponse>(
+        (req, metadata, callOptions, callback) => client.approveGoalMerge(req, metadata, callOptions, callback),
+        request,
+        writeOptions(),
+      ),
+    approveGoalRegistration: (request) =>
+      unary<ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse>(
+        (req, metadata, callOptions, callback) =>
+          client.approveGoalRegistration(req, metadata, callOptions, callback),
+        request,
+        writeOptions(),
+      ),
+    rejectGoalRegistration: (request) =>
+      unary<RejectGoalRegistrationRequest, RejectGoalRegistrationResponse>(
+        (req, metadata, callOptions, callback) =>
+          client.rejectGoalRegistration(req, metadata, callOptions, callback),
+        request,
+        writeOptions(),
+      ),
     close: () =>
       new Promise<void>((resolve) => {
         client.close();

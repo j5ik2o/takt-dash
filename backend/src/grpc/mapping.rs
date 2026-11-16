@@ -6,6 +6,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
+  conversation::ConversationSpeaker,
   model::{self, ExecutionStatus, GoalStatus, InquiryKind, PendingDecisionType, RunStatus, StepLogEntry, TaskStatus},
   takt_dash::v1,
 };
@@ -79,6 +80,7 @@ pub fn pending_decision_type(kind: PendingDecisionType) -> v1::PendingDecisionTy
   match kind {
     | PendingDecisionType::Inquiry => v1::PendingDecisionType::Inquiry,
     | PendingDecisionType::AwaitingMerge => v1::PendingDecisionType::AwaitingMerge,
+    | PendingDecisionType::GoalRegistration => v1::PendingDecisionType::GoalRegistration,
   }
 }
 
@@ -93,6 +95,15 @@ pub fn inquiry_kind(kind: Option<InquiryKind>) -> v1::InquiryKind {
   }
 }
 
+/// 会話の発話者を proto の列挙値へ変換する。
+pub fn conversation_speaker(speaker: ConversationSpeaker) -> v1::ConversationSpeaker {
+  match speaker {
+    | ConversationSpeaker::User => v1::ConversationSpeaker::User,
+    | ConversationSpeaker::Manager => v1::ConversationSpeaker::Manager,
+    | ConversationSpeaker::System => v1::ConversationSpeaker::System,
+  }
+}
+
 /// ステップの記録を proto の StepLog へ変換する。
 pub fn step_log(entry: &StepLogEntry) -> v1::StepLog {
   v1::StepLog {
@@ -103,4 +114,34 @@ pub fn step_log(entry: &StepLogEntry) -> v1::StepLog {
     timestamp: Some(timestamp(entry.timestamp)),
     iteration: entry.iteration,
   }
+}
+
+/// ゴールの作業記録を proto の GoalWorkLog へ変換する。
+pub fn goal_work_log(entry: model::GoalWorkLogEntry) -> v1::GoalWorkLog {
+  v1::GoalWorkLog {
+    work_log_id: entry.work_log_id,
+    recorded_at: Some(timestamp(entry.recorded_at)),
+    summary:     entry.summary,
+  }
+}
+
+/// ゴールの質問と回答を proto の GoalQuestion へ変換する。
+pub fn goal_question(entry: model::GoalQuestionEntry) -> v1::GoalQuestion {
+  v1::GoalQuestion {
+    question_id:     entry.question_id,
+    kind:            entry.kind,
+    status:          entry.status,
+    body:            entry.body,
+    options:         entry.options,
+    answer_text:     entry.answer_text,
+    answer_decision: entry.answer_decision,
+    answer_report:   entry.answer_report,
+    created_at:      optional_timestamp(entry.created_at),
+    answered_at:     optional_timestamp(entry.answered_at),
+  }
+}
+
+/// ゴールに紐づくタスクを proto の GoalTask へ変換する。
+pub fn goal_task(entry: model::GoalTaskEntry) -> v1::GoalTask {
+  v1::GoalTask { task_name: entry.task_name, status: task_status(entry.status) as i32, run_slug: entry.run_slug }
 }

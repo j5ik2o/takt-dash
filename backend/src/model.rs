@@ -3,6 +3,8 @@
 //! これらの型は lib の公開 API の一部であり、後続のタスクの gRPC サーバーが
 //! 読み取り系 API の応答を組み立てるために使います。
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 
 /// ゴールの状態。
@@ -76,11 +78,13 @@ impl EventKind {
   }
 }
 
-/// 判断待ちの種類。未回答の問い合わせと人のマージ待ちのゴールの2種類だけを使います。
+/// 判断待ちの種類。未回答の問い合わせ・人のマージ待ちのゴール・ゴール登録の承認待ちを使います。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingDecisionType {
   Inquiry,
   AwaitingMerge,
+  /// ゴール登録の承認待ち。
+  GoalRegistration,
 }
 
 /// 判断待ちの問い合わせの種類。
@@ -109,14 +113,83 @@ pub struct GoalEntry {
 /// タスクの一覧に含まれるタスク。配列順は tasks.yaml の順を保ちます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEntry {
-  pub name:         String,
-  pub goal_id:      Option<String>,
-  pub status:       TaskStatus,
-  pub started_at:   Option<DateTime<Utc>>,
-  pub run_slug:     Option<String>,
-  pub current_step: Option<String>,
+  pub name:            String,
+  pub goal_id:         Option<String>,
+  pub status:          TaskStatus,
+  pub started_at:      Option<DateTime<Utc>>,
+  pub run_slug:        Option<String>,
+  /// takt_list_tasks の sourceRunSlug。完了タスクが元 run を指すときに持ちます。
+  pub source_run_slug: Option<String>,
+  pub current_step:    Option<String>,
   /// ゴールの仕上げタスクかどうか。
-  pub merge_task:   bool,
+  pub merge_task:      bool,
+}
+
+/// takt_get_goal から得たゴールの詳細。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalDetail {
+  pub goal_id:             String,
+  pub status:              GoalStatus,
+  pub execution_status:    ExecutionStatus,
+  pub objective:           String,
+  pub out_of_scope:        Vec<String>,
+  pub acceptance_criteria: Vec<String>,
+  pub constraints:         Vec<String>,
+  pub specifications:      BTreeMap<String, String>,
+  pub branch:              String,
+  pub integration_branch:  String,
+  pub work_log:            Vec<GoalWorkLogEntry>,
+  pub questions:           Vec<GoalQuestionEntry>,
+  pub tasks:               Vec<GoalTaskEntry>,
+}
+
+/// ゴールの作業記録。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalWorkLogEntry {
+  pub work_log_id: String,
+  pub recorded_at: DateTime<Utc>,
+  pub summary:     String,
+}
+
+/// ゴールに対する manager の質問と回答。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalQuestionEntry {
+  pub question_id:     String,
+  pub kind:            String,
+  pub status:          String,
+  pub body:            String,
+  pub options:         Vec<String>,
+  pub answer_text:     Option<String>,
+  pub answer_decision: Option<String>,
+  pub answer_report:   Option<String>,
+  pub created_at:      Option<DateTime<Utc>>,
+  pub answered_at:     Option<DateTime<Utc>>,
+}
+
+/// ゴールに紐づくタスク。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalTaskEntry {
+  pub task_name: String,
+  pub status:    TaskStatus,
+  pub run_slug:  Option<String>,
+}
+
+/// takt_list_tasks から得たタスクの詳細。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDetail {
+  pub project:             String,
+  pub task_name:           String,
+  pub goal_id:             Option<String>,
+  pub status:              TaskStatus,
+  pub summary:             String,
+  pub created_at:          Option<DateTime<Utc>>,
+  pub started_at:          Option<DateTime<Utc>>,
+  pub completed_at:        Option<DateTime<Utc>>,
+  pub run_slug:            Option<String>,
+  pub linked_run_slugs:    Vec<String>,
+  pub pull_request_number: Option<i64>,
+  pub branch:              Option<String>,
+  pub pull_request_url:    Option<String>,
 }
 
 /// ゴールに属する問い合わせ。
@@ -245,6 +318,8 @@ pub struct ProjectSnapshot {
   pub inquiries:     Vec<InquiryEntry>,
   pub runs:          Vec<RunEntry>,
   pub notifications: Vec<NotificationEntry>,
+  /// ゴール登録の承認待ち。承認待ちが無ければ空です。
+  pub proposals:     Vec<RegistrationProposalEntry>,
 }
 
 impl ProjectSnapshot {
@@ -256,6 +331,7 @@ impl ProjectSnapshot {
       inquiries:     Vec::new(),
       runs:          Vec::new(),
       notifications: Vec::new(),
+      proposals:     Vec::new(),
     }
   }
 }
@@ -285,6 +361,19 @@ pub struct PendingDecision {
   pub pull_request_number: Option<i64>,
   pub pull_request_url:    Option<String>,
   pub stale:               bool,
+  /// 問い合わせの識別子。マージ待ちは問い合わせではないため空です。
+  pub inquiry_id:          String,
+  /// ゴール登録の承認待ちの revision。それ以外の種別は持ちません。
+  pub revision:            Option<i32>,
+}
+
+/// ゴール登録の承認待ち。提案そのものの保持と射影に使います。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationProposalEntry {
+  pub revision:             i32,
+  pub repository_directory: String,
+  /// 提案の要約。判断待ちの本文として表示します。
+  pub summary:              String,
 }
 
 /// 判断待ちの一覧の排他的な見方。問い合わせと人のマージ待ちを別々に取り出せます。

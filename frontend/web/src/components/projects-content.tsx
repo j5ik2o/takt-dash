@@ -9,6 +9,7 @@ type ProjectsContentProps = {
 
 export function ProjectsContent({ state, now }: ProjectsContentProps): ReactElement {
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
+  const projectById = new Map(state.projects.map((project) => [project.name, project]));
   const thresholds = resolveThresholds(state.thresholds);
   const pending = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
@@ -39,7 +40,9 @@ export function ProjectsContent({ state, now }: ProjectsContentProps): ReactElem
                 <ul className="goals">
                   {goals.map((goal) => (
                     <li key={goal.goalId}>
-                      <p className="gn">{goal.name}</p>
+                      <p className="gn">
+                        <a href={`/goals?project=${encodeURIComponent(project.name)}`}>{goal.name}</a>
+                      </p>
                       <p className="gs">
                         ゴールは{goalStatusLabel(goal.status)}で、実行状態は{executionStatusLabel(goal.executionStatus)}です。
                       </p>
@@ -52,7 +55,7 @@ export function ProjectsContent({ state, now }: ProjectsContentProps): ReactElem
                 <p className="k">走っている run（{runs.length}件）</p>
                 <ul className="mini-runs">
                   {runs.map((run) => {
-                    const view = toRunView(run, serverById, thresholds, now);
+                    const view = toRunView(run, serverById, projectById, now);
                     return (
                       <li key={run.runSlug}>
                         <span className="tn">{run.taskName}</span>
