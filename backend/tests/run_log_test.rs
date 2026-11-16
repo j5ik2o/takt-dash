@@ -8,6 +8,7 @@
 use std::{
   fs,
   io::Write,
+  os::unix::fs::symlink,
   path::{Path, PathBuf},
   time::{Duration, UNIX_EPOCH},
 };
@@ -16,6 +17,7 @@ use serde_json::{json, Value};
 use takt_dash_backend::run_log::{BodyLogRead, MetaRead, RunLocation, RunLogReader, RunMeta};
 
 const MAX_SUMMARY_CHARS: usize = 512;
+const PHASE1_DIRECTORY: &str = "phase1-execution";
 
 const BODY_MTIME: u64 = 1_700_000_000;
 const PHASE1_MTIME: u64 = 1_700_000_100;
@@ -734,4 +736,64 @@ fn latest_log_update_returns_none_without_logs() {
   let run_dir = fixture.create_run(&fixture.project_cwd, "run-empty");
 
   assert!(fixture.reader().latest_log_update(&run_dir).is_none());
+}
+
+#[test]
+fn ignores_meta_symlink_outside_run_directory() {
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-meta-link");
+  let outside = fixture.temp_root().join("outside-meta");
+  fs::create_dir_all(&outside).expect("run の外のディレクトリを作れます");
+  fixture.write_meta(&outside);
+  symlink(outside.join("meta.json"), run_dir.join("meta.json")).expect("meta.json のリンクを作れます");
+
+  expect_meta_missing(fixture.reader().read_meta(&run_dir));
+}
+
+#[test]
+fn ignores_logs_symlink_outside_run_directory() {
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-logs-link");
+  let outside = fixture.temp_root().join("outside-logs");
+  fs::create_dir_all(outside.join(PHASE1_DIRECTORY)).expect("run の外のログ置き場を作れます");
+  let outside_log = outside.join("body.jsonl");
+  append_record(&outside_log, &step_record("outside"));
+  append_bytes(&outside_log, b"not json\n");
+  let outside_phase1 = outside.join(PHASE1_DIRECTORY).join("plan-1.jsonl");
+  fs::write(&outside_phase1, b"{\"kind\":\"content_chunk\"}\n").expect("run の外の phase1 のログを書けます");
+  set_modified(&outside_log, BODY_MTIME);
+  set_modified(&outside_phase1, PHASE1_MTIME);
+  fs::remove_dir(run_dir.join("logs")).expect("run の logs ディレクトリを消せます");
+  symlink(&outside, run_dir.join("logs")).expect("logs のリンクを作れます");
+  let mut reader = fixture.reader();
+
+  let read = reader.read_body_log(&run_dir);
+
+  assert!(read.missing, "run の外を指す logs は残っていない結果として返します");
+  assert!(read.records.is_empty(), "run の外の本体ログを読んではいけません");
+  assert_eq!(read.skipped, 0, "run の外の本体ログの行を数えてはいけません");
+  assert!(reader.latest_log_update(&run_dir).is_none(), "run の外のファイルの更新時刻を使ってはいけません");
+}
+
+#[test]
+fn ignores_phase1_symlink_outside_run_directory() {
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-phase1-link");
+  let log = body_log(&run_dir);
+  append_record(&log, &step_record("inside"));
+  set_modified(&log, BODY_MTIME);
+  let outside = fixture.temp_root().join("outside-phase1");
+  fs::create_dir_all(&outside).expect("run の外のディレクトリを作れます");
+  let outside_log = outside.join("plan-1.jsonl");
+  fs::write(&outside_log, b"{\"kind\":\"content_chunk\"}\n").expect("run の外の phase1 のログを書けます");
+  set_modified(&outside_log, IGNORED_MTIME);
+  symlink(&outside, run_dir.join("logs").join(PHASE1_DIRECTORY)).expect("phase1-execution のリンクを作れます");
+
+  let latest = fixture.reader().latest_log_update(&run_dir).expect("run の中の本体ログの更新時刻を返します");
+
+  assert_eq!(
+    latest.timestamp(),
+    BODY_MTIME as i64,
+    "run の外を指す phase1-execution の更新時刻を使わず、run の中の本体ログの更新時刻を返します"
+  );
 }
