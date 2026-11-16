@@ -1479,3 +1479,113 @@ async fn a_non_positive_pull_request_number_is_a_parse_error() {
     client.shutdown().await;
   }
 }
+
+#[tokio::test]
+async fn slow_initialize_is_not_bound_by_the_request_timeout() {
+  // initialize の応答が呼び出しの期限より遅くても、初期化の期限（60秒）の内側なら
+  // 接続できる。呼び出しの期限で初期化を打ち切ると、高負荷のときに起動が終わらない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let mut config = mock_config_with_timeout(directory.path(), &state, None, 2);
+  config.args.push("--initialize-delay-ms".to_owned());
+  config.args.push("5000".to_owned());
+  let mut client = mock_client(config);
+
+  let text = client
+    .call_tool("takt_list_goals", with_cwd(directory.path(), json!({})))
+    .await
+    .expect("初期化が遅くても道具を呼べます");
+
+  assert!(text.contains("\"goals\""), "応答の本文テキストを返します: {text}");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_spawns_stay_within_the_cap() {
+  // 4本のクライアントが同時に起動しても、起動と初期化が重なるのは3本まで。
+  // spawn-log の start から ready までの区間が重なる最大数を数える。
+  // セマフォはプロセス全体で共有されるため、並行して走る他のテストも同じ3枠を使う。
+  // 本数を増やしたり遅延を長くしたりすると、他のテストの起動が待たされて時間の
+  // 表明が崩れるため、本数と遅延は小さく保つ。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let spawn_log = directory.path().join("spawn.log");
+  let mut handles = Vec::new();
+  for _ in 0..4 {
+    let mut config = mock_config_with_timeout(directory.path(), &state, None, 10);
+    config.args.push("--initialize-delay-ms".to_owned());
+    config.args.push("1500".to_owned());
+    config.args.push("--spawn-log".to_owned());
+    config.args.push(spawn_log.display().to_string());
+    let cwd = directory.path().to_path_buf();
+    handles.push(tokio::spawn(async move {
+      let mut client = mock_client(config);
+      client.call_tool("takt_list_goals", with_cwd(&cwd, json!({}))).await.expect("道具を呼べます");
+      client.shutdown().await;
+    }));
+  }
+  for handle in handles {
+    handle.await.expect("起動のタスクが完了します");
+  }
+
+  let log = std::fs::read_to_string(&spawn_log).expect("起動の記録を読めます");
+  let mut starts = std::collections::BTreeMap::new();
+  let mut intervals = Vec::new();
+  for line in log.lines() {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(parts.len(), 3, "起動の記録は3列です: {line}");
+    let at: i64 = parts[2].parse().expect("時刻はミリ秒です");
+    match parts[0] {
+      | "start" => {
+        starts.insert(parts[1].to_owned(), at);
+      },
+      | "ready" => {
+        let start = starts.remove(parts[1]).expect("ready に対応する start があります");
+        intervals.push((start, at));
+      },
+      | other => panic!("未知の起動記録です: {other}"),
+    }
+  }
+  assert_eq!(intervals.len(), 4, "4本とも初期化を終えます: {log}");
+  let mut events = Vec::new();
+  for (start, ready) in &intervals {
+    events.push((*start, 1));
+    events.push((*ready, -1));
+  }
+  events.sort();
+  let mut current = 0;
+  let mut maximum = 0;
+  for (_, delta) in events {
+    current += delta;
+    maximum = maximum.max(current);
+  }
+  assert!(maximum <= 3, "同時に初期化が進むのは3本までです: 最大 {maximum}");
+}
+
+#[tokio::test]
+async fn failed_spawn_backs_off_instead_of_respawning_immediately() {
+  // 起動に失敗した直後の呼び出しは、子プロセスを起動せずに抑制のエラーを返す。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let spawn_log = directory.path().join("spawn.log");
+  let mut config = mock_config(directory.path(), &state, Some("exit"));
+  config.args.push("--spawn-log".to_owned());
+  config.args.push(spawn_log.display().to_string());
+  let mut client = mock_client(config);
+
+  let first = transport(
+    client.call_tool("takt_list_goals", with_cwd(directory.path(), json!({}))).await.expect_err("起動失敗はエラーです"),
+  );
+  assert!(!matches!(first, TransportError::Backoff(_)), "最初の失敗は抑制ではありません: {first}");
+
+  let started = std::time::Instant::now();
+  let second = transport(
+    client.call_tool("takt_list_goals", with_cwd(directory.path(), json!({}))).await.expect_err("抑制中もエラーです"),
+  );
+  assert!(matches!(second, TransportError::Backoff(_)), "2回目は抑制のエラーです: {second}");
+  assert!(started.elapsed() < std::time::Duration::from_secs(2), "抑制は待たずに返ります");
+
+  let spawned = std::fs::read_to_string(&spawn_log).expect("起動の記録を読めます");
+  assert_eq!(spawned.lines().count(), 1, "抑制中は子プロセスを起動しません: {spawned}");
+  client.shutdown().await;
+}
