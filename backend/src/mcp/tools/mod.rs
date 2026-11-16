@@ -13,7 +13,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use super::client::{CallError, McpClient, McpClientConfig};
+use super::client::{CallError, McpClient, McpClientConfig, TransportError};
 use crate::{
   config::McpServer,
   domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
@@ -38,6 +38,12 @@ use self::{
   run::{parse_run, parse_run_detail, report_summaries, step_entries, step_log_entries, step_log_next_offset},
 };
 
+/// 一覧読み取り（ゴール・タスク）の期限。応答が大きく、2026-11-17 の本番実測では
+/// 高負荷のときに takt_list_goals の応答が最大で約15秒、takt_list_tasks が15秒の
+/// 期限切れになり、読み取りサイクル全体が失敗しました。初期化の期限（60秒）と
+/// 同じ予算まで広げ、遅れてもサイクルを失敗させないようにします。
+const LIST_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// takt-mcp 子プロセスの起動設定を作る。
 ///
 /// poller の定期読み取りと GetRunDetail の要求時読み取りが、同じ起動条件（タイムアウトを含む）を
@@ -49,6 +55,10 @@ pub fn client_config(server: &McpServer, cwd: &std::path::Path) -> McpClientConf
     env:             server.env.clone(),
     cwd:             cwd.to_path_buf(),
     request_timeout: Duration::from_secs(15),
+    tool_timeouts:   BTreeMap::from([
+      ("takt_list_goals".to_owned(), LIST_READ_TIMEOUT),
+      ("takt_list_tasks".to_owned(), LIST_READ_TIMEOUT),
+    ]),
   }
 }
 
@@ -72,6 +82,21 @@ impl From<CallError> for ToolError {
       | CallError::Tool(error) => ToolError::Tool(error),
     }
   }
+}
+
+/// 輸送エラーのうち期限切れかどうか。
+fn is_timeout(error: &ToolError) -> bool {
+  matches!(error, ToolError::Transport(TransportError::Timeout(_)))
+}
+
+/// 補助読み取りの失敗のうち、前回値へ縮退してよい失敗かどうか。
+///
+/// 道具エラーは従来どおり縮退します。輸送の期限切れも、高負荷で1件の補助読み取りが
+/// 遅れただけでプロジェクト全体を失敗させないため、縮退の対象に加えます。それ以外の
+/// 輸送エラー（プロセス終了・起動失敗など）は接続自体が壊れている兆候として、
+/// 従来どおり全体の失敗にします。
+fn degrades_to_previous(error: &ToolError) -> bool {
+  matches!(error, ToolError::Tool(_)) || is_timeout(error)
 }
 
 /// 1プロジェクト分の状態を読み取るための道具のまとまり。
@@ -108,10 +133,11 @@ impl<'a> ToolSet<'a> {
   /// ゴール・タスク・問い合わせ・run を読み取り、1プロジェクト分の snapshot を組み立てる。
   ///
   /// `prev` には前回の snapshot を渡します。補助読み取り（run・ゴール質問・通知・ゴールに
-  /// 属さない問い合わせ）が道具エラーで失敗したときは、その項目だけ前回値（無ければ空）を
-  /// 保持し、プロジェクト全体を失敗にしません。ゴール登録提案も道具エラーと解析エラーの
-  /// ときは前回の提案（無ければ空）へ縮退し、周期を失敗させません。コア読み取り
-  /// （ゴール・タスク）の失敗と、補助読み取りの輸送エラーは全体の失敗として伝播します。
+  /// 属さない問い合わせ）が道具エラーか輸送の期限切れで失敗したときは、その項目だけ
+  /// 前回値（無ければ空）を保持し、プロジェクト全体を失敗にしません。ゴール登録提案も
+  /// 道具エラーと解析エラーと期限切れのときは前回の提案（無ければ空）へ縮退し、周期を
+  /// 失敗させません。コア読み取り（ゴール・タスク）の失敗と、補助読み取りの期限切れ
+  /// 以外の輸送エラーは全体の失敗として伝播します。
   ///
   /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知から得るため、通知を読んだ後に
   /// ゴールへ起点時刻を反映します。通知が無いゴールは前回 snapshot の同じゴールの起点を
@@ -129,7 +155,7 @@ impl<'a> ToolSet<'a> {
     let runs = self.get_running_runs(&tasks, prev).await?;
     let proposals = match self.list_goal_registration_proposals().await {
       | Ok(entries) => entries,
-      | Err(ToolError::Tool(_)) | Err(ToolError::Parse(_)) => {
+      | Err(error) if matches!(error, ToolError::Parse(_)) || degrades_to_previous(&error) => {
         prev.map(|snapshot| snapshot.proposals.clone()).unwrap_or_default()
       },
       | Err(error) => return Err(error),
@@ -143,7 +169,17 @@ impl<'a> ToolSet<'a> {
     serde_json::from_str(&text).map_err(|error| ToolError::Parse(format!("{name}: {error}")))
   }
 
+  /// ゴール一覧を全ページ集める。輸送の期限切れのときだけ、もう1回だけ読み直します。
+  /// 期限切れで子プロセスは破棄されるため、再試行は新しい子プロセスへの読み直しに
+  /// なります。読み取り専用の道具なので、再試行に副作用はありません。
   async fn list_goals(&mut self) -> Result<Vec<GoalEntry>, ToolError> {
+    match self.fetch_goals().await {
+      | Err(error) if is_timeout(&error) => self.fetch_goals().await,
+      | result => result,
+    }
+  }
+
+  async fn fetch_goals(&mut self) -> Result<Vec<GoalEntry>, ToolError> {
     let mut entries = Vec::new();
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
@@ -160,7 +196,16 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_list_goals のページ追従が上限に達しました".to_owned()))
   }
 
+  /// タスク一覧を全ページ集める。ゴール一覧と同じく、輸送の期限切れのときだけ
+  /// もう1回だけ読み直します。
   async fn list_tasks(&mut self) -> Result<Vec<TaskEntry>, ToolError> {
+    match self.fetch_tasks().await {
+      | Err(error) if is_timeout(&error) => self.fetch_tasks().await,
+      | result => result,
+    }
+  }
+
+  async fn fetch_tasks(&mut self) -> Result<Vec<TaskEntry>, ToolError> {
     let mut entries = Vec::new();
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
@@ -191,13 +236,15 @@ impl<'a> ToolSet<'a> {
   ) -> Result<Vec<InquiryEntry>, ToolError> {
     let mut inquiries = match self.list_standalone_inquiries().await {
       | Ok(entries) => entries,
-      | Err(ToolError::Tool(_)) => prev_inquiries(prev, |goal_id| goal_id.is_none()),
+      | Err(error) if degrades_to_previous(&error) => prev_inquiries(prev, |goal_id| goal_id.is_none()),
       | Err(error) => return Err(error),
     };
     for goal in goals {
       match self.list_goal_questions(&goal.goal_id).await {
         | Ok(mut entries) => inquiries.append(&mut entries),
-        | Err(ToolError::Tool(_)) => inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id))),
+        | Err(error) if degrades_to_previous(&error) => {
+          inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id)))
+        },
         | Err(error) => return Err(error),
       }
     }
@@ -258,7 +305,7 @@ impl<'a> ToolSet<'a> {
       };
       match self.read_run(&run_slug, task).await {
         | Ok(run) => runs.push(run),
-        | Err(ToolError::Tool(_)) => {
+        | Err(error) if degrades_to_previous(&error) => {
           if let Some(previous) =
             prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str()))
           {
@@ -392,7 +439,7 @@ impl<'a> ToolSet<'a> {
           }
           notifications.extend(goal_notifications);
         },
-        | Err(ToolError::Tool(_)) => {
+        | Err(error) if degrades_to_previous(&error) => {
           if let Some(prev) = prev {
             notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal.goal_id).cloned());
             if let Some(recorded_at) =
