@@ -10,9 +10,10 @@ use std::{env::VarError, io::Write, net::SocketAddr, path::PathBuf, time::Durati
 use proto::v1::{
   takt_dash_service_client::TaktDashServiceClient, AnswerInquiryRequest, AnswerInquiryResponse,
   ApproveGoalMergeRequest, ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse,
-  ConversationSkipped, DashboardState, GetConversationRequest, GetConversationResponse, GetOverviewRequest,
-  GetPendingDecisionsRequest, GoalRegistrationProposal, OperationAnswerReport, PendingDecisionType,
-  RejectGoalRegistrationRequest, RejectGoalRegistrationResponse,
+  ConversationSkipped, DashboardState, ExecutionStatus, GetConversationRequest, GetConversationResponse,
+  GetGoalDetailRequest, GetGoalDetailResponse, GetGoalsRequest, GetGoalsResponse, GetOverviewRequest,
+  GetPendingDecisionsRequest, Goal, GoalQuestion, GoalRegistrationProposal, GoalStatus, OperationAnswerReport,
+  PendingDecisionType, RejectGoalRegistrationRequest, RejectGoalRegistrationResponse, TaskStatus,
 };
 use tonic::{transport::Endpoint, Code, Request, Status};
 
@@ -43,6 +44,11 @@ const OVERVIEW_COMMAND: &str = "overview";
 const CONVERSATION_COMMAND: &str = "conversation";
 /// 会話の取得で一度に調べる行数の上限。
 const CONVERSATION_LIMIT: i32 = 200;
+
+/// ゴールの一覧を表示するコマンドの名前。
+const GOALS_COMMAND: &str = "goals";
+/// ゴールの詳細を表示するコマンドの名前。
+const GOAL_COMMAND: &str = "goal";
 
 /// 問い合わせへ回答するコマンド。
 const ANSWER_COMMAND: &str = "answer";
@@ -163,6 +169,10 @@ enum Invocation {
   Write(WriteInvocation),
   /// manager の会話を表示する。
   Conversation(ConversationOptions),
+  /// ゴールの一覧を表示する。
+  Goals(GoalsOptions),
+  /// ゴールの詳細を表示する。
+  Goal(GoalOptions),
   /// 使い方を表示して正常終了する。
   Help,
 }
@@ -188,6 +198,21 @@ struct OverviewOptions {
 struct ConversationOptions {
   project: String,
   session: Option<String>,
+  addr:    Option<String>,
+  config:  Option<PathBuf>,
+}
+
+/// ゴール一覧の表示に使う解決前の入力。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GoalsOptions {
+  addr:   Option<String>,
+  config: Option<PathBuf>,
+}
+
+/// ゴール詳細の表示に使う解決前の入力。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GoalOptions {
+  goal_id: String,
   addr:    Option<String>,
   config:  Option<PathBuf>,
 }
@@ -251,6 +276,8 @@ fn is_known_command(name: &str) -> bool {
       | APPROVE_REGISTRATION_COMMAND
       | REJECT_REGISTRATION_COMMAND
       | CONVERSATION_COMMAND
+      | GOALS_COMMAND
+      | GOAL_COMMAND
   )
 }
 
@@ -270,7 +297,7 @@ fn flag_allowed(command: Option<&str>, flag: &str) -> bool {
       )
     },
     | "--session" => command.is_none() || matches!(command, Some(OVERVIEW_COMMAND) | Some(CONVERSATION_COMMAND)),
-    | "--goal" => matches!(command, Some(ANSWER_COMMAND) | Some(MERGE_COMMAND)),
+    | "--goal" => matches!(command, Some(ANSWER_COMMAND) | Some(MERGE_COMMAND) | Some(GOAL_COMMAND)),
     | "--question" | "--text" | "--report" => command == Some(ANSWER_COMMAND),
     | "--pr" | "--until" => command == Some(MERGE_COMMAND),
     | "--revision" => matches!(command, Some(APPROVE_REGISTRATION_COMMAND) | Some(REJECT_REGISTRATION_COMMAND)),
@@ -387,6 +414,13 @@ fn parse_arguments(args: &[String]) -> Result<Invocation, UsageError> {
   if command == CONVERSATION_COMMAND {
     let project = project.ok_or_else(|| UsageError("会話の表示にはプロジェクト名が必要です。".to_owned()))?;
     return Ok(Invocation::Conversation(ConversationOptions { project, session, addr, config }));
+  }
+  if command == GOALS_COMMAND {
+    return Ok(Invocation::Goals(GoalsOptions { addr, config }));
+  }
+  if command == GOAL_COMMAND {
+    let goal_id = require_flag(goal, GOAL_COMMAND, "--goal")?;
+    return Ok(Invocation::Goal(GoalOptions { goal_id, addr, config }));
   }
   if command == DECISIONS_COMMAND {
     let server_id = require_flag(server, DECISIONS_COMMAND, "--server")?;
@@ -505,6 +539,8 @@ fn usage() -> String {
     "  overview                            backend の gRPC から概要を取得して表示します（既定）",
     "  conversation <プロジェクト> [--session <セッション>]",
     "                                      manager の会話を発言の時系列で表示します",
+    "  goals                               backend の gRPC からゴールの一覧を取得して表示します",
+    "  goal --goal <ID>                    backend の gRPC からゴールの詳細を取得して表示します",
     "  answer --server <名前> --project <名前> --question <ID> (--text <本文> | --report completed|unable)",
     "                                      問い合わせへ回答します（--goal でゴールを明示できます）",
     "  merge --server <名前> --project <名前> --goal <ID> --pr <番号> --until prepare|merge",
@@ -595,6 +631,27 @@ async fn fetch_overview(addr: SocketAddr) -> Result<DashboardState, ReadError> {
   let mut request = Request::new(GetOverviewRequest {});
   request.set_timeout(READ_TIMEOUT);
   let response = client.get_overview(request).await.map_err(|status| read_call_error(addr, "概要の取得", status))?;
+  Ok(response.into_inner())
+}
+
+/// backend の `GetGoals` でゴールの一覧を取得する。
+async fn fetch_goals(addr: SocketAddr) -> Result<GetGoalsResponse, ReadError> {
+  let channel = connect(addr).await.map_err(ReadError::Unavailable)?;
+  let mut client = TaktDashServiceClient::new(channel);
+  let mut request = Request::new(GetGoalsRequest {});
+  request.set_timeout(READ_TIMEOUT);
+  let response = client.get_goals(request).await.map_err(|status| read_call_error(addr, "ゴール一覧の取得", status))?;
+  Ok(response.into_inner())
+}
+
+/// backend の `GetGoalDetail` でゴールの詳細を取得する。
+async fn fetch_goal_detail(addr: SocketAddr, goal_id: &str) -> Result<GetGoalDetailResponse, ReadError> {
+  let channel = connect(addr).await.map_err(ReadError::Unavailable)?;
+  let mut client = TaktDashServiceClient::new(channel);
+  let mut request = Request::new(GetGoalDetailRequest { goal_id: goal_id.to_owned() });
+  request.set_timeout(READ_TIMEOUT);
+  let response =
+    client.get_goal_detail(request).await.map_err(|status| read_call_error(addr, "ゴールの取得", status))?;
   Ok(response.into_inner())
 }
 
@@ -814,6 +871,8 @@ fn run_with(
     },
     | Invocation::Write(write) => (write.addr, write.config, Action::Write(write.command)),
     | Invocation::Conversation(options) => return run_conversation(&options, env_addr, stdout, stderr),
+    | Invocation::Goals(options) => return run_goals(&options, env_addr, stdout, stderr),
+    | Invocation::Goal(options) => return run_goal(&options, env_addr, stdout, stderr),
   };
   let addr = match resolve_addr(addr_option.as_deref(), config_option.as_ref(), env_addr, stderr) {
     | Ok(addr) => addr,
@@ -919,6 +978,73 @@ fn run_conversation(
     },
     | Err(ReadError::Call(status)) => {
       let _ = writeln!(stderr, "backend から会話を取得できませんでした（{}）。{}", status.code(), status.message());
+      EXIT_FAILURE
+    },
+  }
+}
+
+/// ゴール一覧の表示を実行する。
+fn run_goals(
+  options: &GoalsOptions,
+  env_addr: Result<String, VarError>,
+  stdout: &mut impl Write,
+  stderr: &mut impl Write,
+) -> i32 {
+  let addr = match resolve_addr(options.addr.as_deref(), options.config.as_ref(), env_addr, stderr) {
+    | Ok(addr) => addr,
+    | Err(code) => return code,
+  };
+  let runtime = match build_runtime(stderr) {
+    | Ok(runtime) => runtime,
+    | Err(code) => return code,
+  };
+  match runtime.block_on(fetch_goals(addr)) {
+    | Ok(response) => {
+      let _ = writeln!(stdout, "{}", render_goals(&response));
+      EXIT_OK
+    },
+    | Err(ReadError::Unavailable(message)) => {
+      let _ = writeln!(stderr, "backend に接続できません。{message}");
+      EXIT_FAILURE
+    },
+    | Err(ReadError::Call(status)) => {
+      let _ =
+        writeln!(stderr, "backend からゴール一覧を取得できませんでした（{}）。{}", status.code(), status.message());
+      EXIT_FAILURE
+    },
+  }
+}
+
+/// ゴール詳細の表示を実行する。
+fn run_goal(
+  options: &GoalOptions,
+  env_addr: Result<String, VarError>,
+  stdout: &mut impl Write,
+  stderr: &mut impl Write,
+) -> i32 {
+  let addr = match resolve_addr(options.addr.as_deref(), options.config.as_ref(), env_addr, stderr) {
+    | Ok(addr) => addr,
+    | Err(code) => return code,
+  };
+  let runtime = match build_runtime(stderr) {
+    | Ok(runtime) => runtime,
+    | Err(code) => return code,
+  };
+  match runtime.block_on(fetch_goal_detail(addr, &options.goal_id)) {
+    | Ok(detail) => {
+      let _ = writeln!(stdout, "{}", render_goal_detail(&detail));
+      EXIT_OK
+    },
+    | Err(ReadError::Unavailable(message)) => {
+      let _ = writeln!(stderr, "backend に接続できません。{message}");
+      EXIT_FAILURE
+    },
+    | Err(ReadError::Call(status)) if status.code() == Code::NotFound => {
+      let _ = writeln!(stderr, "ゴールが見つかりません。{}", status.message());
+      EXIT_FAILURE
+    },
+    | Err(ReadError::Call(status)) => {
+      let _ = writeln!(stderr, "backend からゴールを取得できませんでした（{}）。{}", status.code(), status.message());
       EXIT_FAILURE
     },
   }
@@ -1090,6 +1216,176 @@ fn conversation_speaker_label(speaker: i32) -> &'static str {
     | Ok(proto::v1::ConversationSpeaker::System) => "システム",
     | _ => "不明",
   }
+}
+
+/// ゴールの状態を表示名へ変換する。未知の値は「不明」にする。
+fn goal_status_label(status: i32) -> &'static str {
+  match GoalStatus::try_from(status) {
+    | Ok(GoalStatus::Created) => "作成済み",
+    | Ok(GoalStatus::AwaitingMerge) => "人のマージ待ち",
+    | Ok(GoalStatus::Completed) => "完了",
+    | _ => "不明",
+  }
+}
+
+/// ゴールの実行状態を表示名へ変換する。未知の値は「不明」にする。
+fn execution_status_label(status: i32) -> &'static str {
+  match ExecutionStatus::try_from(status) {
+    | Ok(ExecutionStatus::Active) => "稼働中",
+    | Ok(ExecutionStatus::Paused) => "一時停止中",
+    | Ok(ExecutionStatus::Aborted) => "中止",
+    | _ => "不明",
+  }
+}
+
+/// タスクの状態を表示名へ変換する。未知の値は「不明」にする。
+fn task_status_label(status: i32) -> &'static str {
+  match TaskStatus::try_from(status) {
+    | Ok(TaskStatus::Pending) => "未着手",
+    | Ok(TaskStatus::Running) => "実行中",
+    | Ok(TaskStatus::Completed) => "完了",
+    | Ok(TaskStatus::Failed) => "失敗",
+    | Ok(TaskStatus::Exceeded) => "上限超過",
+    | Ok(TaskStatus::PrFailed) => "PR 失敗",
+    | _ => "不明",
+  }
+}
+
+/// 質問の種類を表示名へ変換する。未知の値は原値のまま返す。
+fn question_kind_label(kind: &str) -> String {
+  match kind {
+    | "question" => "質問".to_owned(),
+    | "operation_request" => "作業の依頼".to_owned(),
+    | "approval" => "承認".to_owned(),
+    | other => other.to_owned(),
+  }
+}
+
+/// 質問の状態を表示名へ変換する。未知の値は原値のまま返す。
+fn question_status_label(status: &str) -> String {
+  match status {
+    | "pending" => "未回答".to_owned(),
+    | "answered" => "回答済み".to_owned(),
+    | "withdrawn" => "取り下げ".to_owned(),
+    | other => other.to_owned(),
+  }
+}
+
+/// 質問への回答（可否）を表示名へ変換する。未知の値は原値のまま返す。
+fn answer_decision_label(decision: &str) -> String {
+  match decision {
+    | "allow" => "許可".to_owned(),
+    | "deny" => "否認".to_owned(),
+    | other => other.to_owned(),
+  }
+}
+
+/// 質問への回答（作業の報告）を表示名へ変換する。未知の値は原値のまま返す。
+fn answer_report_label(report: &str) -> String {
+  match report {
+    | "completed" => "実施した".to_owned(),
+    | "unable" => "対応できない".to_owned(),
+    | other => other.to_owned(),
+  }
+}
+
+/// ゴール一覧の表示内容を日本語の文字列へ組み立てる。
+///
+/// 応答順に1行ずつ、サーバー・プロジェクト・ゴールID・名前・状態・実行状態・タスクの4種の
+/// 件数・マージ待ちの有無・プルリクエストを出す。空の一覧は `join_lines` が「（なし）」にする。
+fn render_goals(response: &GetGoalsResponse) -> String {
+  let lines: Vec<String> = response.goals.iter().map(render_goal_row).collect();
+  join_lines(&lines)
+}
+
+/// ゴール一覧の1行を作る。マージ待ちは `awaiting_merge_at` の有無だけで判定する。
+fn render_goal_row(goal: &Goal) -> String {
+  let counts = goal.task_counts.unwrap_or_default();
+  let merge_wait = if goal.awaiting_merge_at.is_some() { "あり" } else { "なし" };
+  let pull_request = match &goal.pull_request {
+    | Some(pull_request) => format!("#{} {}", pull_request.number, pull_request.url),
+    | None => "なし".to_owned(),
+  };
+  format!(
+    "- {}/{}/{}「{}」状態: {}、実行状態: {}、タスク: 完了{}件・失敗{}件（未着手{}件・実行中{}件）、\
+     マージ待ち: {}、プルリクエスト: {}",
+    goal.server_id,
+    goal.project,
+    goal.goal_id,
+    goal.name,
+    goal_status_label(goal.status),
+    execution_status_label(goal.execution_status),
+    counts.completed,
+    counts.failed,
+    counts.pending,
+    counts.running,
+    merge_wait,
+    pull_request
+  )
+}
+
+/// ゴール詳細の表示内容を日本語の文字列へ組み立てる。
+///
+/// 目的・対象外・受け入れ条件・制約・ブランチ・統合ブランチ・状態・実行状態・作業記録・
+/// 質問と回答・紐づくタスクを出す。空の一覧は「（なし）」にする。
+fn render_goal_detail(detail: &GetGoalDetailResponse) -> String {
+  let work_log: Vec<String> = detail
+    .work_log
+    .iter()
+    .map(|log| format!("- {} {}", format_timestamp(log.recorded_at.as_ref()), log.summary))
+    .collect();
+  let questions: Vec<String> = detail.questions.iter().map(render_goal_question).collect();
+  let tasks: Vec<String> = detail
+    .tasks
+    .iter()
+    .map(|task| {
+      let run_slug = task.run_slug.as_deref().filter(|run_slug| !run_slug.is_empty()).unwrap_or("なし");
+      format!("- {}（{}、run: {}）", task.task_name, task_status_label(task.status), run_slug)
+    })
+    .collect();
+  [
+    format!("ゴール: {}", detail.goal_id),
+    format!("サーバー: {}", detail.server_id),
+    format!("プロジェクト: {}", detail.project),
+    format!("状態: {}", goal_status_label(detail.status)),
+    format!("実行状態: {}", execution_status_label(detail.execution_status)),
+    format!("目的: {}", detail.objective),
+    format!("対象外:\n{}", render_string_items(&detail.out_of_scope)),
+    format!("受け入れ条件:\n{}", render_string_items(&detail.acceptance_criteria)),
+    format!("制約:\n{}", render_string_items(&detail.constraints)),
+    format!("ブランチ: {}", detail.branch),
+    format!("統合ブランチ: {}", detail.integration_branch),
+    format!("作業記録:\n{}", join_lines(&work_log)),
+    format!("質問:\n{}", join_lines(&questions)),
+    format!("タスク:\n{}", join_lines(&tasks)),
+  ]
+  .join("\n")
+}
+
+/// ゴールの質問1件を表示する。回答があれば回答本文を併記する。
+fn render_goal_question(question: &GoalQuestion) -> String {
+  let mut line = format!(
+    "- {}（{}）: {}",
+    question_kind_label(&question.kind),
+    question_status_label(&question.status),
+    question.body
+  );
+  if let Some(answer) = question.answer_text.as_deref() {
+    line.push_str(&format!("/回答: {answer}"));
+  }
+  if let Some(decision) = question.answer_decision.as_deref() {
+    line.push_str(&format!("/回答: {}", answer_decision_label(decision)));
+  }
+  if let Some(report) = question.answer_report.as_deref() {
+    line.push_str(&format!("/回答: {}", answer_report_label(report)));
+  }
+  line
+}
+
+/// 文字列の一覧を箇条書きにし、空の一覧は「（なし）」にする。
+fn render_string_items(items: &[String]) -> String {
+  let lines: Vec<String> = items.iter().map(|item| format!("- {item}")).collect();
+  join_lines(&lines)
 }
 
 /// 判断待ちの一覧を、指定したサーバーとプロジェクトに絞って表示する。
