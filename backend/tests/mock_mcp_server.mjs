@@ -19,7 +19,24 @@
 //     "runs": { "<runSlug>": {"runSlug","currentStep","startedAt","currentStepStartedAt","stepLogs",
 //                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
 //                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
+//     "workflows": { "<workflow名>": ["plan", "implement", ...] },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
+//     "goalDetails": {
+//       "<goalId>": {
+//         "summary": {"id","status","executionStatus","branch","integrationBranch","omissions"},
+//         "objective": "長文",
+//         "outOfScope": ["..."],
+//         "acceptanceCriteria": ["..."],
+//         "constraints": ["..."],
+//         "specifications": { "<notation>": "長文" },
+//         "workLog": [ {"id","recordedAt","summary"} ],
+//         "questions": [ {"id","kind","status","body","options","answer","createdAt"} ],
+//         "omitFields": ["outOfScope"],  // 成功応答から content/items を省く path（応答の省略を再現する）
+//         "malformedFields": { "objective": { "content": 42 } }  // path ごとの生の応答（型不正を再現する）
+//       }
+//     },
+//   実 takt-mcp と同じく、存在しない path は
+//   "Goal read failed: Selected field does not exist" の道具エラーで返す。
 //     "proposals": [ {"revision","repositoryDirectory","summary"} ],
 //     "proposalsByCwd": { "<cwd>": [ {"revision","repositoryDirectory","summary"} ] },
 //     "responses": { "<道具名>": {...} },  // 指定した書き込み道具の応答を丸ごと差し替える
@@ -88,14 +105,63 @@ const paged = (items, key, offsetRaw) => {
   };
 };
 
+// takt 本体の listTaktGoalRecords と同じく、末尾から limit 件を切り出して反転する。
+// offset は「先頭から何件を読み終えたか」で、1ページ目が最新の記録になります。
+const pagedBackward = (items, key, offsetRaw) => {
+  const offset = Number(offsetRaw ?? 0);
+  const end = Math.max(0, items.length - offset);
+  const start = Math.max(0, end - PAGE_SIZE);
+  const page = items.slice(start, end).reverse();
+  const nextOffset = offset + page.length < items.length ? offset + page.length : null;
+  return {
+    [key]: page,
+    collection: key,
+    totalCount: items.length,
+    returnedCount: page.length,
+    omittedCount: items.length - page.length,
+    offset,
+    nextOffset,
+    truncated: nextOffset !== null,
+  };
+};
+
+// takt_get_goal の textOffset / maxBytes によるテキストページ。実契約の既定は 4096 バイト。
+// 実 takt-mcp の sliceUtf8（forward）と同じく、開始を継続バイトの後ろへ進め、
+// 終端を UTF-8 の文字境界へ戻す。文字の途中を nextOffset にしない。
+const textPage = (text, offsetRaw, maxBytesRaw) => {
+  const bytes = Buffer.from(String(text), "utf8");
+  const maxBytes = Number(maxBytesRaw ?? 4096);
+  let start = Math.min(Number(offsetRaw ?? 0), bytes.length);
+  let end = Math.min(bytes.length, start + maxBytes);
+  while (start < end && (bytes[start] & 0xc0) === 0x80) start++;
+  while (end > start && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+  return {
+    content: bytes.subarray(start, end).toString("utf8"),
+    totalBytes: bytes.length,
+    offset: start,
+    returnedBytes: end - start,
+    direction: "forward",
+    truncated: start > 0 || end < bytes.length,
+    nextOffset: end < bytes.length ? end : null,
+  };
+};
+
+// 実 takt-mcp の項目不在（selectGoalValue の throw）と同じ道具エラー。
+const goalFieldMissing = () => ({
+  content: [{ type: "text", text: "Goal read failed: Selected field does not exist" }],
+  isError: true,
+});
+
 // 実契約（schemas.ts の strict スキーマ）に対応する、道具ごとの必須キーと許容キー。
 const TOOL_ARGUMENTS = {
   takt_list_goals: { required: ["cwd"], optional: ["offset", "limit", "view"] },
   takt_list_tasks: { required: ["cwd"], optional: ["offset", "limit", "view", "path"] },
   takt_list_goal_questions: { required: ["cwd", "goalId"], optional: ["offset", "limit"] },
+  takt_list_goal_work_log: { required: ["cwd", "goalId"], optional: ["offset", "limit"] },
   takt_list_standalone_inquiries: { required: ["cwd"], optional: ["offset", "limit"] },
   takt_get_run: { required: ["cwd", "runSlug"], optional: ["offset", "limit", "view", "stepIndex", "instructionId", "report", "maxBytes"] },
-  takt_get_goal: { required: ["cwd", "goalId"], optional: ["path", "offset", "limit"] },
+  takt_get_goal: { required: ["cwd", "goalId"], optional: ["path", "offset", "limit", "recordId", "textOffset", "maxBytes"] },
+  takt_get_workflow: { required: ["cwd", "workflow"], optional: ["offset", "limit"] },
   // 書き込み系。実 takt-mcp（features/mcp/schemas.js ほか）の入力契約に合わせる。
   takt_answer_goal_question: { required: ["cwd", "goalId", "questionId", "answer"], optional: [] },
   takt_list_goal_registration_proposals: { required: ["cwd"], optional: [] },
@@ -186,8 +252,8 @@ const handleToolCall = (name, args) => {
     process.exit(4);
   }
   const isError = new Set(state.isError ?? []);
-  // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug>" の限定キーで対象を絞れる。
-  const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? ""}`;
+  // 道具名単位の指定に加え、"<道具名>:<goalId または runSlug または workflow>" の限定キーで対象を絞れる。
+  const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? args.workflow ?? ""}`;
   if (isError.has(name) || isError.has(scopedKey)) {
     return { content: [{ type: "text", text: `${name} は失敗しました。` }], isError: true };
   }
@@ -200,17 +266,56 @@ const handleToolCall = (name, args) => {
       return asText(paged(state.goals ?? [], "goals", args.offset));
     case "takt_list_tasks":
       return asText(paged(state.tasks ?? [], "tasks", args.offset));
-    case "takt_list_goal_questions":
-      return asText({ goalId: args.goalId, ...paged((state.goalQuestions ?? {})[args.goalId] ?? [], "questions", args.offset) });
+    case "takt_list_goal_questions": {
+      const questions = (state.goalDetails ?? {})[args.goalId]?.questions ?? (state.goalQuestions ?? {})[args.goalId] ?? [];
+      return asText({ goalId: args.goalId, ...paged(questions, "questions", args.offset) });
+    }
+    case "takt_list_goal_work_log": {
+      const workLog = (state.goalDetails ?? {})[args.goalId]?.workLog ?? [];
+      return asText(pagedBackward(workLog, "workLog", args.offset));
+    }
     case "takt_list_standalone_inquiries":
       return asText(paged(state.standaloneInquiries ?? [], "inquiries", args.offset));
     case "takt_get_run":
       return asText(runResponse(state, args));
-    case "takt_get_goal":
+    case "takt_get_goal": {
       if (args.path === "notifications") {
         return asText(paged((state.notifications ?? {})[args.goalId] ?? [], "items", args.offset));
       }
-      return asText({});
+      const detail = (state.goalDetails ?? {})[args.goalId] ?? {};
+      if (args.path === undefined) {
+        return asText({ goal: detail.summary ?? {} });
+      }
+      if ((detail.omitFields ?? []).includes(String(args.path))) {
+        return asText({ goalId: args.goalId, path: args.path });
+      }
+      if (Object.hasOwn(detail.malformedFields ?? {}, String(args.path))) {
+        return asText(detail.malformedFields[String(args.path)]);
+      }
+      if (String(args.path).startsWith("specifications.")) {
+        const notation = String(args.path).slice("specifications.".length);
+        return asText(textPage((detail.specifications ?? {})[notation] ?? "", args.textOffset, args.maxBytes));
+      }
+      const value = detail[args.path];
+      if (Array.isArray(value)) {
+        return asText(paged(value, "items", args.offset));
+      }
+      if (typeof value === "string") {
+        return asText(textPage(value, args.textOffset, args.maxBytes));
+      }
+      if (value === undefined) {
+        return goalFieldMissing();
+      }
+      return asText({ items: value });
+    }
+    case "takt_get_workflow":
+      return asText(
+        paged(
+          ((state.workflows ?? {})[args.workflow] ?? []).map((name) => ({ name })),
+          "steps",
+          args.offset,
+        ),
+      );
     case "takt_answer_goal_question":
       return asText({ goalId: args.goalId, questionId: args.questionId, answer: args.answer });
     case "takt_list_goal_registration_proposals":

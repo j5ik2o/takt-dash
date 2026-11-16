@@ -12,8 +12,11 @@ import {
   type GetActivityResponse,
   type GetConversationRequest,
   type GetConversationResponse,
+  type GetGoalDetailResponse,
   type GetProjectsResponse,
   type GetRunDetailResponse,
+  type GetTaskDetailRequest,
+  type GetTaskDetailResponse,
   type RejectGoalRegistrationRequest,
   type RejectGoalRegistrationResponse,
   type WatchStateRequest,
@@ -65,6 +68,22 @@ export class RunNotFoundError extends Error {
   }
 }
 
+/** 指定した goalId のゴールが backend に存在しないことを表す。ページは 404 を返す。 */
+export class GoalNotFoundError extends Error {
+  constructor(goalId: string) {
+    super(`ゴール「${goalId}」は見つかりません。`);
+    this.name = "GoalNotFoundError";
+  }
+}
+
+/** 指定したプロジェクトとタスク名のタスクが backend に存在しないことを表す。ページは 404 を返す。 */
+export class TaskNotFoundError extends Error {
+  constructor(project: string, taskName: string) {
+    super(`プロジェクト「${project}」のタスク「${taskName}」は見つかりません。`);
+    this.name = "TaskNotFoundError";
+  }
+}
+
 export type BackendClient = {
   getOverview(): Promise<DashboardState>;
   getProjects(): Promise<GetProjectsResponse>;
@@ -73,6 +92,8 @@ export type BackendClient = {
   getActivity(): Promise<GetActivityResponse>;
   getRunDetail(runSlug: string): Promise<GetRunDetailResponse>;
   getConversation(request: GetConversationRequest): Promise<GetConversationResponse>;
+  getGoalDetail(goalId: string): Promise<GetGoalDetailResponse>;
+  getTaskDetail(project: string, taskName: string, goalId?: string): Promise<GetTaskDetailResponse>;
   watchState(): ClientReadableStream<DashboardState>;
   answerInquiry(request: AnswerInquiryRequest): Promise<AnswerInquiryResponse>;
   approveGoalMerge(request: ApproveGoalMergeRequest): Promise<ApproveGoalMergeResponse>;
@@ -96,8 +117,10 @@ type CallOptionsFactory = () => grpc.CallOptions;
 
 type ReadOperations = Pick<
   BackendClient,
-  "getOverview" | "getProjects" | "getPendingDecisions" | "getActivity" | "getRunDetail" | "getConversation"
+  "getOverview" | "getProjects" | "getPendingDecisions" | "getActivity" | "getConversation"
 >;
+
+type DetailOperations = Pick<BackendClient, "getRunDetail" | "getGoalDetail" | "getTaskDetail">;
 
 type WriteOperations = Pick<
   BackendClient,
@@ -179,6 +202,24 @@ function createReadOperations(client: TaktDashServiceClient, readOptions: CallOp
         {},
         readOptions(),
       ),
+    getConversation: (request) =>
+      unary<GetConversationRequest, GetConversationResponse>(
+        (value, metadata, callOptions, callback) =>
+          client.getConversation(value, metadata, callOptions, callback),
+        {
+          project: request.project,
+          sessionId: request.sessionId,
+          afterSeq: request.afterSeq,
+          limit: request.limit,
+        },
+        readOptions(),
+      ),
+  };
+}
+
+// 1件を識別子で引く読み取り。NOT_FOUND と識別子の不一致を、対象ごとの「見つからない」エラーへ写す。
+function createDetailOperations(client: TaktDashServiceClient, readOptions: CallOptionsFactory): DetailOperations {
+  return {
     getRunDetail: async (runSlug) => {
       const detail = await unary<{ runSlug: string }, GetRunDetailResponse>(
         (request, metadata, callOptions, callback) =>
@@ -199,18 +240,50 @@ function createReadOperations(client: TaktDashServiceClient, readOptions: CallOp
       }
       return detail;
     },
-    getConversation: (request) =>
-      unary<GetConversationRequest, GetConversationResponse>(
-        (value, metadata, callOptions, callback) =>
-          client.getConversation(value, metadata, callOptions, callback),
-        {
-          project: request.project,
-          sessionId: request.sessionId,
-          afterSeq: request.afterSeq,
-          limit: request.limit,
-        },
+    getGoalDetail: async (goalId) => {
+      const detail = await unary<{ goalId: string }, GetGoalDetailResponse>(
+        (request, metadata, callOptions, callback) => client.getGoalDetail(request, metadata, callOptions, callback),
+        { goalId },
         readOptions(),
-      ),
+      ).catch((error: unknown) => {
+        if (error instanceof BackendUnavailableError) {
+          throw error;
+        }
+        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
+          throw new GoalNotFoundError(goalId);
+        }
+        throw error;
+      });
+      if (detail.goalId !== goalId) {
+        throw new GoalNotFoundError(goalId);
+      }
+      return detail;
+    },
+    getTaskDetail: async (project, taskName, goalId) => {
+      const request: GetTaskDetailRequest =
+        goalId === undefined ? { project, taskName } : { project, taskName, goalId };
+      const detail = await unary<GetTaskDetailRequest, GetTaskDetailResponse>(
+        (unaryRequest, metadata, callOptions, callback) =>
+          client.getTaskDetail(unaryRequest, metadata, callOptions, callback),
+        request,
+        readOptions(),
+      ).catch((error: unknown) => {
+        if (error instanceof BackendUnavailableError) {
+          throw error;
+        }
+        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
+          throw new TaskNotFoundError(project, taskName);
+        }
+        throw error;
+      });
+      if (detail.project !== project || detail.taskName !== taskName) {
+        throw new TaskNotFoundError(project, taskName);
+      }
+      if (goalId !== undefined && detail.goalId !== goalId) {
+        throw new TaskNotFoundError(project, taskName);
+      }
+      return detail;
+    },
   };
 }
 
@@ -256,6 +329,7 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
 
   return {
     ...createReadOperations(client, readOptions),
+    ...createDetailOperations(client, readOptions),
     watchState: () => client.watchState({} satisfies WatchStateRequest),
     ...createWriteOperations(client, writeOptions),
     close: () =>

@@ -1,0 +1,373 @@
+//! ドメイン上の値を表す型（値オブジェクト）。
+//!
+//! 各型は size → lexical content → syntax → semantics の順で検証し、検証を通らない値からは
+//! 生成できません。生成方法は [`TryFrom`] に統一し、無検査の公開コンストラクタは置きません。
+//! 参照先の存在・一意性・一致のような外部状態を要する制約は、型ではなく既存の境界で検証します。
+
+use std::fmt;
+
+use chrono::NaiveDate;
+
+/// 値オブジェクトの生成に失敗した段と理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainError {
+  /// 長さ・件数・範囲の違反。
+  Size(&'static str),
+  /// 使える文字の種類の違反。
+  Lexical(&'static str),
+  /// 区切りや書式の違反。
+  Syntax(&'static str),
+  /// 意味上の制約の違反。
+  Semantics(&'static str),
+}
+
+impl fmt::Display for DomainError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      | DomainError::Size(label) => write!(formatter, "{label}が空か範囲外です"),
+      | DomainError::Lexical(label) => write!(formatter, "{label}に使用できない文字が含まれています"),
+      | DomainError::Syntax(label) => write!(formatter, "{label}の書式が不正です"),
+      | DomainError::Semantics(label) => write!(formatter, "{label}が意味的に不正です"),
+    }
+  }
+}
+
+impl std::error::Error for DomainError {}
+
+/// 空でなく、空白のみでなく、ASCII 制御文字を含まないことを検証する。
+fn validate_text(label: &'static str, value: &str) -> Result<(), DomainError> {
+  if value.is_empty() {
+    return Err(DomainError::Size(label));
+  }
+  if value.trim().is_empty() || value.chars().any(|character| character.is_ascii_control()) {
+    return Err(DomainError::Lexical(label));
+  }
+  Ok(())
+}
+
+macro_rules! text_value {
+  ($name:ident, $label:literal, $doc:literal) => {
+    #[doc = $doc]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct $name(String);
+
+    impl $name {
+      /// 保持している文字列を返す。
+      pub fn as_str(&self) -> &str {
+        &self.0
+      }
+    }
+
+    impl TryFrom<&str> for $name {
+      type Error = DomainError;
+
+      fn try_from(value: &str) -> Result<Self, Self::Error> {
+        validate_text($label, value)?;
+        Ok($name(value.to_owned()))
+      }
+    }
+
+    impl fmt::Display for $name {
+      fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+      }
+    }
+  };
+}
+
+text_value!(ServerId, "サーバー ID", "takt-mcp のサーバー ID。");
+text_value!(ProjectName, "プロジェクト名", "集約対象のプロジェクト名。");
+text_value!(GoalId, "ゴール ID", "ゴールの識別子。");
+text_value!(TaskName, "タスク名", "タスクの名前。");
+text_value!(InquiryId, "inquiry ID", "問い合わせの識別子。");
+
+/// run のディレクトリ名。パスの区切りや親ディレクトリを指す名前は受け付けません。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RunSlug(String);
+
+impl RunSlug {
+  /// 保持している文字列を返す。
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+}
+
+impl TryFrom<&str> for RunSlug {
+  type Error = DomainError;
+
+  fn try_from(value: &str) -> Result<Self, Self::Error> {
+    validate_text("run slug", value)?;
+    if value.contains('/') || value.contains('\\') || value == "." || value == ".." {
+      return Err(DomainError::Syntax("run slug"));
+    }
+    Ok(RunSlug(value.to_owned()))
+  }
+}
+
+impl fmt::Display for RunSlug {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(&self.0)
+  }
+}
+
+/// プルリクエスト番号。1 以上です。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PullRequestNumber(i64);
+
+impl PullRequestNumber {
+  /// 保持している数値を返す。
+  pub fn get(self) -> i64 {
+    self.0
+  }
+}
+
+impl TryFrom<i64> for PullRequestNumber {
+  type Error = DomainError;
+
+  fn try_from(value: i64) -> Result<Self, Self::Error> {
+    if value <= 0 {
+      return Err(DomainError::Size("プルリクエスト番号"));
+    }
+    Ok(PullRequestNumber(value))
+  }
+}
+
+impl fmt::Display for PullRequestNumber {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}", self.0)
+  }
+}
+
+/// ゴール登録の承認待ちの revision。1 以上です。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RegistrationRevision(i32);
+
+impl RegistrationRevision {
+  /// 保持している数値を返す。
+  pub fn get(self) -> i32 {
+    self.0
+  }
+}
+
+impl TryFrom<i32> for RegistrationRevision {
+  type Error = DomainError;
+
+  fn try_from(value: i32) -> Result<Self, Self::Error> {
+    if value <= 0 {
+      return Err(DomainError::Size("revision"));
+    }
+    Ok(RegistrationRevision(value))
+  }
+}
+
+impl fmt::Display for RegistrationRevision {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}", self.0)
+  }
+}
+
+macro_rules! minutes_value {
+  ($name:ident, $label:literal, $doc:literal) => {
+    #[doc = $doc]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct $name(u32);
+
+    impl $name {
+      /// 保持している分数を `i32` で返す。上限は [`i32::MAX`] です。
+      pub fn get(self) -> i32 {
+        self.0 as i32
+      }
+    }
+
+    impl TryFrom<u32> for $name {
+      type Error = DomainError;
+
+      fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value > i32::MAX as u32 {
+          return Err(DomainError::Size($label));
+        }
+        Ok($name(value))
+      }
+    }
+
+    impl fmt::Display for $name {
+      fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+      }
+    }
+  };
+}
+
+minutes_value!(StaleMinutes, "滞留の閾値", "判断待ちの滞留とみなす分数。");
+minutes_value!(SilentMinutes, "無音の閾値", "ログの無音とみなす分数。");
+
+/// タスクの件数。0 以上 [`i32::MAX`] 以下です。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TaskCount(i32);
+
+impl TaskCount {
+  /// 保持している件数を返す。
+  pub fn get(self) -> i32 {
+    self.0
+  }
+}
+
+impl TryFrom<i64> for TaskCount {
+  type Error = DomainError;
+
+  fn try_from(value: i64) -> Result<Self, Self::Error> {
+    if value < 0 || value > i64::from(i32::MAX) {
+      return Err(DomainError::Size("タスク件数"));
+    }
+    Ok(TaskCount(value as i32))
+  }
+}
+
+impl fmt::Display for TaskCount {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}", self.0)
+  }
+}
+
+/// JST の日次集計の日付。`YYYY-MM-DD` の実在する日付です。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DailyDate(String);
+
+impl DailyDate {
+  /// 保持している文字列を返す。
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+}
+
+impl TryFrom<&str> for DailyDate {
+  type Error = DomainError;
+
+  fn try_from(value: &str) -> Result<Self, Self::Error> {
+    let label = "日次集計の日付";
+    if value.len() != 10 {
+      return Err(DomainError::Size(label));
+    }
+    if !value.bytes().all(|byte| byte.is_ascii_digit() || byte == b'-') {
+      return Err(DomainError::Lexical(label));
+    }
+    let bytes = value.as_bytes();
+    let shape = bytes[4] == b'-'
+      && bytes[7] == b'-'
+      && bytes[..4].iter().all(u8::is_ascii_digit)
+      && bytes[5..7].iter().all(u8::is_ascii_digit)
+      && bytes[8..10].iter().all(u8::is_ascii_digit);
+    if !shape {
+      return Err(DomainError::Syntax(label));
+    }
+    let year = value[..4].parse::<i32>().map_err(|_| DomainError::Syntax(label))?;
+    let month = value[5..7].parse::<u32>().map_err(|_| DomainError::Syntax(label))?;
+    let day = value[8..10].parse::<u32>().map_err(|_| DomainError::Syntax(label))?;
+    NaiveDate::from_ymd_opt(year, month, day).ok_or(DomainError::Semantics(label))?;
+    Ok(DailyDate(value.to_owned()))
+  }
+}
+
+impl From<NaiveDate> for DailyDate {
+  fn from(value: NaiveDate) -> Self {
+    DailyDate(value.format("%Y-%m-%d").to_string())
+  }
+}
+
+impl fmt::Display for DailyDate {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(&self.0)
+  }
+}
+
+/// プルリクエストのマージを承認するときの until の指定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MergeUntil {
+  Prepare,
+  Merge,
+}
+
+impl MergeUntil {
+  /// takt へ渡す文字列を返す。
+  pub fn as_str(self) -> &'static str {
+    match self {
+      | MergeUntil::Prepare => "prepare",
+      | MergeUntil::Merge => "merge",
+    }
+  }
+}
+
+impl TryFrom<&str> for MergeUntil {
+  type Error = DomainError;
+
+  fn try_from(value: &str) -> Result<Self, Self::Error> {
+    validate_text("until", value)?;
+    if !value.chars().all(|character| character.is_ascii_lowercase()) {
+      return Err(DomainError::Lexical("until"));
+    }
+    match value {
+      | "prepare" => Ok(MergeUntil::Prepare),
+      | "merge" => Ok(MergeUntil::Merge),
+      | _ => Err(DomainError::Syntax("until")),
+    }
+  }
+}
+
+impl fmt::Display for MergeUntil {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(self.as_str())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{
+    DailyDate, DomainError, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision,
+    RunSlug, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
+  };
+
+  #[test]
+  fn text_values_reject_empty_and_control_characters() {
+    assert!(matches!(ServerId::try_from(""), Err(DomainError::Size(_))));
+    assert!(matches!(ServerId::try_from("  "), Err(DomainError::Lexical(_))));
+    assert!(matches!(ProjectName::try_from("a\n"), Err(DomainError::Lexical(_))));
+    assert!(matches!(GoalId::try_from("g\u{7f}"), Err(DomainError::Lexical(_))));
+    assert!(matches!(TaskName::try_from("\u{0}"), Err(DomainError::Lexical(_))));
+    assert!(matches!(InquiryId::try_from(""), Err(DomainError::Size(_))));
+    assert_eq!(ServerId::try_from("mac-mini").expect("有効です").as_str(), "mac-mini");
+  }
+
+  #[test]
+  fn run_slug_rejects_path_components() {
+    assert!(matches!(RunSlug::try_from("../x"), Err(DomainError::Syntax(_))));
+    assert!(matches!(RunSlug::try_from("."), Err(DomainError::Syntax(_))));
+    assert_eq!(RunSlug::try_from("20261116-run").expect("有効です").as_str(), "20261116-run");
+  }
+
+  #[test]
+  fn numbers_reject_out_of_range_values() {
+    assert!(matches!(PullRequestNumber::try_from(0), Err(DomainError::Size(_))));
+    assert!(matches!(RegistrationRevision::try_from(-1), Err(DomainError::Size(_))));
+    assert!(matches!(StaleMinutes::try_from(i32::MAX as u32 + 1), Err(DomainError::Size(_))));
+    assert!(matches!(SilentMinutes::try_from(i32::MAX as u32 + 1), Err(DomainError::Size(_))));
+    assert!(matches!(TaskCount::try_from(-1), Err(DomainError::Size(_))));
+    assert_eq!(TaskCount::try_from(3).expect("有効です").get(), 3);
+  }
+
+  #[test]
+  fn daily_date_validates_each_stage() {
+    assert!(matches!(DailyDate::try_from("2026-1-1"), Err(DomainError::Size(_))));
+    assert!(matches!(DailyDate::try_from("2026/01/01"), Err(DomainError::Lexical(_))));
+    assert!(matches!(DailyDate::try_from("20260-1-01"), Err(DomainError::Syntax(_))));
+    assert!(matches!(DailyDate::try_from("2026-02-30"), Err(DomainError::Semantics(_))));
+    assert_eq!(DailyDate::try_from("2024-02-29").expect("有効です").as_str(), "2024-02-29");
+  }
+
+  #[test]
+  fn merge_until_accepts_only_known_lowercase_values() {
+    assert!(matches!(MergeUntil::try_from(""), Err(DomainError::Size(_))));
+    assert!(matches!(MergeUntil::try_from("Prepare"), Err(DomainError::Lexical(_))));
+    assert!(matches!(MergeUntil::try_from("unknown"), Err(DomainError::Syntax(_))));
+    assert_eq!(MergeUntil::try_from("prepare").expect("有効です").as_str(), "prepare");
+  }
+}

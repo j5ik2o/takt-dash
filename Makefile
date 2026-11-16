@@ -1,4 +1,4 @@
-.PHONY: fmt clippy test typecheck lint proto-gen proto-check done
+.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-prod e2e-skip-only-check
 
 fmt:
 	cargo +nightly fmt --all -- --check
@@ -9,6 +9,7 @@ clippy:
 test:
 	cargo test --workspace
 	npm --prefix frontend/web run test
+	python3 tools/repo-gate/repo_gate_test.py
 
 typecheck:
 	npm --prefix frontend/web run typecheck
@@ -27,6 +28,24 @@ proto-check:
 	$(MAKE) proto-gen
 	git diff --exit-code -- frontend/web/src/proto
 
+coverage:
+	@echo "== backend (cargo-llvm-cov) =="
+	@cargo llvm-cov --version > /dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+	rustup component add llvm-tools-preview
+	cargo llvm-cov -p takt-dash-backend --ignore-filename-regex '(^|/)(target|tests)/|(^|/)tests\.rs$$|_tests\.rs$$|/\.cargo/registry/|/rustc/'
+	@echo "== frontend/cli (cargo-llvm-cov) =="
+	cargo llvm-cov -p takt-dash-cli --ignore-filename-regex '(^|/)(target|tests)/|(^|/)tests\.rs$$|_tests\.rs$$|/\.cargo/registry/|/rustc/'
+	@echo "== frontend/web (c8) =="
+	test -d frontend/web/node_modules || npm --prefix frontend/web ci
+	cd frontend/web && npx --yes c8@12.0.0 --all --src . \
+		--include 'app/**/*.{ts,tsx}' --include 'src/**/*.{ts,tsx}' \
+		--exclude 'src/proto/**' --exclude '**/*.test.ts' --exclude 'test/**' --exclude '**/*.d.ts' \
+		--reporter text --extension .ts --extension .tsx npm run test
+	@echo "== tools/repo-gate (coverage.py) =="
+	mkdir -p target/coverage
+	python3 -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py' tools/repo-gate/repo_gate_test.py
+	python3 -m coverage report --data-file=target/coverage/.coverage --show-missing
+
 done:
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
 	$(MAKE) proto-check
@@ -35,3 +54,19 @@ done:
 	$(MAKE) test
 	$(MAKE) typecheck
 	$(MAKE) lint
+
+e2e-skip-only-check:
+	! grep -RInE 'test\.(skip|only)([^A-Za-z0-9_]|$$)' e2e/tests e2e/smoke
+
+e2e:
+	test -d e2e/node_modules || npm --prefix e2e ci
+	test -d frontend/web/node_modules || npm --prefix frontend/web ci
+	cargo build -p takt-dash-backend
+	npm --prefix frontend/web run build
+	$(MAKE) e2e-skip-only-check
+	npm --prefix e2e test
+
+e2e-prod:
+	test -d e2e/node_modules || npm --prefix e2e ci
+	$(MAKE) e2e-skip-only-check
+	npm --prefix e2e run test:prod

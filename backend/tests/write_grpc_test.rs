@@ -16,6 +16,7 @@ use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::{json, Value};
 use takt_dash_backend::{
+  domain::{GoalId, InquiryId},
   model::{EventKind, ExecutionStatus, InquiryEntry, InquiryKind, ProjectSnapshot},
   poller::Poller,
   takt_dash::v1::{
@@ -50,8 +51,11 @@ async fn pending_decision_inquiry_id_is_the_identifier_used_for_answering() {
       goals:         vec![],
       tasks:         vec![],
       inquiries:     vec![InquiryEntry {
-        inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-        goal_id:    Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
+        inquiry_id: InquiryId::try_from("8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e")
+          .expect("テストの inquiry ID は有効です"),
+        goal_id:    Some(
+          GoalId::try_from("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11").expect("テストのゴール ID は有効です"),
+        ),
         kind:       InquiryKind::Question,
         body:       "続けてよいですか".to_owned(),
         options:    vec!["はい".to_owned(), "いいえ".to_owned()],
@@ -116,8 +120,10 @@ async fn answered_inquiry_is_absent_from_pending_decisions() {
       goals:         vec![],
       tasks:         vec![],
       inquiries:     vec![InquiryEntry {
-        inquiry_id: "answered-id".to_owned(),
-        goal_id:    Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
+        inquiry_id: InquiryId::try_from("answered-id").expect("テストの inquiry ID は有効です"),
+        goal_id:    Some(
+          GoalId::try_from("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11").expect("テストのゴール ID は有効です"),
+        ),
         kind:       InquiryKind::Question,
         body:       "回答済み".to_owned(),
         options:    vec![],
@@ -358,6 +364,34 @@ async fn approve_goal_registration_sends_the_revision() {
   assert_eq!(calls[0]["revision"], json!(3), "revision は正整数で渡します");
 
   server.stop().await;
+}
+
+#[tokio::test]
+async fn approve_goal_registration_rejects_control_characters_in_the_target_without_calling_takt() {
+  for (server_id, project) in [("mac-mini\n", "takt-dash"), ("mac-mini", "takt-dash\u{0}")] {
+    let harness = harness_with(json!({}));
+    let server = start_server(&harness).await;
+    let mut client = client(server.address).await;
+
+    let status = client
+      .approve_goal_registration(ApproveGoalRegistrationRequest {
+        server_id: server_id.to_owned(),
+        project:   project.to_owned(),
+        revision:  3,
+      })
+      .await
+      .expect_err("制御文字を含む server_id / project は拒否されます")
+      .code();
+
+    assert_eq!(
+      status,
+      Code::InvalidArgument,
+      "server_id={server_id:?} project={project:?} は入力の誤りとして拒否します"
+    );
+    assert!(calls_named(&harness, "takt_approve_goal_registration").is_empty(), "入力の誤りでは takt を呼びません");
+
+    server.stop().await;
+  }
 }
 
 #[tokio::test]
@@ -1027,8 +1061,8 @@ fn snapshot_with(inquiries: Vec<InquiryEntry>) -> ProjectSnapshot {
 /// ゴールに属する未回答の問い合わせ1件。
 fn inquiry_entry(inquiry_id: &str, goal_id: &str, kind: InquiryKind) -> InquiryEntry {
   InquiryEntry {
-    inquiry_id: inquiry_id.to_owned(),
-    goal_id: Some(goal_id.to_owned()),
+    inquiry_id: InquiryId::try_from(inquiry_id).expect("テストの inquiry ID は有効です"),
+    goal_id: Some(GoalId::try_from(goal_id).expect("テストのゴール ID は有効です")),
     kind,
     body: "確認をお願いします".to_owned(),
     options: vec!["はい".to_owned(), "いいえ".to_owned()],
