@@ -1,4 +1,6 @@
-.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-prod e2e-skip-only-check
+.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-prod e2e-skip-only-check prod-check
+
+BASE_URL ?= http://127.0.0.1:3000
 
 fmt:
 	cargo +nightly fmt --all -- --check
@@ -75,3 +77,6 @@ e2e-prod:
 	test -d e2e/node_modules || npm --prefix e2e ci
 	$(MAKE) e2e-skip-only-check
 	npm --prefix e2e run test:prod
+
+prod-check:
+	python3 tools/prod-check/prod_check.py --base-url $(BASE_URL) $(if $(WITH_E2E),--with-e2e,)
