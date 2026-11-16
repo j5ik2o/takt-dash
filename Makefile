@@ -1,4 +1,4 @@
-.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done
+.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e
 
 fmt:
 	cargo +nightly fmt --all -- --check
@@ -53,3 +53,11 @@ done:
 	$(MAKE) test
 	$(MAKE) typecheck
 	$(MAKE) lint
+
+e2e:
+	test -d e2e/node_modules || npm --prefix e2e ci
+	test -d frontend/web/node_modules || npm --prefix frontend/web ci
+	cargo build -p takt-dash-backend
+	npm --prefix frontend/web run build
+	! grep -RInE 'test\.(skip|only)([^A-Za-z0-9_]|$$)' e2e/tests
+	npm --prefix e2e test

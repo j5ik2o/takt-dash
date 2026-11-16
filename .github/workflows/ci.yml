@@ -30,6 +30,22 @@ jobs:
       - run: npm ci
       - run: node scripts/aislop-check-bootstrap.mjs check
 
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "36.2"
+      - run: make e2e
+
   coverage:
     runs-on: ubuntu-latest
     continue-on-error: true
