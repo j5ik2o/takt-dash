@@ -1,14 +1,16 @@
 import type { ReactElement } from "react";
 import type { GetRunDetailResponse } from "../proto/taktdash";
 import { formatClock, formatDateTime, formatDuration } from "../state/format";
+import { RunContentToggle } from "./run-content-toggle";
 
 type RunDetailContentProps = {
   detail: GetRunDetailResponse;
   now: Date;
 };
 
-// run 詳細は takt_get_run で取得できる範囲だけを表示する（order.md:27）。
-// ログは末尾（logTail）だけを示し、JSONL の生ログは表示しない。
+// run 詳細は状態ストアと run の保存場所から backend が組み立てた範囲だけを表示する。
+// ログは末尾（logTail）だけを示し、JSONL の生ログは表示しない。レポートと指示書は一覧だけを
+// 描画し、本文は利用者が項目を開いたときに RunContentToggle が取得する。
 export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactElement {
   const elapsed =
     detail.startedAt !== undefined ? formatDuration((now.getTime() - detail.startedAt.getTime()) / 1000) : undefined;
@@ -102,7 +104,11 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
         <h2 className="sec" id="h-log">
           ログの末尾
         </h2>
-        <pre className="log-tail">{detail.logTail}</pre>
+        {detail.logsRemoved ? (
+          <p className="note">ログは残っていません。run の保存場所が掃除されたため、画面はステップとログを表示できません。</p>
+        ) : (
+          <pre className="log-tail">{detail.logTail}</pre>
+        )}
       </section>
 
       <section aria-labelledby="h-reports">
@@ -118,7 +124,7 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
                 <p className="rname">
                   {report.filename}（{report.sizeBytes} バイト）
                 </p>
-                <pre className="rbody">{report.content}</pre>
+                <RunContentToggle runSlug={detail.runSlug} target={{ kind: "report", filename: report.filename }} />
               </li>
             ))}
           </ul>
@@ -140,7 +146,10 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
                   <span>{instruction.state}</span>
                   <span>{instruction.issuedAt ? formatDateTime(instruction.issuedAt) : "発行時刻は不明です。"}</span>
                 </div>
-                <p>{instruction.content}</p>
+                <RunContentToggle
+                  runSlug={detail.runSlug}
+                  target={{ kind: "instruction", instructionId: instruction.instructionId }}
+                />
               </li>
             ))}
           </ul>

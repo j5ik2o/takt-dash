@@ -4,12 +4,17 @@
 //! 返すため、step の記録と現在ステップの開始はこのモジュールの集計に積み上げ、読むたびに
 //! 先頭から数え直しません。集計の規則は takt_get_run（takt の `readSessionPage`）と同じです。
 //!
-//! 読み取り層は同期の関数なので、非同期の文脈からは [`read_run`] を通して `spawn_blocking`
+//! 読み取り層は同期の関数なので、非同期の文脈からは [`read_run`] などを通して `spawn_blocking`
 //! の中で呼びます。
+//!
+//! 定期読み取りの取っ手は本体ログを先頭から読みます。run 詳細の取っ手は
+//! [`InitialRead::Tail`] で末尾の一定量から読み始めます。そのため、本体ログが上限より大きい run を
+//! 初めて開いたときは、ステップの記録と現在ステップの実行回数が末尾の範囲に含まれる分だけに
+//! なります。読み位置を持った後は、どちらの取っ手も追記分だけを読みます。
 
 use std::{
   borrow::Borrow,
-  collections::BTreeMap,
+  collections::{BTreeMap, VecDeque},
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
 };
@@ -18,9 +23,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::{
-  domain::RunSlug,
+  domain::{InstructionId, ReportFilename, RunSlug},
   model::{ReportEntry, RunEntry, RunStatus, RunStepEntry, StepLogEntry, TaskEntry},
-  run_log::{MetaRead, RunLocation, RunLogReader},
+  run_log::{self, ContentRead, InitialRead, Instruction, InstructionsRead, MetaRead, RunLocation, RunLogReader},
 };
 
 /// takt が既定で worktree を置く、プロジェクトの親ディレクトリの下の名前。
@@ -28,6 +33,8 @@ const WORKTREES_DIRECTORY: &str = "takt-worktrees";
 /// 1プロジェクトで集計を保持する run の上限。takt の並列度（サーバーあたり数件）に対して十分に
 /// 大きく、run 詳細を開いた run が増え続けても保持量が上限で止まるようにします。
 const MAX_TRACKED_RUNS: usize = 32;
+/// ログの末尾として保持する記録の件数。
+const LOG_TAIL_RECORDS: usize = 20;
 
 /// run を保存場所から読めなかった理由。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -55,9 +62,14 @@ pub struct RunLogView {
   pub start_time: Option<DateTime<Utc>>,
   pub current_step_started_at: Option<DateTime<Utc>>,
   pub current_step_execution_count: Option<i32>,
+  /// `meta.json` の task（タスクの本文）。
+  pub task_text: Option<String>,
+  /// この読み取りでディスクから読んだ本体ログのバイト数。
+  pub body_log_bytes_read: u64,
   completions: Vec<StepCompletion>,
   latest_log_update: Option<DateTime<Utc>>,
   reports: Vec<ReportEntry>,
+  log_tail: Vec<String>,
 }
 
 impl RunLogView {
@@ -108,6 +120,16 @@ impl RunLogView {
       .collect()
   }
 
+  /// `reports/` の下のレポートの一覧（名前と大きさ）。
+  pub fn reports(&self) -> &[ReportEntry] {
+    &self.reports
+  }
+
+  /// 本体ログの末尾の記録を「時刻 種類 ステップ」の行にして、古い順に改行で連結したもの。
+  pub fn log_tail(&self) -> String {
+    self.log_tail.join("\n")
+  }
+
   /// run の開始時刻を決める。meta.json の startTime を使い、無ければタスクの開始時刻を使います。
   /// 一覧と詳細はこの1か所を通り、開始時刻とそれに落ちる最終ログ時刻が食い違わないようにします。
   pub fn started_at(&self, task: Option<&TaskEntry>) -> Option<DateTime<Utc>> {
@@ -154,17 +176,28 @@ struct StepStart {
 /// 1つの run の集計。本体ログの読み取り位置もここに持ちます。
 #[derive(Debug)]
 struct RunProgress {
-  reader:      RunLogReader,
+  reader:       RunLogReader,
+  /// 読み位置を持たない本体ログの読み始め。末尾から読む集計は、読み直しのときに自分で初期化します。
+  initial_read: InitialRead,
   /// 最初の `workflow_start` を読むまでは記録を数えない（takt と同じ）。
-  active:      bool,
-  completions: Vec<StepCompletion>,
-  starts:      Vec<StepStart>,
-  last_read:   u64,
+  active:       bool,
+  completions:  Vec<StepCompletion>,
+  starts:       Vec<StepStart>,
+  log_tail:     VecDeque<String>,
+  last_read:    u64,
 }
 
 impl RunProgress {
-  fn new(reader: RunLogReader) -> Self {
-    RunProgress { reader, active: false, completions: Vec::new(), starts: Vec::new(), last_read: 0 }
+  fn new(project_cwd: PathBuf, worktrees_root: PathBuf, initial_read: InitialRead) -> Self {
+    RunProgress {
+      reader: RunLogReader::with_initial_read(project_cwd, worktrees_root, initial_read),
+      initial_read,
+      active: false,
+      completions: Vec::new(),
+      starts: Vec::new(),
+      log_tail: VecDeque::new(),
+      last_read: 0,
+    }
   }
 
   fn read(&mut self, run_slug: &RunSlug) -> Result<RunLogView, RunReadFailure> {
@@ -198,10 +231,23 @@ impl RunProgress {
     let current_iteration = meta.current_iteration.map(|value| meta_i32(value, "currentIteration")).transpose()?;
     let phase = meta.phase.map(|value| meta_i32(value, "phase")).transpose()?;
 
-    // 読み取り層はファイルの縮小や置き換えで位置を 0 に戻す。そのときは先頭の workflow_start で
-    // 集計が初期化されるため、ここで集計を消す必要はない。
-    for record in self.reader.read_body_log(&run_dir).records {
-      self.ingest(&record);
+    // 読み取り層はファイルの縮小や置き換えで読み位置を捨て、読み直す。先頭から読む集計は、先頭の
+    // workflow_start で初期化される。末尾から読む集計は workflow_start を読まないことがあるため、
+    // 読み直したときは記録を取り込む前に自分で初期化する。本体ログが複数ある run でも、どれかを
+    // 読み直せば集計全体を初期化する。
+    let body_log = self.reader.read_body_log(&run_dir);
+    if matches!(self.initial_read, InitialRead::Tail(_)) && body_log.restarted {
+      self.active = false;
+      self.completions.clear();
+      self.starts.clear();
+      self.log_tail.clear();
+    }
+    // 末尾から読み始めた場合は、範囲より前にある workflow_start を読めないため、ここから数える。
+    if body_log.skipped_head {
+      self.active = true;
+    }
+    for record in &body_log.records {
+      self.ingest(record);
     }
     let (current_step_started_at, current_step_execution_count) =
       self.current_step_start(meta.current_step.as_deref(), meta.current_iteration, meta.workflow.as_deref());
@@ -214,6 +260,8 @@ impl RunProgress {
       start_time,
       current_step_started_at,
       current_step_execution_count,
+      task_text: meta.task,
+      body_log_bytes_read: body_log.bytes_read,
       completions: self.completions.clone(),
       latest_log_update: self.reader.latest_log_update(&run_dir),
       reports: self
@@ -226,10 +274,15 @@ impl RunProgress {
           size_bytes: i64::try_from(report.size_bytes).unwrap_or(i64::MAX),
         })
         .collect(),
+      log_tail: self.log_tail.iter().cloned().collect(),
     })
   }
 
   fn ingest(&mut self, record: &Value) {
+    if record.get("type").and_then(Value::as_str) == Some("workflow_start") {
+      self.log_tail.clear();
+    }
+    self.push_log_tail(record);
     match record.get("type").and_then(Value::as_str) {
       | Some("workflow_start") => {
         self.active = true;
@@ -240,6 +293,24 @@ impl RunProgress {
       | Some("step_complete") if self.active => self.completions.push(StepCompletion::from_record(record)),
       | _ => {},
     }
+  }
+
+  /// 記録を「時刻 種類 ステップ」の1行にしてログの末尾へ足す。無い部分は省き、種類の無い記録は
+  /// 足しません。
+  fn push_log_tail(&mut self, record: &Value) {
+    let Some(kind) = record.get("type").and_then(Value::as_str) else {
+      return;
+    };
+    let line =
+      [record.get("timestamp").and_then(Value::as_str), Some(kind), record.get("step").and_then(Value::as_str)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if self.log_tail.len() == LOG_TAIL_RECORDS {
+      self.log_tail.pop_front();
+    }
+    self.log_tail.push_back(line);
   }
 
   /// 現在ステップの開始時刻と実行回数を、takt_get_run と同じ規則で求める。
@@ -341,16 +412,27 @@ impl StepStart {
 pub struct ProjectRunLogs {
   project_cwd:    PathBuf,
   worktrees_root: PathBuf,
+  initial_read:   InitialRead,
   runs:           BTreeMap<RunSlug, RunProgress>,
   read_sequence:  u64,
 }
 
+/// takt が既定で worktree を置く場所（`<cwd>/../takt-worktrees`）。
+fn worktrees_root(project_cwd: &Path) -> PathBuf {
+  project_cwd.join("..").join(WORKTREES_DIRECTORY)
+}
+
 impl ProjectRunLogs {
-  /// プロジェクトの cwd から作る。worktree の置き場は takt
+  /// プロジェクトの cwd から、本体ログを先頭から読む集計を作る。worktree の置き場は takt
   /// の既定（`<cwd>/../takt-worktrees`）です。
   pub fn new(project_cwd: PathBuf) -> Self {
-    let worktrees_root = project_cwd.join("..").join(WORKTREES_DIRECTORY);
-    ProjectRunLogs { project_cwd, worktrees_root, runs: BTreeMap::new(), read_sequence: 0 }
+    Self::with_initial_read(project_cwd, InitialRead::Start)
+  }
+
+  /// 読み位置を持たない本体ログの読み始めを指定して集計を作る。
+  pub fn with_initial_read(project_cwd: PathBuf, initial_read: InitialRead) -> Self {
+    let worktrees_root = worktrees_root(&project_cwd);
+    ProjectRunLogs { project_cwd, worktrees_root, initial_read, runs: BTreeMap::new(), read_sequence: 0 }
   }
 
   /// run を読み、前回の続きを集計へ足して現在の状態を返す。
@@ -360,7 +442,7 @@ impl ProjectRunLogs {
     let progress = self
       .runs
       .entry(run_slug.clone())
-      .or_insert_with(|| RunProgress::new(RunLogReader::new(self.project_cwd.clone(), self.worktrees_root.clone())));
+      .or_insert_with(|| RunProgress::new(self.project_cwd.clone(), self.worktrees_root.clone(), self.initial_read));
     progress.last_read = sequence;
     let view = progress.read(run_slug);
     self.evict_least_recently_read();
@@ -395,15 +477,24 @@ pub fn run_log_handle(project_cwd: PathBuf) -> RunLogHandle {
 /// プロジェクトごとの集計の取っ手と、それぞれを作ったときの cwd。
 ///
 /// 取っ手は作ったときの cwd の保存場所だけを読むため、cwd が変わったプロジェクトは作り直します。
-/// Poller と GetRunDetail のサービスは、それぞれ自分の表を持ちます。
+/// Poller と GetRunDetail のサービスは、それぞれ自分の表を持ちます。既定の表は本体ログを先頭から
+/// 読み、run 詳細の表は [`RunLogHandles::with_initial_read`] で末尾から読みます。
 #[derive(Debug)]
 pub struct RunLogHandles<K> {
-  handles: BTreeMap<K, (PathBuf, RunLogHandle)>,
+  handles:      BTreeMap<K, (PathBuf, RunLogHandle)>,
+  initial_read: InitialRead,
 }
 
 impl<K> Default for RunLogHandles<K> {
   fn default() -> Self {
-    RunLogHandles { handles: BTreeMap::new() }
+    Self::with_initial_read(InitialRead::Start)
+  }
+}
+
+impl<K> RunLogHandles<K> {
+  /// 作る取っ手が、読み位置を持たない本体ログを `initial_read` に従って読む表を作る。
+  pub fn with_initial_read(initial_read: InitialRead) -> Self {
+    RunLogHandles { handles: BTreeMap::new(), initial_read }
   }
 }
 
@@ -413,7 +504,7 @@ impl<K: Ord + Clone> RunLogHandles<K> {
     match self.handles.get(key) {
       | Some((known_cwd, handle)) if known_cwd == cwd => handle.clone(),
       | _ => {
-        let handle = run_log_handle(cwd.to_path_buf());
+        let handle = Arc::new(Mutex::new(ProjectRunLogs::with_initial_read(cwd.to_path_buf(), self.initial_read)));
         self.handles.insert(key.clone(), (cwd.to_path_buf(), handle.clone()));
         handle
       },
@@ -460,4 +551,54 @@ pub async fn retain_runs(handle: &RunLogHandle, run_slugs: Vec<RunSlug>) {
   if let Err(error) = result {
     tracing::warn!(error = %error, "run の集計の整理を完了できませんでした。");
   }
+}
+
+/// 別スレッドで run の場所を解決し、`reports/` の下のレポートの本文を先頭から `max_bytes`
+/// まで読む。
+pub async fn read_report_content(
+  project_cwd: PathBuf,
+  run_slug: RunSlug,
+  filename: ReportFilename,
+  max_bytes: u64,
+) -> Result<ContentRead, RunReadFailure> {
+  tokio::task::spawn_blocking(move || {
+    let reader = RunLogReader::new(project_cwd.clone(), worktrees_root(&project_cwd));
+    match reader.resolve(&run_slug) {
+      | RunLocation::Found(run_dir) => Ok(run_log::read_report(&run_dir, &filename, max_bytes)),
+      | RunLocation::Missing => Err(RunReadFailure::Missing),
+      | RunLocation::NotListed => Err(RunReadFailure::NotListed),
+      | RunLocation::Unreadable(reason) => Err(RunReadFailure::Unreadable(reason)),
+      | RunLocation::Rejected(reason) => Err(RunReadFailure::Rejected(reason)),
+    }
+  })
+  .await
+  .map_err(|error| RunReadFailure::Unreadable(format!("読み取りのスレッドが終了しました: {error}")))?
+}
+
+/// 別スレッドで、プロジェクト側の `interventions.jsonl` から run の指示書を読む。
+pub async fn read_run_instructions(
+  project_cwd: PathBuf,
+  run_slug: RunSlug,
+) -> Result<Vec<Instruction>, RunReadFailure> {
+  tokio::task::spawn_blocking(move || match run_log::read_instructions(&project_cwd, &run_slug) {
+    | InstructionsRead::Found(instructions) => Ok(instructions),
+    | InstructionsRead::Unreadable(reason) => Err(RunReadFailure::Unreadable(reason)),
+  })
+  .await
+  .map_err(|error| RunReadFailure::Unreadable(format!("読み取りのスレッドが終了しました: {error}")))?
+}
+
+/// 別スレッドで、プロジェクト側の `interventions.jsonl` から指定した ID の指示書の本文を、先頭から
+/// `max_bytes` まで読む。
+pub async fn read_instruction_body(
+  project_cwd: PathBuf,
+  run_slug: RunSlug,
+  instruction_id: InstructionId,
+  max_bytes: u64,
+) -> Result<ContentRead, RunReadFailure> {
+  tokio::task::spawn_blocking(move || {
+    run_log::read_instruction_content(&project_cwd, &run_slug, instruction_id, max_bytes)
+  })
+  .await
+  .map_err(|error| RunReadFailure::Unreadable(format!("読み取りのスレッドが終了しました: {error}")))
 }

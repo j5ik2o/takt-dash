@@ -11,7 +11,8 @@ use serde_json::json;
 use takt_dash_backend::{
   domain::{RunSlug, TaskName},
   model::{RunStatus, TaskEntry, TaskStatus},
-  run_progress::{ProjectRunLogs, RunReadFailure},
+  run_log::InitialRead,
+  run_progress::{ProjectRunLogs, RunLogHandles, RunReadFailure},
 };
 
 const WORKFLOW: &str = "development-core";
@@ -285,4 +286,135 @@ fn the_least_recently_read_aggregate_is_dropped_beyond_the_limit() {
 
   assert_eq!(step_names(&mut logs, "r32"), vec!["plan".to_owned()], "最近読んだ run の集計は残ります");
   assert_eq!(step_names(&mut logs, "r0"), vec!["PLAN".to_owned()], "33 件目を読んだときに最も古い r0 を捨てます");
+}
+
+/// 計画が決めた、run 詳細の初回に読む本体ログの末尾の上限（1 MiB）。
+const TAIL_BYTES: u64 = 1024 * 1024;
+const LARGE_BODY_LOG_BYTES: u64 = 9 * 1024 * 1024;
+
+/// 先頭付近に head-marker、9 MiB の集計対象外の record を挟んで末尾に tail-marker の step_complete
+/// を 持つ実行中の run r1 を作る。
+fn large_run(project: &Project) -> RunFixture {
+  let fixture = project.fixture(&["r1"]);
+  fixture.write_meta("r1", &running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    workflow_start_record(WORKFLOW),
+    step_complete_record("head-marker", "architect", 1, "2026-11-13T09:01:00Z"),
+  ]);
+  append_filler_records(&fixture, "r1", LARGE_BODY_LOG_BYTES);
+  fixture.append_records("r1", &[step_complete_record("tail-marker", "coder", 1, "2026-11-13T09:30:00Z")]);
+  fixture
+}
+
+fn read_with(handles: &mut RunLogHandles<String>, project: &Project) -> takt_dash_backend::run_progress::RunLogView {
+  let handle = handles.handle_for(&"takt-dash".to_owned(), &project.cwd);
+  let mut logs = handle.lock().expect("集計を取得できます");
+  logs.read(&run_slug("r1")).expect("run を読めます")
+}
+
+fn names(view: &takt_dash_backend::run_progress::RunLogView) -> Vec<String> {
+  view.step_logs().into_iter().map(|log| log.step_name).collect()
+}
+
+#[test]
+fn a_tail_handle_reads_at_most_the_tail_bytes_of_a_large_body_log_on_the_first_read() {
+  // 末尾読みの取っ手は、読み位置を持たない初回に本体ログの末尾 1 MiB 以内だけを読み、先頭付近の
+  // head-marker を集計しない。途中から読み始めても集計を始め、tail-marker を集計する。
+  let project = Project::new();
+  let fixture = large_run(&project);
+  let size = std::fs::metadata(fixture.body_log("r1")).expect("本体ログの大きさを読めます").len();
+  assert!(size > LARGE_BODY_LOG_BYTES, "fixture の本体ログは 9 MiB を超えます: {size}");
+  let mut handles = RunLogHandles::with_initial_read(InitialRead::Tail(TAIL_BYTES));
+
+  let view = read_with(&mut handles, &project);
+
+  assert!(view.body_log_bytes_read <= TAIL_BYTES, "初回に読んだのは末尾の上限以内です: {}", view.body_log_bytes_read);
+  assert!(view.body_log_bytes_read > 0, "末尾の範囲は読みます");
+  assert_eq!(names(&view), vec!["tail-marker".to_owned()]);
+}
+
+#[test]
+fn a_tail_handle_reads_only_the_appended_bytes_on_the_next_read() {
+  // 末尾読みの取っ手も、2回目は前回の続き（追記した分）だけを読み、集計に積み上げる。
+  let project = Project::new();
+  let fixture = large_run(&project);
+  let mut handles = RunLogHandles::with_initial_read(InitialRead::Tail(TAIL_BYTES));
+  read_with(&mut handles, &project);
+  let appended = step_complete_record("appended", "coder", 2, "2026-11-13T09:40:00Z");
+  let appended_bytes = appended.to_string().len() as u64 + 1;
+  fixture.append_records("r1", &[appended]);
+
+  let view = read_with(&mut handles, &project);
+
+  assert_eq!(view.body_log_bytes_read, appended_bytes, "2回目に読むのは追記した1行だけです");
+  assert_eq!(names(&view), vec!["tail-marker".to_owned(), "appended".to_owned()]);
+}
+
+#[test]
+fn the_default_handle_still_reads_the_body_log_from_the_beginning() {
+  // 定期読み取り（poller）が使う既定の取っ手は、従来どおり先頭から読み、head-marker も集計する。
+  let project = Project::new();
+  let fixture = large_run(&project);
+  let size = std::fs::metadata(fixture.body_log("r1")).expect("本体ログの大きさを読めます").len();
+  let mut handles = RunLogHandles::<String>::default();
+
+  let view = read_with(&mut handles, &project);
+
+  assert_eq!(view.body_log_bytes_read, size, "既定の取っ手は本体ログの全体を読みます");
+  assert_eq!(names(&view), vec!["head-marker".to_owned(), "tail-marker".to_owned()]);
+}
+
+fn tail_names_after(handles: &mut RunLogHandles<String>, project: &Project) -> (Vec<String>, String) {
+  let view = read_with(handles, project);
+  (names(&view), view.log_tail())
+}
+
+#[test]
+fn a_tail_handle_drops_the_old_steps_when_the_body_log_is_replaced_without_a_workflow_start() {
+  // 末尾読みの取っ手で読んだあと、本体ログを workflow_start の無い別のファイル（上限より大きい）へ
+  // 置き換える。読み直した集計は置き換え後の記録だけで、置き換え前の tail-marker を残さない。
+  let project = Project::new();
+  let fixture = large_run(&project);
+  let mut handles = RunLogHandles::with_initial_read(InitialRead::Tail(TAIL_BYTES));
+  let (before, _) = tail_names_after(&mut handles, &project);
+  assert_eq!(before, vec!["tail-marker".to_owned()]);
+  let body_log = fixture.body_log("r1");
+  let replacement = body_log.with_extension("next");
+  std::fs::rename(&body_log, &replacement).expect("本体ログを退避できます");
+  append_filler_records(&fixture, "r1", 2 * TAIL_BYTES);
+  fixture.append_records("r1", &[step_complete_record("after-replace", "coder", 2, "2026-11-13T10:00:00Z")]);
+  std::fs::remove_file(&replacement).expect("退避した本体ログを消せます");
+
+  let (after, log_tail) = tail_names_after(&mut handles, &project);
+
+  assert_eq!(after, vec!["after-replace".to_owned()], "置き換え後の記録だけを集計します");
+  assert!(
+    !log_tail.lines().any(|line| line.split(' ').any(|part| part == "tail-marker")),
+    "ログ末尾に置き換え前の記録を残しません: {log_tail:?}"
+  );
+}
+
+#[test]
+fn a_tail_handle_drops_the_old_steps_when_the_body_log_shrinks() {
+  // 同じファイル（inode は同じ）を、読んだ位置より小さく書き直す。読み直した集計は書き直した後の
+  // 記録だけです。
+  let project = Project::new();
+  let fixture = large_run(&project);
+  let mut handles = RunLogHandles::with_initial_read(InitialRead::Tail(TAIL_BYTES));
+  tail_names_after(&mut handles, &project);
+  let body_log = fixture.body_log("r1");
+  let inode_before = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&body_log).expect("大きさを読めます"));
+  std::fs::OpenOptions::new().write(true).truncate(true).open(&body_log).expect("本体ログを空にできます");
+  append_filler_records(&fixture, "r1", 2 * TAIL_BYTES);
+  fixture.append_records("r1", &[step_complete_record("after-shrink", "coder", 2, "2026-11-13T10:00:00Z")]);
+  let inode_after = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&body_log).expect("大きさを読めます"));
+  assert_eq!(inode_before, inode_after, "同じファイルを縮めた状態です");
+
+  let (after, log_tail) = tail_names_after(&mut handles, &project);
+
+  assert_eq!(after, vec!["after-shrink".to_owned()], "縮めた後の記録だけを集計します");
+  assert!(
+    !log_tail.lines().any(|line| line.split(' ').any(|part| part == "tail-marker")),
+    "ログ末尾に縮める前の記録を残しません: {log_tail:?}"
+  );
 }

@@ -886,17 +886,15 @@ export interface StepLog {
   iteration: number;
 }
 
-/** run のレポートを表す。 */
+/** run のレポートの一覧項目を表す。本文は GetRunContent で取得する。 */
 export interface RunReport {
-  /** ファイル名 */
+  /** reports/ からの相対パス */
   filename: string;
-  /** 本文 */
-  content: string;
   /** 大きさ（バイト） */
   sizeBytes: number;
 }
 
-/** run への指示書を表す。 */
+/** run への指示書の一覧項目を表す。本文は GetRunContent で取得する。 */
 export interface RunInstruction {
   /** 指示書の ID */
   instructionId: number;
@@ -904,15 +902,13 @@ export interface RunInstruction {
   issuedAt:
     | Date
     | undefined;
-  /** 状態 */
+  /** 状態（pending / deliveredSameSession / deliveredNextStep / unconsumedWarned） */
   state: string;
-  /** 本文 */
-  content: string;
 }
 
 /**
  * run 詳細の取得への応答を表す。
- * takt_get_run で取得できる範囲を表現する。
+ * 状態ストアと run の保存場所（meta.json、本体ログの末尾、reports/、interventions.jsonl）から組み立てる。
  */
 export interface GetRunDetailResponse {
   /** runSlug */
@@ -963,7 +959,7 @@ export interface GetRunDetailResponse {
   stepLogs: StepLog[];
   /** ログの末尾 */
   logTail: string;
-  /** レポートの一覧と本文 */
+  /** レポートの一覧 */
   reports: RunReport[];
   /** 指示書の一覧 */
   instructions: RunInstruction[];
@@ -976,7 +972,35 @@ export interface GetRunDetailResponse {
   /** 読み先の応答の有無 */
   serverConnected: boolean;
   /** 読み先から最後に読めた時刻 */
-  serverLastReadAt: Date | undefined;
+  serverLastReadAt:
+    | Date
+    | undefined;
+  /** run の保存場所が残っていない（掃除済みの worktree など） */
+  logsRemoved: boolean;
+}
+
+/** run のレポートまたは指示書の本文の取得を要求する。 */
+export interface GetRunContentRequest {
+  /** runSlug */
+  runSlug: string;
+  /** reports/ からの相対パス（.md） */
+  reportFilename?:
+    | string
+    | undefined;
+  /** 指示書の ID（1 以上） */
+  instructionId?: number | undefined;
+}
+
+/** run のレポートまたは指示書の本文の取得への応答を表す。 */
+export interface GetRunContentResponse {
+  /** runSlug */
+  runSlug: string;
+  /** 本文（上限を超えた分は切り詰める） */
+  content: string;
+  /** 本文全体の大きさ（バイト） */
+  sizeBytes: number;
+  /** 上限で切り詰めたか */
+  truncated: boolean;
 }
 
 /** ゴール一覧の要求。 */
@@ -4550,16 +4574,13 @@ export const StepLog: MessageFns<StepLog> = {
 };
 
 function createBaseRunReport(): RunReport {
-  return { filename: "", content: "", sizeBytes: 0 };
+  return { filename: "", sizeBytes: 0 };
 }
 
 export const RunReport: MessageFns<RunReport> = {
   encode(message: RunReport, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.filename !== "") {
       writer.uint32(10).string(message.filename);
-    }
-    if (message.content !== "") {
-      writer.uint32(18).string(message.content);
     }
     if (message.sizeBytes !== 0) {
       writer.uint32(24).int64(message.sizeBytes);
@@ -4588,14 +4609,6 @@ export const RunReport: MessageFns<RunReport> = {
             message.filename = reader.string();
             continue;
           }
-          case 2: {
-            if (tag !== 18) {
-              break;
-            }
-
-            message.content = reader.string();
-            continue;
-          }
           case 3: {
             if (tag !== 24) {
               break;
@@ -4619,7 +4632,6 @@ export const RunReport: MessageFns<RunReport> = {
   fromJSON(object: any): RunReport {
     return {
       filename: isSet(object.filename) ? globalThis.String(object.filename) : "",
-      content: isSet(object.content) ? globalThis.String(object.content) : "",
       sizeBytes: isSet(object.sizeBytes)
         ? globalThis.Number(object.sizeBytes)
         : isSet(object.size_bytes)
@@ -4633,9 +4645,6 @@ export const RunReport: MessageFns<RunReport> = {
     if (message.filename !== "") {
       obj.filename = message.filename;
     }
-    if (message.content !== "") {
-      obj.content = message.content;
-    }
     if (message.sizeBytes !== 0) {
       obj.sizeBytes = Math.round(message.sizeBytes);
     }
@@ -4648,14 +4657,13 @@ export const RunReport: MessageFns<RunReport> = {
   fromPartial<I extends Exact<DeepPartial<RunReport>, I>>(object: I): RunReport {
     const message = createBaseRunReport();
     message.filename = object.filename ?? "";
-    message.content = object.content ?? "";
     message.sizeBytes = object.sizeBytes ?? 0;
     return message;
   },
 };
 
 function createBaseRunInstruction(): RunInstruction {
-  return { instructionId: 0, issuedAt: undefined, state: "", content: "" };
+  return { instructionId: 0, issuedAt: undefined, state: "" };
 }
 
 export const RunInstruction: MessageFns<RunInstruction> = {
@@ -4668,9 +4676,6 @@ export const RunInstruction: MessageFns<RunInstruction> = {
     }
     if (message.state !== "") {
       writer.uint32(26).string(message.state);
-    }
-    if (message.content !== "") {
-      writer.uint32(34).string(message.content);
     }
     return writer;
   },
@@ -4712,14 +4717,6 @@ export const RunInstruction: MessageFns<RunInstruction> = {
             message.state = reader.string();
             continue;
           }
-          case 4: {
-            if (tag !== 34) {
-              break;
-            }
-
-            message.content = reader.string();
-            continue;
-          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -4745,7 +4742,6 @@ export const RunInstruction: MessageFns<RunInstruction> = {
         ? fromJsonTimestamp(object.issued_at)
         : undefined,
       state: isSet(object.state) ? globalThis.String(object.state) : "",
-      content: isSet(object.content) ? globalThis.String(object.content) : "",
     };
   },
 
@@ -4760,9 +4756,6 @@ export const RunInstruction: MessageFns<RunInstruction> = {
     if (message.state !== "") {
       obj.state = message.state;
     }
-    if (message.content !== "") {
-      obj.content = message.content;
-    }
     return obj;
   },
 
@@ -4774,7 +4767,6 @@ export const RunInstruction: MessageFns<RunInstruction> = {
     message.instructionId = object.instructionId ?? 0;
     message.issuedAt = object.issuedAt ?? undefined;
     message.state = object.state ?? "";
-    message.content = object.content ?? "";
     return message;
   },
 };
@@ -4805,6 +4797,7 @@ function createBaseGetRunDetailResponse(): GetRunDetailResponse {
     logSilent: false,
     serverConnected: false,
     serverLastReadAt: undefined,
+    logsRemoved: false,
   };
 }
 
@@ -4881,6 +4874,9 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
     }
     if (message.serverLastReadAt !== undefined) {
       Timestamp.encode(toTimestamp(message.serverLastReadAt), writer.uint32(194).fork()).join();
+    }
+    if (message.logsRemoved !== false) {
+      writer.uint32(200).bool(message.logsRemoved);
     }
     return writer;
   },
@@ -5090,6 +5086,14 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
             message.serverLastReadAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
             continue;
           }
+          case 25: {
+            if (tag !== 200) {
+              break;
+            }
+
+            message.logsRemoved = reader.bool();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -5200,6 +5204,11 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
         : isSet(object.server_last_read_at)
         ? fromJsonTimestamp(object.server_last_read_at)
         : undefined,
+      logsRemoved: isSet(object.logsRemoved)
+        ? globalThis.Boolean(object.logsRemoved)
+        : isSet(object.logs_removed)
+        ? globalThis.Boolean(object.logs_removed)
+        : false,
     };
   },
 
@@ -5277,6 +5286,9 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
     if (message.serverLastReadAt !== undefined) {
       obj.serverLastReadAt = message.serverLastReadAt.toISOString();
     }
+    if (message.logsRemoved !== false) {
+      obj.logsRemoved = message.logsRemoved;
+    }
     return obj;
   },
 
@@ -5309,6 +5321,245 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
     message.logSilent = object.logSilent ?? false;
     message.serverConnected = object.serverConnected ?? false;
     message.serverLastReadAt = object.serverLastReadAt ?? undefined;
+    message.logsRemoved = object.logsRemoved ?? false;
+    return message;
+  },
+};
+
+function createBaseGetRunContentRequest(): GetRunContentRequest {
+  return { runSlug: "", reportFilename: undefined, instructionId: undefined };
+}
+
+export const GetRunContentRequest: MessageFns<GetRunContentRequest> = {
+  encode(message: GetRunContentRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runSlug !== "") {
+      writer.uint32(10).string(message.runSlug);
+    }
+    if (message.reportFilename !== undefined) {
+      writer.uint32(18).string(message.reportFilename);
+    }
+    if (message.instructionId !== undefined) {
+      writer.uint32(24).int32(message.instructionId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetRunContentRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGetRunContentRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.runSlug = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.reportFilename = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.instructionId = reader.int32();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GetRunContentRequest {
+    return {
+      runSlug: isSet(object.runSlug)
+        ? globalThis.String(object.runSlug)
+        : isSet(object.run_slug)
+        ? globalThis.String(object.run_slug)
+        : "",
+      reportFilename: isSet(object.reportFilename)
+        ? globalThis.String(object.reportFilename)
+        : isSet(object.report_filename)
+        ? globalThis.String(object.report_filename)
+        : undefined,
+      instructionId: isSet(object.instructionId)
+        ? globalThis.Number(object.instructionId)
+        : isSet(object.instruction_id)
+        ? globalThis.Number(object.instruction_id)
+        : undefined,
+    };
+  },
+
+  toJSON(message: GetRunContentRequest): unknown {
+    const obj: any = {};
+    if (message.runSlug !== "") {
+      obj.runSlug = message.runSlug;
+    }
+    if (message.reportFilename !== undefined) {
+      obj.reportFilename = message.reportFilename;
+    }
+    if (message.instructionId !== undefined) {
+      obj.instructionId = Math.round(message.instructionId);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetRunContentRequest>, I>>(base?: I): GetRunContentRequest {
+    return GetRunContentRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetRunContentRequest>, I>>(object: I): GetRunContentRequest {
+    const message = createBaseGetRunContentRequest();
+    message.runSlug = object.runSlug ?? "";
+    message.reportFilename = object.reportFilename ?? undefined;
+    message.instructionId = object.instructionId ?? undefined;
+    return message;
+  },
+};
+
+function createBaseGetRunContentResponse(): GetRunContentResponse {
+  return { runSlug: "", content: "", sizeBytes: 0, truncated: false };
+}
+
+export const GetRunContentResponse: MessageFns<GetRunContentResponse> = {
+  encode(message: GetRunContentResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runSlug !== "") {
+      writer.uint32(10).string(message.runSlug);
+    }
+    if (message.content !== "") {
+      writer.uint32(18).string(message.content);
+    }
+    if (message.sizeBytes !== 0) {
+      writer.uint32(24).int64(message.sizeBytes);
+    }
+    if (message.truncated !== false) {
+      writer.uint32(32).bool(message.truncated);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetRunContentResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGetRunContentResponse();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.runSlug = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.content = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.sizeBytes = longToNumber(reader.int64());
+            continue;
+          }
+          case 4: {
+            if (tag !== 32) {
+              break;
+            }
+
+            message.truncated = reader.bool();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GetRunContentResponse {
+    return {
+      runSlug: isSet(object.runSlug)
+        ? globalThis.String(object.runSlug)
+        : isSet(object.run_slug)
+        ? globalThis.String(object.run_slug)
+        : "",
+      content: isSet(object.content) ? globalThis.String(object.content) : "",
+      sizeBytes: isSet(object.sizeBytes)
+        ? globalThis.Number(object.sizeBytes)
+        : isSet(object.size_bytes)
+        ? globalThis.Number(object.size_bytes)
+        : 0,
+      truncated: isSet(object.truncated) ? globalThis.Boolean(object.truncated) : false,
+    };
+  },
+
+  toJSON(message: GetRunContentResponse): unknown {
+    const obj: any = {};
+    if (message.runSlug !== "") {
+      obj.runSlug = message.runSlug;
+    }
+    if (message.content !== "") {
+      obj.content = message.content;
+    }
+    if (message.sizeBytes !== 0) {
+      obj.sizeBytes = Math.round(message.sizeBytes);
+    }
+    if (message.truncated !== false) {
+      obj.truncated = message.truncated;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetRunContentResponse>, I>>(base?: I): GetRunContentResponse {
+    return GetRunContentResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetRunContentResponse>, I>>(object: I): GetRunContentResponse {
+    const message = createBaseGetRunContentResponse();
+    message.runSlug = object.runSlug ?? "";
+    message.content = object.content ?? "";
+    message.sizeBytes = object.sizeBytes ?? 0;
+    message.truncated = object.truncated ?? false;
     return message;
   },
 };
@@ -8645,7 +8896,10 @@ export const TaktDashServiceService = {
     responseSerialize: (value: GetActivityResponse): Buffer => Buffer.from(GetActivityResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): GetActivityResponse => GetActivityResponse.decode(value),
   },
-  /** 1つの run について、takt_get_run で取得できる範囲を返す。 */
+  /**
+   * 1つの run について、状態ストアと run の保存場所から組み立てた詳細を返す。
+   * レポートと指示書は一覧だけを返し、本文は GetRunContent で取得する。
+   */
   getRunDetail: {
     path: "/takt_dash.v1.TaktDashService/GetRunDetail" as const,
     requestStream: false as const,
@@ -8655,6 +8909,17 @@ export const TaktDashServiceService = {
     responseSerialize: (value: GetRunDetailResponse): Buffer =>
       Buffer.from(GetRunDetailResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): GetRunDetailResponse => GetRunDetailResponse.decode(value),
+  },
+  /** run のレポートまたは指示書の本文を1件だけ返す。run のディレクトリの外は読まない。 */
+  getRunContent: {
+    path: "/takt_dash.v1.TaktDashService/GetRunContent" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GetRunContentRequest): Buffer => Buffer.from(GetRunContentRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GetRunContentRequest => GetRunContentRequest.decode(value),
+    responseSerialize: (value: GetRunContentResponse): Buffer =>
+      Buffer.from(GetRunContentResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): GetRunContentResponse => GetRunContentResponse.decode(value),
   },
   /** manager の会話を時系列で返す。after_seq で増分取得できる。 */
   getConversation: {
@@ -8784,8 +9049,13 @@ export interface TaktDashServiceServer extends UntypedServiceImplementation {
   getPendingDecisions: handleUnaryCall<GetPendingDecisionsRequest, GetPendingDecisionsResponse>;
   /** 出来事の一覧と直近7日分の日次集計を返す。 */
   getActivity: handleUnaryCall<GetActivityRequest, GetActivityResponse>;
-  /** 1つの run について、takt_get_run で取得できる範囲を返す。 */
+  /**
+   * 1つの run について、状態ストアと run の保存場所から組み立てた詳細を返す。
+   * レポートと指示書は一覧だけを返し、本文は GetRunContent で取得する。
+   */
   getRunDetail: handleUnaryCall<GetRunDetailRequest, GetRunDetailResponse>;
+  /** run のレポートまたは指示書の本文を1件だけ返す。run のディレクトリの外は読まない。 */
+  getRunContent: handleUnaryCall<GetRunContentRequest, GetRunContentResponse>;
   /** manager の会話を時系列で返す。after_seq で増分取得できる。 */
   getConversation: handleUnaryCall<GetConversationRequest, GetConversationResponse>;
   /** すべてのサーバー・すべてのプロジェクトのゴールを返す。 */
@@ -8876,7 +9146,10 @@ export interface TaktDashServiceClient extends Client {
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: GetActivityResponse) => void,
   ): ClientUnaryCall;
-  /** 1つの run について、takt_get_run で取得できる範囲を返す。 */
+  /**
+   * 1つの run について、状態ストアと run の保存場所から組み立てた詳細を返す。
+   * レポートと指示書は一覧だけを返し、本文は GetRunContent で取得する。
+   */
   getRunDetail(
     request: GetRunDetailRequest,
     callback: (error: ServiceError | null, response: GetRunDetailResponse) => void,
@@ -8891,6 +9164,22 @@ export interface TaktDashServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: GetRunDetailResponse) => void,
+  ): ClientUnaryCall;
+  /** run のレポートまたは指示書の本文を1件だけ返す。run のディレクトリの外は読まない。 */
+  getRunContent(
+    request: GetRunContentRequest,
+    callback: (error: ServiceError | null, response: GetRunContentResponse) => void,
+  ): ClientUnaryCall;
+  getRunContent(
+    request: GetRunContentRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: GetRunContentResponse) => void,
+  ): ClientUnaryCall;
+  getRunContent(
+    request: GetRunContentRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: GetRunContentResponse) => void,
   ): ClientUnaryCall;
   /** manager の会話を時系列で返す。after_seq で増分取得できる。 */
   getConversation(

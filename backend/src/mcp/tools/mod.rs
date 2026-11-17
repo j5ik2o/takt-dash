@@ -22,15 +22,14 @@ use crate::{
   domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   model::{
     ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
-    InquiryEntry, NotificationEntry, ProjectSnapshot, RegistrationProposalEntry, RunDetail, RunEntry,
-    RunInstructionEntry, RunReportEntry, TaskDetail, TaskEntry, TaskStatus,
+    InquiryEntry, NotificationEntry, ProjectSnapshot, RegistrationProposalEntry, RunEntry, TaskDetail, TaskEntry,
+    TaskStatus,
   },
-  run_progress::{read_run, retain_runs, RunLogHandle, RunReadFailure},
+  run_progress::{read_run, retain_runs, RunLogHandle},
 };
 
 mod goal;
 mod parse;
-mod run;
 
 use self::{
   goal::{
@@ -38,14 +37,13 @@ use self::{
     parse_goal_work_log, parse_inquiry, parse_notification, parse_task, parse_task_detail, prev_inquiries,
     registration_summary_text, resolve_awaiting_merge_at, resolve_inquiry, ParsedInquiry, TaskLinkFields,
   },
-  parse::{checked_i32, domain_value, optional_string, parse_time, required_i32, required_string, string_field, Page},
-  run::{assemble_run_detail, report_summaries},
+  parse::{domain_value, optional_string, required_i32, required_string, string_field, Page},
 };
 
 /// takt-mcp 子プロセスの起動設定を作る。
 ///
-/// poller の定期読み取りと GetRunDetail の要求時読み取りが、同じ起動条件（タイムアウトを含む）を
-/// 共有するために公開します。
+/// poller の定期読み取りと、書き込み・詳細の RPC が要求時に使う子プロセスが、同じ起動条件
+/// （タイムアウトを含む）を共有するために公開します。
 pub fn client_config(server: &McpServer, cwd: &std::path::Path) -> McpClientConfig {
   McpClientConfig {
     command:         server.command.clone(),
@@ -67,9 +65,6 @@ pub enum ToolError {
   Tool(#[from] super::client::ToolCallError),
   #[error("takt-mcp の応答を解析できませんでした: {0}")]
   Parse(String),
-  /// run の保存場所（`.takt/runs`）を読めなかった失敗。takt-mcp の失敗ではありません。
-  #[error(transparent)]
-  RunLog(#[from] RunReadFailure),
 }
 
 impl From<CallError> for ToolError {
@@ -717,51 +712,6 @@ impl<'a> ToolSet<'a> {
       }
     }
     Err(ToolError::Parse("takt_list_tasks のページ追従が上限に達しました".to_owned()))
-  }
-
-  /// 指定した runSlug の詳細を読み取る。
-  ///
-  /// 状態とステップの記録は run の保存場所から読みます。`runs` に同じ取っ手を渡し続けると、
-  /// 本体ログは前回の続きだけを読みます。takt_get_run は summary を1回だけ呼び、stepLogs の
-  /// ページは追いません。レポートと指示書の本文は一覧に含まれないため、summary の filename と
-  /// instructionId を使って1件ずつ本文を取得します。
-  pub async fn read_run_detail(&mut self, run_slug: &RunSlug, runs: &RunLogHandle) -> Result<RunDetail, ToolError> {
-    let view = read_run(runs, run_slug.clone()).await?;
-    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
-    let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_ref() == Some(run_slug));
-    let mut reports = Vec::new();
-    for summary in report_summaries(&value) {
-      let report_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "report": summary.filename })).await?;
-      reports.push(RunReportEntry {
-        filename:   summary.filename.clone(),
-        content:    optional_string(&report_value, "content").unwrap_or_default(),
-        size_bytes: report_value.get("sizeBytes").and_then(Value::as_i64).unwrap_or(summary.size_bytes),
-      });
-    }
-    let mut instructions = Vec::new();
-    for instruction in value.get("instructions").and_then(Value::as_array).cloned().unwrap_or_default() {
-      let instruction_id = match instruction.get("instructionId") {
-        | None => 0,
-        | Some(field) => checked_i32(Some(field), "instructionId")?,
-      };
-      let instruction_value = self
-        .call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "instructionId": instruction_id }))
-        .await?;
-      instructions.push(RunInstructionEntry {
-        instruction_id,
-        issued_at: parse_time(instruction_value.get("issuedAt"))
-          .ok()
-          .flatten()
-          .or_else(|| parse_time(instruction.get("issuedAt")).ok().flatten())
-          .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-        state: optional_string(&instruction_value, "state")
-          .or_else(|| optional_string(&instruction, "state"))
-          .unwrap_or_default(),
-        content: optional_string(&instruction_value, "content").unwrap_or_default(),
-      });
-    }
-    assemble_run_detail(&value, &view, run_slug, task.as_ref(), reports, instructions)
   }
 
   /// 問い合わせへ回答する。`answer` は takt の `answer` オブジェクト（例: `{"text": "..."}`）。

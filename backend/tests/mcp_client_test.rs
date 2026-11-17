@@ -8,7 +8,7 @@ use std::io::Write;
 use common::*;
 use serde_json::{json, Value};
 use takt_dash_backend::{
-  domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug},
+  domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision},
   mcp::{CallError, ToolError, TransportError},
   model::{
     ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, TaskStatus,
@@ -22,10 +22,6 @@ fn goal_id(value: &str) -> GoalId {
 
 fn inquiry_id(value: &str) -> InquiryId {
   InquiryId::try_from(value).expect("テストの inquiry ID は有効です")
-}
-
-fn run_slug(value: &str) -> RunSlug {
-  RunSlug::try_from(value).expect("テストの run slug は有効です")
 }
 
 fn revision(value: i32) -> RegistrationRevision {
@@ -1358,51 +1354,6 @@ async fn revision_beyond_i32_is_a_parse_error() {
     .expect_err("i32 の範囲外の revision は受理しません");
 
   assert!(matches!(error, ToolError::Parse(_)), "範囲外の revision は解析エラーです: {error}");
-  client.shutdown().await;
-}
-
-#[tokio::test]
-async fn instruction_id_beyond_i32_is_a_parse_error_and_is_not_sent_truncated() {
-  // run の指示書が i32 の範囲外の instructionId を持つ場合、2 に切り詰めて
-  // takt_get_run を呼ばずに解析エラーにする。
-  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
-  let state = write_state(
-    directory.path(),
-    json!({
-      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-      "runs": {
-        "r1": {
-          "runSlug": "r1",
-          "instructions": [
-            { "instructionId": 4294967298i64, "issuedAt": "2026-11-13T10:05:00Z", "state": "issued", "content": "指示書" }
-          ]
-        }
-      }
-    }),
-  );
-  write_running_run(directory.path(), "implement", 1, &[]);
-  let calls_path = directory.path().join("tool-calls.jsonl");
-  let mut client = mock_client(mock_config_with_calls(directory.path(), &state, &calls_path));
-
-  let error = tool_set(&mut client, directory.path())
-    .read_run_detail(&run_slug("r1"), &run_logs(directory.path()))
-    .await
-    .expect_err("i32 の範囲外の instructionId は受理しません");
-
-  assert!(matches!(error, ToolError::Parse(_)), "範囲外の instructionId は解析エラーです: {error}");
-
-  let recorded: Vec<Value> = match std::fs::read_to_string(&calls_path) {
-    | Ok(text) => {
-      text.lines().filter(|line| !line.trim().is_empty()).filter_map(|line| serde_json::from_str(line).ok()).collect()
-    },
-    | Err(_) => Vec::new(),
-  };
-  assert!(
-    recorded
-      .iter()
-      .all(|call| !(call["name"] == json!("takt_get_run") && call["arguments"]["instructionId"] == json!(2))),
-    "instructionId を 2 に切り詰めた takt_get_run を記録しません: {recorded:?}"
-  );
   client.shutdown().await;
 }
 

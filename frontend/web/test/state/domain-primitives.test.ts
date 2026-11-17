@@ -8,9 +8,11 @@ import {
   DomainPrimitiveError,
   toGoalId,
   toInquiryId,
+  toInstructionId,
   toProjectName,
   toPullRequestNumber,
   toRegistrationRevision,
+  toReportFilename,
   toRunSlug,
   toServerId,
   toSilentMinutes,
@@ -106,4 +108,24 @@ test("滞留と無音の閾値は 0 以上 i32::MAX 以下だけを受理する"
     assert.equal(stageOf(() => build(1.5)), "syntax", `${name} は小数を拒否する`);
     assert.equal(stageOf(() => build("10")), "lexical", `${name} は数値以外を拒否する`);
   }
+});
+
+test("レポートの名前は reports/ の下の .md の相対パスだけを受理する", () => {
+  assert.equal(toReportFilename("sub/review.md"), "sub/review.md");
+  assert.equal(stageOf(() => toReportFilename("")), "size");
+  assert.equal(stageOf(() => toReportFilename(`${"a".repeat(1024)}.md`)), "size");
+  assert.equal(stageOf(() => toReportFilename("  ")), "lexical");
+  for (const value of ["/etc/hosts.md", "../meta.md", "sub/../../meta.md", "./plan.md", "sub//plan.md", "sub\\plan.md"]) {
+    assert.equal(stageOf(() => toReportFilename(value)), "syntax", `${value} は書式の誤りです`);
+  }
+  assert.equal(stageOf(() => toReportFilename("plan.txt")), "semantics");
+});
+
+test("指示書の ID は 1 以上の i32 の整数だけを受理する", () => {
+  assert.equal(toInstructionId(2), 2);
+  assert.equal(stageOf(() => toInstructionId(0)), "size");
+  assert.equal(stageOf(() => toInstructionId(-1)), "size");
+  assert.equal(stageOf(() => toInstructionId(2_147_483_648)), "size");
+  assert.equal(stageOf(() => toInstructionId(1.5)), "syntax");
+  assert.equal(stageOf(() => toInstructionId("2")), "lexical");
 });

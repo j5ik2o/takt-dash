@@ -18,6 +18,8 @@ import {
   type GetGoalDetailRequest,
   type GetGoalDetailResponse,
   type GetProjectsResponse,
+  type GetRunContentRequest,
+  type GetRunContentResponse,
   type GetRunDetailResponse,
   type GetTaskDetailRequest,
   type GetTaskDetailResponse,
@@ -45,6 +47,8 @@ export type ServerBehavior = {
   pendingDecisions?: { state: DashboardState };
   activity?: GetActivityResponse;
   runDetail?: GetRunDetailResponse | ServerError;
+  runContent?: GetRunContentResponse | ServerError;
+  onGetRunContent?: (request: GetRunContentRequest) => void;
   goalDetail?: GetGoalDetailResponse | ServerError;
   taskDetail?: GetTaskDetailResponse | ServerError;
   onGetGoalDetail?: (request: GetGoalDetailRequest) => void;
@@ -209,6 +213,23 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       const result = behavior.runDetail;
       if (!result) {
         callback(notFound("run が見つかりません"));
+        return;
+      }
+      if ("code" in result) {
+        callback(result);
+        return;
+      }
+      callback(null, result);
+    },
+    getRunContent: (
+      call: grpc.ServerUnaryCall<GetRunContentRequest, unknown>,
+      callback: grpc.sendUnaryData<GetRunContentResponse>,
+    ) => {
+      behavior.calls?.push("GetRunContent");
+      behavior.onGetRunContent?.(call.request);
+      const result = behavior.runContent;
+      if (!result) {
+        callback(notFound("本文が見つかりません"));
         return;
       }
       if ("code" in result) {

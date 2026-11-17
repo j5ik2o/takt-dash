@@ -302,30 +302,6 @@ pub struct RunEntry {
   pub reports:                 Vec<ReportEntry>,
 }
 
-/// run 詳細の本文。一覧の投影では使わない詳細情報です。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunDetail {
-  pub run_slug: RunSlug,
-  pub session_id: String,
-  pub task_name: Option<TaskName>,
-  pub goal_id: Option<GoalId>,
-  pub task_text: String,
-  pub summary: String,
-  pub workflow: String,
-  pub status: RunStatus,
-  pub started_at: Option<DateTime<Utc>>,
-  pub current_step: Option<String>,
-  pub current_iteration: Option<i32>,
-  pub current_step_started_at: Option<DateTime<Utc>>,
-  pub current_step_execution_count: Option<i32>,
-  pub phase: Option<i32>,
-  pub step_logs: Vec<StepLogEntry>,
-  pub log_tail: String,
-  pub reports: Vec<RunReportEntry>,
-  pub instructions: Vec<RunInstructionEntry>,
-  pub last_log_at: Option<DateTime<Utc>>,
-}
-
 /// run のステップの記録。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepLogEntry {
@@ -335,23 +311,6 @@ pub struct StepLogEntry {
   pub content:   String,
   pub timestamp: DateTime<Utc>,
   pub iteration: i32,
-}
-
-/// run のレポートの一覧項目と本文。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunReportEntry {
-  pub filename:   String,
-  pub content:    String,
-  pub size_bytes: i64,
-}
-
-/// run への指示書。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunInstructionEntry {
-  pub instruction_id: i32,
-  pub issued_at:      DateTime<Utc>,
-  pub state:          String,
-  pub content:        String,
 }
 
 /// 1回の読み取りで得た、1プロジェクト分の状態。

@@ -14,6 +14,8 @@ import {
   type GetConversationResponse,
   type GetGoalDetailResponse,
   type GetProjectsResponse,
+  type GetRunContentRequest,
+  type GetRunContentResponse,
   type GetRunDetailResponse,
   type GetTaskDetailRequest,
   type GetTaskDetailResponse,
@@ -22,6 +24,7 @@ import {
   type WatchStateRequest,
 } from "../proto/taktdash";
 import type { TimingSink } from "../telemetry/timing";
+import type { InstructionId, ReportFilename, RunSlug } from "../state/domain-primitives";
 
 export const BACKEND_ADDR_ENV = "TAKTDASH_BACKEND_ADDR";
 
@@ -69,6 +72,17 @@ export class RunNotFoundError extends Error {
   }
 }
 
+/** run のレポートか指示書の本文が backend に存在しないことを表す。Route Handler は 404 を返す。 */
+export class RunContentNotFoundError extends Error {
+  constructor(runSlug: string) {
+    super(`run「${runSlug}」の本文は見つかりません。`);
+    this.name = "RunContentNotFoundError";
+  }
+}
+
+/** GetRunContent で本文を取得する対象。レポートか指示書のどちらか一方。 */
+export type RunContentTarget = { report: ReportFilename } | { instruction: InstructionId };
+
 // 計測の有無は呼び出しごとに決める。共有クライアントでも要求をまたいで計測が混ざらない。
 
 /** 指定した goalId のゴールが backend に存在しないことを表す。ページは 404 を返す。 */
@@ -94,6 +108,7 @@ export type BackendClient = {
   getPendingDecisions(timing?: TimingSink): Promise<DashboardState>;
   getActivity(timing?: TimingSink): Promise<GetActivityResponse>;
   getRunDetail(runSlug: string, timing?: TimingSink): Promise<GetRunDetailResponse>;
+  getRunContent(runSlug: RunSlug, target: RunContentTarget): Promise<GetRunContentResponse>;
   getConversation(request: GetConversationRequest, timing?: TimingSink): Promise<GetConversationResponse>;
   getGoalDetail(goalId: string, timing?: TimingSink): Promise<GetGoalDetailResponse>;
   getTaskDetail(project: string, taskName: string, goalId?: string, timing?: TimingSink): Promise<GetTaskDetailResponse>;
@@ -244,6 +259,28 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
         throw new RunNotFoundError(runSlug);
       }
       return detail;
+    },
+    getRunContent: async (runSlug, target) => {
+      const request: GetRunContentRequest =
+        "report" in target ? { runSlug, reportFilename: target.report } : { runSlug, instructionId: target.instruction };
+      const content = await unary<GetRunContentRequest, GetRunContentResponse>(
+        (unaryRequest, metadata, callOptions, callback) =>
+          client.getRunContent(unaryRequest, metadata, callOptions, callback),
+        request,
+        readOptions(),
+      ).catch((error: unknown) => {
+        if (error instanceof BackendUnavailableError) {
+          throw error;
+        }
+        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
+          throw new RunContentNotFoundError(runSlug);
+        }
+        throw error;
+      });
+      if (content.runSlug !== runSlug) {
+        throw new RunContentNotFoundError(runSlug);
+      }
+      return content;
     },
     getConversation: (request, timing) =>
       timedUnary(timing, "GetConversation", () =>

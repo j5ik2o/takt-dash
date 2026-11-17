@@ -15,8 +15,11 @@ use std::{
 
 use serde_json::{json, Value};
 use takt_dash_backend::{
-  domain::{DomainError, RunSlug},
-  run_log::{BodyLogRead, MetaRead, RunLocation, RunLogReader, RunMeta},
+  domain::{DomainError, InstructionId, ReportFilename, RunSlug},
+  run_log::{
+    read_instruction_content, read_instructions, read_report, BodyLogRead, ContentRead, InitialRead, InstructionState,
+    InstructionsRead, MetaRead, RunLocation, RunLogReader, RunMeta,
+  },
 };
 
 const MAX_SUMMARY_CHARS: usize = 512;
@@ -905,5 +908,233 @@ fn ignores_phase1_symlink_outside_run_directory() {
     latest.timestamp(),
     BODY_MTIME as i64,
     "run の外を指す phase1-execution の更新時刻を使わず、run の中の本体ログの更新時刻を返します"
+  );
+}
+
+fn tail_reader(fixture: &Fixture, limit: u64) -> RunLogReader {
+  RunLogReader::with_initial_read(fixture.project_cwd.clone(), fixture.worktrees_root.clone(), InitialRead::Tail(limit))
+}
+
+fn line_of(record: &Value) -> Vec<u8> {
+  let mut line = serde_json::to_vec(record).expect("レコードを JSON にできます");
+  line.push(b'\n');
+  line
+}
+
+#[test]
+fn tail_reader_drops_the_partial_first_line_without_counting_it_as_skipped() {
+  // 3行の本体ログで、末尾の範囲が2行目の途中から始まるようにする。2行目の後半は書きかけの行として
+  // 捨て、解釈できない行（skipped）に数えない。読むのは範囲の大きさだけで、3行目だけを返す。
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-tail");
+  let log = body_log(&run_dir);
+  let (first, second, third) =
+    (line_of(&step_record("first")), line_of(&step_record("second")), line_of(&step_record("third")));
+  for line in [&first, &second, &third] {
+    append_bytes(&log, line);
+  }
+  let limit = (third.len() + second.len() / 2) as u64;
+  let mut reader = tail_reader(&fixture, limit);
+
+  let read = reader.read_body_log(&run_dir);
+
+  let steps: Vec<&str> = read.records.iter().filter_map(|record| record["marker"].as_str()).collect();
+  assert_eq!(steps, vec!["third"], "範囲の先頭の書きかけの行は返しません");
+  assert_eq!(read.skipped, 0, "捨てた書きかけの行は解釈できない行に数えません");
+  assert!(read.skipped_head, "末尾から読み始めたことを返します");
+  assert_eq!(read.bytes_read, limit, "読むのは末尾の範囲だけです");
+}
+
+#[test]
+fn tail_reader_keeps_the_first_line_when_the_range_starts_at_a_line_boundary() {
+  // 末尾の範囲の先頭がちょうど行頭と重なる場合は、完結した行なので捨てない。上限を3行目の長さに
+  // すると3行目を、2行目と3行目の長さの和にすると2行目と3行目を返す。
+  // 読んだバイト数は範囲の大きさで、 行の区切りを確かめる直前の1バイトは含めない。
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-boundary");
+  let log = body_log(&run_dir);
+  let (first, second, third) =
+    (line_of(&step_record("first")), line_of(&step_record("second")), line_of(&step_record("third")));
+  for line in [&first, &second, &third] {
+    append_bytes(&log, line);
+  }
+
+  for (limit, expected) in
+    [(third.len() as u64, vec!["third"]), ((second.len() + third.len()) as u64, vec!["second", "third"])]
+  {
+    let mut reader = tail_reader(&fixture, limit);
+
+    let read = reader.read_body_log(&run_dir);
+
+    let steps: Vec<&str> = read.records.iter().filter_map(|record| record["marker"].as_str()).collect();
+    assert_eq!(steps, expected, "上限 {limit} の範囲の先頭は行頭なので、その行を返します");
+    assert_eq!(read.skipped, 0);
+    assert!(read.skipped_head, "末尾から読み始めたことを返します");
+    assert_eq!(read.bytes_read, limit, "読んだバイト数は範囲の大きさです");
+  }
+}
+
+#[test]
+fn tail_reader_reads_a_body_log_smaller_than_the_limit_from_the_beginning() {
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-small");
+  let log = body_log(&run_dir);
+  append_record(&log, &step_record("first"));
+  append_record(&log, &step_record("second"));
+  let size = fs::metadata(&log).expect("本体ログの大きさを読めます").len();
+  let mut reader = tail_reader(&fixture, size + 1);
+
+  let read = reader.read_body_log(&run_dir);
+
+  assert_eq!(read.records.len(), 2, "上限より小さい本体ログは全体を読みます");
+  assert!(!read.skipped_head);
+  assert_eq!(read.bytes_read, size);
+}
+
+fn report_filename(value: &str) -> ReportFilename {
+  ReportFilename::try_from(value).expect("テストのレポート名は有効です")
+}
+
+fn expect_report(read: ContentRead) -> takt_dash_backend::run_log::RunContent {
+  match read {
+    | ContentRead::Found(content) => content,
+    | other => panic!("レポートを読めるはずです: {other:?}"),
+  }
+}
+
+#[test]
+fn read_report_returns_the_requested_nested_report_and_rejects_links_outside() {
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-report");
+  fs::create_dir_all(run_dir.join("reports").join("sub")).expect("reports を作れます");
+  fs::write(run_dir.join("reports").join("plan.md"), "計画").expect("レポートを書けます");
+  fs::write(run_dir.join("reports").join("sub").join("review.md"), "レビュー").expect("レポートを書けます");
+  let outside = fixture.temp_root().join("secret.md");
+  fs::write(&outside, "秘密").expect("外のファイルを書けます");
+  symlink(&outside, run_dir.join("reports").join("link.md")).expect("リンクを作れます");
+  fs::write(run_dir.join("reports").join("note.txt"), "メモ").expect("ファイルを書けます");
+  symlink(run_dir.join("reports").join("note.txt"), run_dir.join("reports").join("alias.md"))
+    .expect("リンクを作れます");
+
+  let report = expect_report(read_report(&run_dir, &report_filename("sub/review.md"), 1024));
+
+  assert_eq!(report.content, "レビュー");
+  assert_eq!(report.size_bytes, "レビュー".len() as u64);
+  assert!(!report.truncated);
+  assert_eq!(
+    read_report(&run_dir, &report_filename("link.md"), 1024),
+    ContentRead::Missing,
+    "外を指すリンクは読みません"
+  );
+  assert_eq!(
+    read_report(&run_dir, &report_filename("alias.md"), 1024),
+    ContentRead::Missing,
+    ".md 以外のファイルを指すリンクは読みません"
+  );
+  assert_eq!(read_report(&run_dir, &report_filename("none.md"), 1024), ContentRead::Missing);
+}
+
+#[test]
+fn read_report_truncates_at_a_character_boundary() {
+  // 「あいう」は 9 バイト。上限 4 バイトでは「あ」の後の不完全な文字を落とす。
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-truncate");
+  fs::create_dir_all(run_dir.join("reports")).expect("reports を作れます");
+  fs::write(run_dir.join("reports").join("plan.md"), "あいう").expect("レポートを書けます");
+
+  let report = expect_report(read_report(&run_dir, &report_filename("plan.md"), 4));
+
+  assert_eq!(report.content, "あ");
+  assert_eq!(report.size_bytes, 9);
+  assert!(report.truncated);
+}
+
+fn write_interventions(fixture: &Fixture, slug: &str, lines: &[Value]) {
+  let run_dir = fixture.project_cwd.join(".takt").join("runs").join(slug);
+  fs::create_dir_all(&run_dir).expect("run のディレクトリを作れます");
+  let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+  fs::write(run_dir.join("interventions.jsonl"), text).expect("interventions.jsonl を書けます");
+}
+
+fn instruction_id(value: i32) -> InstructionId {
+  InstructionId::try_from(value).expect("テストの指示書の ID は有効です")
+}
+
+#[test]
+fn read_instructions_folds_the_events_like_takt() {
+  let fixture = Fixture::new();
+  write_interventions(&fixture, "run-ins", &[
+    json!({ "type": "issued", "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "content": "一つ目" }),
+    json!({ "type": "issued", "instructionId": 2, "issuedAt": "2026-11-13T08:51:00Z", "content": "二つ目" }),
+    json!({ "type": "issued", "instructionId": 3, "issuedAt": "2026-11-13T08:52:00Z", "content": "三つ目" }),
+    json!({ "type": "delivered", "instructionIds": [1], "deliveredAt": "2026-11-13T08:53:00Z", "mode": "same_session", "step": "plan", "phase": 1 }),
+    json!({ "type": "delivered", "instructionIds": [2], "deliveredAt": "2026-11-13T08:54:00Z", "mode": "batch_boundary", "step": "plan", "phase": 1 }),
+    json!({ "type": "terminal", "terminalAt": "2026-11-13T09:00:00Z", "status": "completed", "unconsumedInstructionIds": [3] }),
+  ]);
+
+  let InstructionsRead::Found(instructions) = read_instructions(&fixture.project_cwd, &run_slug("run-ins")) else {
+    panic!("指示書を読めるはずです");
+  };
+
+  let states: Vec<(InstructionId, InstructionState, &str)> = instructions
+    .iter()
+    .map(|instruction| (instruction.instruction_id, instruction.state, instruction.content.as_str()))
+    .collect();
+  assert_eq!(states, vec![
+    (instruction_id(1), InstructionState::DeliveredSameSession, "一つ目"),
+    (instruction_id(2), InstructionState::DeliveredNextStep, "二つ目"),
+    (instruction_id(3), InstructionState::UnconsumedWarned, "三つ目"),
+  ]);
+}
+
+#[test]
+fn read_instructions_returns_an_empty_list_without_the_file() {
+  let fixture = Fixture::new();
+
+  assert_eq!(read_instructions(&fixture.project_cwd, &run_slug("run-none")), InstructionsRead::Found(Vec::new()));
+}
+
+#[test]
+fn read_instructions_rejects_out_of_range_ids_and_unknown_references() {
+  // i32 を超える instructionId を切り詰めて受理しない。発行されていない ID への配達も受理しない。
+  let fixture = Fixture::new();
+  write_interventions(&fixture, "run-big", &[
+    json!({ "type": "issued", "instructionId": 4_294_967_298_i64, "issuedAt": "2026-11-13T08:50:00Z", "content": "指示書" }),
+  ]);
+  write_interventions(&fixture, "run-unknown", &[
+    json!({ "type": "issued", "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "content": "指示書" }),
+    json!({ "type": "delivered", "instructionIds": [2], "deliveredAt": "2026-11-13T08:53:00Z", "mode": "next_step", "step": "plan", "phase": 1 }),
+  ]);
+
+  for slug in ["run-big", "run-unknown"] {
+    let read = read_instructions(&fixture.project_cwd, &run_slug(slug));
+    assert!(matches!(read, InstructionsRead::Unreadable(_)), "{slug} の記録は解釈できない記録です: {read:?}");
+  }
+}
+
+#[test]
+fn read_instruction_content_truncates_the_body_at_a_character_boundary_like_a_report() {
+  // 指示書の本文もレポートと同じ規則で切り詰める。「あいう」は 9 バイトで、上限 4 バイトは「い」の
+  // 途中にあたるため「あ」だけを返す。上限が本文の長さ以上なら全文を返し、切り詰めない。
+  let fixture = Fixture::new();
+  write_interventions(&fixture, "run-body", &[
+    json!({ "type": "issued", "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "content": "あいう" }),
+  ]);
+  let slug = run_slug("run-body");
+
+  let ContentRead::Found(truncated) = read_instruction_content(&fixture.project_cwd, &slug, instruction_id(1), 4)
+  else {
+    panic!("指示書の本文を読めるはずです");
+  };
+  let ContentRead::Found(full) = read_instruction_content(&fixture.project_cwd, &slug, instruction_id(1), 9) else {
+    panic!("指示書の本文を読めるはずです");
+  };
+
+  assert_eq!((truncated.content.as_str(), truncated.size_bytes, truncated.truncated), ("あ", 9, true));
+  assert_eq!((full.content.as_str(), full.size_bytes, full.truncated), ("あいう", 9, false));
+  assert_eq!(
+    read_instruction_content(&fixture.project_cwd, &slug, instruction_id(2), 9),
+    ContentRead::Missing,
+    "無い ID の指示書は Missing です"
   );
 }
