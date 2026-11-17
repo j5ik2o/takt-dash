@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "test": "playwright test",
-    "test:prod": "playwright test --config playwright.prod.config.ts"
+    "test:prod": "playwright test --config playwright.prod.config.ts",
+    "screenshots": "playwright test --config playwright.screenshots.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.65.1"
