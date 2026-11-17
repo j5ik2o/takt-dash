@@ -114,6 +114,8 @@ SHELL_KEYWORDS = {
     "}",
 }
 REDIRECTION = re.compile(r"^\d*[<>]")
+# python の実行ファイル名。python3.11 のようなバージョン付きの名前も含む。
+PYTHON_EXECUTABLE = re.compile(r"python(\d+(\.\d+)*)?")
 # shell_tokens が演算子のトークンとして切り出す文字。
 SHELL_OPERATOR_CHARS = ";&|\n()"
 
@@ -673,6 +675,48 @@ def skip_heredoc_bodies(text, index, pending):
     return index
 
 
+def arithmetic_expansion_end(text, start):
+    """text[start] の $(( から始まる算術式展開の終端（)) の直後）を返す。
+
+    start は `$` の位置で、直後の2文字が `((` であることを呼び出し側が
+    確かめる。括弧の対応を数え、引用符とエスケープの中にある括弧は数え
+    ない。閉じていない場合は文字列の末尾を返す。
+    """
+    index = start + 3
+    depth = 2
+    quote = None
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if char == "\\" and index + 1 < len(text):
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(text):
+            index += 2
+            continue
+        if char in ("'", '"'):
+            quote = char
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return len(text)
+
+
 def strip_heredoc_bodies(command):
     """ヒアドキュメントの本文を、コマンド文字列から取り除く。
 
@@ -682,7 +726,8 @@ def strip_heredoc_bodies(command):
     演算子と区切り語もコマンド行から取り除く。本文はシェルの構文として
     解釈されないため、本文に含まれる引用符や # が、後段のコメント除去や
     トークン化へ影響することはない。引用符内の `<<`（例: echo "<<EOF"）や
-    コメント内の `<<` は開始として扱わない。<<<（ヒアストリング）は本文を
+    コメント内の `<<` は開始として扱わない。算術式展開 $(( ... )) の中に
+    ある `<<` はシフト演算子であり、開始として扱わない。<<<（ヒアストリング）は本文を
     持たないため対象にしない。<< が語の途中にある場合（例: a<<EOF）は、
     トークン化側の扱いに合わせて開始として扱わない。数字だけの語の直後に
     ある場合は、fd 指定付きのリダイレクトとして扱う。
@@ -746,6 +791,11 @@ def strip_heredoc_bodies(command):
             result.append(char)
             index += 1
             continue
+        if char == "$" and text[index + 1 : index + 3] == "((":
+            end = arithmetic_expansion_end(text, index)
+            result.append(text[index:end])
+            index = end
+            continue
         if char == "#":
             in_comment = True
             result.append(char)
@@ -788,7 +838,10 @@ def shell_tokens(command):
     トークン化の前に、ヒアドキュメントの本文と行継続（バックスラッシュ＋
     改行）を取り除く。本文はシェルの構文として解釈されないため、本文の
     引用符や改行がトークンを壊すことはない。行継続は入力から取り除かれる
-    ため、継続行の字下げが余分な引数になることもない。
+    ため、継続行の字下げが余分な引数になることもない。算術式展開
+    $(( ... )) は1つの語の構成要素として丸ごと取り込み、中の空白や `<<`
+    で語を割らない（中の `<<` はシフト演算子であり、ヒアドキュメントの
+    開始ではない）。
     """
     text = strip_shell_comments(strip_heredoc_bodies(command))
     tokens = []
@@ -836,6 +889,13 @@ def shell_tokens(command):
                 flags.append(True)
                 quoted = True
                 index += 2
+                continue
+            if char == "$" and text[index + 1 : index + 3] == "((":
+                end = arithmetic_expansion_end(text, index)
+                for position in range(index, end):
+                    chars.append(text[position])
+                    flags.append(False)
+                index = end
                 continue
             if char in ("'", '"'):
                 quote = char
@@ -1252,7 +1312,10 @@ def shell_command_string(arguments):
 
 
 def python_script_arguments(arguments):
-    """python / python3 の引数列から、実行するスクリプトとその引数を返す。
+    """python 系インタプリタの引数列から、実行するスクリプトとその引数を返す。
+
+    対象のインタプリタは python、python3、python3.11 のようなバージョン
+    付きの名前を含む。
 
     インタプリタのオプション（-u など。引数を取る -W / -X はその引数も）を
     読み飛ばす。-c や -m はスクリプトファイルの実行ではないため、その場合は
@@ -1290,9 +1353,10 @@ def invoked_publish_stages(command, depth=0):
     """コマンド文字列が実際に起動する publish.py の段階を集める。
 
     bash -c や sh -c の内側のスクリプトへ再帰し、単純コマンドの先頭にある
-    publish.py の呼び出し（直接実行、または python / python3 の引数としての
-    実行）だけを拾う。コマンド先頭の環境変数代入と python のオプションは
-    読み飛ばす。-n 付きのシェルと、python の -c / -m は実行として扱わない。
+    publish.py の呼び出し（直接実行、または python 系インタプリタ（バー
+    ジョン付きの名前を含む）の引数としての実行）だけを拾う。コマンド先頭
+    の環境変数代入と python のオプションは読み飛ばす。-n 付きのシェルと、
+    python の -c / -m は実行として扱わない。
     echo の引数や引用符内の文字列、コメント、ヒアドキュメントの本文は、
     コマンド文字列の任意の位置に publish.py と段階名が並んでいても起動として
     扱わない。
@@ -1316,7 +1380,7 @@ def invoked_publish_stages(command, depth=0):
             continue
         arguments = tokens_of_command[1:]
         if not head.endswith("publish.py"):
-            if head.rsplit("/", 1)[-1] not in ("python", "python3"):
+            if not PYTHON_EXECUTABLE.fullmatch(head.rsplit("/", 1)[-1]):
                 continue
             script_arguments = python_script_arguments(arguments)
             if script_arguments is None or not script_arguments[0].endswith("publish.py"):

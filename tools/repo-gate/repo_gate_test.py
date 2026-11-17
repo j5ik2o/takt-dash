@@ -1343,6 +1343,9 @@ def test_publish_stage_detection() -> None:
     扱わない。引用符内の << はヒアドキュメントの開始として扱わず、本文に
     引用符が含まれていても本文の読み飛ばしは崩れない。行継続（バックス
     ラッシュ＋改行）は、継続行が字下げされていても引数として残らない。
+    バージョン付きのインタプリタ名（python3.11 など）も python として扱う。
+    算術式展開 $(( ... )) の中にある << はシフト演算子であり、ヒアドキュ
+    メントの開始として扱わない。
     """
     with Sandbox() as sandbox:
         module = sandbox.module
@@ -1420,6 +1423,24 @@ def test_publish_stage_detection() -> None:
         assert module.publish_stages(
             step("python3 \\\n  -u tools/project-status/publish.py commit")
         ) == {"commit": "commit"}, "行継続の後ろに python のオプションがあっても実起動を拾う"
+        assert module.publish_stages(step("python3.11 tools/project-status/publish.py commit")) == {
+            "commit": "commit"
+        }, "バージョン付きのインタプリタ名（python3.11）でも実起動を拾う"
+        assert module.publish_stages(
+            step("/usr/bin/python3.12 tools/project-status/publish.py push", "push")
+        ) == {"push": "push"}, "パス付きのバージョン付きインタプリタでも実起動を拾う"
+        assert module.publish_stages(step("python3.11 -u tools/project-status/publish.py commit")) == {
+            "commit": "commit"
+        }, "バージョン付きのインタプリタとオプションが重なっても実起動を拾う"
+        assert module.publish_stages(
+            step("echo $((1 << 2))\npython3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "算術式の中の << はヒアドキュメントの開始として扱わず、後ろの実起動を拾う"
+        assert module.publish_stages(
+            step("echo $(( (1 << 2) + 3 ))\npython3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "算術式に括弧が入れ子になっていても、後ろの実起動を拾う"
+        assert module.publish_stages(
+            step("echo $((1 << 2))\ncat <<'EOF'\npython3 tools/project-status/publish.py commit\nEOF")
+        ) == {}, "算術式の後ろにあるヒアドキュメントの本文も実行として扱わない"
 
 
 def test_publish_workflow_passes() -> None:
@@ -1488,6 +1509,37 @@ def test_publish_workflow_accepts_heredoc_and_continuation_forms() -> None:
         "行継続で折り返す": lambda line: line.replace(
             "python3 ", "python3 \\\n            ", 1
         ),
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_success(sandbox, label)
+
+
+def test_publish_workflow_accepts_versioned_interpreter_and_arithmetic_forms() -> None:
+    """公開コマンドの有効な記法（バージョン付きインタプリタ、算術式の前置き）でも関門を通る。
+
+    `python3.11 ...` のようなバージョン付きのインタプリタ名は、シェルでは
+    python3 と同じ公開スクリプトを起動する有効な記法である。また、
+    `echo $((1 << 2))` の << は算術式の中のシフト演算子であり、ヒアドキュ
+    メントの開始ではない。どちらも検出から漏らすと、段階の入力が無いもの
+    として正しいワークフローが拒否される。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "バージョン付きインタプリタ": lambda line: line.replace("python3 ", "python3.11 ", 1),
+        "算術式の前置き": lambda line: "          echo $((1 << 2))\n" + line,
     }
     for label, transform in cases.items():
         workflow = PUBLISH_WORKFLOW
@@ -2184,6 +2236,7 @@ def main() -> int:
         test_publish_workflow_passes,
         test_publish_workflow_accepts_option_and_assignment_forms,
         test_publish_workflow_accepts_heredoc_and_continuation_forms,
+        test_publish_workflow_accepts_versioned_interpreter_and_arithmetic_forms,
         test_publish_commands_must_invoke_publish_py,
         test_publish_success_rule_must_precede_unconditional_rule,
         test_machine_gate_requires_six_system_inputs,
