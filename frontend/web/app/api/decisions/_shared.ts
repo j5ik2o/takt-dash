@@ -39,17 +39,29 @@ const DEFAULT_ALLOWED_HOSTS: readonly string[] = [
   "localhost:3000",
 ];
 
+// 既定ポート（http の 80、https の 443）は、明示しても省略しても同じホストと
+// みなす。設定値・Host ヘッダ・Origin のすべてをこの形へそろえてから比べる。
+const canonicalHost = (hostname: string, port: string): string =>
+  port === "" || port === "80" || port === "443" ? hostname : `${hostname}:${port}`;
+
 // host:port の形の値だけを小文字の host:port へ正規化する。パスや userinfo 等が付く値は無効とする。
 const normalizeHost = (value: string): string | undefined => {
   try {
     const url = new URL(`http://${value}`);
-    if (url.host !== value.toLowerCase() || url.username !== "" || url.password !== "") {
+    if (url.username !== "" || url.password !== "") {
       return undefined;
     }
     if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
       return undefined;
     }
-    return url.host;
+    const canonical = canonicalHost(url.hostname, url.port);
+    // URL への解釈で表記が変わる値（空白の除去や符号化が起きる値）は無効とする。
+    // 既定ポートの明示だけは、正規化で落ちた形との差として許す。
+    const lowered = value.toLowerCase();
+    if (lowered !== canonical && lowered !== `${canonical}:80` && lowered !== `${canonical}:443`) {
+      return undefined;
+    }
+    return canonical;
   } catch {
     return undefined;
   }
@@ -77,7 +89,8 @@ const requestOriginIsAllowed = (request: Request): boolean => {
   }
   let originHost: string;
   try {
-    originHost = new URL(origin).host;
+    const originUrl = new URL(origin);
+    originHost = canonicalHost(originUrl.hostname, originUrl.port);
   } catch {
     return false;
   }
