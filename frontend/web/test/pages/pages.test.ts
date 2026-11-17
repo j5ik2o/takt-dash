@@ -19,6 +19,7 @@ import {
   NOW,
 } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
+import { elementWithAttribute, textOf } from "../support/markup.ts";
 import { createBackendClient } from "../../src/grpc/client.ts";
 import { buildOverviewView, type OverviewView } from "../../src/state/dashboard.ts";
 import { OverviewContent } from "../../src/components/overview-content.tsx";
@@ -68,7 +69,7 @@ const occurrences = (html: string, needle: string): number => html.split(needle)
 // run 行の中のバーだけを対象にし、バー自身の属性と内側の幅指定を他の要素の一致に
 // 紛れずに観測する。
 const barMarkup = (html: string): string => {
-  const row = /<li class="run-row[^"]*">([\s\S]*?)<\/li>/.exec(html);
+  const row = /<tr class="run-row[^"]*">([\s\S]*?)<\/tr>/.exec(html);
   if (row === null) {
     assert.fail("run 行が描画されていない");
   }
@@ -461,19 +462,8 @@ const withServerName = (name: string) => {
   return { ...state, servers: state.servers.map((server) => ({ ...server, name })) };
 };
 
-const serverHeadingBlocks = (html: string): string[] =>
-  Array.from(html.matchAll(/<div class="sc-head">([\s\S]*?)<\/div>/g), (match) => match[1]);
-
-const serverHeadingFor = (html: string, needle: string): string => {
-  const block = serverHeadingBlocks(html).find((candidate) => candidate.includes(needle));
-  if (block === undefined) {
-    assert.fail(`サーバーカードの見出しに ${needle} を含む項目がある`);
-  }
-  return block;
-};
-
-const serverHeadingTextFor = (html: string, needle: string): string =>
-  serverHeadingFor(html, needle).replace(/<[^>]+>/g, "");
+// サーバーの1行（server- 接頭辞の id を持つ要素）を取り出す。
+const serverLine = (html: string, serverId: string): string => elementWithAttribute(html, "id", `server-${serverId}`).outer;
 
 const withServerIdentity = (identity: { serverId: string; name: string; kind: string }) => {
   const base = createDashboardState();
@@ -484,10 +474,10 @@ const withServerIdentity = (identity: { serverId: string; name: string; kind: st
   };
 };
 
-test("概要ページのサーバーカード見出しは表示名・サーバー ID・機種をラベル付きで判別できる", () => {
+test("概要ページのサーバーの1行は表示名・サーバー ID・機種をラベル付きで判別できる", () => {
   const state = withServerIdentity({ serverId: "mac-mini", name: "j5ik2o-mac-mini", kind: "Mac mini" });
   const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
-  const heading = serverHeadingTextFor(html, "j5ik2o-mac-mini");
+  const heading = textOf(serverLine(html, "mac-mini"));
 
   assert.match(heading, /表示名: j5ik2o-mac-mini/, "表示名を主として示す");
   assert.match(heading, /サーバー ID: mac-mini/, "サーバー ID を副として示す");
@@ -496,12 +486,12 @@ test("概要ページのサーバーカード見出しは表示名・サーバ�
   assert.doesNotMatch(heading, /j5ik2o-mac-miniMac mini/, "表示名と機種を区切らずに連結しない");
 });
 
-test("概要ページのサーバーカード見出しの変更後も状態表示・アンカー・見出しの id を維持する", () => {
+test("概要ページのサーバーの1行も状態表示・アンカー・見出しの id を維持する", () => {
   const state = withServerIdentity({ serverId: "mac-mini", name: "j5ik2o-mac-mini", kind: "Mac mini" });
   const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
-  const heading = serverHeadingFor(html, "j5ik2o-mac-mini");
+  const heading = serverLine(html, "mac-mini");
 
-  assert.match(html, /id="server-mac-mini"/, "サーバーカードのアンカーを維持する");
+  assert.match(heading, /j5ik2o-mac-mini/, "サーバーのアンカーは表示名を持つ1行に付く");
   assert.match(html, /id="h-servers"/, "サーバー区画の見出し id を維持する");
   assert.match(heading, /aria-hidden="true"/, "状態の点は読み上げ対象から外したままにする");
 });
@@ -710,9 +700,10 @@ test("タスクの要約が空の run 行はタスク名を出す", () => {
   const state = { ...base, runs: base.runs.map((run) => ({ ...run, summary: "" })) };
   const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
 
-  const task = /<div class="task">([\s\S]*?)<\/div>/.exec(html)?.[1];
-  assert.ok(task !== undefined, "タスクの表示がある");
-  assert.match(task, /採用ページのレイアウトを直す/, "要約が無ければタスク名を出す");
+  const row = /<tr class="run-row[^"]*">([\s\S]*?)<\/tr>/.exec(html)?.[1];
+  assert.ok(row !== undefined, "run の行がある");
+  const task = textOf(row);
+  assert.match(task, /タスク「採用ページのレイアウトを直す」/, "要約が無ければタスク名を出す");
   assert.doesNotMatch(task, /タスク「」/, "空の要約をそのまま出さない");
 });
 
@@ -756,9 +747,9 @@ test("新着ログで発光する run 行だけが flash クラスを持ち、�
   );
 
   assert.equal(elementsByClass(html, "flash").length, 1, "発光するのは flashingRunSlugs に入った行だけ");
-  const flashRow = /<li class="run-row flash">([\s\S]*?)<\/li>/.exec(html)?.[1];
+  const flashRow = /<tr class="run-row flash">([\s\S]*?)<\/tr>/.exec(html)?.[1];
   assert.ok(flashRow?.includes("/runs/run-aaa"), "発光する行は対象 slug の run 行になる");
-  const plainRow = /<li class="run-row">([\s\S]*?)<\/li>/.exec(html)?.[1];
+  const plainRow = /<tr class="run-row">([\s\S]*?)<\/tr>/.exec(html)?.[1];
   assert.ok(plainRow?.includes("/runs/run-bbb"), "flash を持たない行は対象外の slug の run 行になる");
 
   const css = await readFile(`${webRoot}app/globals.css`, "utf8");

@@ -51,6 +51,9 @@
   --radius-pill: 999px;
 
   --layout-aside-width: 320px;
+  /* 概要の本文の上限。幅 2560px の画面でも本文（2560 − サイドバー 252 − 左右の余白 72 = 2236px）を
+     埋め切れる値にし、右に大きな空白を残さない（issue #120）。 */
+  --layout-overview-max-width: 2240px;
 }
 
 html {
@@ -253,20 +256,28 @@ a {
 
 .tiles,
 .cards,
-.scards {
+.overview-cards {
   display: grid;
   gap: var(--space-18);
 }
 
+/* 数字1個のタイルは伸ばさず、220px までの幅で左に詰める（issue #120）。 */
 .tiles {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 220px));
 }
 
 .cards {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.cards > li {
+/* 概要のプロジェクトのカードは列数を固定せず、1件なら全幅、2件なら半分ずつに広げる（issue #120）。
+   .cards はほかのページと共有しているため、概要だけこのクラスで並べる。 */
+.overview-cards {
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+}
+
+.cards > li,
+.overview-cards > li {
   display: flex;
   flex-direction: column;
 }
@@ -286,27 +297,12 @@ a {
   outline-offset: 2px;
 }
 
-.scards {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .tile,
 .card {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: var(--space-18) var(--space-20);
   background: var(--surface);
-  min-width: 0;
-}
-
-.scard {
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: var(--space-18) var(--space-20);
-  background: var(--surface);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-12);
   min-width: 0;
 }
 
@@ -364,8 +360,7 @@ a {
   margin-bottom: var(--space-12);
 }
 
-.card-head,
-.sc-head {
+.card-head {
   display: flex;
   justify-content: space-between;
   gap: var(--space-10);
@@ -374,22 +369,37 @@ a {
   margin-bottom: var(--space-4);
 }
 
-.sc-head h3 {
-  font-size: 18px;
-  display: flex;
-  align-items: center;
-  gap: var(--space-10);
-  overflow-wrap: anywhere;
+/* 概要のサーバーは見出しの横の1行に並べる（issue #120）。表示名を主、サーバー ID と機種を副として
+   区別して見せる（issue #63）。応答なしの注記だけは1行の下へ折り返す。 */
+.server-strip > h2 {
+  font-size: var(--font-size-16);
+}
+
+.server-line {
+  gap: var(--space-8) var(--space-12);
   min-width: 0;
 }
 
-/* サーバーカード見出しは表示名を主、サーバー ID と機種を副として縦に積む（issue #63）。 */
-.sc-head h3 .srv-id,
-.sc-head h3 .kind {
-  display: block;
+.server-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.server-name .srv-id,
+.server-name .kind {
+  margin-left: var(--space-8);
   font-size: var(--font-size-13);
   font-weight: 400;
   color: var(--muted);
+}
+
+.server-line .big-badge {
+  font-size: var(--font-size-14);
+  padding: var(--space-2) var(--space-12);
+}
+
+.server-line .stale-note {
+  flex-basis: 100%;
 }
 
 .about,
@@ -400,7 +410,6 @@ a {
 
 .goals,
 .mini-runs,
-.runs,
 .steps,
 .reports,
 .instructions,
@@ -528,20 +537,6 @@ a {
   padding-top: var(--space-8);
 }
 
-.runs .run-row {
-  display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) 200px;
-  gap: var(--space-4) var(--space-16);
-  align-items: center;
-  padding: 11px 0;
-  border-top: 1px solid var(--line2);
-  font-size: var(--font-size-14);
-}
-
-.runs .run-row:first-child {
-  border-top: none;
-}
-
 .st {
   display: inline-flex;
   align-items: center;
@@ -568,55 +563,54 @@ a {
   color: var(--orange-d);
 }
 
-.run-main {
-  min-width: 0;
-}
-
-.run-main .p {
+/* 実行中の run の表（issue #120、#149・#171・#193）。枠・罫線・セルの縦の揃えは部品の .l-table が受け持つ。 */
+.run-project .p {
+  display: block;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
-.run-main .g {
+.run-project .view {
+  font-size: var(--font-size-13);
+}
+
+/* ゴールの文は列の中で折り返し、状態やステップの表示に重ならないようにする。 */
+.run-goal {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.run-goal .g {
   display: block;
   color: var(--muted);
   font-size: var(--font-size-13);
-  line-height: 1.45;
 }
 
-.run-main .task {
-  font-size: var(--font-size-14);
+.run-step {
+  min-width: 180px;
+}
+
+.run-step .stp {
   overflow-wrap: anywhere;
 }
 
-.run-main .model {
-  font-size: var(--font-size-13);
-  color: var(--muted);
-}
-
-.run-prog {
-  min-width: 0;
-}
-
-.run-prog .stp {
-  font-size: var(--font-size-14);
-  overflow-wrap: anywhere;
-}
-
-.run-prog .stp b {
+.run-step .stp b {
   font-family: var(--mono);
-  font-size: var(--font-size-14);
 }
 
-.run-prog .meta {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-8);
+.run-step .model,
+.run-elapsed {
   font-size: var(--font-size-13);
   color: var(--muted);
-  flex-wrap: wrap;
 }
 
-.run-prog .meta .warn,
+/* 経過と状態は折り返さず、ゴールの文の折り返しに巻き込まれないようにする。 */
+.run-elapsed,
+.run-status {
+  white-space: nowrap;
+}
+
+.run-elapsed .warn,
 .run-note.warn {
   color: var(--orange-d);
   font-weight: 600;
@@ -791,16 +785,6 @@ a {
   border-color: var(--orange-line);
 }
 
-.scard.down {
-  border-color: var(--orange-line);
-  background: #fffcf9;
-}
-
-.scard.down .big-badge {
-  color: var(--orange-d);
-  border-color: var(--orange-line);
-}
-
 .tray {
   background: var(--surface);
   border: 1px solid var(--orange-line);
@@ -924,7 +908,8 @@ a {
   text-decoration: underline;
 }
 
-.cards > li > .view {
+.cards > li > .view,
+.overview-cards > li > .view {
   align-self: flex-start;
   margin-left: 0;
   margin-top: var(--space-6);
@@ -1159,21 +1144,15 @@ pre {
   font-weight: 600;
 }
 
-/* 概要（issue #75）: 3タイル・異常バナー・判断待ちパネル・カード下端の集計をコンパクトに並べる。 */
+/* 概要（issue #75）: 3タイル・異常バナー・判断待ちパネルをコンパクトに並べる。
+   本文の上限は共有の .page（1200px）より広げる（issue #120）。 */
 .overview {
   gap: var(--space-16);
+  max-width: var(--layout-overview-max-width);
 }
 
 .overview .tile {
   padding: var(--space-14) var(--space-16);
-}
-
-.overview .scard {
-  padding: var(--space-14) var(--space-16);
-}
-
-.overview .runs .run-row {
-  padding: var(--space-8) 0;
 }
 
 .health {
@@ -1257,23 +1236,6 @@ pre {
   color: var(--orange-d);
 }
 
-.sc-foot {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4) var(--space-16);
-  margin-top: var(--space-10);
-  padding-top: var(--space-8);
-  border-top: 1px solid var(--line2);
-  font-size: var(--font-size-13);
-  color: var(--muted);
-}
-
-.sc-foot .cnt {
-  color: var(--text);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
 .srv-list .cnt {
   font-size: var(--font-size-12);
   color: var(--faint);
@@ -1295,10 +1257,6 @@ pre {
 @media (max-width: 1280px) {
   .cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .scards {
-    grid-template-columns: minmax(0, 1fr);
   }
 
   .tray-item {
@@ -1382,18 +1340,12 @@ pre {
 
   .tiles,
   .cards,
-  .scards,
   .sum-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .sum-grid .f.wide {
     grid-column: auto;
-  }
-
-  .runs .run-row {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-6);
   }
 
   .tray {

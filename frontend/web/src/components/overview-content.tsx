@@ -22,6 +22,10 @@ const positionText = (stepNumber?: number, totalSteps?: number, iteration?: numb
 
 const waitText = (waitMinutes: number): string => formatDuration(Math.round(waitMinutes * 60));
 
+// プロジェクトが増えても、概要の最初の画面がカードの一覧で埋まらないよう枚数を抑える。
+// 超えた分は件数だけを示し、全件は /projects で見る。
+const OVERVIEW_PROJECT_CARD_LIMIT = 6;
+
 // 上限が0でも 0 を返し、0除算の NaN/Infinity を描画しない。
 const runUsagePercent = (runningRuns: number, runLimit: number): number =>
   runLimit > 0 ? Math.min(100, Math.round((runningRuns / runLimit) * 100)) : 0;
@@ -48,6 +52,8 @@ export function OverviewContent({
     ? `${formatClock(view.partialReadAt)} 時点`
     : "最後に読めた時刻は不明";
   const longestWait = view.pendingDecisions[0];
+  const shownProjects = view.projects.slice(0, OVERVIEW_PROJECT_CARD_LIMIT);
+  const hiddenProjectCount = view.projects.length - shownProjects.length;
   return (
     <main className="page overview">
       {disconnected ? <BackendUnavailableNotice /> : null}
@@ -170,140 +176,119 @@ export function OverviewContent({
         </section>
       ) : null}
 
-      <section aria-labelledby="h-servers">
-        <h2 className="sec" id="h-servers">
-          サーバー
-        </h2>
-        <div className="scards">
-          {view.servers.map(
-            ({ server, state, stateLabel, runs, runLimit, runningRuns, inProgressGoals, pendingCount, waitingTasks }) => (
-              <article
-                id={serverAnchorId(server.serverId)}
-                className={`scard ${state === "down" ? "down" : ""}`}
-                key={server.serverId}
-              >
-                <div className="sc-head">
-                  <h3>
-                    <span className={`dot ${state}`} aria-hidden="true" />
-                    <span>
-                      表示名: {server.name}
-                      <span className="srv-id">サーバー ID: {server.serverId}</span>
-                      <span className="kind">機種: {server.kind}</span>
-                    </span>
-                  </h3>
-                  <span className={`big-badge ${state}`}>{stateLabel}</span>
-                </div>
-                <div className="read-at">
+      <section className="l-section" aria-labelledby="h-servers">
+        <div className="l-cluster server-strip">
+          <h2 id="h-servers">サーバー</h2>
+          {view.servers.map(({ server, state, stateLabel }) => (
+            <div id={serverAnchorId(server.serverId)} className="l-cluster server-line" key={server.serverId}>
+              <span className={`dot ${state}`} aria-hidden="true" />
+              <span className="server-name">
+                表示名: {server.name}
+                <span className="srv-id">サーバー ID: {server.serverId}</span>
+                <span className="kind">機種: {server.kind}</span>
+              </span>
+              <span className="read-at">
+                {server.lastReadAt
+                  ? `takt-mcp から ${formatClock(server.lastReadAt)} に読みました。`
+                  : "takt-mcp からまだ読めていません。"}
+              </span>
+              <span className={`big-badge ${state}`}>{stateLabel}</span>
+              {state === "down" ? (
+                <p className="stale-note">
                   {server.lastReadAt
-                    ? `takt-mcp から ${formatClock(server.lastReadAt)} に読みました。`
-                    : "takt-mcp からまだ読めていません。"}
-                </div>
-                {state === "down" ? (
-                  <div className="stale-note">
-                    {server.lastReadAt
-                      ? `${formatClock(server.lastReadAt)} 時点の内容です。最後に読めた時点の状態を表示しています。`
-                      : "まだ一度も読めていません。"}
-                  </div>
-                ) : null}
-                <ul className="runs">
-                  {runs.length > 0 ? (
-                    runs.map((runView) => {
-                      const flashing = flashingRunSlugs?.has(runView.run.runSlug) ?? false;
-                      const position = positionText(
-                        runView.stepNumber,
-                        runView.totalSteps,
-                        runView.iteration,
-                      );
-                      const lastLogText =
-                        runView.elapsedSeconds !== undefined
-                          ? `最後のログは ${formatDuration(runView.elapsedSeconds)}前`
-                          : "最後のログはまだありません";
-                      return (
-                        <li
-                          className={`run-row${flashing ? " flash" : ""}`}
-                          key={runView.run.runSlug}
-                        >
-                          <span className={`st ${runView.state}`}>
-                            <span className={`dot ${runView.state}`} aria-hidden="true" />
-                            {runView.label}
-                          </span>
-                          <div className="run-main">
-                            <span className="p">{runView.run.project}</span>
-                            {runView.goalName ? <span className="g">{runView.goalName}</span> : null}
-                            <div className="task">
-                              タスク「{runView.run.summary || runView.run.taskName}」
-                            </div>
-                            {runView.model ? (
-                              <div className="model">モデルは {formatModel(runView.model)} です。</div>
-                            ) : null}
-                          </div>
-                          <div className="run-prog">
-                            {runView.currentStepName ? (
-                              <div className="stp">
-                                ステップ <b>{runView.currentStepName}</b>
-                                {position}
-                              </div>
-                            ) : null}
-                            {runView.stepNumber !== undefined && runView.totalSteps ? (
-                              <div
-                                className={`bar thick ${runView.state}`}
-                                role="img"
-                                aria-label={`${runView.totalSteps} ステップ中 ${runView.stepNumber} つ目`}
-                              >
-                                <i
-                                  style={{
-                                    width: `${Math.round(
-                                      (runView.stepNumber / runView.totalSteps) * 100,
-                                    )}%`,
-                                  }}
-                                />
-                              </div>
-                            ) : null}
-                            <div className="meta">
-                              <span className={runView.state === "warn" ? "warn" : ""}>
-                                {lastLogText}
-                              </span>
-                              <a
-                                className="view"
-                                href={`/runs/${encodeURIComponent(runView.run.runSlug)}`}
-                              >
-                                run の詳細を見る
-                              </a>
-                            </div>
-                            {runView.state === "warn" && runView.note ? (
-                              <div className="run-note warn">{runView.note}</div>
-                            ) : null}
-                            {runView.state === "delayed" && runView.note ? (
-                              <div className="run-note delayed">{runView.note}</div>
-                            ) : null}
-                          </div>
-                        </li>
-                      );
-                    })
-                  ) : (
-                    <li className="empty">走っている run はありません。</li>
-                  )}
-                </ul>
-                <div className="sc-foot">
-                  <span className="cnt">
-                    run {runningRuns} / {runLimit}
-                  </span>
-                  <span>進行中のゴール {inProgressGoals}件</span>
-                  <span>判断待ち {pendingCount}件</span>
-                  <span>待機中のタスク {waitingTasks}件</span>
-                </div>
-              </article>
-            ),
-          )}
+                    ? `${formatClock(server.lastReadAt)} 時点の内容です。最後に読めた時点の状態を表示しています。`
+                    : "まだ一度も読めていません。"}
+                </p>
+              ) : null}
+            </div>
+          ))}
         </div>
+      </section>
+
+      <section className="l-section" aria-labelledby="h-runs">
+        <h2 id="h-runs">実行中の run</h2>
+        {view.runs.length > 0 ? (
+          <div className="l-table">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">プロジェクト</th>
+                  <th scope="col">ゴール</th>
+                  <th scope="col">ステップ</th>
+                  <th scope="col">経過</th>
+                  <th scope="col">状態</th>
+                </tr>
+              </thead>
+              <tbody>
+                {view.runs.map((runView) => {
+                  const flashing = flashingRunSlugs?.has(runView.run.runSlug) ?? false;
+                  const position = positionText(runView.stepNumber, runView.totalSteps, runView.iteration);
+                  const lastLogText =
+                    runView.elapsedSeconds !== undefined
+                      ? `最後のログは ${formatDuration(runView.elapsedSeconds)}前`
+                      : "最後のログはまだありません";
+                  return (
+                    <tr className={`run-row${flashing ? " flash" : ""}`} key={runView.run.runSlug}>
+                      <td className="run-project">
+                        <span className="p">{runView.run.project}</span>
+                        <a className="view" href={`/runs/${encodeURIComponent(runView.run.runSlug)}`}>
+                          run の詳細を見る
+                        </a>
+                      </td>
+                      <td className="run-goal">
+                        {runView.goalName ? <span className="g">{runView.goalName}</span> : null}
+                        <div className="task">タスク「{runView.run.summary || runView.run.taskName}」</div>
+                      </td>
+                      <td className="run-step">
+                        {runView.currentStepName ? (
+                          <div className="stp">
+                            ステップ <b>{runView.currentStepName}</b>
+                            {position}
+                          </div>
+                        ) : null}
+                        {runView.stepNumber !== undefined && runView.totalSteps ? (
+                          <div
+                            className={`bar thick ${runView.state}`}
+                            role="img"
+                            aria-label={`${runView.totalSteps} ステップ中 ${runView.stepNumber} つ目`}
+                          >
+                            <i style={{ width: `${Math.round((runView.stepNumber / runView.totalSteps) * 100)}%` }} />
+                          </div>
+                        ) : null}
+                        {runView.model ? <div className="model">モデルは {formatModel(runView.model)} です。</div> : null}
+                      </td>
+                      <td className="run-elapsed">
+                        <span className={runView.state === "warn" ? "warn" : undefined}>{lastLogText}</span>
+                      </td>
+                      <td className="run-status">
+                        <span className={`st ${runView.state}`}>
+                          <span className={`dot ${runView.state}`} aria-hidden="true" />
+                          {runView.label}
+                        </span>
+                        {runView.state === "warn" && runView.note ? (
+                          <div className="run-note warn">{runView.note}</div>
+                        ) : null}
+                        {runView.state === "delayed" && runView.note ? (
+                          <div className="run-note delayed">{runView.note}</div>
+                        ) : null}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="empty">走っている run はありません。</p>
+        )}
       </section>
 
       <section aria-labelledby="h-projects">
         <h2 className="sec" id="h-projects">
           プロジェクト
         </h2>
-        <ul className="cards">
-          {view.projects.map((project) => (
+        <ul className="overview-cards">
+          {shownProjects.map((project) => (
             <li key={project.name}>
               <Link className="card card-link" href={projectHref(project.name)}>
                 <h3>{project.name}</h3>
@@ -316,6 +301,13 @@ export function OverviewContent({
             </li>
           ))}
         </ul>
+        {hiddenProjectCount > 0 ? (
+          <p>
+            <Link className="view" href="/projects">
+              ほか {hiddenProjectCount} 件のプロジェクトを見る
+            </Link>
+          </p>
+        ) : null}
       </section>
     </main>
   );

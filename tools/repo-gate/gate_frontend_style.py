@@ -16,16 +16,14 @@ EXCLUDED_DIR_PATHS = {"src/proto", "test", "public"}
 COLOR = "色"
 COLUMNS = "列数"
 
-# 既存の画面用クラスのうち、部品の適用（issue #120・#121）まで残す宣言。
+# 既存の画面用クラスのうち、部品の適用（issue #121 など）まで残す宣言。
 # (frontend/web からの相対パス, 文脈の列, プロパティ, 空白を 1 つに詰めた値) が完全に
 # 一致するときだけ通す。宣言が消えたら一覧からも外す（残すと検査が失敗する）。
 # 新しい例外は足さず、色は :root の変数、列数は部品か auto-fit で書く。
 GLOBALS_CSS = "app/globals.css"
 LIVE_ACCENT = "rgba(255, 255, 255, 0.28)"
 EXISTING_EXCEPTIONS = [
-    (GLOBALS_CSS, (".tiles",), "grid-template-columns", "repeat(3, minmax(0, 1fr))"),
     (GLOBALS_CSS, (".cards",), "grid-template-columns", "repeat(2, minmax(0, 1fr))"),
-    (GLOBALS_CSS, (".scards",), "grid-template-columns", "repeat(2, minmax(0, 1fr))"),
     (
         GLOBALS_CSS,
         (".run-row .bar.live > i",),
@@ -38,7 +36,6 @@ EXISTING_EXCEPTIONS = [
     (GLOBALS_CSS, ("@keyframes pulse", "70%"), "box-shadow", "0 0 0 7px rgba(15, 139, 141, 0)"),
     (GLOBALS_CSS, ("@keyframes pulse", "100%"), "box-shadow", "0 0 0 0 rgba(15, 139, 141, 0)"),
     (GLOBALS_CSS, ("@keyframes flash", "from"), "background-color", "rgba(15, 139, 141, 0.14)"),
-    (GLOBALS_CSS, (".scard.down",), "background", "#fffcf9"),
     (GLOBALS_CSS, (".sum-grid",), "grid-template-columns", "repeat(4, minmax(0, 1fr))"),
     (GLOBALS_CSS, (".dialog-backdrop",), "background", "rgba(31, 35, 40, 0.4)"),
     (GLOBALS_CSS, ("@media (max-width: 1280px)", ".cards"), "grid-template-columns", "repeat(2, minmax(0, 1fr))"),

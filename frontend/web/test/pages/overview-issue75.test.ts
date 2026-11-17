@@ -2,13 +2,14 @@
 //
 // 「開いた瞬間に全体が分かり、異常だけが目立つ」ため、上部を実行中 run・判断待ち・
 // 24時間完了タスクの3タイルにし、閾値と最終読み取り時刻のタイルを外す。異常がある
-// ときだけ警告バナーと判断待ちパネルを出し、サーバーカードを先に置く。描画結果の
+// ときだけ警告バナーと判断待ちパネルを出し、サーバーの節を先に置く。描画結果の
 // HTML から要素を観測し、ブラウザ自動化は使わない。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createDashboardState, createHealthyDashboardState, NOW } from "../support/fixtures.ts";
+import { elementWithAttribute } from "../support/markup.ts";
 import { type DashboardState, ConnectionState, ExecutionStatus } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import OverviewPage from "../../app/page.tsx";
@@ -72,15 +73,15 @@ const calloutSection = (html: string): string | undefined => {
   return html.slice(start, end < 0 ? html.length : end);
 };
 
-const serverCard = (html: string, serverId: string): string => {
-  const marker = `id="server-${serverId}"`;
-  const at = html.indexOf(marker);
-  if (at < 0) {
-    assert.fail(`サーバー ${serverId} のカードが描画されていない`);
-  }
-  const start = html.lastIndexOf("<article", at);
-  const end = html.indexOf("</article>", start);
-  return html.slice(start, end < 0 ? html.length : end);
+// サーバーの1行と、その下に出す応答なしの注記を含む範囲。注記は1行の要素の中か直後の兄弟に置けるため、
+// 1行の要素の開始から次のサーバーの1行（または節の終わり）までを対象にする。
+const serverLine = (html: string, serverId: string): string => {
+  const section = elementWithAttribute(html, "aria-labelledby", "h-servers").outer;
+  const line = elementWithAttribute(section, "id", `server-${serverId}`);
+  const start = section.indexOf(line.openingTag);
+  const next = section.indexOf('id="server-', start + line.openingTag.length);
+  const end = next < 0 ? section.length : section.lastIndexOf("<", next);
+  return section.slice(start, end);
 };
 
 test("概要の上部は実行中 run・判断待ち・24時間完了タスクの3タイルで、閾値と最終読み取り時刻のタイルを持たない", () => {
@@ -238,19 +239,6 @@ test("サーバーの区画はプロジェクトの区画より先に現れる",
   assert.ok(servers < projects, "サーバーを最初の1画面に置く");
 });
 
-test("サーバーカードの下端は run 件数・進行中ゴール・判断待ち・待機中タスクを出す", () => {
-  const html = renderOverview(createDashboardState());
-  const mini = serverCard(html, "mini");
-  const down = serverCard(html, "down");
-
-  assert.match(mini, /run\s*1\s*\/\s*4/, "実行中 run の件数と上限を出す");
-  assert.match(mini, /進行中のゴール\s*1件/, "進行中のゴール数を出す");
-  assert.match(mini, /判断待ち\s*2件/, "そのサーバーの判断待ち数を出す");
-  assert.match(mini, /待機中のタスク\s*1件/, "待機中のタスク数を出す");
-
-  assert.match(down, /run\s*0\s*\/\s*4/, "応答なしのサーバーは run 0件として出す");
-});
-
 test("応答なしのときは最後に読めた時点の件数であることと時刻を示す", () => {
   const base = createDashboardState();
   const state = {
@@ -266,10 +254,10 @@ test("応答なしのときは最後に読めた時点の件数であること�
   assert.match(tile, /最後に読めた時点で\s*1\s*件/, "タイルでも読めた時点の値と示す");
   assert.match(tile, /16:09/, "タイルにも最後に読めた時刻を添える");
 
-  const down = serverCard(html, "down");
-  assert.match(down, /class="[^"]*\bstale-note\b/, "応答なしのカードに時点の注記を出す");
-  assert.match(down, /16:09/, "カードにも最後に読めた時刻を出す");
-  assert.match(down, /時点/, "カードの内容が読めた時点のものであると示す");
+  const down = serverLine(html, "down");
+  assert.match(down, /class="[^"]*\bstale-note\b/, "応答なしのサーバーの1行に時点の注記を添える");
+  assert.match(down, /16:09/, "サーバーの1行にも最後に読めた時刻を出す");
+  assert.match(down, /時点/, "サーバーの内容が読めた時点のものであると示す");
 });
 
 test("最後に読めた時刻が1件も無いときは不明と表示し、時刻を捏造しない", () => {
@@ -289,8 +277,8 @@ test("最後に読めた時刻が1件も無いときは不明と表示し、時�
   assert.match(tile, /最後に読めた時刻は不明/, "タイルで時刻を不明と示す");
   assert.doesNotMatch(tile, /\d{2}:\d{2}/, "タイルに実在しない時刻を出さない");
 
-  const down = serverCard(html, "down");
-  assert.match(down, /まだ一度も読めていません/, "カードはまだ読めていないと示す");
+  const down = serverLine(html, "down");
+  assert.match(down, /まだ一度も読めていません/, "サーバーの1行はまだ読めていないと示す");
   assert.doesNotMatch(down, /最後に読めた時点の状態/, "読めていないのに時点の状態と併記しない");
 });
 
