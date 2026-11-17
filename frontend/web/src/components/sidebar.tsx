@@ -5,6 +5,7 @@ import type { DashboardRun } from "../state/restore-state";
 import { serverHref } from "../state/anchors";
 import { commitsDiffer, type BuildInfo } from "../state/build-info";
 import { formatClock } from "../state/format";
+import { serverStateFrom, serverStateLabel } from "../state/dashboard";
 
 type SidebarProps = {
   servers: Server[];
@@ -50,14 +51,17 @@ export function Sidebar({
         <ul className="srv-list">
           {servers.map((server) => {
             const runCount = runs?.filter((run) => run.serverId === server.serverId).length ?? 0;
+            // 状態の決め方と文言は概要のサーバーカードと共通の関数を使う。
+            // 接続だけで決めると、run が無いサーバーがカードの表示と食い違う（issue #188）。
+            const state = serverStateFrom(server.connected, runCount);
             return (
               <li key={server.serverId}>
-                <span className={`dot ${server.connected ? "live" : "down"}`} aria-hidden="true" />
+                <span className={`dot ${state}`} aria-hidden="true" />
                 <Link className="nm" href={serverHref(server.serverId)}>
                   {server.name}
                 </Link>
                 <span className="cnt">run {runCount}件</span>
-                <span className="srv-state">{server.connected ? "動作中" : "応答なし"}</span>
+                <span className="srv-state">{serverStateLabel(state)}</span>
               </li>
             );
           })}

@@ -28,6 +28,8 @@ import {
   projectKey,
   isHumanMergeWaiting,
   resolveThresholds,
+  serverStateFrom,
+  serverStateLabel,
   sortPendingDecisions,
   summarizePendingDecisions,
   toRunView,
@@ -660,4 +662,42 @@ test("ゴールに属さない run も概要とサーバー別の run 行に表�
   const mini = overview.servers.find((item) => item.server.serverId === "mini");
   assert.equal(mini?.runs[0]?.run.goalId, undefined);
   assert.equal(mini?.runs[0]?.run.runSlug, "run-aaa");
+});
+
+test("サーバーの状態は接続の有無と run の件数だけで決まる", () => {
+  assert.equal(serverStateFrom(false, 3), "down", "未接続なら run があっても応答なしの側にする");
+  assert.equal(serverStateFrom(false, 0), "down", "未接続なら down にする");
+  assert.equal(serverStateFrom(true, 1), "live", "接続済みで run があれば live にする");
+  assert.equal(serverStateFrom(true, 0), "idle", "接続済みで run が無ければ idle にする");
+});
+
+test("サーバーの状態の文言は接続と活動を区別する", () => {
+  assert.equal(serverStateLabel("down"), "応答なし", "未接続の表示は従来どおり応答なしにする");
+  assert.equal(serverStateLabel("live"), "動作中", "run がある場合は動作中にする");
+  assert.equal(
+    serverStateLabel("idle"),
+    "接続中（run なし）",
+    "接続済みで run が無いことを、応答なしとも動作中とも違う文言で示す",
+  );
+});
+
+test("接続済みで run が0件のサーバーは概要カードで「接続中（run なし）」になる", () => {
+  const state = createDashboardState();
+  const overview = buildOverviewView({ ...state, runs: [] }, NOW);
+
+  const mini = overview.servers.find((item) => item.server.serverId === "mini");
+  assert.equal(mini?.state, "idle", "接続済みで run が無いサーバーは idle である");
+  assert.equal(mini?.stateLabel, "接続中（run なし）", "カードの文言が接続できていることを示す");
+
+  const down = overview.servers.find((item) => item.server.serverId === "down");
+  assert.equal(down?.state, "down", "未接続のサーバーは down のままである");
+  assert.equal(down?.stateLabel, "応答なし", "応答なしの表示は従来どおりである");
+});
+
+test("接続済みで run があるサーバーは概要カードで「動作中」になる", () => {
+  const overview = buildOverviewView(createDashboardState(), NOW);
+
+  const mini = overview.servers.find((item) => item.server.serverId === "mini");
+  assert.equal(mini?.state, "live", "run があるサーバーは live である");
+  assert.equal(mini?.stateLabel, "動作中", "カードの文言は動作中である");
 });
