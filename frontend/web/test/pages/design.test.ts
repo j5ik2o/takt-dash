@@ -572,7 +572,7 @@ test("アクティビティの出来事行は種類ごとの状態を点とラ�
   assert.doesNotMatch(idle, /class="ev warn"/, "一時停止は注意の行にしない");
 });
 
-test("接続の切断から復帰をまとめた行は最新の復帰の状態に揃える", () => {
+test("接続の切断と復帰は別の行になり、それぞれの種類の状態で表示する", () => {
   const base = createActivityResponse();
   const response: GetActivityResponse = {
     ...base,
@@ -595,9 +595,15 @@ test("接続の切断から復帰をまとめた行は最新の復帰の状態�
   };
   const html = renderPage(ActivityPage, { response, now: NOW });
   const rows = html.match(/<li class="ev[\s\S]*?<\/li>/g) ?? [];
-  assert.equal(rows.length, 1, "隣接する接続イベントは1行にまとまる");
-  const row = rows[0]!;
-  assert.doesNotMatch(row, /class="ev warn"/, "最新が復帰なら注意の行にしない");
-  assert.doesNotMatch(row, /class="kl warn"/, "最新が復帰なら警告のラベルにしない");
-  assert.match(row, /class="dot live"/, "最新が復帰なら実行中の点にする");
+  assert.equal(rows.length, 2, "切断と復帰は別の行になる");
+  const restoredRow = rows[0]!;
+  assert.match(restoredRow, /接続の復帰/, "復帰の行は復帰の種類で出す");
+  assert.doesNotMatch(restoredRow, /class="ev warn"/, "復帰の行は注意の行にしない");
+  assert.doesNotMatch(restoredRow, /class="kl warn"/, "復帰の行は警告のラベルにしない");
+  assert.match(restoredRow, /class="dot live"/, "復帰の行は実行中の点にする");
+  const lostRow = rows[1]!;
+  assert.match(lostRow, /接続の切断/, "切断の行は切断の種類で出す");
+  assert.match(lostRow, /class="ev warn"/, "切断の行は注意の行にする");
+  assert.match(lostRow, /class="kl warn"/, "切断の行は警告のラベルにする");
+  assert.match(lostRow, /class="dot warn"/, "切断の行は警告の点にする");
 });
