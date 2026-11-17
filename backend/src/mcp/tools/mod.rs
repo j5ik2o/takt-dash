@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use super::client::{CallError, McpClient, McpClientConfig, TransportError};
 use crate::{
   config::McpServer,
-  domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
+  domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   model::{
     GoalDetail, GoalEntry, GoalQuestionEntry, GoalTaskEntry, GoalWorkLogEntry, InquiryEntry, NotificationEntry,
     ProjectSnapshot, RegistrationProposalEntry, RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, TaskDetail,
@@ -493,44 +493,40 @@ impl<'a> ToolSet<'a> {
   /// 目的・対象外・受け入れ条件・制約・仕様は takt_get_goal の path/textOffset を全ページ追従して
   /// 全文を集めます。作業記録と質問は専用の一覧道具を全ページ追従します。紐づくタスクは
   /// takt_list_tasks を全ページ取得して goal_id で絞ります。
-  pub async fn read_goal_detail(&mut self, goal_id: &str) -> Result<GoalDetail, ToolError> {
-    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id })).await?;
+  pub async fn read_goal_detail(&mut self, goal_id: &GoalId) -> Result<GoalDetail, ToolError> {
+    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id.as_str() })).await?;
     let goal =
       value.get("goal").ok_or_else(|| ToolError::Parse("takt_get_goal の応答に goal がありません".to_owned()))?;
     let returned_id = string_field(goal, "id")?;
-    if returned_id != goal_id {
+    if returned_id != goal_id.as_str() {
       return Err(ToolError::Parse(format!("要求したゴール {goal_id} と応答のゴール {returned_id} が一致しません")));
     }
     let status = parse_goal_status(goal.get("status"))?;
     let execution_status = parse_goal_execution_status(goal.get("executionStatus"))?;
     let branch = optional_string(goal, "branch").unwrap_or_default();
     let integration_branch = optional_string(goal, "integrationBranch").unwrap_or_default();
-    let objective = self.read_goal_text(goal_id, "objective").await?;
-    let out_of_scope = self.read_goal_array(goal_id, "outOfScope").await?;
-    let acceptance_criteria = self.read_goal_array(goal_id, "acceptanceCriteria").await?;
-    let constraints = self.read_goal_array(goal_id, "constraints").await?;
+    let objective = self.read_goal_text(goal_id.as_str(), "objective").await?;
+    let out_of_scope = self.read_goal_array(goal_id.as_str(), "outOfScope").await?;
+    let acceptance_criteria = self.read_goal_array(goal_id.as_str(), "acceptanceCriteria").await?;
+    let constraints = self.read_goal_array(goal_id.as_str(), "constraints").await?;
     let mut specifications = BTreeMap::new();
     for notation in SPECIFICATION_NOTATIONS {
-      let content = self.read_goal_text(goal_id, &format!("specifications.{notation}")).await?;
+      let content = self.read_goal_text(goal_id.as_str(), &format!("specifications.{notation}")).await?;
       if !content.is_empty() {
         specifications.insert(notation.to_owned(), content);
       }
     }
-    let work_log = self.read_goal_work_log(goal_id).await?;
-    let questions = self.read_goal_questions(goal_id).await?;
+    let work_log = self.read_goal_work_log(goal_id.as_str()).await?;
+    let questions = self.read_goal_questions(goal_id.as_str()).await?;
     let tasks = self
       .list_tasks()
       .await?
       .into_iter()
-      .filter(|task| task.goal_id.as_ref().map(|goal_id| goal_id.as_str()) == Some(goal_id))
-      .map(|task| GoalTaskEntry {
-        task_name: task.name.as_str().to_owned(),
-        status:    task.status,
-        run_slug:  task.run_slug.as_ref().map(|run_slug| run_slug.as_str().to_owned()),
-      })
+      .filter(|task| task.goal_id.as_ref() == Some(goal_id))
+      .map(|task| GoalTaskEntry { task_name: task.name, status: task.status, run_slug: task.run_slug })
       .collect();
     Ok(GoalDetail {
-      goal_id: goal_id.to_owned(),
+      goal_id: goal_id.clone(),
       status,
       execution_status,
       objective,
@@ -667,20 +663,20 @@ impl<'a> ToolSet<'a> {
   /// 一致するタスクが無ければ Ok(None)、ページ追従が上限に達したら Parse エラーにします。
   pub async fn read_task_detail(
     &mut self,
-    project: &str,
-    task_name: &str,
-    goal_id: Option<&str>,
+    project: &ProjectName,
+    task_name: &TaskName,
+    goal_id: Option<&GoalId>,
   ) -> Result<Option<TaskDetail>, ToolError> {
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
       let value = self.call_json("takt_list_tasks", json!({ "offset": offset })).await?;
       let page = Page::from_value(&value, "tasks")?;
       for item in &page.items {
-        if item.get("name").and_then(Value::as_str) != Some(task_name) {
+        if item.get("name").and_then(Value::as_str) != Some(task_name.as_str()) {
           continue;
         }
         if let Some(goal_id) = goal_id {
-          if item.get("goalId").and_then(Value::as_str) != Some(goal_id) {
+          if item.get("goalId").and_then(Value::as_str) != Some(goal_id.as_str()) {
             continue;
           }
         }
