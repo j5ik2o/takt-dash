@@ -53,7 +53,7 @@ export function GoalsContent({ state, project }: GoalsContentProps): ReactElemen
               <p>{goalStateSentence(goal)}</p>
               <p>{isHumanMergeWaiting(goal) ? "マージの承認待ちです。" : "マージの承認待ちではありません。"}</p>
               <p className="k">タスクの件数</p>
-              <div className="kv">
+              <div className="kv task-counts">
                 {countEntries(goal).map((entry) => (
                   <span key={entry.label}>
                     {entry.label} {entry.count}件
