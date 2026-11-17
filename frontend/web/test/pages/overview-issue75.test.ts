@@ -130,7 +130,7 @@ test("24時間に完了したタスクのタイルは合計と失敗系の件数
   const tile = tileWithLabel(html, "24時間に完了したタスク");
 
   assert.match(tile, /<div class="num">\s*4\s*<small>件<\/small>/, "完了したタスクの合計4件を出す");
-  assert.match(tile, /失敗したタスクが\s*1件残っています/, "失敗系の件数を添える");
+  assert.match(tile, /失敗・上限超過・PR 失敗のタスクが\s*1件残っています/, "失敗系の件数を添える");
 });
 
 test("異常があるときだけ警告バナーを出し、該当する文だけを並べる", () => {
@@ -141,8 +141,8 @@ test("異常があるときだけ警告バナーを出し、該当する文だ�
   assert.match(health, /class="[^"]*\battention\b/, "注意の見た目にする");
   assert.match(health, /判断待ちが\s*2件あります/, "判断待ちの文を出す");
   assert.match(health, /Mac Studio から応答がありません/, "応答のないサーバーの文を出す");
-  assert.match(health, /失敗/, "失敗したタスクの文を出す");
-  assert.match(health, /1件/, "失敗したタスクの件数を出す");
+  assert.match(health, /失敗・上限超過・PR 失敗のタスクが/, "失敗系の内訳を明記した文を出す");
+  assert.match(health, /1件/, "失敗系の件数を出す");
 });
 
 test("ログが止まっている run だけが異常のときはその文だけを出す", () => {
@@ -177,7 +177,7 @@ test("中止したゴールだけが異常のときはその文だけを出す",
   assert.match(health, /中止したゴールが\s*1件あります/, "中止したゴールの文を出す");
   assert.doesNotMatch(health, /判断待ちが/, "0件の判断待ちの文を出さない");
   assert.doesNotMatch(health, /から応答がありません/, "応答のない対象が無ければその文を出さない");
-  assert.doesNotMatch(health, /失敗したタスクが/, "失敗が無ければその文を出さない");
+  assert.doesNotMatch(health, /失敗・上限超過・PR 失敗のタスクが/, "失敗が無ければその文を出さない");
 });
 
 test("プロジェクトの応答なしだけが異常のときはそのプロジェクトの文だけを出す", () => {
@@ -196,7 +196,7 @@ test("プロジェクトの応答なしだけが異常のときはそのプロ�
   assert.match(health, /esa から応答がありません/, "応答なしのプロジェクト名を出す");
   assert.doesNotMatch(health, /判断待ちが/, "0件の判断待ちの文を出さない");
   assert.doesNotMatch(health, /中止したゴール/, "中止が無ければその文を出さない");
-  assert.doesNotMatch(health, /失敗したタスクが/, "失敗が無ければその文を出さない");
+  assert.doesNotMatch(health, /失敗・上限超過・PR 失敗のタスクが/, "失敗が無ければその文を出さない");
 });
 
 test("異常が無いときは警告バナーと判断待ちパネルを描画しない", () => {
@@ -323,7 +323,7 @@ test("サーバーが応答なしのときはヘッダーとタイルがサー�
   assert.match(tile, /応答のないサーバーがあるため/, "タイルもサーバーを主語にする");
 });
 
-test("失敗したタスクの件数は失敗・上限超過・PR作成失敗の合計をタイルに出す", () => {
+test("失敗系の件数は失敗・上限超過・PR 失敗の合計を内訳の文言でタイルに出す", () => {
   const base = createHealthyDashboardState();
   const state = {
     ...base,
@@ -339,7 +339,7 @@ test("失敗したタスクの件数は失敗・上限超過・PR作成失敗の
   const html = renderOverview(state);
   const tile = tileWithLabel(html, "24時間に完了したタスク");
 
-  assert.match(tile, /失敗したタスクが\s*6件残っています/, "failed 1 + exceeded 2 + prFailed 3 を合計する");
+  assert.match(tile, /失敗・上限超過・PR 失敗のタスクが\s*6件残っています/, "failed 1 + exceeded 2 + prFailed 3 を合計する");
 });
 
 test("トークン消費のタイルは描画しない", () => {
