@@ -672,15 +672,67 @@ def shell_tokens(command):
     return tokens
 
 
+def heredoc_delimiter(token):
+    """トークンがヒアドキュメントの開始（<<区切り語）なら、その区切り語を返す。
+
+    区切り語が次のトークンに分かれている形式（<< だけのトークン）では空文字列を
+    返す。ヒアドキュメントでない場合は None を返す。<<<（ヒアストリング）は
+    本文を持たないため対象にしない。
+    """
+    text = str(token)
+    index = 0
+    while index < len(text) and text[index].isdigit():
+        index += 1
+    rest = text[index:]
+    if not rest.startswith("<<") or rest.startswith("<<<"):
+        return None
+    delimiter = rest[2:]
+    if delimiter.startswith("-"):
+        delimiter = delimiter[1:]
+    return delimiter
+
+
 def simple_commands(tokens):
-    """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。"""
+    """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。
+
+    ヒアドキュメントの本文はコマンドとして実行されないため、コマンド解析の
+    対象から外す。本文は、ヒアドキュメントを含むコマンド行の改行の直後から、
+    区切り語だけの行までである。
+    """
     current = []
+    pending_delimiters = []
+    body_delimiters = []
+    body_line = []
+    expecting_delimiter = False
     for token in tokens:
+        if body_delimiters:
+            if token == "\n" and is_shell_operator(token):
+                if len(body_line) == 1 and body_line[0] == body_delimiters[0]:
+                    body_delimiters.pop(0)
+                body_line = []
+            else:
+                body_line.append(token)
+            continue
         if token in SHELL_SEPARATORS and is_shell_operator(token):
             if current:
                 yield current
             current = []
+            if token == "\n" and pending_delimiters:
+                body_delimiters = pending_delimiters
+                pending_delimiters = []
+                body_line = []
             continue
+        if expecting_delimiter:
+            pending_delimiters.append(str(token))
+            expecting_delimiter = False
+            current.append(token)
+            continue
+        delimiter = heredoc_delimiter(token)
+        if delimiter is not None:
+            if delimiter == "":
+                expecting_delimiter = True
+            else:
+                pending_delimiters.append(delimiter)
         current.append(token)
     if current:
         yield current
@@ -923,13 +975,104 @@ PUBLISH_STAGES = ("commit", "push", "pr", "status")
 PUBLISH_SUCCESS_STAGES = ("commit", "push", "pr")
 
 
+ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def strip_command_prefix(tokens_of_command):
+    """単純コマンドの先頭にある制御語と環境変数代入を読み飛ばす。
+
+    `FOO=1 python3 ...` の代入はコマンド名ではなく、その後ろの実行ファイルが
+    起動する。代入だけのコマンドは空の列になる。
+    """
+    while tokens_of_command and (
+        tokens_of_command[0] in SHELL_KEYWORDS or ENV_ASSIGNMENT.match(tokens_of_command[0])
+    ):
+        tokens_of_command = tokens_of_command[1:]
+    return tokens_of_command
+
+
+def shell_command_string(arguments):
+    """bash / sh の引数列から、-c で実行されるスクリプトを返す。
+
+    -n（読み込むが実行しない）が付いている場合、そのスクリプトは実行されない
+    ため None を返す。-c が無い場合（スクリプトファイルの実行など）も None を
+    返す。-o のように引数を取るオプションは、その引数も読み飛ばす。
+    """
+    noexec = False
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            return None
+        if token.startswith("+") and len(token) > 1:
+            index += 1
+            continue
+        if not token.startswith("-") or token == "-":
+            return None
+        if token.startswith("--"):
+            index += 1
+            continue
+        step = 1
+        for position, option in enumerate(token[1:]):
+            if option == "n":
+                noexec = True
+            elif option == "c":
+                if noexec or index + 1 >= len(arguments):
+                    return None
+                return arguments[index + 1]
+            elif option == "o":
+                if position == len(token) - 2:
+                    step = 2
+                break
+        index += step
+    return None
+
+
+def python_script_arguments(arguments):
+    """python / python3 の引数列から、実行するスクリプトとその引数を返す。
+
+    インタプリタのオプション（-u など。引数を取る -W / -X はその引数も）を
+    読み飛ばす。-c や -m はスクリプトファイルの実行ではないため、その場合は
+    None を返す。--help や --version のようにスクリプトを実行しない場合と、
+    スクリプトが無い場合も None を返す。
+    """
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            index += 1
+            break
+        if not token.startswith("-") or token == "-":
+            break
+        if token.startswith("--"):
+            if token[2:].split("=", 1)[0] in ("help", "version"):
+                return None
+            index += 1
+            continue
+        step = 1
+        for position, option in enumerate(token[1:]):
+            if option in ("c", "m"):
+                return None
+            if option in ("W", "X"):
+                if position == len(token) - 2:
+                    step = 2
+                break
+        index += step
+    if index >= len(arguments):
+        return None
+    return arguments[index:]
+
+
 def invoked_publish_stages(command, depth=0):
     """コマンド文字列が実際に起動する publish.py の段階を集める。
 
     bash -c や sh -c の内側のスクリプトへ再帰し、単純コマンドの先頭にある
     publish.py の呼び出し（直接実行、または python / python3 の引数としての
-    実行）だけを拾う。echo の引数や引用符内の文字列、コメントは、コマンド
-    文字列の任意の位置に publish.py と段階名が並んでいても起動として扱わない。
+    実行）だけを拾う。コマンド先頭の環境変数代入と python のオプションは
+    読み飛ばす。-n 付きのシェルと、python の -c / -m は実行として扱わない。
+    echo の引数や引用符内の文字列、コメント、ヒアドキュメントの本文は、
+    コマンド文字列の任意の位置に publish.py と段階名が並んでいても起動として
+    扱わない。
     """
     found = set()
     if depth > 5:
@@ -939,23 +1082,23 @@ def invoked_publish_stages(command, depth=0):
     except ValueError:
         return found
     for tokens_of_command in simple_commands(tokens):
-        while tokens_of_command and tokens_of_command[0] in SHELL_KEYWORDS:
-            tokens_of_command = tokens_of_command[1:]
+        tokens_of_command = strip_command_prefix(tokens_of_command)
         if not tokens_of_command:
             continue
         head = tokens_of_command[0]
-        if head in ("bash", "sh") and "-c" in tokens_of_command:
-            index = tokens_of_command.index("-c")
-            if index + 1 < len(tokens_of_command):
-                found |= invoked_publish_stages(tokens_of_command[index + 1], depth + 1)
+        if head in ("bash", "sh"):
+            script = shell_command_string(tokens_of_command[1:])
+            if script is not None:
+                found |= invoked_publish_stages(script, depth + 1)
             continue
         arguments = tokens_of_command[1:]
         if not head.endswith("publish.py"):
             if head.rsplit("/", 1)[-1] not in ("python", "python3"):
                 continue
-            if not arguments or not arguments[0].endswith("publish.py"):
+            script_arguments = python_script_arguments(arguments)
+            if script_arguments is None or not script_arguments[0].endswith("publish.py"):
                 continue
-            arguments = arguments[1:]
+            arguments = script_arguments[1:]
         if arguments and arguments[0] in PUBLISH_STAGES:
             found.add(arguments[0])
     return found

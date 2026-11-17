@@ -1336,8 +1336,11 @@ def test_status_only_step_is_not_a_publish_step() -> None:
 def test_publish_stage_detection() -> None:
     """publish.py の段階検出は、実行位置にある呼び出しだけを拾う。
 
-    echo の引数・引用符内の文字列・コメントに書かれた publish.py は実行とみなさない。
-    bash -c の内側のスクリプトと、&& でつないだ後段の呼び出しは実行として拾う。
+    echo の引数・引用符内の文字列・コメント・ヒアドキュメントの本文に書かれた
+    publish.py は実行とみなさない。bash -c の内側のスクリプトと、&& でつないだ
+    後段の呼び出しは実行として拾う。コマンド先頭の環境変数代入と python の
+    オプションは読み飛ばし、-n 付きのシェルと python の -c / -m は実行として
+    扱わない。
     """
     with Sandbox() as sandbox:
         module = sandbox.module
@@ -1370,6 +1373,36 @@ def test_publish_stage_detection() -> None:
         assert module.publish_stages(
             step("cd frontend && python3 tools/project-status/publish.py push", "push")
         ) == {"push": "push"}, "前段を && でつないだ実起動を拾う"
+        assert module.publish_stages(step("python3 -u tools/project-status/publish.py commit")) == {
+            "commit": "commit"
+        }, "python のオプション（-u）を読み飛ばして、オプションなしと同じ段階を返す"
+        assert module.publish_stages(
+            step("python3 -W ignore tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "引数を取る python のオプション（-W）を読み飛ばして実起動を拾う"
+        assert module.publish_stages(
+            step('python3 -c "python3 tools/project-status/publish.py commit"')
+        ) == {}, "python の -c はスクリプトの実行として扱わない"
+        assert module.publish_stages(step("python3 -m tools.project-status.publish commit")) == {}, (
+            "python の -m はスクリプトの実行として扱わない"
+        )
+        assert module.publish_stages(step("FOO=1 python3 tools/project-status/publish.py commit")) == {
+            "commit": "commit"
+        }, "先頭の環境変数代入を読み飛ばして実起動を拾う"
+        assert module.publish_stages(
+            step("PYTHONUNBUFFERED=1 python3 -u tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "環境変数代入と python のオプションが重なっても実起動を拾う"
+        assert module.publish_stages(
+            step("bash -n -c 'python3 tools/project-status/publish.py commit'")
+        ) == {}, "構文確認だけのシェル（bash -n -c）は実行として扱わない"
+        assert module.publish_stages(
+            step("cat <<'EOF'\npython3 tools/project-status/publish.py commit\nEOF")
+        ) == {}, "ヒアドキュメントの本文は実行として扱わない"
+        assert module.publish_stages(
+            step(
+                "cat <<'EOF'\npython3 tools/project-status/publish.py commit\nEOF\n"
+                "python3 tools/project-status/publish.py commit"
+            )
+        ) == {"commit": "commit"}, "ヒアドキュメントの後ろにある実起動は拾う"
 
 
 def test_publish_workflow_passes() -> None:
@@ -1380,10 +1413,42 @@ def test_publish_workflow_passes() -> None:
         assert_success(sandbox, "公開ステップを置く構成")
 
 
+def test_publish_workflow_accepts_option_and_assignment_forms() -> None:
+    """公開コマンドの有効な記法（python のオプション、環境変数代入）でも関門を通る。
+
+    `python3 -u ...` と `PYTHONUNBUFFERED=1 python3 ...` は、シェルでは公開
+    スクリプトを起動する有効な記法である。段階の検出から漏らすと、段階の入力が
+    無いものとして正しいワークフローが拒否される。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "python のオプション付き": lambda line: line.replace("python3 ", "python3 -u ", 1),
+        "環境変数代入付き": lambda line: line.replace(
+            "          python3 ", "          PYTHONUNBUFFERED=1 python3 ", 1
+        ),
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_success(sandbox, label)
+
+
 def test_publish_commands_must_invoke_publish_py() -> None:
     """公開の段階が表示用の文字列だけでは、公開ステップとして受理しない。
 
-    echo の引数・引用符内の文字列・コメントに publish.py を書いても実行にはならない。
+    echo の引数・引用符内の文字列・コメント・ヒアドキュメントの本文に publish.py を
+    書いても、構文確認だけのシェル（bash -n -c）に渡しても実行にはならない。
     実行位置に呼び出しが無ければ公開ステップは無いものとして扱われ、machine_gate の
     成功が公開ステップへ遷移する構成と矛盾するため、関門は拒否する。
     """
@@ -1399,6 +1464,12 @@ def test_publish_commands_must_invoke_publish_py() -> None:
         "echo で表示するだけ": lambda line: "          echo " + line.strip() + "\n",
         "引用符内の文字列で表示するだけ": lambda line: "          echo \"" + line.strip() + "\"\n",
         "コメントに書くだけ": lambda line: "          # " + line.strip() + "\n",
+        "構文確認だけのシェルで表示するだけ": lambda line: "          bash -n -c '"
+        + line.strip()
+        + "'\n",
+        "ヒアドキュメントで表示するだけ": lambda line: "          cat <<'EOF'\n"
+        + line
+        + "          EOF\n",
     }
     for label, transform in cases.items():
         workflow = PUBLISH_WORKFLOW
@@ -2053,8 +2124,10 @@ def main() -> int:
         test_clippy_must_reject_warnings,
         test_done_must_install_node_dependencies_when_missing,
         test_machine_gate_develop_complete_and_mode,
+        test_status_only_step_is_not_a_publish_step,
         test_publish_stage_detection,
         test_publish_workflow_passes,
+        test_publish_workflow_accepts_option_and_assignment_forms,
         test_publish_commands_must_invoke_publish_py,
         test_publish_success_rule_must_precede_unconditional_rule,
         test_machine_gate_requires_six_system_inputs,
