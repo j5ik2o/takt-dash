@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as grpc from "@grpc/grpc-js";
+import { ExecutionStatus, GoalStatus, TaskStatus } from "../../src/proto/taktdash.ts";
 import { createGoalDetailResponse } from "../support/fixtures.ts";
 import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-server.ts";
 import { formatDateTime } from "../../src/state/format.ts";
@@ -63,10 +64,11 @@ test("ゴール詳細は開始ブランチ・統合ブランチ・ゴールブ�
   assert.match(html, /goal\/45-frontend/);
 });
 
-test("ゴール詳細は状態と実行状態を既存の日本語ラベルで表示する", () => {
+test("ゴール詳細は状態と実行状態が矛盾しない文面を表示する", () => {
   const html = renderDetail();
   assert.match(html, /人のマージ待ち/);
-  assert.match(html, /稼働中/);
+  assert.match(html, /ゴールは人のマージ待ちです/);
+  assert.doesNotMatch(html, /稼働中/);
 });
 
 test("ゴール詳細は作業記録を応答順のまま時刻と本文つきで表示する", () => {
@@ -175,4 +177,39 @@ test("backend に接続できないときゴール詳細のローダーは落ち
     assert.match(html, /backend に接続できません/);
     assert.match(html, /TAKTDASH_BACKEND_ADDR/);
   });
+});
+
+test("ゴール詳細は完了したゴールに稼働中と出さず、実行中のタスクが残れば件数を出す", () => {
+  const completed = renderDetail(
+    createGoalDetailResponse({
+      status: GoalStatus.GOAL_STATUS_COMPLETED,
+      tasks: [{ taskName: "仕上げ", status: TaskStatus.TASK_STATUS_COMPLETED, runSlug: "run-zzz" }],
+    }),
+  );
+  assert.match(completed, /ゴールは完了しています/);
+  assert.doesNotMatch(completed, /稼働中/);
+  assert.doesNotMatch(completed, /残っています/);
+
+  const withRunning = renderDetail(
+    createGoalDetailResponse({
+      status: GoalStatus.GOAL_STATUS_COMPLETED,
+      tasks: [
+        { taskName: "仕上げ", status: TaskStatus.TASK_STATUS_COMPLETED, runSlug: "run-zzz" },
+        { taskName: "後片付け", status: TaskStatus.TASK_STATUS_RUNNING, runSlug: "run-yyy" },
+      ],
+    }),
+  );
+  assert.match(withRunning, /ゴールは完了しています。実行中のタスクが 1 件残っています/);
+  assert.doesNotMatch(withRunning, /稼働中/);
+});
+
+test("ゴール詳細は中止したゴールをゴール自体の中止として表示する", () => {
+  const html = renderDetail(
+    createGoalDetailResponse({
+      status: GoalStatus.GOAL_STATUS_CREATED,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED,
+    }),
+  );
+  assert.match(html, /ゴールは中止されました/);
+  assert.doesNotMatch(html, /作成済みで、実行状態は中止/);
 });
