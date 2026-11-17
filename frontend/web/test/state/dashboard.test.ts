@@ -79,6 +79,10 @@ test("承認待ちを独立の区分として数え、内訳の和を total に�
     createdAt: new Date(NOW.getTime() - 60 * 60_000),
     body: "新しいゴール",
     options: [],
+    // ゴール登録の承認待ちにはプルリクエストと問い合わせ ID が無い。proto の
+    // 必須フィールドとして、フィクスチャと同じ形で明示する。
+    pullRequest: undefined,
+    inquiryId: "",
     stale: false,
     revision: 3,
   };
@@ -603,10 +607,20 @@ test("通常タスクの未着手・実行中は人のマージ待ちの判定�
 
   assert.equal(isHumanMergeWaiting(base), true, "通常タスクが動いていなくても人のマージ待ちです");
 
-  const withRunning = { ...base, taskCounts: { ...base.taskCounts, pending: 0, running: 1 } };
+  // 件数の一部だけを変えたゴールも createGoal で作り、TaskStatusCounts の
+  // 全フィールドがそろった形を保つ。
+  const withRunning = createGoal({
+    status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+    mergeTaskLast: TaskStatus.TASK_STATUS_COMPLETED,
+    taskCounts: { pending: 0, running: 1, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+  });
   assert.equal(isHumanMergeWaiting(withRunning), true, "通常タスクが実行中でも人のマージ待ちです");
 
-  const withPending = { ...base, taskCounts: { ...base.taskCounts, pending: 1, running: 0 } };
+  const withPending = createGoal({
+    status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+    mergeTaskLast: TaskStatus.TASK_STATUS_COMPLETED,
+    taskCounts: { pending: 1, running: 0, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+  });
   assert.equal(isHumanMergeWaiting(withPending), true, "通常タスクが未着手でも人のマージ待ちです");
 });
 

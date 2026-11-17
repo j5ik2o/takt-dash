@@ -11,7 +11,7 @@ import { readFile } from "node:fs/promises";
 import { renderToStaticMarkup } from "react-dom/server";
 import { fileURLToPath } from "node:url";
 import { createDashboardState, createProjectsResponse, NOW } from "../support/fixtures.ts";
-import { DashboardState, InquiryKind, PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
+import { ConnectionState, DashboardState, InquiryKind, PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import { Sidebar } from "../../src/components/sidebar.tsx";
 import OverviewPage from "../../app/page.tsx";
@@ -91,7 +91,17 @@ test("プロジェクト名が既存の見出し id と衝突してもカード 
   const base = createDashboardState();
   const state = {
     ...base,
-    projects: [{ name: "h-projects", about: "衝突を確かめるプロジェクト", serverId: "mini", completedTasks24h: 1 }],
+    projects: [
+      {
+        name: "h-projects",
+        about: "衝突を確かめるプロジェクト",
+        serverId: "mini",
+        completedTasks24h: 1,
+        connected: true,
+        lastReadAt: NOW,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+      },
+    ],
   };
   const overview = renderOverviewWithState(state);
   anchorFor(overview, "/projects#project-h-projects");
@@ -172,6 +182,8 @@ const inquiryDecision = (overrides: Partial<PendingDecision> = {}): PendingDecis
   createdAt: new Date(NOW.getTime() - 30 * 60_000),
   body: "リリースの日取りはどうしますか。",
   options: [],
+  // 問い合わせにはプルリクエストが無い。proto の必須フィールドとして明示する。
+  pullRequest: undefined,
   stale: false,
   ...overrides,
 });
@@ -211,7 +223,17 @@ test("名前に %20 を含むプロジェクトでも概要のリンクが該当
   const base = createDashboardState();
   const state = {
     ...base,
-    projects: [{ name: "release%20candidate", about: "% を含む名前のプロジェクト", serverId: "mini", completedTasks24h: 1 }],
+    projects: [
+      {
+        name: "release%20candidate",
+        about: "% を含む名前のプロジェクト",
+        serverId: "mini",
+        completedTasks24h: 1,
+        connected: true,
+        lastReadAt: NOW,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+      },
+    ],
   };
   const overview = renderOverviewWithState(state);
   const href = "/projects#project-release%2520candidate";
@@ -227,7 +249,17 @@ test("名前に % を含むプロジェクトでも概要のリンクが該当�
   const base = createDashboardState();
   const state = {
     ...base,
-    projects: [{ name: "100%", about: "% を含む名前のプロジェクト", serverId: "mini", completedTasks24h: 1 }],
+    projects: [
+      {
+        name: "100%",
+        about: "% を含む名前のプロジェクト",
+        serverId: "mini",
+        completedTasks24h: 1,
+        connected: true,
+        lastReadAt: NOW,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+      },
+    ],
   };
   const overview = renderOverviewWithState(state);
   const href = "/projects#project-100%25";

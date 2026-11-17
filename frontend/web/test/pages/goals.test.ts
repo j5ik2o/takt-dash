@@ -4,16 +4,18 @@
 // ゴールを既定で表示する。?project= 指定時はそのプロジェクトだけに絞り込む。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createElement } from "react";
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ExecutionStatus, GoalStatus, TaskStatus } from "../../src/proto/taktdash.ts";
 import { createDashboardState, createGoal } from "../support/fixtures.ts";
+import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
 import { GoalsContent } from "../../src/components/goals-content.tsx";
 import { StateStreamProvider } from "../../src/components/state-provider.tsx";
 import GoalsPage from "../../app/goals/page.tsx";
 
+// GoalsContent は内部型の状態を受けるため、proto のフィクスチャを変換して渡す。
 const renderGoals = (state = createDashboardState(), project?: string): string =>
-  renderToStaticMarkup(createElement(GoalsContent, { state, project }));
+  renderToStaticMarkup(createElement(GoalsContent, { state: dashboardStateFromProto(state), project }));
 
 // ページは RSC で searchParams を受け取り、SSE の state を配る Provider の内側で一覧を描く。
 // 描画時の配線（searchParams → LiveGoals → GoalsContent）を観測するため、ページ関数を
@@ -22,9 +24,12 @@ const renderGoalsPage = async (project?: string): Promise<string> => {
   const page = await GoalsPage({
     searchParams: Promise.resolve(project === undefined ? {} : { project }),
   });
-  return renderToStaticMarkup(
-    createElement(StateStreamProvider, { initialState: createDashboardState() }, page),
-  );
+  // children は Provider の props の必須項目のため、型付けした props ごと渡す。
+  const props: ComponentProps<typeof StateStreamProvider> = {
+    initialState: createDashboardState(),
+    children: page,
+  };
+  return renderToStaticMarkup(createElement(StateStreamProvider, props));
 };
 
 // 一覧の行は 1件につき1つの li 要素になる。名前から行を切り出し、行ごとの表示を観測する。

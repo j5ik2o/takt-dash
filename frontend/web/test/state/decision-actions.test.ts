@@ -95,7 +95,8 @@ test("種別の表示名は3種別を判別できる", () => {
   assert.match(registrationLabel, /承認/);
   assert.notEqual(registrationLabel, inquiryLabel);
 
-  assert.equal(decisionTypeLabel({ ...optionsQuestion(), type: 99 }), "判断待ち");
+  // 未知の種別は生成コードの UNRECOGNIZED で表し、既定の表示名へ落ちることを見る。
+  assert.equal(decisionTypeLabel({ ...optionsQuestion(), type: PendingDecisionType.UNRECOGNIZED }), "判断待ち");
 });
 
 test("操作の結果に出す項目名はプロジェクトと種別を含む", () => {
@@ -196,11 +197,13 @@ test("自由記述の回答は問い合わせの識別子と本文を持つ", ()
 test("作業の依頼の回答は report だけを持つ", () => {
   const completed = buildAnswerAction(operation(), { report: 1 });
   assert.ok(completed);
+  assert.equal(completed.kind, "answer");
   assert.equal(completed.payload.report, 1);
   assert.equal(completed.payload.text, undefined);
 
   const unable = buildAnswerAction(operation(), { report: 2 });
   assert.ok(unable);
+  assert.equal(unable.kind, "answer");
   assert.equal(unable.payload.report, 2);
   assert.equal(unable.payload.text, undefined);
 });
@@ -277,8 +280,8 @@ test("確定の意図はダイアログに対応する操作を選び、承認�
 
 test("マージ確認は開いた時点の PR 番号と URL を保持し、確認時もその PR を送る", () => {
   const target = openDecisionDialog(merge(), "merge");
-  assert.equal(target.prNumber, 418);
-  assert.equal(target.url, "https://example.test/pr/418");
+  assert.equal(target?.kind === "merge" ? target.prNumber : undefined, 418);
+  assert.equal(target?.kind === "merge" ? target.url : undefined, "https://example.test/pr/418");
 
   const resolution = resolveDecisionIntent(
     merge(),
@@ -360,7 +363,10 @@ test("確認ダイアログを開くと対象を保持し、同じ対象の確�
   assert.equal(openedRegistration.kind, "open");
   const registrationTarget =
     openedRegistration.kind === "open" ? openedRegistration.target ?? undefined : undefined;
-  assert.equal(registrationTarget?.revision, 7);
+  assert.equal(
+    registrationTarget?.kind === "approve-registration" ? registrationTarget.revision : undefined,
+    7,
+  );
 
   const registrationResolution = resolveDecisionIntent(
     registration(),
@@ -439,12 +445,14 @@ test("自由記述と作業の依頼の意図も従来どおりの回答を組�
   assert.equal(textResolution.kind, "submit");
   const textAction = textResolution.kind === "submit" ? textResolution.action : undefined;
   assert.ok(textAction);
+  assert.equal(textAction.kind, "answer");
   assert.equal(textAction.payload.text, " 補足します ");
 
   const reportResolution = resolveDecisionIntent(operation(), { type: "answer-report", report: 2 }, { text: "" });
   assert.equal(reportResolution.kind, "submit");
   const reportAction = reportResolution.kind === "submit" ? reportResolution.action : undefined;
   assert.ok(reportAction);
+  assert.equal(reportAction.kind, "answer");
   assert.equal(reportAction.payload.report, 2);
   assert.equal(reportAction.payload.text, undefined);
 });

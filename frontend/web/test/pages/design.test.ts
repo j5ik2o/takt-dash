@@ -18,6 +18,7 @@ import {
 } from "../support/fixtures.ts";
 import { ActivityKind, DashboardState, ExecutionStatus, GoalStatus, type GetActivityResponse } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
+import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
 import { RunDetailContent } from "../../src/components/run-detail-content.tsx";
 import { Sidebar } from "../../src/components/sidebar.tsx";
 import ActivityPage from "../../app/activity/page.tsx";
@@ -487,8 +488,8 @@ test("760px 以下でもサーバーの状態テキストを隠さない", async
       servers: state.servers,
       pendingCount: 0,
       // 状態は run の件数でも決まるため、run があるサーバーが「動作中」になる
-      // 前提をそろえて渡す（issue #188）。
-      runs: state.runs,
+      // 前提をそろえて渡す（issue #188）。Sidebar の runs は内部型のため変換して渡す。
+      runs: dashboardStateFromProto(state).runs,
       frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
       backendBuild: { commit: "a1b2c3d", branch: "takt/backend" },
     }),
