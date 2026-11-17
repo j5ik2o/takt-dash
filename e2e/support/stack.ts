@@ -235,8 +235,10 @@ export type StackProject = {
 
 // 開始するスタックの構成。プロジェクトを渡すとその件数・内容で起動し、
 // 省略すると既定の1プロジェクト（PROJECT_NAME / PROJECT_ABOUT）で起動する。
+// mockState を渡すと起動時のモックの状態をその関数で作り、省略すると既定の buildMockState を使う。
 export type StartStackOptions = {
   projects?: readonly StackProject[];
+  mockState?: (now: Date) => Record<string, unknown>;
 };
 
 type StackConfigInput = {
@@ -410,7 +412,7 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     options.projects ?? [{ name: PROJECT_NAME, about: PROJECT_ABOUT }];
 
   try {
-    await writeFile(statePath, JSON.stringify(buildMockState(new Date())), "utf8");
+    await writeFile(statePath, JSON.stringify((options.mockState ?? buildMockState)(new Date())), "utf8");
     // backend がモックを起動する前に遅延 0（透過）を用意し、ラッパーが初回から同じ契約で読めるようにする。
     await writeFile(delayPath, JSON.stringify({ stdoutDelayMs: 0 }), "utf8");
     await mkdir(homeDir, { recursive: true });
