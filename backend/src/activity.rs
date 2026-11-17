@@ -147,6 +147,40 @@ impl ActivityStore {
     Ok(events)
   }
 
+  /// 指定したサーバーとプロジェクトについて、最後に記録された接続の出来事
+  /// （切断と復帰のうち新しい方）を、種類と発生時刻の組で返す。接続の出来事が
+  /// 無ければ None。プロセスの再起動後に、記録済みでまだ復帰が対応していない
+  /// 切断が残っているかを確かめるために使います。
+  pub fn last_connection_event(
+    &self,
+    server_id: &str,
+    project: &str,
+  ) -> rusqlite::Result<Option<(EventKind, DateTime<Utc>)>> {
+    let connection = self.connection.lock().expect("SQLite のロックが壊れています");
+    let mut statement = connection.prepare(
+      "SELECT kind, occurred_at FROM events
+       WHERE server_id = ?1 AND project = ?2 AND kind IN (?3, ?4)
+       ORDER BY occurred_at DESC, id DESC
+       LIMIT 1",
+    )?;
+    let mut rows = statement.query(params![
+      server_id,
+      project,
+      EventKind::ConnectionLost.as_str(),
+      EventKind::ConnectionRestored.as_str(),
+    ])?;
+    match rows.next()? {
+      | Some(row) => {
+        let kind_text: String = row.get(0)?;
+        let occurred_at: String = row.get(1)?;
+        let kind = EventKind::from_stored(&kind_text)
+          .ok_or_else(|| conversion_error(0, format!("未知の出来事の種類です: {kind_text}")))?;
+        Ok(Some((kind, parse_timestamp(&occurred_at))))
+      },
+      | None => Ok(None),
+    }
+  }
+
   /// `now` を含む JST の日から遡って7日分の日次集計を、古い日から並べて返す。
   /// 出来事がない日は 0 件として含めます。
   pub fn daily_summaries(&self, now: DateTime<Utc>) -> rusqlite::Result<Vec<DailyCount>> {

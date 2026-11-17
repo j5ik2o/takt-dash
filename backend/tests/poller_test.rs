@@ -16,7 +16,7 @@ use takt_dash_backend::{
   config::Thresholds,
   domain::{SilentMinutes, StaleMinutes},
   mcp::McpClientRegistry,
-  model::EventKind,
+  model::{ActivityEvent, EventKind},
   poller::{run_until_stopped, Poller},
   store::StateStore,
 };
@@ -25,6 +25,7 @@ struct Harness {
   _directory:       tempfile::TempDir,
   config_path:      PathBuf,
   state_path:       PathBuf,
+  project_dir:      PathBuf,
   activity:         Arc<ActivityStore>,
   activity_db_path: PathBuf,
   store:            Arc<StateStore>,
@@ -52,6 +53,32 @@ fn fail_event_recording_for(db_path: &Path, server_id: &str) {
 fn allow_event_recording(db_path: &Path) {
   let connection = rusqlite::Connection::open(db_path).expect("記録先へ直接接続できます");
   connection.execute_batch("DROP TRIGGER IF EXISTS reject_events").expect("記録の中断を解除できます");
+}
+
+/// 記録先の events テーブルを別名へ退避し、接続の出来事への照会を失敗させる。
+///
+/// テーブルが無い間も、出来事が空の記録（空のトランザクション）は成功するため、
+/// 「照会だけが失敗し、読み取りと空の記録は成功する」状態を決定的に作れます。
+/// 退避中は recent_events も失敗するため、検証は restore_events_table の後に行います。
+fn hide_events_table(db_path: &Path) {
+  let connection = rusqlite::Connection::open(db_path).expect("記録先へ直接接続できます");
+  connection.execute_batch("ALTER TABLE events RENAME TO events_hidden").expect("テーブルを退避できます");
+}
+
+fn restore_events_table(db_path: &Path) {
+  let connection = rusqlite::Connection::open(db_path).expect("記録先へ直接接続できます");
+  connection.execute_batch("ALTER TABLE events_hidden RENAME TO events").expect("テーブルを戻せます");
+}
+
+/// 復帰イベントの本文から、切断していた秒数を読み取る。
+fn outage_seconds_of(event: &ActivityEvent) -> i64 {
+  event
+    .body
+    .split("切断していた時間は ")
+    .nth(1)
+    .and_then(|rest| rest.split(" 秒です。").next())
+    .and_then(|value| value.parse::<i64>().ok())
+    .expect("復帰イベントの本文に切断していた秒数が入ります")
 }
 
 /// mock MCP サーバが起動時に書いた PID を読む。
@@ -109,7 +136,7 @@ impl Harness {
     let activity_db_path = directory.path().join("events.sqlite");
     let activity = Arc::new(ActivityStore::open(&activity_db_path).expect("SQLite を開けます"));
     let (changes, _) = tokio::sync::broadcast::channel(16);
-    Harness { _directory: directory, config_path, state_path, activity, activity_db_path, store, changes }
+    Harness { _directory: directory, config_path, state_path, project_dir, activity, activity_db_path, store, changes }
   }
 
   fn poller(&self) -> Poller {
@@ -120,6 +147,27 @@ impl Harness {
       self.changes.clone(),
       McpClientRegistry::new(),
     )
+  }
+
+  /// プロセスの再起動を模した Poller を返す。状態ストアとレジストリは作り直し、
+  /// 設定ファイルと出来事の記録先は同じものを使い回します。作り直した状態ストアも返します。
+  fn restarted_poller(&self) -> (Poller, Arc<StateStore>) {
+    let mut servers = BTreeMap::new();
+    servers.insert("mac-mini".to_owned(), server_meta());
+    let store = Arc::new(StateStore::new(servers, vec![project("takt-dash", &self.project_dir)], Thresholds {
+      pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
+      run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
+      connection_failure_count:       3,
+      connection_delay_seconds:       120,
+    }));
+    let poller = Poller::new(
+      self.config_path.clone(),
+      self.activity.clone(),
+      store.clone(),
+      self.changes.clone(),
+      McpClientRegistry::new(),
+    );
+    (poller, store)
   }
 
   fn rewrite_state(&self, state: Value) {
@@ -1336,4 +1384,328 @@ async fn changing_the_project_server_assignment_reads_the_new_server_state() {
     .collect();
   assert!(goals.contains(&"g2".to_owned()), "新しいサーバーの状態を読みます: {goals:?}");
   assert!(!goals.contains(&"g1".to_owned()), "旧サーバーの状態を持ち越しません: {goals:?}");
+}
+
+#[tokio::test]
+async fn restart_during_a_recorded_outage_records_the_matching_restore_once() {
+  // 切断を記録した後にプロセスが再起動し、再起動後の最初の読み取りで既に回復していた
+  // 場合でも、記録済みの切断に対応する復帰を記録します。再起動後の Poller がメモリ上の
+  // 比較基準と状態ストアだけに頼る実装では、基準もスロットも無いまま成功するため
+  // 復帰を記録できず、切断だけが残ります。再起動は、新しい Poller と新しい状態ストアに
+  // 同じ設定ファイルと同じ記録先を使い回して模します。
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(1, 1);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+  let lost_before: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost_before, 1, "再起動前に切断を1件記録します");
+  poller.shutdown().await;
+
+  // 再起動後の最初の読み取りで既に回復している状態にします。
+  harness.rewrite_state(state_with_goal("g1"));
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+  restarted.read_cycle_once().await.expect("再起動後のサイクルを実行できます");
+  let restored: Vec<_> = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .collect();
+  assert_eq!(restored.len(), 1, "再起動前の切断に対応する復帰を1件だけ記録します");
+  assert!(
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰イベントの本文に、記録済みの切断から数えた切断していた時間を入れます: {}",
+    restored[0].body
+  );
+
+  // 続く成功サイクルでも、復帰を二重に記録しません。
+  restarted.read_cycle_once().await.expect("続くサイクルを実行できます");
+  let restored_after: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .count();
+  assert_eq!(restored_after, 1, "復帰を二重に記録しません");
+  restarted.shutdown().await;
+}
+
+#[tokio::test]
+async fn restart_with_continuing_failures_does_not_duplicate_the_recorded_lost() {
+  // 再起動後も読み取りの失敗が続く間は、記録済みの切断を二重に記録しません。
+  // 記録から基準化した状態で状態ストア側が応答なしへ跨いでも、切断は1件のままです。
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(1, 1);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+  poller.shutdown().await;
+
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+  restarted.read_cycle_once().await.expect("再起動後の失敗でもサイクルは完了します");
+  let lost: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost, 1, "再起動後も切断を二重に記録しません");
+
+  // 回復したら、再起動前の切断に対応する復帰を1件だけ記録します。
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  harness.rewrite_state(state_with_goal("g1"));
+  restarted.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
+  let restored: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .count();
+  assert_eq!(restored, 1, "再起動前の切断に対応する復帰を1件だけ記録します");
+  restarted.shutdown().await;
+}
+
+#[tokio::test]
+async fn client_rebuild_during_a_recorded_outage_records_the_matching_restore() {
+  // クライアントの作り直しで差分基準をリセットしても、記録済みで未対応の切断は
+  // 残ります。リセットした基準だけに頼る実装では、回復しても復帰を記録できません。
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(1, 1);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+  let lost: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost, 1, "作り直し前に切断を1件記録します");
+
+  // cwd を別の存在するディレクトリへ変えてクライアントを作り直し、読み取りも回復させます。
+  let alternate_dir = harness._directory.path().join("project-alternate");
+  std::fs::create_dir_all(&alternate_dir).expect("作り直し先の cwd を作れます");
+  harness.rewrite_config(|value| {
+    value["projects"][0]["cwd"] = json!(alternate_dir.display().to_string());
+  });
+  harness.rewrite_state(state_with_goal("g1"));
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  let report = poller.read_cycle_once().await.expect("作り直し後のサイクルを実行できます");
+  assert_eq!(report.events_recorded, 1, "復帰の出来事だけを記録します");
+  let restored: Vec<_> = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .collect();
+  assert_eq!(restored.len(), 1, "作り直し前の切断に対応する復帰を1件だけ記録します");
+  assert!(
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰イベントの本文に、記録済みの切断から数えた切断していた時間を入れます: {}",
+    restored[0].body
+  );
+  poller.shutdown().await;
+}
+#[tokio::test]
+async fn restart_with_a_failed_first_history_lookup_still_records_the_matching_restore() {
+  // 再起動直後の種付け照会が一時的に失敗しても、その後の成功サイクルで比較基準を
+  // 確定してしまわず、照会が成功したサイクルで未対応の切断に対応する復帰を記録します。
+  // 照会の失敗を「履歴なし」と同じに扱う実装では、最初の成功サイクルが空の出来事群を
+  // 保存して基準を接続中へ確定させるため、以後は照会を試し直せず復帰を記録できません。
+  // 照会の失敗は、events テーブルを別名へ退避して決定的に作ります。
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(1, 1);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+  let lost_before: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost_before, 1, "再起動前に切断を1件記録します");
+  poller.shutdown().await;
+
+  // 再起動後の最初のサイクルでは、種付け照会だけを失敗させます。読み取り自体は
+  // 回復している状態にします。切断していた時間が1秒以上になるよう間を空けます。
+  harness.rewrite_state(state_with_goal("g1"));
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  hide_events_table(&harness.activity_db_path);
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+  restarted.read_cycle_once().await.expect("照会が失敗してもサイクルは完了します");
+  restore_events_table(&harness.activity_db_path);
+
+  // 照会が成功する次のサイクルで、未対応の切断に対応する復帰を1件だけ記録します。
+  restarted.read_cycle_once().await.expect("照会が成功するサイクルを実行できます");
+  let restored: Vec<_> = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .collect();
+  assert_eq!(restored.len(), 1, "照会の失敗をまたいでも復帰を1件だけ記録します");
+  assert!(
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰イベントの本文に、記録済みの切断から数えた切断していた時間を入れます: {}",
+    restored[0].body
+  );
+
+  // 続く成功サイクルでも、復帰を二重に記録しません。
+  restarted.read_cycle_once().await.expect("続くサイクルを実行できます");
+  let restored_after: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .count();
+  assert_eq!(restored_after, 1, "復帰を二重に記録しません");
+  restarted.shutdown().await;
+}
+
+#[tokio::test]
+async fn restart_with_a_delayed_phase_does_not_duplicate_the_recorded_lost() {
+  // 再起動後に「遅延中」を経由して応答なしへ跨いでも、記録済みの切断を二重に記録しません。
+  // 記録から基準化した「応答なし」の基準が、遅延中の失敗で弱い状態へ上書きされると、
+  // しきい値を跨いだときに切断をもう1件記録してしまいます。
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(1, 1);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+  let lost_before: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost_before, 1, "再起動前に切断を1件記録します");
+  poller.shutdown().await;
+
+  // 失敗回数のしきい値を3にして再起動し、失敗を3回続けます。1回目と2回目は遅延中、
+  // 3回目で応答なしへ跨ぎますが、切断は1件のままです。
+  harness.rewrite_connection_thresholds(3, 1);
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+  for _ in 0..3 {
+    restarted.read_cycle_once().await.expect("再起動後の失敗でもサイクルは完了します");
+    let lost: usize = harness
+      .activity
+      .recent_events(50)
+      .unwrap()
+      .into_iter()
+      .filter(|event| event.kind == EventKind::ConnectionLost)
+      .count();
+    assert_eq!(lost, 1, "再起動後も切断を二重に記録しません");
+  }
+
+  // 回復したら、再起動前の切断に対応する復帰を1件だけ記録します。
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  harness.rewrite_state(state_with_goal("g1"));
+  restarted.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
+  let restored: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .count();
+  assert_eq!(restored, 1, "再起動前の切断に対応する復帰を1件だけ記録します");
+  restarted.shutdown().await;
+}
+
+#[tokio::test]
+async fn restart_with_pending_history_lookup_across_the_threshold_records_the_lost_once() {
+  // 再起動直後の種付け照会が失敗し続けている間に読み取りの失敗が応答なしの閾値を
+  // 跨ぐと、保留中の遷移は捨てられるため切断が記録されません。その後、照会が成功
+  // して（履歴に未対応の切断は無い）保留が解けると、比較基準だけが応答なしとして
+  // 確定し、回復したときに切断の無い復帰だけが残ります。保留中に跨いだ切断は、
+  // 照会が成功した時点で1件だけ記録して、復帰と対応させます。
+  // 照会の失敗は、events テーブルを別名へ退避して決定的に作ります。
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(3, 1);
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  hide_events_table(&harness.activity_db_path);
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+
+  // 照会が失敗し続ける間に失敗を3回続けます。1回目と2回目は遅延中で、
+  // 3回目で応答なしへ跨ぎます。
+  for _ in 0..3 {
+    restarted.read_cycle_once().await.expect("照会が失敗してもサイクルは完了します");
+  }
+  restore_events_table(&harness.activity_db_path);
+
+  // 照会が成功するサイクルでも、読み取りは失敗したままにします。この時点で、
+  // 保留中に跨いだ切断が1件だけ記録されます。
+  restarted.read_cycle_once().await.expect("照会が成功するサイクルを実行できます");
+  let lost: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost, 1, "保留中に跨いだ切断を、照会が成功した時点で1件だけ記録します");
+
+  // 回復したら、保留中に跨いだ切断に対応する復帰を1件だけ記録します。
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  harness.rewrite_state(state_with_goal("g1"));
+  restarted.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
+  let restored: Vec<_> = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .collect();
+  assert_eq!(restored.len(), 1, "保留中に跨いだ切断に対応する復帰を1件だけ記録します");
+  assert!(
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰イベントの本文に、保留中に跨いだ切断から数えた切断していた時間を入れます: {}",
+    restored[0].body
+  );
+
+  // 続く成功サイクルでも、復帰を二重に記録しません。
+  restarted.read_cycle_once().await.expect("続くサイクルを実行できます");
+  let restored_after: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .count();
+  assert_eq!(restored_after, 1, "復帰を二重に記録しません");
+  restarted.shutdown().await;
 }
