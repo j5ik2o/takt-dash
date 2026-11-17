@@ -817,11 +817,18 @@ test("アクティビティページは切断と復帰を別の行にし、同�
     ...base,
     events: [
       {
+        occurredAt: new Date(NOW.getTime() - 3 * 60_000),
+        serverId: "mini",
+        project: "esa",
+        kind: ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED,
+        body: "接続が復帰しました。切断していた時間は 90 秒です。",
+      },
+      {
         occurredAt: new Date(NOW.getTime() - 5 * 60_000),
         serverId: "mini",
         project: "esa",
         kind: ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED,
-        body: "接続が復帰しました。",
+        body: "接続が復帰しました。切断していた時間は 150 秒です。",
       },
       {
         occurredAt: new Date(NOW.getTime() - 10 * 60_000),
@@ -843,17 +850,22 @@ test("アクティビティページは切断と復帰を別の行にし、同�
   const html = renderPage(ActivityPage, { response, now: NOW });
   const rows = html.match(/<li class="ev[\s\S]*?<\/li>/g) ?? [];
 
-  assert.equal(rows.length, 2, "切断と復帰は別の行になり、同種の切断だけが1行にまとまる");
+  assert.equal(rows.length, 2, "切断と復帰は別の行になり、同種の接続イベントだけが1行にまとまる");
   const restoredRow = rows[0]!;
   assert.match(restoredRow, /接続の復帰/, "復帰は復帰だけの行に出す");
-  assert.match(restoredRow, /16:25/, "復帰の時刻を出す");
-  assert.match(restoredRow, /接続が復帰しました。/, "単独の行は本文をそのまま出す");
-  assert.doesNotMatch(restoredRow, /2件/, "復帰の行にまとめた件数を付けない");
+  assert.match(restoredRow, /2件/, "復帰も同種ならまとめた件数を出す");
+  assert.match(restoredRow, /切断していた時間は 90 秒です。/, "まとめた復帰の行は最新の出来事の本文を出す");
+  assert.doesNotMatch(restoredRow, /150 秒/, "まとめた復帰の行に古い出来事の本文は出さない");
+  assert.doesNotMatch(restoredRow, /接続の状態が変わりました。/, "まとめた行に汎用の文言は出さない");
+  assert.match(restoredRow, /16:25/, "復帰の期間の始まりを出す");
+  assert.match(restoredRow, /16:27/, "復帰の期間の終わりを出す");
+  assert.ok(restoredRow.indexOf("16:25") < restoredRow.indexOf("16:27"), "復帰の期間を最古から最新の順に出す");
   const lostRow = rows[1]!;
   assert.match(lostRow, /esa/, "まとめた行にプロジェクト名を出す");
   assert.match(lostRow, /接続の切断/, "切断は切断だけの行に出す");
   assert.match(lostRow, /2件/, "まとめた件数を出す");
-  assert.match(lostRow, /接続の状態が変わりました。/, "まとめた行は共通の本文を出す");
+  assert.match(lostRow, /接続が切れました。/, "まとめた切断の行も最新の出来事の具体的な本文を出す");
+  assert.doesNotMatch(lostRow, /接続の状態が変わりました。/, "まとめた行に汎用の文言は出さない");
   assert.match(lostRow, /16:15/, "期間の始まりを出す");
   assert.match(lostRow, /16:20/, "期間の終わりを出す");
   assert.ok(lostRow.indexOf("16:15") < lostRow.indexOf("16:20"), "期間を最古から最新の順に出す");
