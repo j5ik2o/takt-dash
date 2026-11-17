@@ -8,7 +8,7 @@
 // 動いているかどうかを文言で区別する（issue #189）。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { goalBadge, type GoalBadgeKind, type GoalBadgeTone } from "../../src/state/goal-badge.ts";
+import { goalBadge, goalStateSentence, type GoalBadgeKind, type GoalBadgeTone } from "../../src/state/goal-badge.ts";
 import { EXECUTION_STATUS, GOAL_STATUS } from "../../src/state/proto-values.ts";
 import type { TaskStatusCounts } from "../../src/proto/taktdash.ts";
 
@@ -137,6 +137,66 @@ test("Goal.status と execution_status の全組み合わせで決まったラ�
       assert.ok(kinds.has(badge.kind), `status=${status} executionStatus=${executionStatus} の kind が対応表の外`);
       assert.ok(tones.has(badge.tone), `status=${status} executionStatus=${executionStatus} の tone が3種類の外`);
       assert.doesNotMatch(badge.label, /稼働中/, `status=${status} executionStatus=${executionStatus}`);
+    }
+  }
+});
+
+const sentenceFor = (status: number, executionStatus: number, taskCounts?: TaskStatusCounts) =>
+  goalStateSentence({ status, executionStatus, taskCounts });
+
+test("完了したゴールの文面は完了だけを述べ、実行状態が ACTIVE でも稼働中と出さない", () => {
+  assert.equal(sentenceFor(GOAL_STATUS.COMPLETED, EXECUTION_STATUS.ACTIVE), "ゴールは完了しています。");
+  assert.equal(
+    sentenceFor(GOAL_STATUS.COMPLETED, EXECUTION_STATUS.ACTIVE, counts({ running: 2, completed: 5 })),
+    "ゴールは完了しています。実行中のタスクが 2 件残っています。",
+  );
+});
+
+test("中止したゴールの文面はゴール自体の中止として述べる", () => {
+  assert.equal(sentenceFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.ABORTED), "ゴールは中止されました。");
+  assert.equal(sentenceFor(GOAL_STATUS.COMPLETED, EXECUTION_STATUS.ABORTED), "ゴールは中止されました。");
+});
+
+test("一時停止の文面は状態と、実行が一時停止していることを分けて述べる", () => {
+  assert.equal(
+    sentenceFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.PAUSED),
+    "ゴールは作成済みで、実行は一時停止しています。",
+  );
+  assert.equal(
+    sentenceFor(GOAL_STATUS.AWAITING_MERGE, EXECUTION_STATUS.PAUSED),
+    "ゴールは人のマージ待ちで、実行は一時停止しています。",
+  );
+});
+
+test("人のマージ待ちの文面はマージ待ちだけを述べ、稼働中と出さない", () => {
+  assert.equal(sentenceFor(GOAL_STATUS.AWAITING_MERGE, EXECUTION_STATUS.ACTIVE), "ゴールは人のマージ待ちです。");
+});
+
+test("作成済みの文面はタスクの実態で述べ、実行状態が ACTIVE でも稼働中と出さない", () => {
+  assert.equal(
+    sentenceFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.ACTIVE),
+    "ゴールは作成済みで、タスクはまだ登録されていません。",
+  );
+  assert.equal(
+    sentenceFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.ACTIVE, counts({ running: 3, pending: 1 })),
+    "ゴールは作成済みで、実行中のタスクが 3 件あります。",
+  );
+  assert.equal(
+    sentenceFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.ACTIVE, counts({ pending: 1, completed: 2 })),
+    "ゴールは作成済みで、タスクは進行中です。",
+  );
+});
+
+test("Goal.status と execution_status の全組み合わせで文面に稼働中を含めない", () => {
+  const statuses = [GOAL_STATUS.CREATED, GOAL_STATUS.AWAITING_MERGE, GOAL_STATUS.COMPLETED];
+  const executionStatuses = [EXECUTION_STATUS.ACTIVE, EXECUTION_STATUS.PAUSED, EXECUTION_STATUS.ABORTED];
+  for (const status of statuses) {
+    for (const executionStatus of executionStatuses) {
+      assert.doesNotMatch(
+        sentenceFor(status, executionStatus),
+        /稼働中/,
+        `status=${status} executionStatus=${executionStatus}`,
+      );
     }
   }
 });

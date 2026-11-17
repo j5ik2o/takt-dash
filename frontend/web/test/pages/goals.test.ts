@@ -70,7 +70,7 @@ test("ゴール一覧ページは ?project= が無いとき全プロジェクト
   assert.match(html, /全サーバー・全プロジェクトのゴールを2件表示しています。/);
 });
 
-test("ゴール一覧の各行は状態・実行状態・状態別のタスク件数・マージ待ち・プルリクエストを表示する", () => {
+test("ゴール一覧の各行は状態の文面・状態別のタスク件数・マージ待ち・プルリクエストを表示する", () => {
   const humanMerge = createGoal({
     goalId: "goal-human",
     name: "人のマージ待ちのゴール",
@@ -105,7 +105,8 @@ test("ゴール一覧の各行は状態・実行状態・状態別のタスク�
 
   const humanRow = rowFor(html, "人のマージ待ちのゴール");
   assert.match(humanRow, /人のマージ待ち/);
-  assert.match(humanRow, /稼働中/);
+  assert.match(humanRow, /ゴールは人のマージ待ちです/);
+  assert.doesNotMatch(humanRow, /稼働中/);
   assert.match(humanRow, /マージの承認待ちです/);
   assert.match(humanRow, /13/);
   assert.match(humanRow, /418/);
@@ -137,4 +138,75 @@ test("ゴール一覧の各行はゴール ID をエスケープした詳細へ�
   const html = renderGoals({ ...state, goals: [goal] });
   assert.match(html, /href="\/goals\/goal%2F1"/);
   assert.doesNotMatch(html, /href="\/goals\/goal\/1"/);
+});
+
+test("ゴール一覧の各行は状態と実行状態が矛盾しない文面を表示する", () => {
+  const completed = createGoal({
+    goalId: "goal-completed",
+    name: "完了したゴール",
+    status: GoalStatus.GOAL_STATUS_COMPLETED,
+    executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+    taskCounts: { pending: 0, running: 0, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const completedRunning = createGoal({
+    goalId: "goal-completed-running",
+    name: "完了して実行中のタスクが残るゴール",
+    status: GoalStatus.GOAL_STATUS_COMPLETED,
+    executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+    taskCounts: { pending: 0, running: 2, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const aborted = createGoal({
+    goalId: "goal-aborted",
+    name: "中止されたゴール",
+    status: GoalStatus.GOAL_STATUS_CREATED,
+    executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED,
+    taskCounts: { pending: 1, running: 0, completed: 2, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const untouched = createGoal({
+    goalId: "goal-untouched",
+    name: "タスクが無いゴール",
+    status: GoalStatus.GOAL_STATUS_CREATED,
+    executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+    taskCounts: { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const running = createGoal({
+    goalId: "goal-running-tasks",
+    name: "実行中のタスクがあるゴール",
+    status: GoalStatus.GOAL_STATUS_CREATED,
+    executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+    taskCounts: { pending: 1, running: 3, completed: 0, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const paused = createGoal({
+    goalId: "goal-paused",
+    name: "一時停止のゴール",
+    status: GoalStatus.GOAL_STATUS_CREATED,
+    executionStatus: ExecutionStatus.EXECUTION_STATUS_PAUSED,
+    taskCounts: { pending: 2, running: 0, completed: 1, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const state = createDashboardState();
+  const html = renderGoals({ ...state, goals: [completed, completedRunning, aborted, untouched, running, paused] });
+
+  const completedRow = rowFor(html, "完了したゴール");
+  assert.match(completedRow, /ゴールは完了しています/);
+  assert.doesNotMatch(completedRow, /稼働中/);
+  assert.doesNotMatch(completedRow, /残っています/);
+
+  const completedRunningRow = rowFor(html, "完了して実行中のタスクが残るゴール");
+  assert.match(completedRunningRow, /ゴールは完了しています。実行中のタスクが 2 件残っています/);
+  assert.doesNotMatch(completedRunningRow, /稼働中/);
+
+  const abortedRow = rowFor(html, "中止されたゴール");
+  assert.match(abortedRow, /ゴールは中止されました/);
+  assert.doesNotMatch(abortedRow, /作成済み/);
+
+  const untouchedRow = rowFor(html, "タスクが無いゴール");
+  assert.match(untouchedRow, /ゴールは作成済みで、タスクはまだ登録されていません/);
+  assert.doesNotMatch(untouchedRow, /稼働中/);
+
+  const runningRow = rowFor(html, "実行中のタスクがあるゴール");
+  assert.match(runningRow, /ゴールは作成済みで、実行中のタスクが 3 件あります/);
+  assert.doesNotMatch(runningRow, /稼働中/);
+
+  const pausedRow = rowFor(html, "一時停止のゴール");
+  assert.match(pausedRow, /ゴールは作成済みで、実行は一時停止しています/);
 });
