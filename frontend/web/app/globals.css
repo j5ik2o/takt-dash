@@ -54,6 +54,8 @@
   /* 概要の本文の上限。幅 2560px の画面でも本文（2560 − サイドバー 252 − 左右の余白 72 = 2236px）を
      埋め切れる値にし、右に大きな空白を残さない（issue #120）。 */
   --layout-overview-max-width: 2240px;
+  /* 判断待ちの本文の1行の上限。全幅に置いても長い行で読みにくくならない幅にする（issue #121）。 */
+  --layout-decision-body-max-width: 80ch;
 }
 
 html {
@@ -793,11 +795,13 @@ a {
   padding: var(--space-18) var(--space-22);
 }
 
+/* 判断待ちが0件のときは警告ではないため、橙の線をやめて通常の線にする（issue #121）。 */
+.tray.tray-empty {
+  border: 1px solid var(--line);
+}
+
+/* 項目は .l-stack で「見出し行 → 本文 → 回答ボタン」の3行に積み、列には分けない（issue #121）。 */
 .tray-item {
-  display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) 170px 100px;
-  gap: var(--space-8) var(--space-22);
-  align-items: start;
   padding: var(--space-14) 0;
   border-top: 1px solid var(--line);
   font-size: var(--font-size-14);
@@ -812,44 +816,41 @@ a {
   background: var(--orange-soft);
 }
 
-/* 見出し・本文・選択肢・待ち時間を縦に積み、行内で連結させない（issue #37 方針2）。 */
-.tray-item .proj,
-.tray-item .desc,
-.tray-item .opts,
-.tray-item .wait {
-  display: block;
-  width: 100%;
+/* 見出し行は、左にプロジェクト・種別・対象、右端に待ち時間と滞留の印を置く。 */
+.tray-item .decision-head {
+  justify-content: space-between;
 }
 
 .tray-item .proj {
-  grid-column: 1;
+  min-width: 0;
   font-weight: 700;
   overflow-wrap: anywhere;
 }
 
+.tray-item .proj .kind {
+  font-size: var(--font-size-14);
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.tray-item .wait {
+  margin-left: auto;
+  font-size: var(--font-size-14);
+  color: var(--muted);
+}
+
+/* 本文の行は全幅に置き、1行の長さだけを上限で抑える。改行は畳まない。 */
+.tray-item .decision-body {
+  max-width: var(--layout-decision-body-max-width);
+}
+
 .tray-item .desc {
-  grid-column: 2;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .tray-item .opts {
-  grid-column: 3;
   font-size: var(--font-size-14);
-  color: var(--muted);
-}
-
-.tray-item .wait {
-  grid-column: 4;
-  font-size: var(--font-size-14);
-  color: var(--muted);
-}
-
-.tray-item .proj .srv,
-.tray-item .proj .kind {
-  display: block;
-  font-size: var(--font-size-14);
-  font-weight: 400;
   color: var(--muted);
 }
 
@@ -862,7 +863,7 @@ a {
 }
 
 .tray-item .opts {
-  margin-top: 0;
+  margin-top: var(--space-8);
   padding-top: 0;
   border-top: none;
 }
@@ -877,7 +878,6 @@ a {
 }
 
 .tray-item .wait b {
-  display: block;
   font-size: var(--font-size-16);
   color: var(--text);
 }
@@ -1259,26 +1259,6 @@ pre {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .tray-item {
-    grid-template-columns: 170px minmax(0, 1fr) 140px;
-  }
-
-  .tray-item .proj {
-    grid-column: 1;
-  }
-
-  .tray-item .desc {
-    grid-column: 2;
-  }
-
-  .tray-item .opts {
-    grid-column: 3;
-  }
-
-  .tray-item .wait {
-    grid-column: 2 / 4;
-  }
-
   .sum-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1350,23 +1330,6 @@ pre {
 
   .tray {
     padding: var(--space-14) var(--space-16);
-  }
-
-  .tray-item {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-6);
-  }
-
-  .tray-item .proj,
-  .tray-item .desc,
-  .tray-item .opts,
-  .tray-item .wait {
-    grid-column: auto;
-  }
-
-  .tray-item .wait b {
-    display: inline;
-    margin-right: var(--space-6);
   }
 
   .ev {

@@ -118,7 +118,6 @@ export type OverviewStateInput = Omit<DashboardState, "runs" | "pendingDecisions
 export type DecisionsStateInput = {
   thresholds: AnomalyThresholds | undefined;
   pendingDecisions: readonly PendingDecisionInput[];
-  servers: readonly Server[];
 };
 
 const minutesSince = (from: Date, now: Date): number => Math.max(0, (now.getTime() - from.getTime()) / 60_000);

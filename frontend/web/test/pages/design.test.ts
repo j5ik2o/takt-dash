@@ -37,13 +37,15 @@ type CssRule = { selectors: string; body: string };
 
 // 入れ子のない通常の規則だけを取り出す。@media の中の規則は、そのブロックを
 // 切り出してから同じ関数へ渡す。
+// 規則の直前のコメントをセレクタに含めないよう、コメントを除いてから取り出す。
 const cssRules = (css: string): CssRule[] => {
   const rules: CssRule[] = [];
+  const source = css.replace(/\/\*[\s\S]*?\*\//g, "");
   const pattern = /([^{}]+)\{([^{}]*)\}/g;
-  let match = pattern.exec(css);
+  let match = pattern.exec(source);
   while (match !== null) {
     rules.push({ selectors: match[1] ?? "", body: match[2] ?? "" });
-    match = pattern.exec(css);
+    match = pattern.exec(source);
   }
   return rules;
 };
@@ -344,6 +346,91 @@ test("判断待ちは橙の左罫線の容器になり、要約は4列で wide �
   assert.match(wide, /span\s+2/, "wide の項目は2列を占める");
 
   assert.equal(requireDeclaration(css, /^pre$/, "max-height", "pre"), "360px", "ログの高さを制限する");
+});
+
+// var(--name) を :root の値へ解決する。直接の値はそのまま返す。
+const resolveRootVariable = (css: string, value: string): string => {
+  const reference = /^var\(\s*(--[a-z0-9-]+)\s*\)$/i.exec(value.trim());
+  if (reference === null) {
+    return value.trim();
+  }
+  return requireDeclaration(css, /^:root$/, reference[1]!, ":root");
+};
+
+test("判断待ちの項目は列の grid をやめ、どの幅でも列の指定を持たない", async () => {
+  const css = await readCss();
+
+  for (const rule of cssRules(css)) {
+    const trayItemSelectors = rule.selectors
+      .split(",")
+      .map((token) => token.trim())
+      .filter((token) => /^\.tray-item\b/.test(token));
+    if (trayItemSelectors.length === 0) {
+      continue;
+    }
+    for (const property of ["grid-template-columns", "grid-column"]) {
+      assert.equal(
+        declaration(rule.body, property),
+        undefined,
+        `${trayItemSelectors.join(", ")} に ${property} を残さない（列に分けると内容量で位置がずれる）`,
+      );
+    }
+  }
+});
+
+test("判断待ちの見出し行は左の群と右端の待ち時間を両端に分ける", async () => {
+  const css = await readCss();
+
+  assert.ok(selectorExists(css, /^\.tray-item\s+\.decision-head$/), "見出し行の規則がある");
+  const justify = declarationMatching(css, /^\.tray-item\s+\.decision-head$/, "justify-content");
+  const waitMargin = declarationMatching(css, /^\.tray-item\s+\.wait$/, "margin-left");
+  assert.ok(
+    justify === "space-between" || waitMargin === "auto",
+    "待ち時間を見出し行の右端へ寄せる（justify-content: space-between か margin-left: auto）",
+  );
+});
+
+test("判断待ちの本文は1行の上限を 80ch 前後にし、改行を保持する", async () => {
+  const css = await readCss();
+
+  const maxWidth = resolveRootVariable(
+    css,
+    requireDeclaration(css, /^\.tray-item\s+\.decision-body$/, "max-width", ".tray-item .decision-body"),
+  );
+  const ch = /^(\d+(?:\.\d+)?)ch$/.exec(maxWidth);
+  assert.ok(ch !== null, `本文の上限は ch で指定する: ${maxWidth}`);
+  const value = Number(ch[1]);
+  assert.ok(value >= 70 && value <= 90, `本文の上限は 80ch 前後: ${maxWidth}`);
+
+  assert.equal(
+    requireDeclaration(css, /^\.tray-item\s+\.desc$/, "white-space", ".tray-item .desc"),
+    "pre-wrap",
+    "本文の改行を保持する",
+  );
+});
+
+test("判断待ちが0件の空の状態は橙の警告の線を持たず、通常の線を使う", async () => {
+  const css = await readCss();
+
+  const rule = cssRules(css).find((candidate) =>
+    candidate.selectors.split(",").some((token) => /^\.tray\.tray-empty$/.test(token.trim())),
+  );
+  if (rule === undefined) {
+    assert.fail(".tray.tray-empty の規則が定義されていない");
+  }
+  const border = declaration(rule.body, "border");
+  const borderLeft = declaration(rule.body, "border-left");
+  const borderColor = declaration(rule.body, "border-color");
+  assert.ok(border !== undefined || borderColor !== undefined, "空の状態は .tray の四辺の線を上書きする");
+  for (const value of [border, borderLeft, borderColor]) {
+    if (value !== undefined) {
+      assert.doesNotMatch(value, /orange/, `空の状態の線に橙を使わない: ${value}`);
+    }
+  }
+  assert.match(border ?? borderColor ?? "", /var\(--line\)/, "空の状態は通常の線の色を使う");
+  if (border !== undefined && borderLeft === undefined) {
+    assert.doesNotMatch(border, /5px/, "左端だけ太い警告の線にしない");
+  }
 });
 
 test("時刻と識別子は等幅書体になり、run 詳細の識別子に mono が付く", async () => {

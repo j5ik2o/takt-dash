@@ -19,7 +19,7 @@ import {
   NOW,
 } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
-import { elementWithAttribute, textOf } from "../support/markup.ts";
+import { elementWithAttribute, elementsWithClass, hasClassToken, textOf } from "../support/markup.ts";
 import { createBackendClient } from "../../src/grpc/client.ts";
 import { buildOverviewView, type OverviewView } from "../../src/state/dashboard.ts";
 import { OverviewContent } from "../../src/components/overview-content.tsx";
@@ -64,6 +64,52 @@ const elementsByClass = (html: string, className: string): string[] =>
   html.match(new RegExp(`<[a-z]+[^>]*class="(?:[^"]*\\s)?${className}(?:\\s[^"]*)?"[^>]*>`, "g")) ?? [];
 
 const occurrences = (html: string, needle: string): number => html.split(needle).length - 1;
+
+// 指定 class を持つ最初の要素を、開始タグから対応する終了タグまで取り出す。
+// 項目内の要素の並び順に依存せず、その要素の中だけを観測する。
+const blockOf = (html: string, className: string): string => {
+  const element = elementsWithClass(html, className)[0];
+  if (element === undefined) {
+    assert.fail(`class="${className}" の要素が描画されていない`);
+  }
+  return element.outer;
+};
+
+// 要素の直下の子要素を文書順に返す。孫要素は含めない。
+const childElementsOf = (outer: string): { openingTag: string; outer: string }[] => {
+  const innerStart = outer.indexOf(">") + 1;
+  const innerEnd = outer.lastIndexOf("</");
+  const inner = outer.slice(innerStart, innerEnd);
+  const children: { openingTag: string; outer: string }[] = [];
+  const tags = /<(\/?)([a-z][a-z0-9]*)\b[^>]*?(\/?)>/gi;
+  const voidElements = new Set(["br", "hr", "img", "input", "meta", "link", "wbr"]);
+  let depth = 0;
+  let start = -1;
+  let openingTag = "";
+  for (const match of inner.matchAll(tags)) {
+    const closing = match[1] === "/";
+    const selfClosing = match[3] === "/" || voidElements.has(match[2]!.toLowerCase());
+    if (!closing && depth === 0) {
+      start = match.index ?? 0;
+      openingTag = match[0];
+      if (selfClosing) {
+        children.push({ openingTag, outer: openingTag });
+        continue;
+      }
+    }
+    if (selfClosing && !closing) {
+      continue;
+    }
+    depth += closing ? -1 : 1;
+    if (closing && depth === 0) {
+      children.push({ openingTag, outer: inner.slice(start, (match.index ?? 0) + match[0].length) });
+    }
+  }
+  return children;
+};
+
+// 判断待ちの各項目（li.tray-item）を文書順に返す。選択肢欄の li は含めない。
+const decisionItems = (html: string) => elementsWithClass(html, "tray-item");
 
 // 進捗バーの開始タグから閉じタグまでを取り出す。概要の上部には使用率バーも現れるため、
 // run 行の中のバーだけを対象にし、バー自身の属性と内側の幅指定を他の要素の一致に
@@ -282,7 +328,7 @@ test("判断待ちページは本文の空行を段落の区切りとして描�
   });
   const descBlocks = elementsByClass(html, "desc");
   assert.equal(descBlocks.length, 1, "本文は1つの本文ブロックにまとまる");
-  const descHtml = html.slice(html.indexOf(descBlocks[0]!), html.indexOf('class="wait"'));
+  const descHtml = blockOf(html, "desc");
   const paragraphItems = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
   assert.equal(paragraphItems.length, 3, "空行で区切られた3つの段落がそれぞれ別の要素になる");
   assert.match(paragraphItems[0]!, /リリースの日取りを決めたい。\n今週は手が空いています。/);
@@ -314,8 +360,7 @@ test("判断待ちページは本文の単一改行で段落を分けない", ()
     state: stateWithDecision({ body: "1行目\n2行目" }),
     now: NOW,
   });
-  const descBlock = elementsByClass(html, "desc")[0];
-  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  const descHtml = blockOf(html, "desc");
   const paragraphs = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
   assert.equal(paragraphs.length, 1, "単一改行では段落を分けない");
   assert.match(paragraphs[0]!, /1行目\n2行目/, "改行は段落内に残る");
@@ -336,7 +381,7 @@ test("判断待ちページは選択肢を本文の塊とは別の要素に1件�
   const between = html.slice(descIndex, optsIndex);
   assert.doesNotMatch(between, /選択肢/, "選択肢は本文ブロックに混ざらない");
 
-  const optsHtml = html.slice(optsIndex, html.indexOf('class="wait"'));
+  const optsHtml = blockOf(html, "opts");
   const items = optsHtml.match(/<li[^>]*>[\s\S]*?<\/li>/g) ?? [];
   assert.equal(items.length, 2, "選択肢は1件ずつ別の要素になる");
   assert.match(items[0]!, /今週/);
@@ -355,7 +400,7 @@ test("判断待ちページは本文中の選択肢の記述を残したまま�
   const optsIndex = html.indexOf(optsBlocks[0]!);
   const descHtml = html.slice(descIndex, optsIndex);
   assert.match(descHtml, /\(a\) 今週、\(b\) 来週/, "本文の記述はそのまま残る");
-  const optsHtml = html.slice(optsIndex, html.indexOf('class="wait"'));
+  const optsHtml = blockOf(html, "opts");
   assert.equal(occurrences(descHtml, "今週"), 1, "本文中に選択肢欄の内容が二重に現れない");
   const items = optsHtml.match(/<li[^>]*>[\s\S]*?<\/li>/g) ?? [];
   assert.equal(items.length, 2, "選択肢欄は本文の記述とは別に各選択肢を並べる");
@@ -386,7 +431,7 @@ test("判断待ちページは選択肢から作る文を表示せず、本文�
       /選択肢は\s*今週\s*と\s*来週\s*です/,
       "構造化された選択肢から作る「選択肢は … です。」の文を表示しない",
     );
-    const between = html.slice(descEnd, html.indexOf('class="wait"'));
+    const between = html.slice(descEnd, html.indexOf('class="actions"', descEnd));
     assert.doesNotMatch(between, /選択肢は/, `本文ブロックの後に生成文を重ねて表示しない: ${body}`);
 
     assert.match(html, /<button[^>]*>今週<\/button>/, "1つ目の選択肢の回答ボタンを表示する");
@@ -394,29 +439,115 @@ test("判断待ちページは選択肢から作る文を表示せず、本文�
   }
 });
 
-test("判断待ちページは見出し・本文・選択肢・待ち時間をそれぞれ別のブロックとして描画する", async () => {
+test("判断待ちページの各項目は見出し行・本文・回答ボタンの3つの子だけをこの順に持つ", () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({
+      body: "リリースの日取りはどうしますか。",
+      options: ["今週", "来週"],
+      inquiryId: "inquiry-structure",
+    }),
+    now: NOW,
+  });
+  const items = decisionItems(html);
+  assert.equal(items.length, 1, "判断待ちの項目が1件描画される");
+  const children = childElementsOf(items[0]!.outer);
+  assert.equal(children.length, 3, "項目の直下は見出し行・本文・回答ボタンの3つだけ");
+  assert.ok(hasClassToken(children[0]!.openingTag, "decision-head"), "1つ目は見出し行");
+  assert.ok(hasClassToken(children[1]!.openingTag, "decision-body"), "2つ目は本文");
+  assert.ok(hasClassToken(children[2]!.openingTag, "actions"), "3つ目は回答ボタン");
+
+  const body = children[1]!.outer;
+  const descIndex = body.indexOf(blockOf(body, "desc"));
+  const optsIndex = body.indexOf(blockOf(body, "opts"));
+  assert.ok(descIndex >= 0 && optsIndex > descIndex, "本文の中で、本文の後ろに選択肢欄が来る");
+  assert.match(children[2]!.outer, /<button[^>]*>今週<\/button>/, "本文の直後の行に回答ボタンがある");
+});
+
+test("判断待ちページの見出し行は左にプロジェクト・種別・対象、その後ろに待ち時間を持ち、本文や選択肢を含まない", () => {
   const html = renderPage(DecisionsPage, {
     state: stateWithDecision({ body: "リリースの日取りはどうしますか。", options: ["今週", "来週"] }),
     now: NOW,
   });
-  const projIndex = html.indexOf(elementsByClass(html, "proj")[0] ?? "");
-  const descIndex = html.indexOf(elementsByClass(html, "desc")[0] ?? "");
-  const optsIndex = html.indexOf(elementsByClass(html, "opts")[0] ?? "");
-  const waitIndex = html.indexOf(elementsByClass(html, "wait")[0] ?? "");
-  assert.ok(projIndex >= 0 && descIndex >= 0 && optsIndex >= 0 && waitIndex >= 0);
-  assert.ok(
-    projIndex < descIndex && descIndex < optsIndex && optsIndex < waitIndex,
-    "見出し・本文・選択肢・待ち時間の順に並ぶ",
-  );
+  const head = childElementsOf(decisionItems(html)[0]!.outer)[0]!;
+  assert.ok(hasClassToken(head.openingTag, "decision-head"));
+  const groups = childElementsOf(head.outer);
+  assert.equal(groups.length, 2, "見出し行は左の群と右の群の2つから成る");
+  assert.ok(hasClassToken(groups[0]!.openingTag, "proj"), "左はプロジェクトの群");
+  assert.ok(hasClassToken(groups[1]!.openingTag, "wait"), "右端は待ち時間の群");
 
-  const css = await readFile(`${webRoot}app/globals.css`, "utf8");
-  for (const className of ["proj", "desc", "opts", "wait"]) {
-    assert.match(
-      css,
-      new RegExp(`\\.tray-item\\s+\\.${className}[,\\s][^{}]*\\{[^}]*display:\\s*block`),
-      `.tray-item .${className} は行内に連結せずブロックとして積まれる`,
+  const left = textOf(groups[0]!.outer);
+  assert.match(left, /プロジェクト: esa/);
+  assert.match(left, /種別: 問い合わせ（質問）/);
+  assert.match(left, /対象: ゴール goal-2/);
+  assert.match(textOf(groups[1]!.outer), /30分 待ち/, "右の群に待ち時間を出す");
+  assert.doesNotMatch(textOf(head.outer), /リリースの日取り/, "見出し行に本文を含めない");
+  assert.doesNotMatch(textOf(head.outer), /今週/, "見出し行に選択肢を含めない");
+});
+
+test("判断待ちページは滞留の印を見出し行の待ち時間の隣に出し、滞留でない項目には出さない", () => {
+  const html = renderPage(DecisionsPage, { state: createDashboardState(), now: NOW });
+  const items = decisionItems(html);
+  assert.equal(items.length, 2);
+  const byProject = (project: string) => {
+    const item = items.find((candidate) => textOf(candidate.outer).includes(`プロジェクト: ${project}`));
+    if (item === undefined) {
+      assert.fail(`${project} の項目が描画される`);
+    }
+    return item;
+  };
+
+  const stale = byProject("corporate-site");
+  assert.ok(hasClassToken(stale.openingTag, "stale"), "滞留の項目に stale を付ける");
+  const staleHead = childElementsOf(stale.outer)[0]!;
+  assert.ok(hasClassToken(staleHead.openingTag, "decision-head"));
+  const staleWait = blockOf(staleHead.outer, "wait");
+  assert.match(textOf(staleWait), /5時間 待ち/);
+  assert.match(textOf(staleWait), /滞留しています。/, "滞留の印は見出し行の待ち時間の群にある");
+  const staleBody = childElementsOf(stale.outer)[1]!;
+  assert.doesNotMatch(textOf(staleBody.outer), /5時間 待ち|滞留しています/, "本文の行に待ち時間や滞留の印を置かない");
+
+  const fresh = byProject("esa");
+  assert.ok(!hasClassToken(fresh.openingTag, "stale"));
+  assert.doesNotMatch(textOf(fresh.outer), /滞留しています。/, "滞留でない項目に滞留の印を出さない");
+});
+
+test("判断待ちページは種別に関係なく、どの項目も回答の行を本文のすぐ後ろに置く", () => {
+  const html = renderPage(DecisionsPage, { state: createActionableDashboardState(), now: NOW });
+  const items = decisionItems(html);
+  assert.ok(items.length >= 3, "複数の種別の項目が描画される");
+  for (const item of items) {
+    const children = childElementsOf(item.outer);
+    const label = textOf(children[0]?.outer ?? "");
+    assert.equal(children.length, 3, `項目の直下は3つ: ${label}`);
+    assert.ok(hasClassToken(children[0]!.openingTag, "decision-head"), `1つ目は見出し行: ${label}`);
+    assert.ok(hasClassToken(children[1]!.openingTag, "decision-body"), `2つ目は本文: ${label}`);
+    assert.ok(
+      hasClassToken(children[2]!.openingTag, "actions") || hasClassToken(children[2]!.openingTag, "note"),
+      `3つ目は回答の行: ${label}`,
     );
   }
+});
+
+test("判断待ちページは本文を折りたたまず、常に描画する", () => {
+  const body = "1行目\n2行目\n3行目";
+  const html = renderPage(DecisionsPage, { state: stateWithDecision({ body }), now: NOW });
+  const item = decisionItems(html)[0]!.outer;
+  assert.doesNotMatch(item, /<details|<summary|hidden=""|aria-expanded/, "本文を隠す仕組みを持たない");
+  assert.ok(blockOf(item, "desc").includes(body), "本文を原文のまま描画する");
+});
+
+test("判断待ちが0件のときは空の状態を警告ではない容器に出し、1件以上では付けない", () => {
+  const base = createDashboardState();
+  const emptyHtml = renderPage(DecisionsPage, { state: { ...base, pendingDecisions: [] }, now: NOW });
+  const emptyTray = elementWithAttribute(emptyHtml, "aria-label", "判断待ちの一覧");
+  assert.ok(hasClassToken(emptyTray.openingTag, "tray"), "一覧の容器は tray のまま");
+  assert.ok(hasClassToken(emptyTray.openingTag, "tray-empty"), "0件のときは空の状態の見た目にする");
+  assert.match(textOf(emptyTray.outer), /判断待ちはありません。/);
+
+  const html = renderPage(DecisionsPage, { state: base, now: NOW });
+  const tray = elementWithAttribute(html, "aria-label", "判断待ちの一覧");
+  assert.ok(hasClassToken(tray.openingTag, "tray"));
+  assert.ok(!hasClassToken(tray.openingTag, "tray-empty"), "項目があるときは空の状態の見た目にしない");
 });
 
 test("判断待ちページは本文が空白だけなら本文ブロックの段落を描画しない", () => {
@@ -424,8 +555,7 @@ test("判断待ちページは本文が空白だけなら本文ブロックの�
     state: stateWithDecision({ body: "  \n\t\n  " }),
     now: NOW,
   });
-  const descBlock = elementsByClass(html, "desc")[0];
-  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  const descHtml = blockOf(html, "desc");
   assert.equal(descHtml.match(/<p[^>]*>/g)?.length ?? 0, 0, "空の段落は描画しない");
 });
 
@@ -434,8 +564,7 @@ test("判断待ちページは CRLF の改行も段落の区切りとして扱�
     state: stateWithDecision({ body: "第1段落。\r\n\r\n第2段落。" }),
     now: NOW,
   });
-  const descBlock = elementsByClass(html, "desc")[0];
-  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  const descHtml = blockOf(html, "desc");
   const textParagraphs = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
   assert.equal(textParagraphs.length, 2, "CRLF の空行も段落の区切りになる");
   assert.equal(textParagraphs[0]!.includes("\r"), false, "正規化後の段落に復帰文字を残さない");
@@ -443,8 +572,8 @@ test("判断待ちページは CRLF の改行も段落の区切りとして扱�
   assert.match(textParagraphs[1]!, /第2段落。/);
 });
 
-const headingBlocks = (html: string): string[] =>
-  Array.from(html.matchAll(/<div class="proj">([\s\S]*?)<\/div>/g), (match) => match[1]);
+// 各項目の見出し行の左の群（class に proj を含む要素）。ほかの class が並んでも拾う。
+const headingBlocks = (html: string): string[] => elementsWithClass(html, "proj").map((element) => element.outer);
 
 const headingTexts = (html: string): string[] =>
   headingBlocks(html).map((block) => block.replace(/<[^>]+>/g, ""));
@@ -496,24 +625,34 @@ test("概要ページのサーバーの1行も状態表示・アンカー・見�
   assert.match(heading, /aria-hidden="true"/, "状態の点は読み上げ対象から外したままにする");
 });
 
-test("判断待ちページは各項目の見出しでプロジェクト・サーバーの表示名・種別・対象を判別できる", () => {
-  const html = renderPage(DecisionsPage, { state: withServerName("j5ik2o-mac-mini"), now: NOW });
+test("判断待ちページは各項目の見出しでプロジェクト・種別・対象を判別できる", () => {
+  const html = renderPage(DecisionsPage, { state: createDashboardState(), now: NOW });
 
   const mergeHeading = headingTextFor(html, "corporate-site");
   assert.match(mergeHeading, /プロジェクト: corporate-site/);
-  assert.match(mergeHeading, /サーバー: j5ik2o-mac-mini/);
-  assert.doesNotMatch(mergeHeading, /サーバー: mini/);
   assert.match(mergeHeading, /種別: 人のマージ待ち/);
   assert.match(mergeHeading, /#418/);
 
   const inquiryHeading = headingTextFor(html, "esa");
   assert.match(inquiryHeading, /プロジェクト: esa/);
-  assert.match(inquiryHeading, /サーバー: j5ik2o-mac-mini/);
   assert.match(inquiryHeading, /種別: 問い合わせ（質問）/);
   assert.match(inquiryHeading, /goal-2/);
 });
 
-test("判断待ちページは各項目の見出しにその項目のサーバーの表示名を出し、他のサーバーの表示名を出さない", () => {
+test("判断待ちページの項目には、表示名の有無に関係なくサーバーの ID も表示名も出さない", () => {
+  for (const name of ["j5ik2o-mac-mini", ""]) {
+    const html = renderPage(DecisionsPage, { state: withServerName(name), now: NOW });
+    const items = decisionItems(html);
+    assert.equal(items.length, 2, "判断待ちの項目が描画される");
+    for (const item of items) {
+      const text = textOf(item.outer);
+      assert.doesNotMatch(text, /サーバー/, `項目にサーバーの表示を出さない（表示名: "${name}"）`);
+      assert.doesNotMatch(text, /mini/, `項目にサーバー ID も表示名も出さない（表示名: "${name}"）`);
+    }
+  }
+});
+
+test("判断待ちページは項目ごとにサーバーが違っても、どのサーバーの ID も表示名も項目に出さない", () => {
   const base = createDashboardState();
   const state = {
     ...base,
@@ -527,16 +666,14 @@ test("判断待ちページは各項目の見出しにその項目のサーバ�
     ),
   };
   const html = renderPage(DecisionsPage, { state, now: NOW });
-
-  const mergeHeading = headingTextFor(html, "corporate-site");
-  assert.match(mergeHeading, /サーバー: j5ik2o-mac-mini/);
-  assert.doesNotMatch(mergeHeading, /サーバー: studio-2/);
-  assert.doesNotMatch(mergeHeading, /サーバー: mini/);
-
-  const inquiryHeading = headingTextFor(html, "esa");
-  assert.match(inquiryHeading, /サーバー: studio-2/);
-  assert.doesNotMatch(inquiryHeading, /サーバー: j5ik2o-mac-mini/);
-  assert.doesNotMatch(inquiryHeading, /サーバー: down/);
+  const items = decisionItems(html);
+  assert.equal(items.length, 2);
+  for (const item of items) {
+    const text = textOf(item.outer);
+    for (const forbidden of ["サーバー", "mini", "j5ik2o-mac-mini", "studio-2", "down"]) {
+      assert.ok(!text.includes(forbidden), `項目に ${forbidden} を出さない`);
+    }
+  }
 });
 
 test("判断待ちページは見出しのプロジェクト名を HTML エスケープする", () => {

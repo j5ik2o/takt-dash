@@ -184,6 +184,23 @@ const long = singleState(
   [{ name: PROJECT_NAME, about: repeatSentence(LONG_SENTENCE, 4) }],
 );
 
+// 判断待ちページで、改行を含む本文と長さの違う本文を並べて撮る（issue #121）。
+// ゴール 1 の質問は詳細ページにも出るため、従来の1行の本文のまま変えない。
+const manyQuestionBody = (index: number): string => {
+  const head = `撮影確認用の質問の本文 ${index}`;
+  if (index === 1) {
+    return head;
+  }
+  switch (index % 3) {
+    case 0:
+      return `${head}\n2行目の文です。\n3行目の文です。`;
+    case 1:
+      return `${head} ${repeatSentence(LONG_SENTENCE, 2)}`;
+    default:
+      return head;
+  }
+};
+
 const MANY_GOAL_COUNT = 20;
 const MANY_RUNNING_COUNT = 3;
 const MANY_TARGET_TASK_COUNT = 5;
@@ -223,7 +240,7 @@ const many: ScreenshotState = {
         runs[runSlug] = buildRun({ slug: runSlug, taskName, goalId: id, startedAt: at, stepCount: 12, text: `撮影確認用の文 ${index}` });
       }
       if (index % 2 === 1) {
-        goalQuestions[id] = [pendingQuestion(`screenshot-many-question-${index}`, `撮影確認用の質問の本文 ${index}`, at)];
+        goalQuestions[id] = [pendingQuestion(`screenshot-many-question-${index}`, manyQuestionBody(index), at)];
       }
     }
     // 詳細の対象（1番目のゴール）には、紐づくタスクを複数持たせる。
@@ -248,9 +265,11 @@ const many: ScreenshotState = {
       goals,
       tasks,
       goalQuestions,
-      standaloneInquiries: Array.from({ length: 3 }, (_, index) =>
-        pendingQuestion(`screenshot-many-inquiry-${index + 1}`, `撮影確認用の単独の問い合わせ ${index + 1}`, targetAt),
-      ),
+      standaloneInquiries: [
+        `撮影確認用の単独の問い合わせ 1\n2行目の文です。\n3行目の文です。`,
+        `撮影確認用の単独の問い合わせ 2 ${repeatSentence(LONG_SENTENCE, 2)}`,
+        "撮影確認用の単独の問い合わせ 3",
+      ].map((body, index) => pendingQuestion(`screenshot-many-inquiry-${index + 1}`, body, targetAt)),
       runs,
       goalDetails: {
         [targetId]: buildGoalDetail({
