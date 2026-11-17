@@ -23,6 +23,8 @@
   7. status は run ディレクトリも応答ファイルも無いとき、.takt/tasks.yaml の該当
      エントリの task_dir から order.md を解決する（開始時点の解決経路）。
   8. status の gh 失敗は非致命で、終了コード 0 と stdout の記録にする。
+  9. commit は、ステージされた Python の bytecode（__pycache__ 配下と *.pyc）を
+     コミット対象から外す。bytecode だけがステージされたときはコミットせず成功する。
 
 実 gh・実 Git は呼ばない。publish.py と project_status.py を一時リポジトリへ複製し、
 PATH の先頭に置いたスタブだけを呼ぶ。
@@ -304,6 +306,34 @@ def test_commit_without_changes_succeeds_without_commit() -> None:
         repo.set_git(data)
         run_ok(repo, "commit")
         assert not any(line.startswith("git commit") for line in repo.git_calls()), repo.git_calls()
+
+
+def test_commit_excludes_staged_bytecode() -> None:
+    with Repo() as repo:
+        data = default_git_config()
+        data["diff"] = {
+            "stdout": "changed.txt\ntools/project-status/__pycache__/publish.cpython-315.pyc\n"
+        }
+        repo.set_git(data)
+        run_ok(repo, "commit")
+        calls = repo.git_calls()
+        resets = [line for line in calls if line.startswith("git reset")]
+        assert len(resets) == 1, calls
+        assert "tools/project-status/__pycache__/publish.cpython-315.pyc" in resets[0], resets
+        assert "changed.txt" not in resets[0], resets
+        assert any(line.startswith("git commit") for line in calls), calls
+
+
+def test_commit_with_only_bytecode_succeeds_without_commit() -> None:
+    with Repo() as repo:
+        data = default_git_config()
+        data["diff"] = {"stdout": "tools/project-status/__pycache__/task_context.cpython-315.pyc\n"}
+        repo.set_git(data)
+        result = run_ok(repo, "commit")
+        calls = repo.git_calls()
+        assert any(line.startswith("git reset") for line in calls), calls
+        assert not any(line.startswith("git commit") for line in calls), calls
+        assert "コミットする変更はありません" in result.stdout, result.stdout
 
 
 def test_commit_failure_blocks_push() -> None:
@@ -610,6 +640,8 @@ def main() -> int:
     tests = [
         test_commit_commits_staged_changes,
         test_commit_without_changes_succeeds_without_commit,
+        test_commit_excludes_staged_bytecode,
+        test_commit_with_only_bytecode_succeeds_without_commit,
         test_commit_failure_blocks_push,
         test_push_requires_successful_commit,
         test_push_pushes_current_branch,

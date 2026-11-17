@@ -9,7 +9,8 @@
 
 段階の契約:
   commit  git add -A と git commit を行い、成功で <marker>/commit.ok を書く。
-          変更が無いときはコミットせず成功として扱う。
+          変更が無いときはコミットせず成功として扱う。Python の bytecode
+          （__pycache__ 配下と *.pyc）はコミット対象から外す。
   push    commit.ok があるときだけ git push を行う。成功で push.ok を書く。
   pr      push.ok があるときだけ gh pr create を行う。base は tasks.yaml の
           該当エントリの base_branch から解決する。既に PR がある場合だけ成功と
@@ -110,6 +111,16 @@ def _order_run_slug(environ):
     return None
 
 
+def _is_bytecode(path: str) -> bool:
+    """Python の bytecode（__pycache__ 配下のファイルと *.pyc）かどうかを返す。
+
+    project-status のスクリプトを import すると作業ツリーに bytecode が
+    生成される。公開のコミットへ混入させないため、stage_commit がコミット
+    対象から外す。.gitignore の指定と二重に守る。
+    """
+    return "__pycache__" in path.split("/") or path.endswith(".pyc")
+
+
 def stage_commit(environ) -> int:
     markers = _markers(environ)
     _clear(markers, (COMMIT_MARKER, PUSH_MARKER, PR_MARKER))
@@ -124,7 +135,17 @@ def stage_commit(environ) -> int:
         print(f"失敗: コミット対象の確認に失敗しました: {_failure_reason(staged)}")
         return 1
 
-    if not staged["stdout"].strip():
+    names = [line for line in staged["stdout"].splitlines() if line]
+    bytecode = [name for name in names if _is_bytecode(name)]
+    if bytecode:
+        reset = _run(["git", "reset", "--", *bytecode])
+        if reset["status"] != 0:
+            print(f"失敗: bytecode をコミット対象から外せませんでした: {_failure_reason(reset)}")
+            return 1
+        excluded = set(bytecode)
+        names = [name for name in names if name not in excluded]
+
+    if not names:
         print("コミットする変更はありません")
         _write_marker(markers, COMMIT_MARKER)
         return 0
