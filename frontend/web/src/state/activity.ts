@@ -12,8 +12,9 @@ export type ActivityGroup = {
   oldest: ActivityEvent;
 };
 
-// backend が返す最新順の配列を受け取り、隣接する同一サーバー・同一プロジェクトの接続イベントだけを
-// 1つのまとまりにします。非接続の出来事は1件ずつのまとまりとして返します。
+// backend が返す最新順の配列を受け取り、隣接する同一サーバー・同一プロジェクト・同一種別の
+// 接続イベントだけを1つのまとまりにします。切断と復帰は種別が違うためまとめません。
+// 非接続の出来事は1件ずつのまとまりとして返します。
 export function groupActivityEvents(events: readonly ActivityEvent[]): ActivityGroup[] {
   const groups: ActivityGroup[] = [];
   for (const event of events) {
@@ -22,7 +23,7 @@ export function groupActivityEvents(events: readonly ActivityEvent[]): ActivityG
       current !== undefined &&
       current.events.length > 0 &&
       isConnectionKind(event.kind) &&
-      isConnectionKind(current.events[0]!.kind) &&
+      event.kind === current.events[0]!.kind &&
       event.serverId === current.events[0]!.serverId &&
       event.project !== undefined &&
       event.project === current.events[0]!.project;
