@@ -5,7 +5,10 @@
 // stateStreamHandlers → reduceLiveState を通して遷移を検証し、接続状態の LiveOverview／LiveDecisions を
 // StateStreamProvider 配下で描画して観測する。切断時に通知が出ることは、内容コンポーネントの
 // prop 契約を固定する live-disconnected.test.ts が担保する。StateStreamProvider は初期値を
-// initialState から決めるため、SSR では切断状態の Live* を描画しない（未確認として扱う）。
+// initialState から決めるため、初期読み込みの成否が渡されない限り SSR では切断状態の
+// Live* を描画しない（未確認として扱う）。初期読み込みが失敗した場合は
+// initialUnavailable から切断状態で始まり、起動時の不通でも画面側の通知が
+// 1回だけ出る（issue #92）。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement, type ComponentProps } from "react";
@@ -208,4 +211,55 @@ test("接続履歴の prop が無い場合は、今回の読み込みの成否�
   assert.equal(renderInitialValue({ initialUnavailable: true }).respondedBefore, false);
   assert.equal(renderInitialValue({ initialUnavailable: false }).respondedBefore, true);
   assert.equal(renderInitialValue({}).respondedBefore, true);
+});
+
+// 初期読み込みが失敗したときの本番の入口（app/layout.tsx）と同じ prop の組み合わせで
+// StateStreamProvider を描画する。レイアウトは通知を描画せず、初期読み込みの成否だけを
+// Provider へ渡す（issue #92）。
+const renderLiveWithInitialUnavailable = (
+  page: typeof LiveOverview | typeof LiveDecisions,
+  state: DashboardState,
+): string => {
+  const props: ComponentProps<typeof StateStreamProvider> = {
+    initialState: state,
+    initialUnavailable: true,
+    initialRespondedBefore: false,
+    children: createElement(page),
+  };
+  return renderToStaticMarkup(createElement(StateStreamProvider, props));
+};
+
+const countOccurrences = (html: string, text: string): number => html.split(text).length - 1;
+
+test("初期読み込みが失敗した場合は Provider が切断状態で始まる", () => {
+  const initial = renderInitialValue({ initialUnavailable: true, initialRespondedBefore: false });
+  assert.equal(initial.disconnected, true, "初期読み込みの失敗を切断の初期値へ反映する");
+  assert.equal(renderInitialValue({ initialUnavailable: false }).disconnected, false);
+  assert.equal(renderInitialValue({}).disconnected, false);
+});
+
+test("初期読み込みの失敗で切断状態で始まっても、SSE の受信で切断が消える", () => {
+  const initial = renderInitialValue({ initialUnavailable: true, initialRespondedBefore: false });
+  assert.equal(initial.disconnected, true, "起動時は切断状態で始まる");
+  const { holder, handlers } = drive(initial);
+  handlers.onState(dashboardStateFromProto(createDashboardState()));
+  assert.equal(holder.current.disconnected, false, "受信で切断フラグが消える");
+});
+
+test("概要は初期読み込みが失敗した場合に通知を1回だけ描画する", () => {
+  const html = renderLiveWithInitialUnavailable(LiveOverview, createDashboardState());
+  assert.equal(
+    countOccurrences(html, BACKEND_UNAVAILABLE_MESSAGE),
+    1,
+    "起動時の不通でも通知は画面側の1回だけにする",
+  );
+});
+
+test("判断待ちは初期読み込みが失敗した場合に通知を1回だけ描画する", () => {
+  const html = renderLiveWithInitialUnavailable(LiveDecisions, createDashboardState());
+  assert.equal(
+    countOccurrences(html, BACKEND_UNAVAILABLE_MESSAGE),
+    1,
+    "起動時の不通でも通知は画面側の1回だけにする",
+  );
 });

@@ -74,6 +74,8 @@ type StateStreamProviderProps = {
   /**
    * 初回の読み込みで backend に接続できなかったかどうか（今回の読み込みの成否）。
    * initialRespondedBefore が渡されない場合にだけ、接続履歴の初期値の代用にする。
+   * あわせて切断の初期値にも使う。通知の表示元は画面側の内容だけに一本化され、
+   * レイアウトは通知を描画しないため、起動時の不通はここで切断として拾う（issue #92）。
    */
   initialUnavailable?: boolean;
   /**
@@ -98,7 +100,10 @@ export function StateStreamProvider({
 }: StateStreamProviderProps) {
   const [value, setValue] = useState<StateStreamContextValue>(() => ({
     state: dashboardStateFromProto(initialState),
-    disconnected: false,
+    // 初期読み込みが失敗した場合は切断状態で始める。レイアウトは通知を描画せず、
+    // 概要と判断待ちの内容が disconnected で通知を描画するため、起動時の不通でも
+    // 通知は画面側の1回だけになる（issue #92）。
+    disconnected: initialUnavailable === true,
     disconnectedSince: null,
     // 接続履歴の初期値はサーバー側の履歴を正とする。今回の読み込みが失敗して
     // キャッシュで描画した場合でも、過去の応答があれば履歴は消えない。

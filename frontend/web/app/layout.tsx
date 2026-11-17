@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import "./globals.css";
 import {
   BackendUnavailableError,
-  backendUnavailableSituation,
   createBackendClient,
   hasBackendResponded,
 } from "@/src/grpc/client";
@@ -10,7 +9,6 @@ import { DashboardState } from "@/src/proto/taktdash";
 import { resolveThresholds } from "@/src/state/dashboard";
 import { StateStreamProviderWithRefresh } from "@/src/components/state-provider";
 import { LiveSidebar } from "@/src/components/live-sidebar";
-import { BackendUnavailableNotice } from "@/src/components/backend-unavailable-notice";
 import { normalizeBuildInfo } from "@/src/state/build-info";
 
 export const metadata: Metadata = {
@@ -37,7 +35,6 @@ async function loadInitialState(): Promise<{
   state: DashboardState;
   unavailable: boolean;
   respondedBefore: boolean;
-  error?: BackendUnavailableError;
 }> {
   const client = createBackendClient();
   try {
@@ -53,7 +50,6 @@ async function loadInitialState(): Promise<{
         state: lastLoadedState ?? EMPTY_STATE,
         unavailable: true,
         respondedBefore: hasBackendResponded(),
-        error,
       };
     }
     throw error;
@@ -63,7 +59,7 @@ async function loadInitialState(): Promise<{
 }
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
-  const { state, unavailable, respondedBefore, error } = await loadInitialState();
+  const { state, unavailable, respondedBefore } = await loadInitialState();
   return (
     <html lang="ja">
       <body>
@@ -75,9 +71,8 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
           <div className="shell">
             <LiveSidebar frontendBuild={FRONTEND_BUILD} />
             <div className="content">
-              {unavailable && error !== undefined ? (
-                <BackendUnavailableNotice situation={backendUnavailableSituation(error)} />
-              ) : null}
+              {/* backend 不通の通知は、画面側の内容が切断の表示として描画する。
+                  レイアウトでは描画しない（issue #92）。 */}
               {children}
             </div>
           </div>
