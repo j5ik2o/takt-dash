@@ -1333,6 +1333,232 @@ def test_status_only_step_is_not_a_publish_step() -> None:
         assert_success(sandbox, "status だけを実行する開始ステップ")
 
 
+def test_publish_stage_detection() -> None:
+    """publish.py の段階検出は、正規形のコマンドだけを受理する。
+
+    正規形は `python3 tools/project-status/publish.py <段階>` の1行であり、
+    段階の後ろには publish.py 自身のオプション（--status と
+    --require-published）だけを置ける。publish.py への言及があるのに正規形に
+    一致しないコマンドは、正規形を示す理由つきで拒否する。echo の引数・
+    コメント・引用符内の文字列・ラッパー越し・複数行など、記法を問わない。
+    オプションの値に後続コマンドやコマンド置換を付けた入力も受理しない。
+    publish.py への言及が無いコマンドは公開と無関係であり、そのまま通す。
+    """
+    with Sandbox() as sandbox:
+        module = sandbox.module
+
+        def step(command, as_name="commit"):
+            return {
+                "name": "create_pr",
+                "mode": "system",
+                "system_inputs": [{"type": "command", "as": as_name, "command": command}],
+            }
+
+        for stage in ("commit", "push", "pr"):
+            assert module.publish_stages(
+                step(f"python3 tools/project-status/publish.py {stage}", stage)
+            ) == {stage: stage}, f"正規形の {stage} を拾う"
+        assert module.publish_stages(
+            step('python3 tools/project-status/publish.py status --status "In Review"', "status")
+        ) == {"status": "status"}, "status の --status（引用符付き）を受理する"
+        assert module.publish_stages(
+            step("python3 tools/project-status/publish.py status --status 'In Review'", "status")
+        ) == {"status": "status"}, "status の --status（単一引用符）を受理する"
+        assert module.publish_stages(
+            step("python3 tools/project-status/publish.py status --status InReview", "status")
+        ) == {"status": "status"}, "status の --status（引用符なし）を受理する"
+        assert module.publish_stages(
+            step(
+                'python3 tools/project-status/publish.py status --status "In Review"'
+                " --require-published",
+                "status",
+            )
+        ) == {"status": "status"}, "--require-published を受理する"
+        assert module.publish_stages(
+            step(
+                'python3 tools/project-status/publish.py status --require-published'
+                ' --status "In Review"',
+                "status",
+            )
+        ) == {"status": "status"}, "オプションの順序は問わない"
+        assert module.publish_stages(step("make done")) == {}, (
+            "publish.py への言及が無いコマンドはそのまま通す"
+        )
+        assert module.publish_stages(
+            {
+                "name": "create_pr",
+                "mode": "system",
+                "system_inputs": [
+                    {"type": "command", "as": "note", "command": "echo 公開の準備"},
+                    {
+                        "type": "command",
+                        "as": "commit",
+                        "command": "python3 tools/project-status/publish.py commit",
+                    },
+                ],
+            }
+        ) == {"commit": "commit"}, "言及の無いコマンドと正規形が混ざっても正規形だけを拾う"
+
+        rejected = {
+            "echo の引数": "echo python3 tools/project-status/publish.py commit",
+            "引用符内の文字列": 'echo "python3 tools/project-status/publish.py commit"',
+            "コメント": "# python3 tools/project-status/publish.py commit",
+            "bash -c の内側": "bash -c 'python3 tools/project-status/publish.py commit'",
+            "前段との連結": "cd frontend && python3 tools/project-status/publish.py commit",
+            "python のオプション付き": "python3 -u tools/project-status/publish.py commit",
+            "環境変数代入付き": "FOO=1 python3 tools/project-status/publish.py commit",
+            "ラッパー越し": "env FOO=1 python3 tools/project-status/publish.py commit",
+            "バージョン付きインタプリタ": "python3.11 tools/project-status/publish.py commit",
+            "パス付きインタプリタ": "/usr/bin/python3 tools/project-status/publish.py commit",
+            "直接実行": "tools/project-status/publish.py commit",
+            "複数行": "cat <<'EOF'\nready\nEOF\npython3 tools/project-status/publish.py commit",
+            "段階が無い": "python3 tools/project-status/publish.py",
+            "段階が違う": "python3 tools/project-status/publish.py deploy",
+            "publish.py に無いオプション": "python3 tools/project-status/publish.py commit --verbose",
+            "後段との連結": "python3 tools/project-status/publish.py commit; echo done",
+            "オプション値への後続コマンドの付加": (
+                "python3 tools/project-status/publish.py commit --status x;true"
+            ),
+            "オプション値の連結": "python3 tools/project-status/publish.py status --status x&&true",
+            "オプション値のパイプ": "python3 tools/project-status/publish.py status --status x|true",
+            "オプション値のリダイレクト": (
+                "python3 tools/project-status/publish.py status --status x>/dev/null"
+            ),
+            "オプション値のコマンド置換": (
+                "python3 tools/project-status/publish.py status --status $(true)"
+            ),
+            "引用符内のコマンド置換": (
+                'python3 tools/project-status/publish.py status --status "$(true)"'
+            ),
+            "オプション値のバッククォート": (
+                "python3 tools/project-status/publish.py status --status `true`"
+            ),
+        }
+        for label, command in rejected.items():
+            try:
+                module.publish_stages(step(command))
+            except module.GateError as error:
+                assert "正規形" in str(error), (
+                    f"{label}: 拒否の理由に正規形が含まれません: {error}"
+                )
+            else:
+                raise AssertionError(f"{label}: 正規形でないコマンドが受理されました")
+
+
+def test_publish_workflow_passes() -> None:
+    """公開ステップを置く正しい構成は、関門を通る。"""
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=PUBLISH_WORKFLOW)
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "公開ステップを置く構成")
+
+
+def test_publish_workflow_rejects_noncanonical_forms() -> None:
+    """公開コマンドの正規形でない記法は、正規形を示す理由つきで拒否する。
+
+    python のオプション・環境変数代入・ラッパー・バージョン付きインタプリタ・
+    ヒアドキュメントの前置き・行継続・前段との連結は、シェルでは公開スクリプトを
+    起動する有効な記法だが、正規形に一致しないため公開コマンドとして受理しない。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "python のオプション付き": lambda line: line.replace("python3 ", "python3 -u ", 1),
+        "環境変数代入付き": lambda line: line.replace(
+            "          python3 ", "          PYTHONUNBUFFERED=1 python3 ", 1
+        ),
+        "ラッパー越し": lambda line: line.replace(
+            "python3 ", "env PYTHONUNBUFFERED=1 python3 ", 1
+        ),
+        "バージョン付きインタプリタ": lambda line: line.replace("python3 ", "python3.11 ", 1),
+        "ヒアドキュメントの前置き": lambda line: (
+            "          cat <<'EOF'\n          It's a publish step\n          EOF\n" + line
+        ),
+        "行継続で折り返す": lambda line: line.replace(
+            "python3 ", "python3 \\\n            ", 1
+        ),
+        "前段との連結": lambda line: line.replace("python3 ", "true && python3 ", 1),
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "正規形")
+
+
+def test_publish_commands_must_use_canonical_form() -> None:
+    """publish.py への言及だけでは、公開ステップとして受理しない。
+
+    echo の引数・引用符内の文字列・コメント・ヒアドキュメントの本文・構文確認
+    だけのシェル・場所の表示だけを行う command -v など、publish.py に言及する
+    だけのコマンドは、正規形を示す理由つきで拒否する。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "echo で表示するだけ": lambda line: "          echo " + line.strip() + "\n",
+        "引用符内の文字列で表示するだけ": lambda line: "          echo \"" + line.strip() + "\"\n",
+        "コメントに書くだけ": lambda line: "          # " + line.strip() + "\n",
+        "構文確認だけのシェルで表示するだけ": lambda line: "          bash -n -c '"
+        + line.strip()
+        + "'\n",
+        "ヒアドキュメントで表示するだけ": lambda line: "          cat <<'EOF'\n"
+        + line
+        + "          EOF\n",
+        "command -v で場所を表示するだけ": lambda line: "          command -v "
+        + line.strip()
+        + "\n",
+        "ラッパー越しの構文確認だけのシェルで表示するだけ": lambda line: (
+            "          env FOO=1 bash -n -c '" + line.strip() + "'\n"
+        ),
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "正規形")
+
+
+def test_publish_success_rule_must_precede_unconditional_rule() -> None:
+    """公開の成功規則は、when(true) の無条件規則より前に置かなければならない。
+
+    規則は先に一致したものから順に評価されるため、無条件規則が先にあると、公開が
+    成功してもそちらが選ばれて aislop_gate へ進まない。
+    """
+    success_rule = (
+        "      - condition: when(context.create_pr.commit.exit_code == 0 && "
+        "context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)\n"
+        "        next: aislop_gate\n"
+    )
+    fallback_rule = "      - condition: when(true)\n        next: fix_publish\n"
+    assert success_rule + fallback_rule in PUBLISH_WORKFLOW, "公開ステップの規則列が見つかりません"
+    workflow = PUBLISH_WORKFLOW.replace(success_rule + fallback_rule, fallback_rule + success_rule)
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=workflow)
+        stub_external_tools(sandbox)
+        assert_failure(
+            sandbox, "無条件規則が成功規則より前にある", "workflow-machine-gate", "無条件規則より後"
+        )
+
+
 def test_workflow_requires_aislop_gate_step() -> None:
     """aislop の機械ゲートが無い、順序が違う、失敗時に戻らない、のそれぞれで失敗する。"""
     machine_success_complete = MACHINE_GATE_STEP.replace(
@@ -1954,6 +2180,12 @@ def main() -> int:
         test_clippy_must_reject_warnings,
         test_done_must_install_node_dependencies_when_missing,
         test_machine_gate_develop_complete_and_mode,
+        test_status_only_step_is_not_a_publish_step,
+        test_publish_stage_detection,
+        test_publish_workflow_passes,
+        test_publish_workflow_rejects_noncanonical_forms,
+        test_publish_commands_must_use_canonical_form,
+        test_publish_success_rule_must_precede_unconditional_rule,
         test_machine_gate_requires_six_system_inputs,
         test_machine_gate_commands_invoke_their_make_targets,
         test_machine_gate_success_requires_all_six_exit_codes,
