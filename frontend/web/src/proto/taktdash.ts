@@ -551,11 +551,7 @@ export interface Server {
   /** 応答の有無 */
   connected: boolean;
   /** 最後に読めた時刻 */
-  lastReadAt:
-    | Date
-    | undefined;
-  /** 同時実行の上限 */
-  concurrency: number;
+  lastReadAt: Date | undefined;
 }
 
 /** 集約対象のプロジェクトを表す。 */
@@ -576,6 +572,8 @@ export interface Project {
     | undefined;
   /** 接続状態（未読は UNSPECIFIED） */
   connectionState: ConnectionState;
+  /** 同時実行の上限（.takt/config.yaml の concurrency。キーが無ければ takt の既定値1） */
+  concurrency: number;
 }
 
 /** タスクの状態ごとの件数を表す。 */
@@ -735,7 +733,11 @@ export interface PendingDecision {
   /** 問い合わせの識別子（AnswerInquiry の inquiry_id に渡す。マージ待ちは空。ゴールに属さない問い合わせには回答できない） */
   inquiryId: string;
   /** ゴール登録の承認待ちの revision（承認・却下に渡す。それ以外は省略） */
-  revision?: number | undefined;
+  revision?:
+    | number
+    | undefined;
+  /** マージ待ちのゴールの仕上げタスクの最後の状態（それ以外は省略する） */
+  mergeTaskLast?: TaskStatus | undefined;
 }
 
 /** 異常判定の基準を表す。 */
@@ -1313,7 +1315,7 @@ export interface ListGoalRegistrationProposalsResponse {
 }
 
 function createBaseServer(): Server {
-  return { serverId: "", name: "", kind: "", connected: false, lastReadAt: undefined, concurrency: 0 };
+  return { serverId: "", name: "", kind: "", connected: false, lastReadAt: undefined };
 }
 
 export const Server: MessageFns<Server> = {
@@ -1332,9 +1334,6 @@ export const Server: MessageFns<Server> = {
     }
     if (message.lastReadAt !== undefined) {
       Timestamp.encode(toTimestamp(message.lastReadAt), writer.uint32(42).fork()).join();
-    }
-    if (message.concurrency !== 0) {
-      writer.uint32(48).int32(message.concurrency);
     }
     return writer;
   },
@@ -1392,14 +1391,6 @@ export const Server: MessageFns<Server> = {
             message.lastReadAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
             continue;
           }
-          case 6: {
-            if (tag !== 48) {
-              break;
-            }
-
-            message.concurrency = reader.int32();
-            continue;
-          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -1427,7 +1418,6 @@ export const Server: MessageFns<Server> = {
         : isSet(object.last_read_at)
         ? fromJsonTimestamp(object.last_read_at)
         : undefined,
-      concurrency: isSet(object.concurrency) ? globalThis.Number(object.concurrency) : 0,
     };
   },
 
@@ -1448,9 +1438,6 @@ export const Server: MessageFns<Server> = {
     if (message.lastReadAt !== undefined) {
       obj.lastReadAt = message.lastReadAt.toISOString();
     }
-    if (message.concurrency !== 0) {
-      obj.concurrency = Math.round(message.concurrency);
-    }
     return obj;
   },
 
@@ -1464,7 +1451,6 @@ export const Server: MessageFns<Server> = {
     message.kind = object.kind ?? "";
     message.connected = object.connected ?? false;
     message.lastReadAt = object.lastReadAt ?? undefined;
-    message.concurrency = object.concurrency ?? 0;
     return message;
   },
 };
@@ -1478,6 +1464,7 @@ function createBaseProject(): Project {
     connected: false,
     lastReadAt: undefined,
     connectionState: 0,
+    concurrency: 0,
   };
 }
 
@@ -1503,6 +1490,9 @@ export const Project: MessageFns<Project> = {
     }
     if (message.connectionState !== 0) {
       writer.uint32(56).int32(message.connectionState);
+    }
+    if (message.concurrency !== 0) {
+      writer.uint32(64).int32(message.concurrency);
     }
     return writer;
   },
@@ -1576,6 +1566,14 @@ export const Project: MessageFns<Project> = {
             message.connectionState = reader.int32() as any;
             continue;
           }
+          case 8: {
+            if (tag !== 64) {
+              break;
+            }
+
+            message.concurrency = reader.int32();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -1613,6 +1611,7 @@ export const Project: MessageFns<Project> = {
         : isSet(object.connection_state)
         ? connectionStateFromJSON(object.connection_state)
         : 0,
+      concurrency: isSet(object.concurrency) ? globalThis.Number(object.concurrency) : 0,
     };
   },
 
@@ -1639,6 +1638,9 @@ export const Project: MessageFns<Project> = {
     if (message.connectionState !== 0) {
       obj.connectionState = connectionStateToJSON(message.connectionState);
     }
+    if (message.concurrency !== 0) {
+      obj.concurrency = Math.round(message.concurrency);
+    }
     return obj;
   },
 
@@ -1654,6 +1656,7 @@ export const Project: MessageFns<Project> = {
     message.connected = object.connected ?? false;
     message.lastReadAt = object.lastReadAt ?? undefined;
     message.connectionState = object.connectionState ?? 0;
+    message.concurrency = object.concurrency ?? 0;
     return message;
   },
 };
@@ -2821,6 +2824,7 @@ function createBasePendingDecision(): PendingDecision {
     stale: false,
     inquiryId: "",
     revision: undefined,
+    mergeTaskLast: undefined,
   };
 }
 
@@ -2861,6 +2865,9 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     }
     if (message.revision !== undefined) {
       writer.uint32(96).int32(message.revision);
+    }
+    if (message.mergeTaskLast !== undefined) {
+      writer.uint32(104).int32(message.mergeTaskLast);
     }
     return writer;
   },
@@ -2974,6 +2981,14 @@ export const PendingDecision: MessageFns<PendingDecision> = {
             message.revision = reader.int32();
             continue;
           }
+          case 13: {
+            if (tag !== 104) {
+              break;
+            }
+
+            message.mergeTaskLast = reader.int32() as any;
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -3026,6 +3041,11 @@ export const PendingDecision: MessageFns<PendingDecision> = {
         ? globalThis.String(object.inquiry_id)
         : "",
       revision: isSet(object.revision) ? globalThis.Number(object.revision) : undefined,
+      mergeTaskLast: isSet(object.mergeTaskLast)
+        ? taskStatusFromJSON(object.mergeTaskLast)
+        : isSet(object.merge_task_last)
+        ? taskStatusFromJSON(object.merge_task_last)
+        : undefined,
     };
   },
 
@@ -3067,6 +3087,9 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     if (message.revision !== undefined) {
       obj.revision = Math.round(message.revision);
     }
+    if (message.mergeTaskLast !== undefined) {
+      obj.mergeTaskLast = taskStatusToJSON(message.mergeTaskLast);
+    }
     return obj;
   },
 
@@ -3089,6 +3112,7 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     message.stale = object.stale ?? false;
     message.inquiryId = object.inquiryId ?? "";
     message.revision = object.revision ?? undefined;
+    message.mergeTaskLast = object.mergeTaskLast ?? undefined;
     return message;
   },
 };

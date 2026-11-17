@@ -138,7 +138,6 @@ fn assemble_servers(
         kind: meta.kind.clone(),
         connected,
         last_read_at: optional_timestamp(last_read_at),
-        concurrency: meta.concurrency,
       }
     })
     .collect()
@@ -156,6 +155,7 @@ fn assemble_projects(views: &[model::ProjectView], activity: &ActivityStore, now
         name: view.name.clone(),
         about: view.about.clone(),
         server_id: view.server_id.clone(),
+        concurrency: view.concurrency,
         completed_tasks_24h,
         connected: view.connected,
         last_read_at: optional_timestamp(view.last_read_at),
@@ -274,21 +274,26 @@ fn assemble_pending_decisions(store: &StateStore, now: DateTime<Utc>) -> Vec<Pen
     .pending_decisions(now, model::PendingDecisionFilter::All)
     .into_iter()
     .map(|decision| PendingDecision {
-      r#type:       pending_decision_type(decision.decision_type) as i32,
-      server_id:    decision.server_id,
-      project:      decision.project,
-      goal_id:      decision.goal_id,
-      inquiry_kind: inquiry_kind(decision.inquiry_kind) as i32,
-      created_at:   Some(timestamp(decision.created_at)),
-      body:         decision.body,
-      options:      decision.options,
-      pull_request: pull_request(
+      r#type:          pending_decision_type(decision.decision_type) as i32,
+      server_id:       decision.server_id,
+      project:         decision.project,
+      goal_id:         decision.goal_id,
+      inquiry_kind:    inquiry_kind(decision.inquiry_kind) as i32,
+      created_at:      Some(timestamp(decision.created_at)),
+      body:            decision.body,
+      options:         decision.options,
+      pull_request:    pull_request(
         decision.pull_request_number.map(PullRequestNumber::get),
         decision.pull_request_url.as_deref(),
       ),
-      stale:        decision.stale,
-      inquiry_id:   decision.inquiry_id.as_ref().map(|inquiry_id| inquiry_id.as_str().to_owned()).unwrap_or_default(),
-      revision:     decision.revision.map(RegistrationRevision::get),
+      stale:           decision.stale,
+      inquiry_id:      decision
+        .inquiry_id
+        .as_ref()
+        .map(|inquiry_id| inquiry_id.as_str().to_owned())
+        .unwrap_or_default(),
+      revision:        decision.revision.map(RegistrationRevision::get),
+      merge_task_last: decision.merge_task_last.map(|status| task_status(status) as i32),
     })
     .collect()
 }
@@ -465,7 +470,14 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let stored_run = view.runs.iter().find(|run| run.run_slug == run_slug.as_str()).cloned();
     // 完了した run は実行中一覧から消えるため、状態ストアの完了タスクからゴールと
     // タスク名を補います。run の詳細 URL は完了後も同じまま取得できます。
-    let stored_task = view.tasks.iter().find(|task| task.run_slug.as_ref() == Some(&run_slug));
+    // runSlug の一致を優先し、無ければ sourceRunSlug の一致で完了タスクを引きます
+    // （run_log の解決と同じ優先順位）。完了タスクが sourceRunSlug だけを持つ場合でも
+    // ゴールとタスク名を補えるようにするためです。
+    let stored_task = view
+      .tasks
+      .iter()
+      .find(|task| task.run_slug.as_ref() == Some(&run_slug))
+      .or_else(|| view.tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())));
     let view_server_id = ServerId::try_from(view.server_id.as_str())
       .map_err(|error| Status::internal(format!("状態ストアの server_id が不正です: {error}")))?;
     let view_project = ProjectName::try_from(view.name.as_str())
@@ -573,7 +585,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
     let resolved = self.resolve_project(&view_server_id, &view_project)?;
     let mut client = McpClient::new(resolved.client_config);
-    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_goal_detail(goal_id.as_str()).await {
+    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_goal_detail(&goal_id).await {
       | Ok(detail) => detail,
       | Err(error) => {
         client.shutdown().await;
@@ -582,7 +594,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     };
     client.shutdown().await;
     Ok(Response::new(GetGoalDetailResponse {
-      goal_id:             detail.goal_id,
+      goal_id:             detail.goal_id.as_str().to_owned(),
       server_id:           view.server_id.clone(),
       project:             view.name.clone(),
       status:              goal_status(detail.status) as i32,
@@ -634,7 +646,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let resolved = resolve_project_in(&config, &configured_server_id, &project)?;
     let mut client = McpClient::new(resolved.client_config);
     let detail = match ToolSet::new(&mut client, resolved.cwd.clone())
-      .read_task_detail(project.as_str(), task_name.as_str(), goal_id.as_ref().map(|goal_id| goal_id.as_str()))
+      .read_task_detail(&project, &task_name, goal_id.as_ref())
       .await
     {
       | Ok(Some(detail)) => detail,
@@ -652,17 +664,17 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     };
     client.shutdown().await;
     Ok(Response::new(GetTaskDetailResponse {
-      project:             detail.project,
-      task_name:           detail.task_name,
-      goal_id:             detail.goal_id,
+      project:             detail.project.as_str().to_owned(),
+      task_name:           detail.task_name.as_str().to_owned(),
+      goal_id:             detail.goal_id.map(|goal_id| goal_id.as_str().to_owned()),
       status:              task_status(detail.status) as i32,
       summary:             detail.summary,
       created_at:          optional_timestamp(detail.created_at),
       started_at:          optional_timestamp(detail.started_at),
       completed_at:        optional_timestamp(detail.completed_at),
-      run_slug:            detail.run_slug,
-      pull_request_number: detail.pull_request_number,
-      linked_run_slugs:    detail.linked_run_slugs,
+      run_slug:            detail.run_slug.map(|run_slug| run_slug.as_str().to_owned()),
+      pull_request_number: detail.pull_request_number.map(|number| number.get()),
+      linked_run_slugs:    detail.linked_run_slugs.into_iter().map(|slug| slug.as_str().to_owned()).collect(),
       branch:              detail.branch,
       pull_request_url:    detail.pull_request_url,
     }))

@@ -210,6 +210,7 @@ impl StateStore {
           name: project.name.clone(),
           about: project.about.clone(),
           server_id: project.server.clone(),
+          concurrency: project.concurrency,
           connected: slot.is_connected(),
           connection_state: slot.connection_state,
           last_read_at: slot.last_read_at,
@@ -342,6 +343,7 @@ fn inquiry_decisions(
         stale:               wait >= stale_threshold,
         inquiry_id:          Some(inquiry.inquiry_id.clone()),
         revision:            None,
+        merge_task_last:     None,
       }
     })
     .collect()
@@ -361,6 +363,8 @@ fn merge_decisions(
     .map(|goal| {
       let created_at = goal.awaiting_merge_at.unwrap_or(now);
       let wait = now.signed_duration_since(created_at);
+      let merge_task_last =
+        merge_tasks.iter().rev().find(|task| task.goal_id.as_ref() == Some(&goal.goal_id)).map(|task| task.status);
       PendingDecision {
         decision_type: PendingDecisionType::AwaitingMerge,
         server_id: project.server.clone(),
@@ -376,6 +380,7 @@ fn merge_decisions(
         stale: wait >= stale_threshold,
         inquiry_id: None,
         revision: None,
+        merge_task_last,
       }
     })
     .collect()
@@ -403,23 +408,21 @@ fn registration_decisions(project: &Project, snapshot: &ProjectSnapshot, now: Da
       stale:               false,
       inquiry_id:          None,
       revision:            Some(proposal.revision),
+      merge_task_last:     None,
     })
     .collect()
 }
 
-/// takt の activity.ts と同じ規則で、人のマージ待ちかどうかを判定する。
+/// フロントエンドの isHumanMergeWaiting と同じ規則で、人のマージ待ちかどうかを判定する。
 ///
-/// awaiting_merge で、ゴールの仕上げタスクに pending/running がなく、
-/// 配列末尾の仕上げタスクの状態が failed/exceeded/pr_failed でもないときに人のマージ待ちです。
+/// awaiting_merge で、ゴールの仕上げタスクに pending/running がなければ人のマージ待ちです。
+/// 仕上げタスクが失敗系の状態（failed/exceeded/pr_failed）で終わった場合は、仕上げが止まって
+/// 人の判断が要る状態として含めます（issue #231）。
 pub fn is_human_merge_wait(status: GoalStatus, goal_id: &GoalId, merge_tasks: &[&TaskEntry]) -> bool {
   if status != GoalStatus::AwaitingMerge {
     return false;
   }
   let goal_merge_tasks: Vec<&TaskEntry> =
     merge_tasks.iter().copied().filter(|task| task.goal_id.as_ref() == Some(goal_id)).collect();
-  if goal_merge_tasks.iter().any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running)) {
-    return false;
-  }
-  let last_status = goal_merge_tasks.last().map(|task| task.status);
-  !matches!(last_status, Some(TaskStatus::Failed) | Some(TaskStatus::Exceeded) | Some(TaskStatus::PrFailed))
+  !goal_merge_tasks.iter().any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
 }

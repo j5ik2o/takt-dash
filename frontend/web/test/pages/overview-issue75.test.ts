@@ -95,20 +95,20 @@ test("概要の上部は実行中 run・判断待ち・24時間完了タスク�
   assert.doesNotMatch(html, /最終読み取り時刻/, "最終読み取り時刻のタイルを概要から外す");
 });
 
-test("実行中 run のタイルは concurrency の合計に対する件数と使用率バーを出す", () => {
+test("実行中 run のタイルはプロジェクトの concurrency の合計に対する件数と使用率バーを出す", () => {
   const html = renderOverview(createDashboardState());
   const tile = tileWithLabel(html, "実行中の run");
 
-  assert.match(tile, /1\s*<small>\/ 8 件<\/small>/, "1件と concurrency 合計8件を出す");
+  assert.match(tile, /1\s*<small>\/ 8 件<\/small>/, "1件とプロジェクトの concurrency 合計8件を出す");
   assert.match(tile, /class="[^"]*\bbar\b[^"]*"/, "使用率バーを出す");
   assert.match(tile, /width:13%/, "1 / 8 の使用率をバーの幅に反映する");
 });
 
-test("concurrency の合計が0でも使用率バーを壊さない", () => {
+test("プロジェクトの concurrency の合計が0でも使用率バーを壊さない", () => {
   const base = createDashboardState();
   const state = {
     ...base,
-    servers: base.servers.map((server) => ({ ...server, concurrency: 0 })),
+    projects: base.projects.map((project) => ({ ...project, concurrency: 0 })),
   };
   const html = renderOverview(state);
   const tile = tileWithLabel(html, "実行中の run");
@@ -131,7 +131,7 @@ test("24時間に完了したタスクのタイルは合計と失敗系の件数
   const tile = tileWithLabel(html, "24時間に完了したタスク");
 
   assert.match(tile, /<div class="num">\s*4\s*<small>件<\/small>/, "完了したタスクの合計4件を出す");
-  assert.match(tile, /失敗したタスクが\s*1件残っています/, "失敗系の件数を添える");
+  assert.match(tile, /失敗・上限超過・PR 失敗のタスクが\s*1件残っています/, "失敗系の件数を添える");
 });
 
 test("異常があるときだけ警告バナーを出し、該当する文だけを並べる", () => {
@@ -142,8 +142,8 @@ test("異常があるときだけ警告バナーを出し、該当する文だ�
   assert.match(health, /class="[^"]*\battention\b/, "注意の見た目にする");
   assert.match(health, /判断待ちが\s*2件あります/, "判断待ちの文を出す");
   assert.match(health, /Mac Studio から応答がありません/, "応答のないサーバーの文を出す");
-  assert.match(health, /失敗/, "失敗したタスクの文を出す");
-  assert.match(health, /1件/, "失敗したタスクの件数を出す");
+  assert.match(health, /失敗・上限超過・PR 失敗のタスクが/, "失敗系の内訳を明記した文を出す");
+  assert.match(health, /1件/, "失敗系の件数を出す");
 });
 
 test("ログが止まっている run だけが異常のときはその文だけを出す", () => {
@@ -178,7 +178,7 @@ test("中止したゴールだけが異常のときはその文だけを出す",
   assert.match(health, /中止したゴールが\s*1件あります/, "中止したゴールの文を出す");
   assert.doesNotMatch(health, /判断待ちが/, "0件の判断待ちの文を出さない");
   assert.doesNotMatch(health, /から応答がありません/, "応答のない対象が無ければその文を出さない");
-  assert.doesNotMatch(health, /失敗したタスクが/, "失敗が無ければその文を出さない");
+  assert.doesNotMatch(health, /失敗・上限超過・PR 失敗のタスクが/, "失敗が無ければその文を出さない");
 });
 
 test("プロジェクトの応答なしだけが異常のときはそのプロジェクトの文だけを出す", () => {
@@ -197,7 +197,7 @@ test("プロジェクトの応答なしだけが異常のときはそのプロ�
   assert.match(health, /esa から応答がありません/, "応答なしのプロジェクト名を出す");
   assert.doesNotMatch(health, /判断待ちが/, "0件の判断待ちの文を出さない");
   assert.doesNotMatch(health, /中止したゴール/, "中止が無ければその文を出さない");
-  assert.doesNotMatch(health, /失敗したタスクが/, "失敗が無ければその文を出さない");
+  assert.doesNotMatch(health, /失敗・上限超過・PR 失敗のタスクが/, "失敗が無ければその文を出さない");
 });
 
 test("異常が無いときは警告バナーと判断待ちパネルを描画しない", () => {
@@ -225,7 +225,7 @@ test("判断待ちパネルは項目ごとに1行で出し、滞留を強調し�
   assert.ok(staleRow !== undefined, "滞留したマージ待ちの行がある");
   assert.match(staleRow, /class="[^"]*\bstale\b/, "滞留した項目を強調する");
 
-  assert.match(callout, /href="\/decisions#decision-inquiry:mini:esa:inquiry-schedule"/, "問い合わせの項目へ移動できる");
+  assert.match(callout, /href="\/decisions#decision-inquiry:mini:esa:goal-2:inquiry-schedule"/, "問い合わせの項目へ移動できる");
   assert.match(callout, /href="\/decisions#decision-merge:mini:corporate-site:goal-1"/, "マージ待ちの項目へ移動できる");
 });
 
@@ -237,6 +237,19 @@ test("サーバーの区画はプロジェクトの区画より先に現れる",
   assert.ok(servers >= 0, "サーバーの見出しがある");
   assert.ok(projects >= 0, "プロジェクトの見出しがある");
   assert.ok(servers < projects, "サーバーを最初の1画面に置く");
+});
+
+// main のこのテストは、旧サーバーカードの下端（.sc-foot）でサーバーごとの run 件数と上限・進行中ゴール・
+// 判断待ち・待機中タスクを確かめていた。概要はサーバーを1行で出す形（issue #120）に変わり、サーバーごとの
+// 件数の表示先は無い。上限を配下プロジェクトの concurrency の合計にする main の振る舞いは、全体の
+// タイルの「実行中の run / 上限」で確かめる。進行中ゴールの分類は test/state/dashboard.test.ts で確かめる。
+test("実行中の run のタイルは run 件数と全プロジェクトの上限の合計を出し、判断待ちのタイルは件数を出す", () => {
+  const html = renderOverview(createDashboardState());
+  const runTile = tileWithLabel(html, "実行中の run");
+  const pendingTile = tileWithLabel(html, "判断待ち（全サーバー）");
+
+  assert.match(runTile, /1\s*<small>\s*\/\s*8\s*件/, "実行中 run の件数と、プロジェクトの上限の合計を出す");
+  assert.match(pendingTile, /2\s*<small>\s*件/, "全サーバーの判断待ちの件数を出す");
 });
 
 test("応答なしのときは最後に読めた時点の件数であることと時刻を示す", () => {
@@ -311,7 +324,7 @@ test("サーバーが応答なしのときはヘッダーとタイルがサー�
   assert.match(tile, /応答のないサーバーがあるため/, "タイルもサーバーを主語にする");
 });
 
-test("失敗したタスクの件数は失敗・上限超過・PR作成失敗の合計をタイルに出す", () => {
+test("失敗系の件数は失敗・上限超過・PR 失敗の合計を内訳の文言でタイルに出す", () => {
   const base = createHealthyDashboardState();
   const state = {
     ...base,
@@ -327,7 +340,7 @@ test("失敗したタスクの件数は失敗・上限超過・PR作成失敗の
   const html = renderOverview(state);
   const tile = tileWithLabel(html, "24時間に完了したタスク");
 
-  assert.match(tile, /失敗したタスクが\s*6件残っています/, "failed 1 + exceeded 2 + prFailed 3 を合計する");
+  assert.match(tile, /失敗・上限超過・PR 失敗のタスクが\s*6件残っています/, "failed 1 + exceeded 2 + prFailed 3 を合計する");
 });
 
 test("トークン消費のタイルは描画しない", () => {

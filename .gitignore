@@ -11,6 +11,10 @@ next-env.d.ts
 *.tsbuildinfo
 .vercel
 
+# Python（tools/project-status のスクリプト）
+__pycache__/
+*.pyc
+
 # 環境変数・ローカル設定
 .env
 .env*.local

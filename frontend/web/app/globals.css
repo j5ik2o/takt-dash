@@ -357,6 +357,13 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* ゴール一覧のタスク件数は、項目どうしを余白で区切って並べる（issue #232）。 */
+.task-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
 .sec {
   font-size: var(--font-size-16);
   margin-bottom: var(--space-12);
@@ -436,6 +443,12 @@ a {
 
 .mini-runs li:first-child {
   border-top: none;
+}
+
+/* run のスラッグは長い識別子のため、行の中で折り返して全文を見せる（issue #153）。 */
+.mini-runs .view {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .goals li {
@@ -561,10 +574,6 @@ a {
   color: var(--muted);
 }
 
-.st.delayed {
-  color: var(--orange-d);
-}
-
 /* 実行中の run の表（issue #120、#149・#171・#193）。枠・罫線・セルの縦の揃えは部品の .l-table が受け持つ。 */
 .run-project .p {
   display: block;
@@ -660,10 +669,6 @@ a {
   background: var(--idle);
 }
 
-.bar.delayed > i {
-  background: var(--warn);
-}
-
 .dot {
   display: inline-block;
   width: 10px;
@@ -702,11 +707,6 @@ a {
 
 .run-row .dot.idle {
   background: var(--down);
-}
-
-.dot.delayed,
-.run-row .dot.delayed {
-  background: var(--orange);
 }
 
 @keyframes pulse {
@@ -1042,11 +1042,6 @@ pre {
   margin-bottom: var(--space-10);
   color: var(--teal-d);
   font-size: var(--font-size-14);
-  font-weight: 600;
-}
-
-.run-note.delayed {
-  color: var(--orange-d);
   font-weight: 600;
 }
 

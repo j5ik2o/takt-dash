@@ -66,6 +66,9 @@ pub struct McpClientConfig {
   pub cwd:             PathBuf,
   /// 1呼び出しあたりのタイムアウト。
   pub request_timeout: Duration,
+  /// 道具ごとのタイムアウト。ここに無い道具は `request_timeout` を使います。
+  /// 応答が大きく高負荷で遅れやすい読み取り道具だけを個別に長くします。
+  pub tool_timeouts:   BTreeMap<String, Duration>,
 }
 
 /// 起動と初期化だけに使う期限。道具の呼び出しの期限とは分けます。高負荷のときは
@@ -135,8 +138,13 @@ impl McpClient {
     self.ensure_started().await?;
     let id = self.take_id();
     let request = Request::new(id, "tools/call", Some(json!({ "name": name, "arguments": arguments })));
-    let result = self.request(request).await?;
+    let result = self.request(request, self.timeout_for(name)).await?;
     extract_tool_text(name, &result).map_err(CallError::from)
+  }
+
+  /// 道具の呼び出しに使う期限。道具ごとの設定があればそれを使い、無ければ全体の期限を使います。
+  fn timeout_for(&self, tool: &str) -> Duration {
+    self.config.tool_timeouts.get(tool).copied().unwrap_or(self.config.request_timeout)
   }
 
   /// 子プロセスを起動して終了させる。停止指令を受けたときに呼びます。
@@ -215,8 +223,8 @@ impl McpClient {
     Ok(process)
   }
 
-  async fn request(&mut self, request: Request) -> Result<Value, TransportError> {
-    let timeout_secs = self.config.request_timeout.as_secs();
+  async fn request(&mut self, request: Request, timeout: Duration) -> Result<Value, TransportError> {
+    let timeout_secs = timeout.as_secs();
     let process = match self.process.as_mut() {
       | Some(process) => process,
       | None => return Err(TransportError::ProcessExited),

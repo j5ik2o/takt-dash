@@ -260,6 +260,36 @@ test("run の行はゴール・ステップ・経過・状態をそれぞれの�
   assert.equal(normalize(textOf(status)), "実行中", "状態の列は状態のラベルだけを出す");
 });
 
+// 2026-11-16 の本番で実際に表示された、256 バイトで切れた preview（issue #153）。
+// test/state/goal-summary.test.ts の TRUNCATED_PREVIEW と同じ文字列。
+const TRUNCATED_PREVIEW =
+  "taktDash の関門と道具の穴4件を解消する。対象は issue #132（https://github.com/j5ik2o/takt-dash/issues/132 、proto-check が index 依存で、proto を変更するタスクは machine_gate を通過できない）、issue #98（https://";
+
+// main の #153 は旧サーバーカードの run 行で、切り詰められた preview のゴール名に省略記号を付けていた。
+// 新しい run の表でもゴールの列がこの表示を保つことを、描画した表のセルで確かめる。
+test("run の表のゴールの列は、切り詰められた preview のゴール名に省略記号を付け、完結した名前には付けない", () => {
+  const base = createDashboardState();
+  const truncated = DashboardState.create({
+    ...base,
+    goals: base.goals.map((goal) => (goal.goalId === "goal-1" ? { ...goal, name: TRUNCATED_PREVIEW } : goal)),
+  });
+  const truncatedSection = runsSection(renderOverview(truncated));
+  const truncatedRow = runRows(truncatedSection)[0];
+  assert.ok(truncatedRow !== undefined, "run の行がある");
+  const truncatedGoal = textOf(cellFor(truncatedSection, truncatedRow, "ゴール"));
+  assert.ok(truncatedGoal.includes(`${TRUNCATED_PREVIEW}…`), "切り詰められた preview のゴール名に省略記号を付けて出す");
+
+  const completeSection = runsSection(renderOverview(base));
+  const completeRow = runRows(completeSection)[0];
+  assert.ok(completeRow !== undefined, "run の行がある");
+  const completeGoal = textOf(cellFor(completeSection, completeRow, "ゴール"));
+  assert.ok(completeGoal.includes("採用ページのレイアウトを直す"), "完結したゴール名を出す");
+  assert.ok(!completeGoal.includes("…"), "完結したゴール名には省略記号を付けない");
+});
+
+// ゴール側のこのテストは、読み取り遅延（DELAYED）の run が状態「実行中（読み取り遅延）」と class="st delayed" で
+// 出ることを前提にしていた。main（issue #194）は読み取り遅延だけでは run の表示を変えない形にし、delayed の
+// 状態を撤去した。遅延中でも状態のラベルが状態の列に入り、ゴールの列へ混ざらないことを、main の表示で確かめる。
 test("読み取り遅延の run は状態のラベルをゴールの列と別のセルに出す", () => {
   const state = createDashboardStateWithProjectConnection(
     "corporate-site",
@@ -273,9 +303,9 @@ test("読み取り遅延の run は状態のラベルをゴールの列と別の
 
   const status = cellFor(section, row, "状態");
   const goal = cellFor(section, row, "ゴール");
-  assert.match(status, /class="st delayed"/, "状態の列に遅延のラベルを出す");
-  assert.match(normalize(textOf(status)), /実行中（読み取り遅延）/);
-  assert.doesNotMatch(normalize(textOf(goal)), /読み取り遅延/, "ゴールの列に状態のラベルを混ぜない");
+  assert.match(status, /class="st live"/, "読み取り遅延だけでは状態を変えず、状態の列に実行中のラベルを出す");
+  assert.equal(normalize(textOf(status)), "実行中", "状態の列は状態のラベルだけを出す");
+  assert.doesNotMatch(normalize(textOf(goal)), /実行中|読み取り遅延/, "ゴールの列に状態のラベルを混ぜない");
   assert.match(normalize(textOf(goal)), /採用ページのレイアウトを直す/, "ゴールの列にはゴール名を出す");
 });
 

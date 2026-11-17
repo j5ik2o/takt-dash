@@ -100,7 +100,9 @@ export function ActivityContent({ response, now }: ActivityContentProps): ReactE
                   </span>
                   <span className="msg">
                     {newest.project ? <b>{newest.project}：</b> : null}
-                    {single ? newest.body : "接続の状態が変わりました。"}
+                    {/* グループは同種・同一サーバー・同一プロジェクトの接続イベントだけを
+                        集めるため、最新の出来事の本文がグループ全体の具体的な文言になる */}
+                    {newest.body}
                   </span>
                   <span className="sv">{serverNames.get(newest.serverId) ?? newest.serverId}</span>
                 </li>

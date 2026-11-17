@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
-use crate::domain::{GoalId, InquiryId, PullRequestNumber, RegistrationRevision, RunSlug, TaskName};
+use crate::domain::{GoalId, InquiryId, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName};
 
 /// ゴールの状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +155,7 @@ pub struct TaskEntry {
 /// takt_get_goal から得たゴールの詳細。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalDetail {
-  pub goal_id:             String,
+  pub goal_id:             GoalId,
   pub status:              GoalStatus,
   pub execution_status:    ExecutionStatus,
   pub objective:           String,
@@ -196,25 +196,25 @@ pub struct GoalQuestionEntry {
 /// ゴールに紐づくタスク。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalTaskEntry {
-  pub task_name: String,
+  pub task_name: TaskName,
   pub status:    TaskStatus,
-  pub run_slug:  Option<String>,
+  pub run_slug:  Option<RunSlug>,
 }
 
 /// takt_list_tasks から得たタスクの詳細。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDetail {
-  pub project:             String,
-  pub task_name:           String,
-  pub goal_id:             Option<String>,
+  pub project:             ProjectName,
+  pub task_name:           TaskName,
+  pub goal_id:             Option<GoalId>,
   pub status:              TaskStatus,
   pub summary:             String,
   pub created_at:          Option<DateTime<Utc>>,
   pub started_at:          Option<DateTime<Utc>>,
   pub completed_at:        Option<DateTime<Utc>>,
-  pub run_slug:            Option<String>,
-  pub linked_run_slugs:    Vec<String>,
-  pub pull_request_number: Option<i64>,
+  pub run_slug:            Option<RunSlug>,
+  pub linked_run_slugs:    Vec<RunSlug>,
+  pub pull_request_number: Option<PullRequestNumber>,
   pub branch:              Option<String>,
   pub pull_request_url:    Option<String>,
 }
@@ -409,6 +409,8 @@ pub struct PendingDecision {
   pub inquiry_id:          Option<InquiryId>,
   /// ゴール登録の承認待ちの revision。それ以外の種別は持ちません。
   pub revision:            Option<RegistrationRevision>,
+  /// マージ待ちのゴールの仕上げタスクの最後の状態。それ以外の種別は持ちません。
+  pub merge_task_last:     Option<TaskStatus>,
 }
 
 /// ゴール登録の承認待ち。提案そのものの保持と射影に使います。
@@ -434,6 +436,8 @@ pub struct ProjectView {
   pub name:             String,
   pub about:            String,
   pub server_id:        String,
+  /// 同時実行の上限（プロジェクトの .takt/config.yaml 由来）。
+  pub concurrency:      i32,
   pub connected:        bool,
   /// 接続状態。まだ一度も読めていない場合は None。
   pub connection_state: Option<ConnectionState>,

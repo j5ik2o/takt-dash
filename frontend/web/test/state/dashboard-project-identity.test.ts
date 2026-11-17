@@ -24,7 +24,6 @@ const server = (serverId: string, kind: string): Server => ({
   kind,
   connected: true,
   lastReadAt: minutesAgo(1),
-  concurrency: 4,
 });
 
 const run = (serverId: string): Run => ({
@@ -41,6 +40,7 @@ const run = (serverId: string): Run => ({
   totalSteps: 1,
   currentIteration: 1,
   lastLogAt: minutesAgo(1),
+  reports: [],
   status: RunStatus.RUN_STATUS_RUNNING,
   logSilent: false,
 });
@@ -74,7 +74,7 @@ const createSharedNameState = (
     thresholds: createThresholds(),
   });
 
-test("同名プロジェクトでも遅延中のサーバーの run だけが遅延表示になる", () => {
+test("同名プロジェクトでも遅延中のサーバーの run は遅延表示にならず、他サーバーへ波及しない", () => {
   const view = buildOverviewView(
     createSharedNameState(ConnectionState.CONNECTION_STATE_DELAYED, ConnectionState.CONNECTION_STATE_CONNECTED),
     NOW,
@@ -84,8 +84,9 @@ test("同名プロジェクトでも遅延中のサーバーの run だけが遅
   assert.ok(delayed !== undefined, "サーバー a の run がある");
   assert.ok(healthy !== undefined, "サーバー b の run がある");
 
-  assert.equal(delayed.state, "delayed", "遅延中のサーバー a の run だけが遅延表示になる");
+  assert.equal(delayed.state, "live", "遅延中でもログが出続けている run は実行中のままになる");
   assert.equal(delayed.connected, true, "遅延中は接続中として扱う");
+  assert.equal(delayed.note, "", "読み取り時刻の注記は付けない");
   assert.equal(healthy.state, "live", "同じ名前でもサーバー b の run は実行中のままになる");
   assert.equal(healthy.connected, true);
 });

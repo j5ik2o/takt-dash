@@ -12,7 +12,8 @@ const isPositiveInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value > 0;
 
 // 種別ごとの識別子。SSE の再描画で並び順が変わっても、同じ判断待ちに同じ結果を
-// 紐づけられるよう、種別と識別子だけから作る。
+// 紐づけられるよう、種別と識別子から作る。問い合わせは同じ inquiryId でもゴールが
+// 異なり得るため、ゴールの区画も含める。ゴールが無い場合は空の区画にする。
 type DecisionKeyBuilder = (decision: PendingDecision) => string;
 
 const DECISION_KEY_BY_TYPE: Partial<Record<number, DecisionKeyBuilder>> = {
@@ -21,7 +22,7 @@ const DECISION_KEY_BY_TYPE: Partial<Record<number, DecisionKeyBuilder>> = {
   [PENDING_DECISION_TYPE.GOAL_REGISTRATION]: (decision) =>
     `goal-registration:${decision.serverId}:${decision.project}:${decision.revision ?? ""}`,
   [PENDING_DECISION_TYPE.INQUIRY]: (decision) =>
-    `inquiry:${decision.serverId}:${decision.project}:${decision.inquiryId}`,
+    `inquiry:${decision.serverId}:${decision.project}:${decision.goalId ?? ""}:${decision.inquiryId}`,
 };
 
 export function decisionKey(decision: PendingDecision): string {
@@ -59,7 +60,7 @@ const decisionLabelIdentifier = (decision: PendingDecision): string => {
     case PENDING_DECISION_TYPE.GOAL_REGISTRATION:
       return `revision ${decision.revision ?? "不明"}`;
     case PENDING_DECISION_TYPE.INQUIRY:
-      return decision.inquiryId;
+      return `ゴール ${decision.goalId ?? "不明"} ${decision.inquiryId}`;
     default:
       return "";
   }

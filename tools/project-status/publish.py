@@ -9,11 +9,13 @@
 
 段階の契約:
   commit  git add -A と git commit を行い、成功で <marker>/commit.ok を書く。
-          変更が無いときはコミットせず成功として扱う。
+          変更が無いときはコミットせず成功として扱う。Python の bytecode
+          （__pycache__ 配下と *.pyc）はコミット対象から外す。ステージ済みの
+          一覧は -z で取得し、引用・エスケープされていない実パスで判定する。
   push    commit.ok があるときだけ git push を行う。成功で push.ok を書く。
   pr      push.ok があるときだけ gh pr create を行う。base は tasks.yaml の
-          該当エントリの base_branch から解決する。既に PR がある場合だけ成功と
-          して扱い、pr.ok を書く。
+          該当エントリの base_branch から解決する。作成に失敗したときは、同じ
+          base への PR が既にある場合だけ成功として扱い、pr.ok を書く。
   status  order.md の issue を対象に Status を変更する。order.md や issue の
           記述が見つからないときは「未実施」を記録して終了コード 0 にする。
           --require-published を付けると commit.ok / push.ok / pr.ok が揃って
@@ -110,6 +112,16 @@ def _order_run_slug(environ):
     return None
 
 
+def _is_bytecode(path: str) -> bool:
+    """Python の bytecode（__pycache__ 配下のファイルと *.pyc）かどうかを返す。
+
+    project-status のスクリプトを import すると作業ツリーに bytecode が
+    生成される。公開のコミットへ混入させないため、stage_commit がコミット
+    対象から外す。.gitignore の指定と二重に守る。
+    """
+    return "__pycache__" in path.split("/") or path.endswith(".pyc")
+
+
 def stage_commit(environ) -> int:
     markers = _markers(environ)
     _clear(markers, (COMMIT_MARKER, PUSH_MARKER, PR_MARKER))
@@ -119,12 +131,25 @@ def stage_commit(environ) -> int:
         print(f"失敗: git add -A に失敗しました: {_failure_reason(added)}")
         return 1
 
-    staged = _run(["git", "diff", "--cached", "--name-only"])
+    # -z を付けると、パスが引用・エスケープされず NUL 区切りで返る。日本語など
+    # を含むパスでも、実パスをそのまま判定と git reset に使える（引用された
+    # 文字列では拡張子の判定が外れ、reset も実ファイルに届かない）。
+    staged = _run(["git", "diff", "--cached", "--name-only", "-z"])
     if staged["status"] != 0:
         print(f"失敗: コミット対象の確認に失敗しました: {_failure_reason(staged)}")
         return 1
 
-    if not staged["stdout"].strip():
+    names = [name for name in staged["stdout"].split("\x00") if name]
+    bytecode = [name for name in names if _is_bytecode(name)]
+    if bytecode:
+        reset = _run(["git", "reset", "--", *bytecode])
+        if reset["status"] != 0:
+            print(f"失敗: bytecode をコミット対象から外せませんでした: {_failure_reason(reset)}")
+            return 1
+        excluded = set(bytecode)
+        names = [name for name in names if name not in excluded]
+
+    if not names:
         print("コミットする変更はありません")
         _write_marker(markers, COMMIT_MARKER)
         return 0
@@ -160,9 +185,23 @@ def stage_push(environ) -> int:
     return 0
 
 
-def _existing_pull_request(branch: str):
+def _existing_pull_request(branch: str, base_branch: str):
     result = _run(
-        ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url", "--limit", "1"]
+        [
+            "gh",
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--base",
+            base_branch,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--limit",
+            "1",
+        ]
     )
     if result["status"] != 0:
         return None
@@ -203,7 +242,7 @@ def stage_pr(environ) -> int:
         print(f"PR を作成しました: {url}" if url else "PR を作成しました")
         return 0
 
-    existing = _existing_pull_request(branch)
+    existing = _existing_pull_request(branch, base_branch)
     if existing is not None:
         _write_marker(markers, PR_MARKER)
         print(f"既存の PR を確認しました: {existing}")
