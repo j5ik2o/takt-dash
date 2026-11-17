@@ -30,6 +30,30 @@ export type GoalBadge = {
   tone: GoalBadgeTone;
 };
 
+export type GoalSection = "inProgress" | "untouched" | "completed" | "aborted";
+
+// ゴールの区画分け（issue #242、issue #243）。
+//
+// 画面の各所で使う「進行中・未着手・完了・中止」の区画は、バッジの対応表から
+// 一意に決める。タスクが登録されていないゴールは、進行中の区画へ入れず未着手の
+// 区画へ分ける（issue #242）。中止したゴールは完了の区画へ含めず、中止の区画で
+// 別に数える（issue #243）。区画分けをこの対応表からだけ作り、画面ごとに
+// status と execution_status の組み合わせを分岐させない。
+export function goalSection(
+  goal: Pick<Goal, "status" | "executionStatus" | "taskCounts">,
+): GoalSection {
+  switch (goalBadge(goal).kind) {
+    case "completed":
+      return "completed";
+    case "aborted":
+      return "aborted";
+    case "untouched":
+      return "untouched";
+    default:
+      return "inProgress";
+  }
+}
+
 export function goalBadge(
   goal: Pick<Goal, "status" | "executionStatus" | "taskCounts">,
 ): GoalBadge {

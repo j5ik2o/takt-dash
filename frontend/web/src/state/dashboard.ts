@@ -11,6 +11,7 @@ import type {
   TaskStatus,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
+import { goalSection } from "./goal-badge";
 import {
   toRunCount,
   toRunLimit,
@@ -281,10 +282,11 @@ const isHumanMerge = (goal: Goal): boolean =>
   goal.status === GOAL_STATUS.AWAITING_MERGE &&
   !(goal.mergeTaskLast !== undefined && MERGE_TASK_RUNNING.has(goal.mergeTaskLast));
 
+// 進行中のゴールは、goal-badge の区画分けで進行中の区画に入るゴールから、人の
+// マージ待ちを除いたものとする。区画分けにより、タスクが登録されていない未着手の
+// ゴールと、完了・中止のゴールは進行中に数えない（issue #242、issue #243）。
 const isInProgressGoal = (goal: Goal): boolean =>
-  goal.executionStatus !== EXECUTION_STATUS.ABORTED &&
-  goal.status !== GOAL_STATUS.COMPLETED &&
-  !isHumanMerge(goal);
+  goalSection(goal) === "inProgress" && !isHumanMerge(goal);
 
 const waitingTaskCount = (goals: readonly Goal[]): number =>
   goals.reduce((total, goal) => total + (goal.taskCounts?.pending ?? 0), 0);
@@ -351,9 +353,7 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
   const runningRuns = state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length;
   const silentRunCount = runs.filter((run) => run.state === "warn").length;
   const failedTasks = failedTaskCount(state.goals);
-  const abortedGoals = state.goals.filter(
-    (goal) => goal.executionStatus === EXECUTION_STATUS.ABORTED,
-  ).length;
+  const abortedGoals = state.goals.filter((goal) => goalSection(goal) === "aborted").length;
   const pendingCounts = summarizePendingDecisions(pendingDecisions);
   const readAt = state.readAt;
   const partialReadAt = earliestReadAt(
