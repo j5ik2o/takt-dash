@@ -394,6 +394,42 @@ async fn get_task_detail_leaves_branch_and_pull_request_url_unset_when_the_task_
 }
 
 #[tokio::test]
+async fn get_task_detail_succeeds_for_a_task_with_an_empty_goal_id() {
+  let tasks = vec![json!({
+    "name": "standalone-task",
+    "goalId": "",
+    "status": "pending",
+    "summary": "単独",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", Path::new("/abs/takt-dash")),
+      server_meta(),
+      json!({ "tasks": tasks, "isError": ["takt_get_goal"] }),
+    )
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "standalone-task".to_owned(),
+      goal_id:   None,
+    })
+    .await
+    .expect("goalId が空文字のタスクは takt_get_goal を呼ばずに取得できます")
+    .into_inner();
+
+  assert_eq!(detail.task_name, "standalone-task");
+  assert_eq!(detail.status, ProtoTaskStatus::Pending as i32);
+  assert!(detail.branch.is_none(), "goalId が空文字のタスクは branch を未設定にします");
+  assert!(detail.pull_request_url.is_none(), "goalId が空文字のタスクはプルリクエスト URL を未設定にします");
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn get_task_detail_maps_created_started_and_completed_times() {
   let tasks = vec![json!({
     "name": "time-task",
