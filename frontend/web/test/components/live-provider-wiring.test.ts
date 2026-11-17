@@ -8,10 +8,11 @@
 // initialState から決めるため、SSR では切断状態の Live* を描画しない（未確認として扱う）。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createElement } from "react";
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DashboardState } from "../../src/proto/taktdash.ts";
 import { createDashboardState } from "../support/fixtures.ts";
+import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
 import { LiveOverview } from "../../src/components/live-overview.tsx";
 import { LiveDecisions } from "../../src/components/live-decisions.tsx";
 import {
@@ -41,14 +42,26 @@ const drive = (initial: StateStreamContextValue) => {
 };
 
 // 本番の唯一の入口（app/layout.tsx）と同じ形で StateStreamProvider を描画する。
-// initialState だけを渡し、追加の供給口は使わない。
+// initialState だけを渡し、追加の供給口は使わない。initialState は RSC が渡す
+// proto の状態であり、Context 値の内部型とは別であることに注意する。
+// children は props の必須項目のため、ComponentProps で型付けした props ごと渡す
+// （createElement の残余引数形式は React 19 の型では必須 children と両立せず、
+// props へ直接書く形式は lint の react/no-children-prop と衝突するため）。
 const renderLive = (
   page: typeof LiveOverview | typeof LiveDecisions,
-  state: StateStreamContextValue["state"],
-): string =>
-  renderToStaticMarkup(createElement(StateStreamProvider, { initialState: state }, createElement(page)));
+  state: DashboardState,
+): string => {
+  const props: ComponentProps<typeof StateStreamProvider> = {
+    initialState: state,
+    children: createElement(page),
+  };
+  return renderToStaticMarkup(createElement(StateStreamProvider, props));
+};
 
-const connected = (): StateStreamContextValue => ({ state: createDashboardState(), disconnected: false });
+const connected = (): StateStreamContextValue => ({
+  state: dashboardStateFromProto(createDashboardState()),
+  disconnected: false,
+});
 
 test("SSE の受信で切断フラグが消え、切断で立ち、切断中も直前の state を保持する", () => {
   const initial = connected();
@@ -58,7 +71,7 @@ test("SSE の受信で切断フラグが消え、切断で立ち、切断中も�
   assert.equal(holder.current.disconnected, true, "エラーで切断フラグが立つ");
   assert.equal(holder.current.state, initial.state, "切断中も直前の state を保持する");
 
-  const next = createDashboardState();
+  const next = dashboardStateFromProto(createDashboardState());
   handlers.onState(next);
   assert.equal(holder.current.disconnected, false, "受信で切断フラグが消える");
   assert.equal(holder.current.state, next, "受信で state を置き換える");
@@ -66,7 +79,7 @@ test("SSE の受信で切断フラグが消え、切断で立ち、切断中も�
 
 test("切断の開始時刻と接続履歴を Context 値に保持する", () => {
   const initial: StateStreamContextValue = {
-    state: createDashboardState(),
+    state: dashboardStateFromProto(createDashboardState()),
     disconnected: false,
     disconnectedSince: null,
     respondedBefore: true,
@@ -82,30 +95,30 @@ test("切断の開始時刻と接続履歴を Context 値に保持する", () =>
   handlers.onError();
   assert.equal(holder.current.disconnectedSince, since, "切断が続く間は開始時刻を保つ");
 
-  handlers.onState(createDashboardState());
+  handlers.onState(dashboardStateFromProto(createDashboardState()));
   assert.equal(holder.current.disconnected, false, "受信で切断フラグが消える");
   assert.equal(holder.current.disconnectedSince, null, "受信で切断の開始時刻を消す");
   assert.equal(holder.current.respondedBefore, true, "受信で接続履歴が残る");
 });
 
 test("概要は Provider の Context が接続中なら useLiveState 経由で通知を描画しない", () => {
-  const html = renderLive(LiveOverview, connected().state);
+  const html = renderLive(LiveOverview, createDashboardState());
   assert.doesNotMatch(html, /backend に接続できません/);
 });
 
 test("概要は Provider の Context が接続中なら最終読み取り時刻のタイルを持たない", () => {
-  const html = renderLive(LiveOverview, connected().state);
+  const html = renderLive(LiveOverview, createDashboardState());
   assert.doesNotMatch(html, /最終読み取り時刻/, "最終読み取り時刻のタイルはサイドバーへ移した");
   assert.match(html, /Mac mini/, "サーバーの表示を残す");
 });
 
 test("判断待ちは Provider の Context が接続中なら useLiveState 経由で通知を描画しない", () => {
-  const html = renderLive(LiveDecisions, connected().state);
+  const html = renderLive(LiveDecisions, createDashboardState());
   assert.doesNotMatch(html, /backend に接続できません/);
 });
 
 test("判断待ちは Provider の Context が接続中でも最後に読めた状態の表示を残す", () => {
-  const html = renderLive(LiveDecisions, connected().state);
+  const html = renderLive(LiveDecisions, createDashboardState());
   assert.match(html, /判断待ち/, "最後に読めた判断待ちの表示を残す");
   // 見出しや脚注にも「判断待ち」が含まれるため、状態に由来する一覧の値で
   // Context の state が一覧へ届いていることを確かめる。
@@ -116,11 +129,12 @@ test("判断待ちは Provider の Context が接続中でも最後に読めた�
 test("RSC の初期状態は検証を通してから Context に載せ、必須の値が空なら描画しない", () => {
   const invalid = DashboardState.create({ servers: [{ serverId: "" }] });
 
+  const props: ComponentProps<typeof StateStreamProvider> = {
+    initialState: invalid,
+    children: createElement(LiveOverview),
+  };
   assert.throws(
-    () =>
-      renderToStaticMarkup(
-        createElement(StateStreamProvider, { initialState: invalid }, createElement(LiveOverview)),
-      ),
+    () => renderToStaticMarkup(createElement(StateStreamProvider, props)),
     (error) => error instanceof DomainPrimitiveError && error.stage === "size",
   );
 });
@@ -137,9 +151,12 @@ const renderInitialValue = (props: {
     holder.current = useLiveState();
     return null;
   };
-  renderToStaticMarkup(
-    createElement(StateStreamProvider, { initialState: createDashboardState(), ...props }, createElement(Probe)),
-  );
+  const providerProps: ComponentProps<typeof StateStreamProvider> = {
+    initialState: createDashboardState(),
+    ...props,
+    children: createElement(Probe),
+  };
+  renderToStaticMarkup(createElement(StateStreamProvider, providerProps));
   const current = holder.current;
   if (current === undefined) {
     throw new Error("Provider の初期値を観測できませんでした。");

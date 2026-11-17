@@ -41,6 +41,7 @@ const run = (serverId: string): Run => ({
   totalSteps: 1,
   currentIteration: 1,
   lastLogAt: minutesAgo(1),
+  reports: [],
   status: RunStatus.RUN_STATUS_RUNNING,
   logSilent: false,
 });

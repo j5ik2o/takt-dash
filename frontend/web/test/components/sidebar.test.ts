@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Sidebar } from "../../src/components/sidebar.tsx";
+import { dashboardStateFromProto, type DashboardRun } from "../../src/state/restore-state.ts";
 import { createDashboardState } from "../support/fixtures.ts";
 
 type BuildInfo = { commit: string; branch: string };
@@ -112,7 +113,7 @@ const serverRow = (html: string, serverName: string): { dot: string; state: stri
   return { dot, state };
 };
 
-const renderSidebarWithServers = (runs: readonly unknown[]): string =>
+const renderSidebarWithServers = (runs: readonly DashboardRun[]): string =>
   renderToStaticMarkup(
     createElement(Sidebar, {
       servers: createDashboardState().servers,
@@ -126,7 +127,7 @@ const renderSidebarWithServers = (runs: readonly unknown[]): string =>
 test("サイドバーのサーバー状態は概要カードと同じ基準と文言で出す", () => {
   const state = createDashboardState();
 
-  const withRuns = renderSidebarWithServers(state.runs);
+  const withRuns = renderSidebarWithServers(dashboardStateFromProto(state).runs);
   assert.deepEqual(
     serverRow(withRuns, "Mac mini"),
     { dot: "live", state: "動作中" },
