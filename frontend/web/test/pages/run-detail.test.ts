@@ -74,6 +74,25 @@ test("run 詳細ページはレポートと指示書の本文を最初の描画�
   }
 });
 
+test("ログの末尾は、log_tail の各行を「ログの行」の一覧の項目として描画し、追記を足せる形にする", async () => {
+  // 開いている間に届く追記分は、この一覧の末尾へ項目として足す。最初の描画は log_tail の行です。
+  const response = {
+    ...createRunDetailResponse("run-aaa"),
+    logTail: "2026-11-13T09:01:00Z step_complete plan\n2026-11-13T09:05:00Z step_start implement",
+  };
+  const server = await startTaktDashServer({ runDetail: response });
+  try {
+    const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
+    const list = html.match(/<ol[^>]*aria-label="ログの行"[^>]*>([\s\S]*?)<\/ol>/);
+    assert.ok(list, "ログの末尾に「ログの行」の一覧がある");
+    const items = [...list[1].matchAll(/<li[^>]*>([\s\S]*?)<\/li>/g)].map((match) => match[1]);
+    assert.deepEqual(items, ["2026-11-13T09:01:00Z step_complete plan", "2026-11-13T09:05:00Z step_start implement"]);
+    assert.match(html, /セッションログの活動はまだありません。/, "活動の印が届く前はまだ無いことを示す");
+  } finally {
+    await server.shutdown();
+  }
+});
+
 test("ログが残っていない run は、ログの末尾の節に「ログは残っていません。」と表示する", async () => {
   const response = {
     ...createRunDetailResponse("run-aaa"),

@@ -273,6 +273,14 @@ impl v1::takt_dash_service_server::TaktDashService for DummyTaktDashService {
     Err(Status::unimplemented("このダミーサーバーは GetRunContent を提供しません。"))
   }
 
+  async fn get_run_updates(
+    &self,
+    _request: Request<v1::GetRunUpdatesRequest>,
+  ) -> Result<Response<v1::GetRunUpdatesResponse>, Status> {
+    self.record("GetRunUpdates");
+    Err(Status::unimplemented("このダミーサーバーは GetRunUpdates を提供しません。"))
+  }
+
   async fn get_goals(&self, request: Request<v1::GetGoalsRequest>) -> Result<Response<v1::GetGoalsResponse>, Status> {
     self.record("GetGoals");
     self.record_timeout("GetGoals", &request);
