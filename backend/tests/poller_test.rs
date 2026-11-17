@@ -16,7 +16,7 @@ use takt_dash_backend::{
   config::Thresholds,
   domain::{SilentMinutes, StaleMinutes},
   mcp::McpClientRegistry,
-  model::EventKind,
+  model::{ActivityEvent, EventKind},
   poller::{run_until_stopped, Poller},
   store::StateStore,
 };
@@ -53,6 +53,32 @@ fn fail_event_recording_for(db_path: &Path, server_id: &str) {
 fn allow_event_recording(db_path: &Path) {
   let connection = rusqlite::Connection::open(db_path).expect("記録先へ直接接続できます");
   connection.execute_batch("DROP TRIGGER IF EXISTS reject_events").expect("記録の中断を解除できます");
+}
+
+/// 記録先の events テーブルを別名へ退避し、接続の出来事への照会を失敗させる。
+///
+/// テーブルが無い間も、出来事が空の記録（空のトランザクション）は成功するため、
+/// 「照会だけが失敗し、読み取りと空の記録は成功する」状態を決定的に作れます。
+/// 退避中は recent_events も失敗するため、検証は restore_events_table の後に行います。
+fn hide_events_table(db_path: &Path) {
+  let connection = rusqlite::Connection::open(db_path).expect("記録先へ直接接続できます");
+  connection.execute_batch("ALTER TABLE events RENAME TO events_hidden").expect("テーブルを退避できます");
+}
+
+fn restore_events_table(db_path: &Path) {
+  let connection = rusqlite::Connection::open(db_path).expect("記録先へ直接接続できます");
+  connection.execute_batch("ALTER TABLE events_hidden RENAME TO events").expect("テーブルを戻せます");
+}
+
+/// 復帰イベントの本文から、切断していた秒数を読み取る。
+fn outage_seconds_of(event: &ActivityEvent) -> i64 {
+  event
+    .body
+    .split("切断していた時間は ")
+    .nth(1)
+    .and_then(|rest| rest.split(" 秒です。").next())
+    .and_then(|value| value.parse::<i64>().ok())
+    .expect("復帰イベントの本文に切断していた秒数が入ります")
 }
 
 /// mock MCP サーバが起動時に書いた PID を読む。
@@ -1399,8 +1425,8 @@ async fn restart_during_a_recorded_outage_records_the_matching_restore_once() {
     .collect();
   assert_eq!(restored.len(), 1, "再起動前の切断に対応する復帰を1件だけ記録します");
   assert!(
-    restored[0].body.contains("切断していた時間は") && restored[0].body.contains("秒です。"),
-    "復帰イベントの本文に切断していた時間を入れます: {}",
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰イベントの本文に、記録済みの切断から数えた切断していた時間を入れます: {}",
     restored[0].body
   );
 
@@ -1497,9 +1523,125 @@ async fn client_rebuild_during_a_recorded_outage_records_the_matching_restore() 
     .collect();
   assert_eq!(restored.len(), 1, "作り直し前の切断に対応する復帰を1件だけ記録します");
   assert!(
-    restored[0].body.contains("切断していた時間は") && restored[0].body.contains("秒です。"),
-    "復帰イベントの本文に切断していた時間を入れます: {}",
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰イベントの本文に、記録済みの切断から数えた切断していた時間を入れます: {}",
     restored[0].body
   );
   poller.shutdown().await;
+}
+#[tokio::test]
+async fn restart_with_a_failed_first_history_lookup_still_records_the_matching_restore() {
+  // 再起動直後の種付け照会が一時的に失敗しても、その後の成功サイクルで比較基準を
+  // 確定してしまわず、照会が成功したサイクルで未対応の切断に対応する復帰を記録します。
+  // 照会の失敗を「履歴なし」と同じに扱う実装では、最初の成功サイクルが空の出来事群を
+  // 保存して基準を接続中へ確定させるため、以後は照会を試し直せず復帰を記録できません。
+  // 照会の失敗は、events テーブルを別名へ退避して決定的に作ります。
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(1, 1);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+  let lost_before: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost_before, 1, "再起動前に切断を1件記録します");
+  poller.shutdown().await;
+
+  // 再起動後の最初のサイクルでは、種付け照会だけを失敗させます。読み取り自体は
+  // 回復している状態にします。切断していた時間が1秒以上になるよう間を空けます。
+  harness.rewrite_state(state_with_goal("g1"));
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  hide_events_table(&harness.activity_db_path);
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+  restarted.read_cycle_once().await.expect("照会が失敗してもサイクルは完了します");
+  restore_events_table(&harness.activity_db_path);
+
+  // 照会が成功する次のサイクルで、未対応の切断に対応する復帰を1件だけ記録します。
+  restarted.read_cycle_once().await.expect("照会が成功するサイクルを実行できます");
+  let restored: Vec<_> = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .collect();
+  assert_eq!(restored.len(), 1, "照会の失敗をまたいでも復帰を1件だけ記録します");
+  assert!(
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰イベントの本文に、記録済みの切断から数えた切断していた時間を入れます: {}",
+    restored[0].body
+  );
+
+  // 続く成功サイクルでも、復帰を二重に記録しません。
+  restarted.read_cycle_once().await.expect("続くサイクルを実行できます");
+  let restored_after: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .count();
+  assert_eq!(restored_after, 1, "復帰を二重に記録しません");
+  restarted.shutdown().await;
+}
+
+#[tokio::test]
+async fn restart_with_a_delayed_phase_does_not_duplicate_the_recorded_lost() {
+  // 再起動後に「遅延中」を経由して応答なしへ跨いでも、記録済みの切断を二重に記録しません。
+  // 記録から基準化した「応答なし」の基準が、遅延中の失敗で弱い状態へ上書きされると、
+  // しきい値を跨いだときに切断をもう1件記録してしまいます。
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(1, 1);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+  let lost_before: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost_before, 1, "再起動前に切断を1件記録します");
+  poller.shutdown().await;
+
+  // 失敗回数のしきい値を3にして再起動し、失敗を3回続けます。1回目と2回目は遅延中、
+  // 3回目で応答なしへ跨ぎますが、切断は1件のままです。
+  harness.rewrite_connection_thresholds(3, 1);
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+  for _ in 0..3 {
+    restarted.read_cycle_once().await.expect("再起動後の失敗でもサイクルは完了します");
+    let lost: usize = harness
+      .activity
+      .recent_events(50)
+      .unwrap()
+      .into_iter()
+      .filter(|event| event.kind == EventKind::ConnectionLost)
+      .count();
+    assert_eq!(lost, 1, "再起動後も切断を二重に記録しません");
+  }
+
+  // 回復したら、再起動前の切断に対応する復帰を1件だけ記録します。
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  harness.rewrite_state(state_with_goal("g1"));
+  restarted.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
+  let restored: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .count();
+  assert_eq!(restored, 1, "再起動前の切断に対応する復帰を1件だけ記録します");
+  restarted.shutdown().await;
 }
