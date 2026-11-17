@@ -149,6 +149,15 @@ test("タスク詳細の Route Handler は ?task= が空のとき 400 を返す"
   assert.deepEqual(await response.json(), { error: "タスク名が指定されていません。" });
 });
 
+test("タスク詳細の Route Handler は ?task が空白のみのとき 400 を返す", async () => {
+  const response = await getTaskDetail(
+    new NextRequest("http://localhost/api/tasks/corporate-site?task=%20%20"),
+    taskContext("corporate-site"),
+  );
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "タスク名が指定されていません。" });
+});
+
 test("backend に接続できないときゴール系 Route Handler は 503 を返す", async () => {
   const closedAddress = await reserveClosedAddress();
   await withServerEnv(closedAddress, async () => {

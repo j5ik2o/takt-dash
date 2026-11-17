@@ -15,7 +15,7 @@ const badRequest = (): Response => Response.json({ error: "タスク名が指定
 export async function GET(request: NextRequest, context: TaskDetailRouteContext): Promise<Response> {
   const { project } = await context.params;
   const taskName = request.nextUrl.searchParams.get("task");
-  if (taskName === null || taskName === "") {
+  if (taskName === null || taskName.trim() === "") {
     return badRequest();
   }
   const goalId = request.nextUrl.searchParams.get("goal") ?? undefined;
