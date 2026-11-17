@@ -273,9 +273,6 @@ export function OverviewContent({
                             {runView.state === "warn" && runView.note ? (
                               <div className="run-note warn">{runView.note}</div>
                             ) : null}
-                            {runView.state === "delayed" && runView.note ? (
-                              <div className="run-note delayed">{runView.note}</div>
-                            ) : null}
                           </div>
                         </li>
                       );

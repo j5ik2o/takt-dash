@@ -291,7 +291,7 @@ test("入れ子 workflow の内側ログがあってもステップ名は位置�
   assert.equal(view.iteration, 3, "反復回数は独立して保持する");
 });
 
-test("遅延中のプロジェクトの run は接続中のまま遅延の状態と最後に読めた時刻の注記を出す", () => {
+test("遅延中のプロジェクトでも、ログが出続けている run は実行中のままにし、読み取り時刻の注記を付けない", () => {
   const state = createDashboardStateWithProjectConnection(
     "corporate-site",
     ConnectionState.CONNECTION_STATE_DELAYED,
@@ -302,20 +302,55 @@ test("遅延中のプロジェクトの run は接続中のまま遅延の状態
   const run = view.runs[0]!;
 
   assert.equal(run.connected, true, "遅延中は接続中として扱う");
-  assert.equal(run.state, "delayed", "遅延中は idle にしない");
-  assert.equal(run.note, "読み取りが遅れています（最後に読めたのは 300 秒前）");
+  assert.equal(run.state, "live", "ログが出続けている run は遅延表示にしない");
+  assert.equal(run.label, "実行中");
+  assert.equal(run.note, "", "読み取り時刻を根拠にした注記は付けない");
 });
 
-test("遅延の注記の秒数は時刻が1秒進むと1秒増える", () => {
-  const state = createDashboardStateWithProjectConnection(
+test("最後に読めた時刻が最新でも、ログが無音なら遅延の理由はログの無音として表示する", () => {
+  const base = createDashboardStateWithProjectConnection(
+    "corporate-site",
+    ConnectionState.CONNECTION_STATE_DELAYED,
+    NOW,
+  );
+  const state = {
+    ...base,
+    runs: base.runs.map((run) => ({
+      ...run,
+      logSilent: false,
+      lastLogAt: new Date(NOW.getTime() - 93 * 60_000),
+    })),
+  };
+
+  const view = buildOverviewView(state, NOW);
+  const run = view.runs[0]!;
+
+  assert.equal(run.state, "warn", "ログの無音で警告にする");
+  assert.equal(run.label, "ログが止まっています");
+  assert.equal(run.note, "ログが 93分 出ていません。", "注記は最後のログの時刻で書く");
+  assert.doesNotMatch(run.note, /最後に読めたのは/, "読み取り時刻の注記と混ぜない");
+});
+
+test("読み取りもログも古いときは、注記は読み取り時刻ではなくログの時刻で書く", () => {
+  const base = createDashboardStateWithProjectConnection(
     "corporate-site",
     ConnectionState.CONNECTION_STATE_DELAYED,
     new Date(NOW.getTime() - 300 * 1_000),
   );
+  const state = {
+    ...base,
+    runs: base.runs.map((run) => ({
+      ...run,
+      logSilent: false,
+      lastLogAt: new Date(NOW.getTime() - (SILENT_MINUTES * 60_000 + 60_000)),
+    })),
+  };
 
-  const oneSecondLater = buildOverviewView(state, new Date(NOW.getTime() + 1_000));
+  const view = buildOverviewView(state, NOW);
+  const run = view.runs[0]!;
 
-  assert.equal(oneSecondLater.runs[0]!.note, "読み取りが遅れています（最後に読めたのは 301 秒前）");
+  assert.equal(run.state, "warn", "読み取りが遅れていてもログの無音で警告にする");
+  assert.equal(run.note, "ログが 11分 出ていません。", "注記はログ基準にする");
 });
 
 test("応答なしのプロジェクトの run は従来どおり最後に読めた時点の idle 表示になる", () => {

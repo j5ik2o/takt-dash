@@ -59,7 +59,7 @@ type RunView = {
   run: RunInput;
   server: Server | undefined;
   connected: boolean;
-  state: "live" | "warn" | "delayed" | "idle";
+  state: "live" | "warn" | "idle";
   label: string;
   note: string;
   goalName?: string;
@@ -200,20 +200,10 @@ export function toRunView(
       note: "サーバーから応答がないため、最後に読めた時点の状態です。",
     };
   }
-  if (project?.connectionState === CONNECTION_STATE.DELAYED) {
-    const lastReadAt = project.lastReadAt ?? server?.lastReadAt;
-    const seconds = lastReadAt ? Math.max(0, Math.floor((now.getTime() - lastReadAt.getTime()) / 1_000)) : undefined;
-    return {
-      ...derived,
-      connected: true,
-      state: "delayed",
-      label: "実行中（読み取り遅延）",
-      note:
-        seconds !== undefined
-          ? `読み取りが遅れています（最後に読めたのは ${seconds} 秒前）`
-          : "読み取りが遅れています（最後に読めた時刻は不明です）",
-    };
-  }
+  // run の表示は、プロジェクトの読み取り状態ではなく run 自身のログの鮮度で決める。
+  // 読み取りが遅れている（DELAYED）だけでは run の表示を変えず、読み取り時刻を注記に
+  // 使わない。「遅れているのに最後に読めたのは 0 秒前」のような自己矛盾が起きるため、
+  // 遅延の注記は最後のログの時刻で書く（issue #194）。
   const silentMinutes = run.lastLogAt
     ? Math.max(0, Math.floor((now.getTime() - run.lastLogAt.getTime()) / 60_000))
     : undefined;
