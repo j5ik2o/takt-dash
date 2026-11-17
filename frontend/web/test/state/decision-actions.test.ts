@@ -81,7 +81,31 @@ test("判断待ちの識別子は種別ごとに固有の接頭辞で始まる",
 
   assert.equal(decisionKey(mergeDecision), "merge:mini:corporate-site:goal-1");
   assert.equal(decisionKey(registrationDecision), "goal-registration:mini:takt:7");
-  assert.equal(decisionKey(inquiryDecision), "inquiry:mini:esa:inquiry-options");
+  assert.equal(decisionKey(inquiryDecision), "inquiry:mini:esa:goal-2:inquiry-options");
+});
+
+test("問い合わせの識別子は同じ inquiryId でもゴールが違えば別のキーになる", () => {
+  const base = optionsQuestion();
+  const first: PendingDecision = { ...base, goalId: "goal-2" };
+  const second: PendingDecision = { ...base, goalId: "goal-3" };
+
+  const firstKey = decisionKey(first);
+  const secondKey = decisionKey(second);
+
+  assert.notEqual(firstKey, secondKey);
+  assert.match(firstKey, /goal-2/);
+  assert.match(secondKey, /goal-3/);
+  assert.match(firstKey, /inquiry-options/);
+  assert.match(secondKey, /inquiry-options/);
+});
+
+test("ゴールを持たない問い合わせの識別子は空の区画を使い、ゴール付きのキーと衝突しない", () => {
+  const withoutGoal: PendingDecision = { ...optionsQuestion(), goalId: undefined };
+  const withGoal: PendingDecision = { ...optionsQuestion(), goalId: "goal-2" };
+
+  assert.equal(decisionKey(withoutGoal), "inquiry:mini:esa::inquiry-options");
+  assert.doesNotMatch(decisionKey(withoutGoal), /undefined/);
+  assert.notEqual(decisionKey(withoutGoal), decisionKey(withGoal));
 });
 
 test("種別の表示名は3種別を判別できる", () => {
@@ -95,7 +119,8 @@ test("種別の表示名は3種別を判別できる", () => {
   assert.match(registrationLabel, /承認/);
   assert.notEqual(registrationLabel, inquiryLabel);
 
-  assert.equal(decisionTypeLabel({ ...optionsQuestion(), type: 99 }), "判断待ち");
+  // 未知の種別は生成コードの UNRECOGNIZED で表し、既定の表示名へ落ちることを見る。
+  assert.equal(decisionTypeLabel({ ...optionsQuestion(), type: PendingDecisionType.UNRECOGNIZED }), "判断待ち");
 });
 
 test("操作の結果に出す項目名はプロジェクトと種別を含む", () => {
@@ -130,6 +155,30 @@ test("操作の結果に出す項目名はサーバーと対象の識別子を�
   const registrationLabel = decisionLabel(registration());
   assert.match(registrationLabel, /mini/);
   assert.match(registrationLabel, /7/);
+});
+
+test("操作の結果に出す項目名は同じ inquiryId でもゴールで区別できる", () => {
+  const base = optionsQuestion();
+  const first: PendingDecision = { ...base, goalId: "goal-2" };
+  const second: PendingDecision = { ...base, goalId: "goal-3" };
+
+  const firstLabel = decisionLabel(first);
+  const secondLabel = decisionLabel(second);
+
+  assert.notEqual(firstLabel, secondLabel);
+  assert.match(firstLabel, /goal-2/);
+  assert.match(secondLabel, /goal-3/);
+  assert.match(firstLabel, /inquiry-options/);
+  assert.match(secondLabel, /inquiry-options/);
+});
+
+test("ゴールを持たない問い合わせの項目名はゴールの欠損を明示する", () => {
+  const withoutGoal: PendingDecision = { ...optionsQuestion(), goalId: undefined };
+  const withGoal: PendingDecision = { ...optionsQuestion(), goalId: "goal-2" };
+
+  const label = decisionLabel(withoutGoal);
+  assert.match(label, /ゴール 不明/);
+  assert.notEqual(label, decisionLabel(withGoal));
 });
 
 test("操作要素の対象名は種別ごとの識別子を含み、同じ種別でも区別できる", () => {
@@ -196,11 +245,13 @@ test("自由記述の回答は問い合わせの識別子と本文を持つ", ()
 test("作業の依頼の回答は report だけを持つ", () => {
   const completed = buildAnswerAction(operation(), { report: 1 });
   assert.ok(completed);
+  assert.equal(completed.kind, "answer");
   assert.equal(completed.payload.report, 1);
   assert.equal(completed.payload.text, undefined);
 
   const unable = buildAnswerAction(operation(), { report: 2 });
   assert.ok(unable);
+  assert.equal(unable.kind, "answer");
   assert.equal(unable.payload.report, 2);
   assert.equal(unable.payload.text, undefined);
 });
@@ -277,8 +328,8 @@ test("確定の意図はダイアログに対応する操作を選び、承認�
 
 test("マージ確認は開いた時点の PR 番号と URL を保持し、確認時もその PR を送る", () => {
   const target = openDecisionDialog(merge(), "merge");
-  assert.equal(target.prNumber, 418);
-  assert.equal(target.url, "https://example.test/pr/418");
+  assert.equal(target?.kind === "merge" ? target.prNumber : undefined, 418);
+  assert.equal(target?.kind === "merge" ? target.url : undefined, "https://example.test/pr/418");
 
   const resolution = resolveDecisionIntent(
     merge(),
@@ -360,7 +411,10 @@ test("確認ダイアログを開くと対象を保持し、同じ対象の確�
   assert.equal(openedRegistration.kind, "open");
   const registrationTarget =
     openedRegistration.kind === "open" ? openedRegistration.target ?? undefined : undefined;
-  assert.equal(registrationTarget?.revision, 7);
+  assert.equal(
+    registrationTarget?.kind === "approve-registration" ? registrationTarget.revision : undefined,
+    7,
+  );
 
   const registrationResolution = resolveDecisionIntent(
     registration(),
@@ -439,12 +493,14 @@ test("自由記述と作業の依頼の意図も従来どおりの回答を組�
   assert.equal(textResolution.kind, "submit");
   const textAction = textResolution.kind === "submit" ? textResolution.action : undefined;
   assert.ok(textAction);
+  assert.equal(textAction.kind, "answer");
   assert.equal(textAction.payload.text, " 補足します ");
 
   const reportResolution = resolveDecisionIntent(operation(), { type: "answer-report", report: 2 }, { text: "" });
   assert.equal(reportResolution.kind, "submit");
   const reportAction = reportResolution.kind === "submit" ? reportResolution.action : undefined;
   assert.ok(reportAction);
+  assert.equal(reportAction.kind, "answer");
   assert.equal(reportAction.payload.report, 2);
   assert.equal(reportAction.payload.text, undefined);
 });
@@ -471,6 +527,30 @@ test("操作結果は一覧と同じ key を持ち、同じ key の結果は置�
   assert.equal(mixed.length, 2);
   assert.equal(mixed[0]!.key, other.key);
   assert.equal(mixed[1]!.key, first.key);
+});
+
+test("同じ inquiryId でもゴールが違う操作結果は保持し、同じゴールの再操作は置換する", () => {
+  const base = optionsQuestion();
+  const firstDecision: PendingDecision = { ...base, goalId: "goal-2" };
+  const secondDecision: PendingDecision = { ...base, goalId: "goal-3" };
+
+  const first = toDecisionResult(firstDecision, { ok: true, message: "回答を送信しました。" });
+  const second = toDecisionResult(secondDecision, { ok: true, message: "回答を送信しました。" });
+
+  const both = upsertDecisionResult(upsertDecisionResult([], first), second);
+  assert.equal(both.length, 2);
+  assert.equal(new Set(both.map((result) => result.key)).size, 2);
+  assert.ok(both.some((result) => result.key === first.key && result.label === first.label));
+  assert.ok(both.some((result) => result.key === second.key && result.label === second.label));
+
+  const repeated = toDecisionResult(firstDecision, { ok: false, message: "操作に失敗しました。" });
+  const replaced = upsertDecisionResult(both, repeated);
+  assert.equal(replaced.length, 2);
+  const firstEntries = replaced.filter((result) => result.key === first.key);
+  assert.equal(firstEntries.length, 1);
+  assert.equal(firstEntries[0]!.ok, false);
+  assert.equal(firstEntries[0]!.message, "操作に失敗しました。");
+  assert.ok(replaced.some((result) => result.key === second.key));
 });
 
 test("送信できない入力では操作を組み立てない", () => {

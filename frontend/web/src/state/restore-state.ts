@@ -192,7 +192,6 @@ const toServer = (raw: unknown): DashboardServer => {
     kind: String(value.kind ?? ""),
     connected: value.connected === true,
     lastReadAt: toDate(value.lastReadAt),
-    concurrency: asNumber(value.concurrency),
   };
 };
 
@@ -203,6 +202,7 @@ const toProject = (raw: unknown): DashboardProject => {
     about: String(value.about ?? ""),
     serverId: toServerId(value.serverId),
     completedTasks24h: asNumber(value.completedTasks24h),
+    concurrency: asNumber(value.concurrency),
     connected: value.connected === true,
     lastReadAt: toDate(value.lastReadAt),
     connectionState:

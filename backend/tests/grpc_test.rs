@@ -146,12 +146,12 @@ async fn get_overview_assembles_the_dashboard_state_from_the_store() {
   assert_eq!(state.servers[0].name, "j5ik2o-mac-mini");
   assert_eq!(state.servers[0].kind, "Mac mini");
   assert!(state.servers[0].connected, "読めていれば接続ありです");
-  assert_eq!(state.servers[0].concurrency, 4);
 
   assert_eq!(state.projects.len(), 1);
   assert_eq!(state.projects[0].name, "takt-dash");
   assert_eq!(state.projects[0].server_id, "mac-mini");
   assert_eq!(state.projects[0].about, "takt-dash の説明");
+  assert_eq!(state.projects[0].concurrency, 1, "プロジェクトの上限は .takt/config.yaml が無ければ takt の既定値1です");
   assert_eq!(
     state.projects[0].connection_state,
     ProtoConnectionState::Connected as i32,

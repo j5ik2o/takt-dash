@@ -43,11 +43,13 @@
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
 //     "hang": ["takt_list_goal_questions:g1", "takt_get_run:r1@120"], // 指定した呼び出しだけ応答しない。
-//     "delayMs": { "takt_list_goals": 1000 }             // 道具ごとに応答を遅らせる。
+//     "delayMs": { "takt_list_goals": 1000 },            // 道具ごとに応答を遅らせる。
+//     "delays": { "takt_list_goals": 1500 },  // 指定した道具の応答を指定ミリ秒だけ遅らせる
+//     "hangOnce": ["takt_list_goals"]  // 指定した道具は最初の子プロセスだけ応答しない（マーカーが残る）
 //   }
 // --calls <path> を渡すと、受け取った tools/call を {"name","arguments"} の JSONL として追記する。
 // --processes <path> を渡すと、起動時に自分の pid を 1 行追記する。
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isAbsolute } from "node:path";
 
@@ -456,6 +458,22 @@ const onLine = async (line) => {
     const delayMs = state.delayMs?.[name] ?? 0;
     if (delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    // hangOnce に指定した道具は、最初の子プロセスだけが応答しない。マーカーが残るため、
+    // 作り直した子プロセス（再試行側）は応答する。「1回だけ時間切れし、その後は回復する」
+    // サーバーを模す。
+    if (statePath !== undefined && (state.hangOnce ?? []).includes(name)) {
+      const marker = `${statePath}.hang-once.${name}`;
+      if (!existsSync(marker)) {
+        writeFileSync(marker, String(process.pid));
+        return;
+      }
+    }
+    // delays に指定した道具は、応答を指定ミリ秒だけ遅らせる。期限より遅い応答を模す。
+    const replyDelayMs = Number((state.delays ?? {})[name] ?? 0);
+    if (replyDelayMs > 0) {
+      setTimeout(() => reply({ jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) }), replyDelayMs);
+      return;
     }
     reply({ jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) });
     return;

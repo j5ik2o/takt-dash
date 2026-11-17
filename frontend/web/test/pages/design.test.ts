@@ -17,6 +17,7 @@ import {
 } from "../support/fixtures.ts";
 import { ActivityKind, DashboardState, ExecutionStatus, GoalStatus, type GetActivityResponse } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
+import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
 import { RunDetailContent } from "../../src/components/run-detail-content.tsx";
 import { Sidebar } from "../../src/components/sidebar.tsx";
 import ActivityPage from "../../app/activity/page.tsx";
@@ -318,6 +319,13 @@ test("サーバーのカードは 1280px 以下で1列になり、run 行は3列
   );
 });
 
+test("run 行の状態ラベルは列の中で折り返し、隣の本文へ重ならない", async () => {
+  const css = await readCss();
+
+  const whiteSpace = requireDeclaration(css, /\.runs\s+\.st$/, "white-space", ".runs .st");
+  assert.equal(whiteSpace, "normal", "長い状態ラベルは 96px の状態列の中で折り返す");
+});
+
 test("760px 以下でモバイルの1列構成にし、旧 720px の切り替えを残さない", async () => {
   const css = await readCss();
 
@@ -480,10 +488,14 @@ test("760px 以下でもサーバーの状態テキストを隠さない", async
     "760px 以下でサーバーの状態を消さない",
   );
 
+  const state = createDashboardState();
   const html = renderToStaticMarkup(
     createElement(Sidebar, {
-      servers: createDashboardState().servers,
+      servers: state.servers,
       pendingCount: 0,
+      // 状態は run の件数でも決まるため、run があるサーバーが「動作中」になる
+      // 前提をそろえて渡す（issue #188）。Sidebar の runs は内部型のため変換して渡す。
+      runs: dashboardStateFromProto(state).runs,
       frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
       backendBuild: { commit: "a1b2c3d", branch: "takt/backend" },
     }),
@@ -559,7 +571,7 @@ test("アクティビティの出来事行は種類ごとの状態を点とラ�
   assert.doesNotMatch(idle, /class="ev warn"/, "一時停止は注意の行にしない");
 });
 
-test("接続の切断から復帰をまとめた行は最新の復帰の状態に揃える", () => {
+test("接続の切断と復帰は別の行になり、それぞれの種類の状態で表示する", () => {
   const base = createActivityResponse();
   const response: GetActivityResponse = {
     ...base,
@@ -582,9 +594,15 @@ test("接続の切断から復帰をまとめた行は最新の復帰の状態�
   };
   const html = renderPage(ActivityPage, { state: createDashboardState(), response, now: NOW });
   const rows = html.match(/<li class="ev[\s\S]*?<\/li>/g) ?? [];
-  assert.equal(rows.length, 1, "隣接する接続イベントは1行にまとまる");
-  const row = rows[0]!;
-  assert.doesNotMatch(row, /class="ev warn"/, "最新が復帰なら注意の行にしない");
-  assert.doesNotMatch(row, /class="kl warn"/, "最新が復帰なら警告のラベルにしない");
-  assert.match(row, /class="dot live"/, "最新が復帰なら実行中の点にする");
+  assert.equal(rows.length, 2, "切断と復帰は別の行になる");
+  const restoredRow = rows[0]!;
+  assert.match(restoredRow, /接続の復帰/, "復帰の行は復帰の種類で出す");
+  assert.doesNotMatch(restoredRow, /class="ev warn"/, "復帰の行は注意の行にしない");
+  assert.doesNotMatch(restoredRow, /class="kl warn"/, "復帰の行は警告のラベルにしない");
+  assert.match(restoredRow, /class="dot live"/, "復帰の行は実行中の点にする");
+  const lostRow = rows[1]!;
+  assert.match(lostRow, /接続の切断/, "切断の行は切断の種類で出す");
+  assert.match(lostRow, /class="ev warn"/, "切断の行は注意の行にする");
+  assert.match(lostRow, /class="kl warn"/, "切断の行は警告のラベルにする");
+  assert.match(lostRow, /class="dot warn"/, "切断の行は警告の点にする");
 });

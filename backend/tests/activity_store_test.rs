@@ -283,3 +283,37 @@ fn today_counts_by_server_reports_a_stored_server_id_that_cannot_be_a_domain_val
     "不正なサーバー ID は SQL の復元エラーになります: {error}"
   );
 }
+
+#[test]
+fn last_connection_event_returns_the_newest_connection_event_for_the_project() {
+  let store = ActivityStore::open_in_memory().expect("SQLite を開けます");
+  assert_eq!(
+    store.last_connection_event("mac-mini", "takt-dash").expect("接続の出来事を引けます"),
+    None,
+    "接続の出来事が無ければ None です"
+  );
+
+  store
+    .record(&event("2026-11-13T10:00:00Z", "mac-mini", Some("takt-dash"), EventKind::ConnectionLost, "切断"))
+    .unwrap();
+  store.record(&event("2026-11-13T10:05:00Z", "mac-mini", Some("takt-dash"), EventKind::GoalCreated, "登録")).unwrap();
+  store
+    .record(&event("2026-11-13T10:06:00Z", "mac-mini", Some("other"), EventKind::ConnectionRestored, "復帰"))
+    .unwrap();
+
+  let (kind, at) = store
+    .last_connection_event("mac-mini", "takt-dash")
+    .expect("接続の出来事を引けます")
+    .expect("切断が最後の接続の出来事です");
+  assert_eq!(kind, EventKind::ConnectionLost, "接続以外の出来事と他プロジェクトの出来事は数えません");
+  assert_eq!(at, DateTime::parse_from_rfc3339("2026-11-13T10:00:00Z").unwrap().with_timezone(&Utc));
+
+  store
+    .record(&event("2026-11-13T10:10:00Z", "mac-mini", Some("takt-dash"), EventKind::ConnectionRestored, "復帰"))
+    .unwrap();
+  let (kind, _) = store
+    .last_connection_event("mac-mini", "takt-dash")
+    .expect("接続の出来事を引けます")
+    .expect("復帰が最後の接続の出来事です");
+  assert_eq!(kind, EventKind::ConnectionRestored, "復帰を記録したら最後の接続の出来事は復帰です");
+}

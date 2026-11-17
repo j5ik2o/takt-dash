@@ -222,11 +222,8 @@ async fn watch_state_sends_the_current_server_meta_after_a_config_change() {
   assert_eq!(first.servers[0].name, "j5ik2o-mac-mini", "初回は接続時のサーバー表示情報を返します");
 
   // 設定のサーバー表示情報を書き換え、定期読み取りの1サイクルを回す。
-  harness.rewrite_server_meta("mac-mini", ServerMeta {
-    name:        "renamed-mini".to_owned(),
-    kind:        "Mac Studio".to_owned(),
-    concurrency: 8,
-  });
+  harness
+    .rewrite_server_meta("mac-mini", ServerMeta { name: "renamed-mini".to_owned(), kind: "Mac Studio".to_owned() });
   let mut poller = Poller::new(
     harness.config_path().to_path_buf(),
     harness.activity.clone(),
@@ -244,7 +241,6 @@ async fn watch_state_sends_the_current_server_meta_after_a_config_change() {
   assert_eq!(second.servers.len(), 1, "設定にあるサーバーだけを返します");
   assert_eq!(second.servers[0].name, "renamed-mini", "変化通知後のサーバー名は変更後の値です");
   assert_eq!(second.servers[0].kind, "Mac Studio", "種類も変更後に追随します");
-  assert_eq!(second.servers[0].concurrency, 8, "同時実行数も変更後に追随します");
 
   poller.shutdown().await;
   server.stop().await;
@@ -403,7 +399,6 @@ async fn watch_state_sends_added_server_metadata_after_a_config_change() {
     .expect("ストリームから読めます")
     .expect("変化後の状態があります");
   assert_eq!(second.servers[0].name, "j5ik2o-mac-mini-renamed", "変化通知後の servers は新しい設定の表示名を返します");
-  assert_eq!(second.servers[0].concurrency, 8, "並列度の変更も新しい状態に現れます");
 
   poller.shutdown().await;
   server.stop().await;

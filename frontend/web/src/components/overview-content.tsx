@@ -4,12 +4,16 @@ import type { OverviewView } from "../state/dashboard";
 import { decisionKey, decisionTypeLabel } from "../state/decision-actions";
 import { formatClock, formatDateTime, formatDuration, formatModel } from "../state/format";
 import { decisionHref, projectHref, serverAnchorId } from "../state/anchors";
+import { goalDisplayName } from "../state/goal-summary";
+import type { BackendUnavailableSituation } from "../grpc/client";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 
 type OverviewContentProps = {
   view: OverviewView;
   flashingRunSlugs?: ReadonlySet<string>;
   disconnected: boolean;
+  /** 切断時の通知の文面を決める状況。ライブ表示だけが渡す。 */
+  unavailableSituation?: BackendUnavailableSituation;
 };
 
 const positionText = (stepNumber?: number, totalSteps?: number, iteration?: number): string => {
@@ -33,6 +37,7 @@ export function OverviewContent({
   view,
   flashingRunSlugs,
   disconnected,
+  unavailableSituation,
 }: OverviewContentProps): ReactElement {
   const { pendingCounts } = view;
   const hasUnresponsiveServer = view.unresponsiveServers.length > 0;
@@ -47,10 +52,13 @@ export function OverviewContent({
   const partialReadTime = view.partialReadAt
     ? `${formatClock(view.partialReadAt)} 時点`
     : "最後に読めた時刻は不明";
+  const lastReadText = view.readAt
+    ? `最終読み取り時刻 ${formatClock(view.readAt)}（${formatDateTime(view.readAt)}）時点の内容を表示しています。`
+    : "takt-mcp からまだ読めていません。";
   const longestWait = view.pendingDecisions[0];
   return (
     <main className="page overview">
-      {disconnected ? <BackendUnavailableNotice /> : null}
+      {disconnected ? <BackendUnavailableNotice situation={unavailableSituation} /> : null}
       <header className="page-head">
         <div>
           <h1>概要</h1>
@@ -63,11 +71,7 @@ export function OverviewContent({
               {partialReadTime}）。
             </p>
           ) : null}
-          {disconnected ? (
-            <p className="stale-note">
-              最終読み取り時刻 {formatClock(view.readAt)}（{formatDateTime(view.readAt)}）時点の内容を表示しています。
-            </p>
-          ) : null}
+          {disconnected ? <p className="stale-note">{lastReadText}</p> : null}
         </div>
         {view.hasAnomalies ? (
           <div className="health attention" role="status">
@@ -229,7 +233,7 @@ export function OverviewContent({
                           </span>
                           <div className="run-main">
                             <span className="p">{runView.run.project}</span>
-                            {runView.goalName ? <span className="g">{runView.goalName}</span> : null}
+                            {runView.goalName ? <span className="g">{goalDisplayName(runView.goalName)}</span> : null}
                             <div className="task">
                               タスク「{runView.run.summary || runView.run.taskName}」
                             </div>
@@ -273,9 +277,6 @@ export function OverviewContent({
                             {runView.state === "warn" && runView.note ? (
                               <div className="run-note warn">{runView.note}</div>
                             ) : null}
-                            {runView.state === "delayed" && runView.note ? (
-                              <div className="run-note delayed">{runView.note}</div>
-                            ) : null}
                           </div>
                         </li>
                       );
@@ -309,6 +310,9 @@ export function OverviewContent({
                 <h3>{project.name}</h3>
                 <p className="about">{project.about}</p>
                 <p>直近24時間に完了したタスクは {project.completedTasks24h}件です。</p>
+                <p>
+                  実行中の run は {project.runningRuns} 件で、同時実行の上限は {project.concurrency} 件です。
+                </p>
               </Link>
               <a className="view" href={`/goals?project=${encodeURIComponent(project.name)}`}>
                 ゴール一覧を見る

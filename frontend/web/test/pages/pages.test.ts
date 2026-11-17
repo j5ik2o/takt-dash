@@ -438,6 +438,37 @@ test("判断待ちページは CRLF の改行も段落の区切りとして扱�
   assert.match(textParagraphs[1]!, /第2段落。/);
 });
 
+test("判断待ちページは本文の先頭の字下げを残して描画する", () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "  字下げした行です。\n同じ段落の2行目です。" }),
+    now: NOW,
+  });
+  const descBlock = elementsByClass(html, "desc")[0];
+  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  const paragraphs = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
+  assert.equal(paragraphs.length, 1, "単一改行では段落を分けない");
+  assert.match(
+    paragraphs[0]!,
+    /^<p> {2}字下げした行です。\n同じ段落の2行目です。<\/p>$/,
+    "段落の先頭の空白を切り取らずに表示する",
+  );
+});
+
+test("判断待ちページは空行で段落を分け、空行直後の段落の字下げも残す", () => {
+  const body = "第1段落です。\n\n　字下げした第2段落です。\n\n  字下げした第3段落です。";
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body }),
+    now: NOW,
+  });
+  const descBlock = elementsByClass(html, "desc")[0];
+  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  const paragraphs = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
+  assert.equal(paragraphs.length, 3, "空行で区切られた3つの段落がそれぞれ別の要素になる");
+  assert.match(paragraphs[0]!, /^<p>第1段落です。<\/p>$/);
+  assert.match(paragraphs[1]!, /^<p>　字下げした第2段落です。<\/p>$/, "空行直後の段落の全角の字下げを残す");
+  assert.match(paragraphs[2]!, /^<p> {2}字下げした第3段落です。<\/p>$/, "空行直後の段落の半角の字下げを残す");
+});
+
 const headingBlocks = (html: string): string[] =>
   Array.from(html.matchAll(/<div class="proj">([\s\S]*?)<\/div>/g), (match) => match[1]);
 
@@ -748,7 +779,7 @@ test("新着ログで発光する run 行だけが flash クラスを持ち、�
   const view = buildOverviewView(state, NOW);
 
   const html = renderToStaticMarkup(
-    createElement(OverviewContent, { view, flashingRunSlugs: new Set(["run-aaa"]) }),
+    createElement(OverviewContent, { view, flashingRunSlugs: new Set(["run-aaa"]), disconnected: false }),
   );
 
   assert.equal(elementsByClass(html, "flash").length, 1, "発光するのは flashingRunSlugs に入った行だけ");
@@ -761,7 +792,7 @@ test("新着ログで発光する run 行だけが flash クラスを持ち、�
   assert.match(css, /\.run-row\.flash\s*\{[^}]*animation:\s*flash\s+1s/, "基本規則は1秒の flash アニメーション");
 });
 
-test("遅延中の run 行は idle にせず遅延の点と注記を描画する", () => {
+test("遅延中の run 行は idle にせず、ログが出続けていれば実行中として描画する", () => {
   const state = createDashboardStateWithProjectConnection(
     "corporate-site",
     ConnectionState.CONNECTION_STATE_DELAYED,
@@ -769,14 +800,14 @@ test("遅延中の run 行は idle にせず遅延の点と注記を描画する
   );
   const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
 
-  assert.match(html, /class="st delayed"/, "状態のラベルを遅延の見た目で出す");
-  assert.match(html, /class="dot delayed"/, "状態の点を遅延の見た目で出す");
-  assert.match(html, /class="run-note delayed"/, "遅延の注記を専用の見た目で出す");
-  assert.match(html, /読み取りが遅れています（最後に読めたのは 300 秒前）/);
+  assert.match(html, /class="st live"/, "ログが出続けている run は実行中の見た目で出す");
+  assert.match(html, /class="dot live"/, "状態の点も実行中の見た目で出す");
+  assert.doesNotMatch(html, /run-note delayed/, "読み取り遅延の注記は出さない");
+  assert.doesNotMatch(html, /読み取りが遅れています/, "読み取り時刻の注記は出さない");
   assert.doesNotMatch(html, /class="st idle"/, "遅延中の run 行を応答なしの見た目にしない");
 });
 
-test("アクティビティページは同一プロジェクトの隣接する接続イベントを件数と期間の1行にまとめる", () => {
+test("アクティビティページは切断と復帰を別の行にし、同種の接続イベントだけを件数と期間の1行にまとめる", () => {
   const base = createActivityResponse();
   const response = {
     ...base,
@@ -795,19 +826,33 @@ test("アクティビティページは同一プロジェクトの隣接する�
         kind: ActivityKind.ACTIVITY_KIND_CONNECTION_LOST,
         body: "接続が切れました。",
       },
+      {
+        occurredAt: new Date(NOW.getTime() - 15 * 60_000),
+        serverId: "mini",
+        project: "esa",
+        kind: ActivityKind.ACTIVITY_KIND_CONNECTION_LOST,
+        body: "接続が切れました。",
+      },
     ],
   };
 
   const html = renderPage(ActivityPage, { state: createDashboardState(), response, now: NOW });
   const rows = html.match(/<li class="ev[\s\S]*?<\/li>/g) ?? [];
 
-  assert.equal(rows.length, 1, "隣接する同一プロジェクトの接続イベントは1行になる");
-  const row = rows[0]!;
-  assert.match(row, /esa/, "まとめた行にプロジェクト名を出す");
-  assert.match(row, /2件/, "まとめた件数を出す");
-  assert.match(row, /16:20/, "期間の始まりを出す");
-  assert.match(row, /16:25/, "期間の終わりを出す");
-  assert.ok(row.indexOf("16:20") < row.indexOf("16:25"), "期間を最古から最新の順に出す");
+  assert.equal(rows.length, 2, "切断と復帰は別の行になり、同種の切断だけが1行にまとまる");
+  const restoredRow = rows[0]!;
+  assert.match(restoredRow, /接続の復帰/, "復帰は復帰だけの行に出す");
+  assert.match(restoredRow, /16:25/, "復帰の時刻を出す");
+  assert.match(restoredRow, /接続が復帰しました。/, "単独の行は本文をそのまま出す");
+  assert.doesNotMatch(restoredRow, /2件/, "復帰の行にまとめた件数を付けない");
+  const lostRow = rows[1]!;
+  assert.match(lostRow, /esa/, "まとめた行にプロジェクト名を出す");
+  assert.match(lostRow, /接続の切断/, "切断は切断だけの行に出す");
+  assert.match(lostRow, /2件/, "まとめた件数を出す");
+  assert.match(lostRow, /接続の状態が変わりました。/, "まとめた行は共通の本文を出す");
+  assert.match(lostRow, /16:15/, "期間の始まりを出す");
+  assert.match(lostRow, /16:20/, "期間の終わりを出す");
+  assert.ok(lostRow.indexOf("16:15") < lostRow.indexOf("16:20"), "期間を最古から最新の順に出す");
 });
 
 test("アクティビティページは接続の復帰イベントを種類と切断時間つきで描画する", () => {

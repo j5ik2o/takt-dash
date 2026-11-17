@@ -44,6 +44,7 @@ pub fn mock_config_with_timeout(
     env: Default::default(),
     cwd: cwd.to_path_buf(),
     request_timeout: std::time::Duration::from_secs(timeout_secs),
+    tool_timeouts: Default::default(),
   }
 }
 
@@ -207,15 +208,16 @@ pub fn snapshot(
 }
 
 pub fn server_meta() -> ServerMeta {
-  ServerMeta { name: "j5ik2o-mac-mini".to_owned(), kind: "Mac mini".to_owned(), concurrency: 4 }
+  ServerMeta { name: "j5ik2o-mac-mini".to_owned(), kind: "Mac mini".to_owned() }
 }
 
 pub fn project(name: &str, cwd: &Path) -> Project {
   Project {
-    name:   name.to_owned(),
-    server: "mac-mini".to_owned(),
-    about:  format!("{name} の説明"),
-    cwd:    cwd.to_path_buf(),
+    name:        name.to_owned(),
+    server:      "mac-mini".to_owned(),
+    about:       format!("{name} の説明"),
+    cwd:         cwd.to_path_buf(),
+    concurrency: 1,
   }
 }
 

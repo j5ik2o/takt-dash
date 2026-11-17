@@ -11,7 +11,16 @@ import type {
   TaskStatus,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
-import { toSilentMinutes, toStaleMinutes, type ValidatedAnomalyThresholds } from "./domain-primitives";
+import { goalSection } from "./goal-badge";
+import {
+  toRunCount,
+  toRunLimit,
+  toSilentMinutes,
+  toStaleMinutes,
+  type RunCount,
+  type RunLimit,
+  type ValidatedAnomalyThresholds,
+} from "./domain-primitives";
 import {
   CONNECTION_STATE,
   EXECUTION_STATUS,
@@ -59,7 +68,7 @@ type RunView = {
   run: RunInput;
   server: Server | undefined;
   connected: boolean;
-  state: "live" | "warn" | "delayed" | "idle";
+  state: "live" | "warn" | "idle";
   label: string;
   note: string;
   goalName?: string;
@@ -83,21 +92,29 @@ type OverviewServerView = {
   state: "live" | "idle" | "down";
   stateLabel: string;
   runs: RunView[];
-  runLimit: number;
+  runLimit: RunLimit;
   runningRuns: number;
   inProgressGoals: number;
   pendingCount: number;
   waitingTasks: number;
 };
 
+// 概要のプロジェクト行。プロジェクト自身の同時実行上限と、そのプロジェクトで
+// 実行中の run の件数を対比できる形にする。
+export type OverviewProjectView = Omit<Project, "concurrency"> & {
+  concurrency: RunLimit;
+  runningRuns: RunCount;
+};
+
 export type OverviewView = {
-  readAt: Date;
+  // 最後に実際に読めた時刻。1件も読めていない場合は実在しない時刻を作らず undefined にする。
+  readAt?: Date;
   servers: OverviewServerView[];
-  projects: Project[];
+  projects: OverviewProjectView[];
   runs: RunView[];
   thresholds: ValidatedAnomalyThresholds;
   runningRuns: number;
-  runLimit: number;
+  runLimit: RunLimit;
   completedTasks24h: number;
   failedTaskCount: number;
   abortedGoalCount: number;
@@ -200,20 +217,10 @@ export function toRunView(
       note: "サーバーから応答がないため、最後に読めた時点の状態です。",
     };
   }
-  if (project?.connectionState === CONNECTION_STATE.DELAYED) {
-    const lastReadAt = project.lastReadAt ?? server?.lastReadAt;
-    const seconds = lastReadAt ? Math.max(0, Math.floor((now.getTime() - lastReadAt.getTime()) / 1_000)) : undefined;
-    return {
-      ...derived,
-      connected: true,
-      state: "delayed",
-      label: "実行中（読み取り遅延）",
-      note:
-        seconds !== undefined
-          ? `読み取りが遅れています（最後に読めたのは ${seconds} 秒前）`
-          : "読み取りが遅れています（最後に読めた時刻は不明です）",
-    };
-  }
+  // run の表示は、プロジェクトの読み取り状態ではなく run 自身のログの鮮度で決める。
+  // 読み取りが遅れている（DELAYED）だけでは run の表示を変えず、読み取り時刻を注記に
+  // 使わない。「遅れているのに最後に読めたのは 0 秒前」のような自己矛盾が起きるため、
+  // 遅延の注記は最後のログの時刻で書く（issue #194）。
   const silentMinutes = run.lastLogAt
     ? Math.max(0, Math.floor((now.getTime() - run.lastLogAt.getTime()) / 60_000))
     : undefined;
@@ -233,42 +240,53 @@ export function toRunView(
   return { ...derived, connected: true, state: "live", label: "実行中", note: "" };
 }
 
-const serverState = (server: Server, runs: readonly RunInput[]): OverviewServerView["state"] => {
-  if (!server.connected) {
+// サーバーの状態は接続の有無と run の件数だけで決め、概要のサーバーカードと
+// サイドバーで同じ関数と同じ文言を使う。別々の基準で決めると、同じサーバーが
+// 「動作中」と「待機中」のように食い違って見える（issue #188）。run の件数は
+// 検証済みの専用型 RunCount で受け取り、生の数値を流通させない。
+export const serverStateFrom = (
+  connected: boolean,
+  runCount: RunCount,
+): OverviewServerView["state"] => {
+  if (!connected) {
     return "down";
   }
-  return runs.length > 0 ? "live" : "idle";
+  return runCount > 0 ? "live" : "idle";
 };
 
-const serverStateLabel = (state: OverviewServerView["state"]): string => {
+const serverState = (server: Server, runs: readonly RunInput[]): OverviewServerView["state"] =>
+  serverStateFrom(server.connected, toRunCount(runs.length));
+
+// idle は「接続できているが run が無い」状態であり、接続そのものができていない
+// down（応答なし）と区別できる文言にする。文言は「接続中」と短くし、run が無いことは
+// サイドバーの「run 0件」とカードの件数表示で別途分かるため文言には含めない。
+// 長い文言は幅の狭いサイドバーの行にはみ出すおそれがある（issue #188）。
+export const serverStateLabel = (state: OverviewServerView["state"]): string => {
   switch (state) {
     case "down":
       return "応答なし";
     case "live":
       return "動作中";
     case "idle":
-      return "待機中";
+      return "接続中";
   }
 };
 
-// 仕上げタスクが pending/running/failed などでまだ終わっていなければ、人のマージ待ちではなく
-// 進行中のゴールとして数える。merge_task_last が未設定または完了なら人の判断待ちになる。
-const MERGE_TASK_IN_PROGRESS: ReadonlySet<number> = new Set([
-  TASK_STATUS.PENDING,
-  TASK_STATUS.RUNNING,
-  TASK_STATUS.FAILED,
-  TASK_STATUS.EXCEEDED,
-  TASK_STATUS.PR_FAILED,
-]);
+// 仕上げタスクが未着手・実行中の間は仕上げの途中なので、人のマージ待ちではなく進行中の
+// ゴールとして数える。仕上げタスクが失敗・上限超過・PR 作成失敗で終わったゴールは、自動
+// では進まず人の判断が要るため、人のマージ待ちとして数える（issue #231）。
+// merge_task_last が未設定または完了の場合も人のマージ待ちである。
+const MERGE_TASK_RUNNING: ReadonlySet<number> = new Set([TASK_STATUS.PENDING, TASK_STATUS.RUNNING]);
 
 const isHumanMerge = (goal: Goal): boolean =>
   goal.status === GOAL_STATUS.AWAITING_MERGE &&
-  !(goal.mergeTaskLast !== undefined && MERGE_TASK_IN_PROGRESS.has(goal.mergeTaskLast));
+  !(goal.mergeTaskLast !== undefined && MERGE_TASK_RUNNING.has(goal.mergeTaskLast));
 
+// 進行中のゴールは、goal-badge の区画分けで進行中の区画に入るゴールから、人の
+// マージ待ちを除いたものとする。区画分けにより、タスクが登録されていない未着手の
+// ゴールと、完了・中止のゴールは進行中に数えない（issue #242、issue #243）。
 const isInProgressGoal = (goal: Goal): boolean =>
-  goal.executionStatus !== EXECUTION_STATUS.ABORTED &&
-  goal.status !== GOAL_STATUS.COMPLETED &&
-  !isHumanMerge(goal);
+  goalSection(goal) === "inProgress" && !isHumanMerge(goal);
 
 const waitingTaskCount = (goals: readonly Goal[]): number =>
   goals.reduce((total, goal) => total + (goal.taskCounts?.pending ?? 0), 0);
@@ -321,7 +339,11 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
       runs: serverRuns.map((run) =>
         toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
       ),
-      runLimit: server.concurrency,
+      runLimit: toRunLimit(
+        state.projects
+          .filter((project) => project.serverId === server.serverId)
+          .reduce((total, project) => total + project.concurrency, 0),
+      ),
       runningRuns: serverRuns.filter((run) => run.status === RUN_STATUS.RUNNING).length,
       inProgressGoals: serverGoals.filter(isInProgressGoal).length,
       pendingCount: pendingDecisions.filter((decision) => decision.serverId === server.serverId).length,
@@ -331,22 +353,30 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
   const runningRuns = state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length;
   const silentRunCount = runs.filter((run) => run.state === "warn").length;
   const failedTasks = failedTaskCount(state.goals);
-  const abortedGoals = state.goals.filter(
-    (goal) => goal.executionStatus === EXECUTION_STATUS.ABORTED,
-  ).length;
+  const abortedGoals = state.goals.filter((goal) => goalSection(goal) === "aborted").length;
   const pendingCounts = summarizePendingDecisions(pendingDecisions);
-  const readAt = state.readAt ?? now;
+  const readAt = state.readAt;
   const partialReadAt = earliestReadAt(
     [...unresponsiveServers, ...unresponsiveProjects].map((item) => item.lastReadAt),
   );
   return {
     readAt,
     servers,
-    projects: state.projects,
+    projects: state.projects.map((project) => ({
+      ...project,
+      concurrency: toRunLimit(project.concurrency),
+      runningRuns: toRunCount(
+        state.runs.filter(
+          (run) =>
+            projectKey(run.serverId, run.project) === projectKey(project.serverId, project.name) &&
+            run.status === RUN_STATUS.RUNNING,
+        ).length,
+      ),
+    })),
     runs,
     thresholds,
     runningRuns,
-    runLimit: state.servers.reduce((total, server) => total + server.concurrency, 0),
+    runLimit: toRunLimit(state.projects.reduce((total, project) => total + project.concurrency, 0)),
     completedTasks24h: state.projects.reduce(
       (total, project) => total + project.completedTasks24h,
       0,
@@ -415,17 +445,46 @@ export const taskStatusLabel = (status: TaskStatus): string => {
 };
 
 // 仕上げタスクの末尾状態だけで人のマージ待ちかどうかを判定する。通常タスクの pending/running は
-// 判定に影響しない。awaiting_merge で、末尾が pending/running/failed/exceeded/pr_failed で
-// なければ人のマージ待ちになる。
+// 判定に影響しない。awaiting_merge で、末尾が未着手・実行中でなければ人のマージ待ちになる。
+// 失敗・上限超過・PR 作成失敗は、仕上げが止まって人の判断が要る状態として含める（issue #231）。
 export function isHumanMergeWaiting(goal: Goal): boolean {
   if (goal.status !== GOAL_STATUS.AWAITING_MERGE) {
     return false;
   }
-  return (
-    goal.mergeTaskLast !== TASK_STATUS.PENDING &&
-    goal.mergeTaskLast !== TASK_STATUS.RUNNING &&
-    goal.mergeTaskLast !== TASK_STATUS.FAILED &&
-    goal.mergeTaskLast !== TASK_STATUS.EXCEEDED &&
-    goal.mergeTaskLast !== TASK_STATUS.PR_FAILED
-  );
+  return goal.mergeTaskLast !== TASK_STATUS.PENDING && goal.mergeTaskLast !== TASK_STATUS.RUNNING;
+}
+
+// 仕上げタスクの末尾状態が失敗系のときに、仕上げが止まった理由を示す文面を返す。
+// ゴール一覧のカードと判断待ちのカードで同じ文面を使うため、末尾状態だけから決める。
+const mergeTaskFailureNoteForLast = (mergeTaskLast: TaskStatus | undefined): string | undefined => {
+  switch (mergeTaskLast) {
+    case TASK_STATUS.FAILED:
+      return "仕上げタスクが失敗しました。";
+    case TASK_STATUS.EXCEEDED:
+      return "仕上げタスクが上限超過で止まりました。";
+    case TASK_STATUS.PR_FAILED:
+      return "仕上げタスクのプルリクエスト作成が失敗しました。";
+    default:
+      return undefined;
+  }
+};
+
+// 仕上げタスクが失敗系の状態で終わったことを示す文面（issue #231）。人のマージ待ちとして
+// 出すときに、仕上げが止まった理由が分かるようにする。awaiting_merge でないゴールと、
+// 失敗系でない末尾状態では undefined を返す。
+export function mergeTaskFailureNote(goal: Goal): string | undefined {
+  if (goal.status !== GOAL_STATUS.AWAITING_MERGE) {
+    return undefined;
+  }
+  return mergeTaskFailureNoteForLast(goal.mergeTaskLast);
+}
+
+// 判断待ちのカードに出す、仕上げタスクの失敗を示す文面（issue #231）。マージ待ちの項目で、
+// 仕上げタスクが失敗系の状態で終わったときだけ返す。それ以外の種別と末尾状態では
+// undefined を返す。
+export function pendingDecisionMergeFailureNote(decision: PendingDecision): string | undefined {
+  if (decision.type !== PENDING_DECISION_TYPE.AWAITING_MERGE) {
+    return undefined;
+  }
+  return mergeTaskFailureNoteForLast(decision.mergeTaskLast);
 }

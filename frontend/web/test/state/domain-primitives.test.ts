@@ -13,6 +13,7 @@ import {
   toPullRequestNumber,
   toRegistrationRevision,
   toReportFilename,
+  toRunCount,
   toRunSlug,
   toServerId,
   toSilentMinutes,
@@ -92,6 +93,17 @@ test("タスク件数は 0 以上 i32::MAX 以下だけを受理する", () => {
   assert.equal(stageOf(() => toTaskCount(2_147_483_648)), "size");
   assert.equal(stageOf(() => toTaskCount(1.5)), "syntax");
   assert.equal(stageOf(() => toTaskCount("1")), "lexical");
+});
+
+test("run 件数は 0 以上 i32::MAX 以下だけを受理する", () => {
+  assert.equal(toRunCount(0), 0);
+  assert.equal(toRunCount(2_147_483_647), 2_147_483_647);
+  assert.equal(stageOf(() => toRunCount(-1)), "size");
+  assert.equal(stageOf(() => toRunCount(2_147_483_648)), "size");
+  assert.equal(stageOf(() => toRunCount(1.5)), "syntax");
+  assert.equal(stageOf(() => toRunCount("1")), "lexical");
+  assert.equal(stageOf(() => toRunCount(Number.NaN)), "lexical");
+  assert.equal(stageOf(() => toRunCount(Number.POSITIVE_INFINITY)), "lexical");
 });
 
 test("滞留と無音の閾値は 0 以上 i32::MAX 以下だけを受理する", () => {

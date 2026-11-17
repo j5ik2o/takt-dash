@@ -7,9 +7,11 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as grpc from "@grpc/grpc-js";
+import { ExecutionStatus, GoalStatus, TaskStatus } from "../../src/proto/taktdash.ts";
 import { createGoalDetailResponse } from "../support/fixtures.ts";
 import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-server.ts";
 import { formatDateTime } from "../../src/state/format.ts";
+import { resetBackendResponded } from "../../src/grpc/client.ts";
 import { GoalDetailContent } from "../../src/components/goal-detail-content.tsx";
 import { GoalDetailLoader } from "../../src/components/goal-detail-loader.tsx";
 import GoalDetailPage from "../../app/goals/[goalId]/page.tsx";
@@ -66,10 +68,11 @@ test("ゴール詳細は開始ブランチ・統合ブランチ・ゴールブ�
   assert.match(html, /goal\/45-frontend/);
 });
 
-test("ゴール詳細は状態と実行状態を既存の日本語ラベルで表示する", () => {
+test("ゴール詳細は状態と実行状態が矛盾しない文面を表示する", () => {
   const html = renderDetail();
   assert.match(html, /人のマージ待ち/);
-  assert.match(html, /稼働中/);
+  assert.match(html, /ゴールは人のマージ待ちです/);
+  assert.doesNotMatch(html, /稼働中/);
 });
 
 test("ゴール詳細は作業記録を応答順のまま時刻と本文つきで表示する", () => {
@@ -104,6 +107,30 @@ test("ゴール詳細は回答本文が無くても回答の判断と作業の�
   assert.match(html, /回答の判断は allow です。/);
   assert.match(html, /作業の報告は completed です。/);
   assert.doesNotMatch(html, /未回答/);
+});
+
+test("ゴール詳細は取り下げ済みの質問を未回答と表示せず、取り下げとして表示する", () => {
+  const detail = createGoalDetailResponse();
+  const pending = detail.questions[1]!;
+  const html = renderDetail({
+    ...detail,
+    questions: [
+      { ...pending, questionId: "q-withdrawn", body: "この質問は後で出し直します。", status: "withdrawn" },
+    ],
+  });
+  assert.match(html, /取り下げ済み/);
+  assert.doesNotMatch(html, /未回答/);
+});
+
+test("ゴール詳細は未回答のままの通常の質問を引き続き未回答と表示する", () => {
+  const detail = createGoalDetailResponse();
+  const pending = detail.questions[1]!;
+  const html = renderDetail({
+    ...detail,
+    questions: [{ ...pending, questionId: "q-pending", status: "pending" }],
+  });
+  assert.match(html, /未回答/);
+  assert.doesNotMatch(html, /取り下げ済み/);
 });
 
 test("ゴール詳細はタスク一覧を表示し、タスク名とゴール ID をエスケープしたタスク詳細へのリンクを持つ", () => {
@@ -170,6 +197,9 @@ test("応答の goalId が要求と一致しないときも本番経路で notFo
 });
 
 test("backend に接続できないときゴール詳細のローダーは落ちず不通の旨を描画する", async () => {
+  // このテストは、一度も backend の応答を受けていない Web プロセスを前提にする。
+  // 同じファイルの成功ケースで残った接続履歴の影響を受けないよう、前提を明示する。
+  resetBackendResponded();
   const closedAddress = await reserveClosedAddress();
   await withServerEnv(closedAddress, async () => {
     const html = renderToStaticMarkup(
@@ -178,4 +208,39 @@ test("backend に接続できないときゴール詳細のローダーは落ち
     assert.match(html, /backend に接続できません/);
     assert.match(html, /TAKTDASH_BACKEND_ADDR/);
   });
+});
+
+test("ゴール詳細は完了したゴールに稼働中と出さず、実行中のタスクが残れば件数を出す", () => {
+  const completed = renderDetail(
+    createGoalDetailResponse({
+      status: GoalStatus.GOAL_STATUS_COMPLETED,
+      tasks: [{ taskName: "仕上げ", status: TaskStatus.TASK_STATUS_COMPLETED, runSlug: "run-zzz" }],
+    }),
+  );
+  assert.match(completed, /ゴールは完了しています/);
+  assert.doesNotMatch(completed, /稼働中/);
+  assert.doesNotMatch(completed, /残っています/);
+
+  const withRunning = renderDetail(
+    createGoalDetailResponse({
+      status: GoalStatus.GOAL_STATUS_COMPLETED,
+      tasks: [
+        { taskName: "仕上げ", status: TaskStatus.TASK_STATUS_COMPLETED, runSlug: "run-zzz" },
+        { taskName: "後片付け", status: TaskStatus.TASK_STATUS_RUNNING, runSlug: "run-yyy" },
+      ],
+    }),
+  );
+  assert.match(withRunning, /ゴールは完了しています。実行中のタスクが 1 件残っています/);
+  assert.doesNotMatch(withRunning, /稼働中/);
+});
+
+test("ゴール詳細は中止したゴールをゴール自体の中止として表示する", () => {
+  const html = renderDetail(
+    createGoalDetailResponse({
+      status: GoalStatus.GOAL_STATUS_CREATED,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED,
+    }),
+  );
+  assert.match(html, /ゴールは中止されました/);
+  assert.doesNotMatch(html, /作成済みで、実行状態は中止/);
 });
