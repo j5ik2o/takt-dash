@@ -1274,6 +1274,332 @@ def strip_command_prefix(tokens_of_command):
     return tokens_of_command
 
 
+def split_string_command(string, extra_arguments):
+    """env の -S の引数（コマンド文字列）を、起動するコマンドのトークン列へ変える。
+
+    env は文字列を分割して1つのプログラムを直接起動する（シェルは経由しない）
+    ため、実行されるのは先頭の単純コマンドだけであり、後ろの引数はその
+    コマンドへ追加の引数として渡される。
+    """
+    try:
+        commands = list(simple_commands(shell_tokens(string)))
+    except ValueError:
+        return None
+    if not commands:
+        return None
+    return list(commands[0]) + list(extra_arguments)
+
+
+def env_command_arguments(arguments):
+    """env の引数列から、env が実際に起動するコマンドの引数列を返す。
+
+    オプション（-i、引数を取る -u / -C、--unset=... の形を含む）と、コマンド
+    の前にある NAME=VALUE の代入を読み飛ばす。コマンドが続かない場合（環境
+    の表示だけ）は None を返す。--help / --version もコマンドを実行しない
+    ため None を返す。
+
+    -S（--split-string）は、引数自体がコマンド文字列であり、後ろの引数は
+    そのコマンドへ追加されるため、split_string_command でトークン列へ変える。
+    """
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            index += 1
+            break
+        if token == "-":
+            index += 1
+            continue
+        if token.startswith("--"):
+            name, separator, attached = token[2:].partition("=")
+            if name in ("help", "version"):
+                return None
+            if name == "split-string":
+                if separator:
+                    return split_string_command(attached, arguments[index + 1 :])
+                if index + 1 >= len(arguments):
+                    return None
+                return split_string_command(arguments[index + 1], arguments[index + 2 :])
+            if name in ("unset", "chdir") and not separator:
+                index += 2
+            else:
+                index += 1
+            continue
+        if token.startswith("-"):
+            step = 1
+            for position, option in enumerate(token[1:]):
+                if option in ("u", "C"):
+                    if position == len(token) - 2:
+                        step = 2
+                    break
+                if option == "S":
+                    attached = token[position + 2 :]
+                    if attached:
+                        return split_string_command(attached, arguments[index + 1 :])
+                    if index + 1 >= len(arguments):
+                        return None
+                    return split_string_command(arguments[index + 1], arguments[index + 2 :])
+            index += step
+            continue
+        break
+    while index < len(arguments) and ENV_ASSIGNMENT.match(arguments[index]):
+        index += 1
+    if index >= len(arguments):
+        return None
+    return arguments[index:]
+
+
+SUDO_OPTIONS_WITH_ARGUMENT = {"C", "D", "R", "T", "U", "g", "p", "r", "t", "u"}
+SUDO_LONG_OPTIONS_WITH_ARGUMENT = {
+    "chdir",
+    "close-from",
+    "command-timeout",
+    "group",
+    "host",
+    "login-class",
+    "prompt",
+    "role",
+    "target",
+    "type",
+    "user",
+}
+SUDO_OPTIONS_WITHOUT_EXECUTION = {"K", "V", "e", "l", "v"}
+SUDO_LONG_OPTIONS_WITHOUT_EXECUTION = {
+    "edit",
+    "help",
+    "list",
+    "remove-timestamp",
+    "validate",
+    "version",
+}
+
+
+def sudo_command_arguments(arguments):
+    """sudo の引数列から、sudo が実際に起動するコマンドの引数列を返す。
+
+    オプション（引数を取る -u / -g / --user=... など）を読み飛ばす。一覧の
+    表示やタイムスタンプの操作、ファイルの編集だけを行う形式（-l / -v /
+    -K / -V / -e、--list など）はコマンドを実行しないため None を返す。
+    コマンドが続かない場合も None を返す。コマンドの前に置かれる
+    NAME=VALUE は sudo 自身が環境変数として受け取るため、ここでは読み飛
+    ばさず、呼び出し側の strip_command_prefix に委ねる。
+
+    -h は、くっついた引数がある場合はホストの指定、無い場合はヘルプの表示
+    として扱う。
+    """
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            index += 1
+            break
+        if token.startswith("--"):
+            name, separator, _attached = token[2:].partition("=")
+            if name in SUDO_LONG_OPTIONS_WITHOUT_EXECUTION:
+                return None
+            if name in SUDO_LONG_OPTIONS_WITH_ARGUMENT and not separator:
+                index += 2
+            else:
+                index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            step = 1
+            for position, option in enumerate(token[1:]):
+                if option in SUDO_OPTIONS_WITHOUT_EXECUTION:
+                    return None
+                if option == "h":
+                    if position == len(token) - 2:
+                        return None
+                    break
+                if option in SUDO_OPTIONS_WITH_ARGUMENT:
+                    if position == len(token) - 2:
+                        step = 2
+                    break
+            index += step
+            continue
+        break
+    if index >= len(arguments):
+        return None
+    return arguments[index:]
+
+
+def nice_command_arguments(arguments):
+    """nice の引数列から、nice が実際に起動するコマンドの引数列を返す。
+
+    -n（--adjustment）と、旧式の -5 のような符号付き数値の調整値を読み飛
+    ばす。--help / --version はコマンドを実行しないため None を返す。
+    コマンドが続かない場合（現在のナイス値の表示だけ）も None を返す。
+    """
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            index += 1
+            break
+        if token.startswith("--"):
+            name, separator, _attached = token[2:].partition("=")
+            if name in ("help", "version"):
+                return None
+            if name == "adjustment" and not separator:
+                index += 2
+            else:
+                index += 1
+            continue
+        if re.fullmatch(r"[+-]\d+", token):
+            index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            step = 1
+            for position, option in enumerate(token[1:]):
+                if option == "n":
+                    if position == len(token) - 2:
+                        step = 2
+                    break
+            index += step
+            continue
+        break
+    if index >= len(arguments):
+        return None
+    return arguments[index:]
+
+
+TIME_OPTIONS_WITH_ARGUMENT = {"f", "o"}
+TIME_LONG_OPTIONS_WITH_ARGUMENT = {"format", "output"}
+
+
+def time_command_arguments(arguments):
+    """time の引数列から、time が実際に起動するコマンドの引数列を返す。
+
+    引数を取る -o / -f（--output / --format）を読み飛ばす。--help /
+    --version はコマンドを実行しないため None を返す。コマンドが続かない
+    場合も None を返す。
+    """
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            index += 1
+            break
+        if token.startswith("--"):
+            name, separator, _attached = token[2:].partition("=")
+            if name in ("help", "version"):
+                return None
+            if name in TIME_LONG_OPTIONS_WITH_ARGUMENT and not separator:
+                index += 2
+            else:
+                index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            step = 1
+            for position, option in enumerate(token[1:]):
+                if option in TIME_OPTIONS_WITH_ARGUMENT:
+                    if position == len(token) - 2:
+                        step = 2
+                    break
+            index += step
+            continue
+        break
+    if index >= len(arguments):
+        return None
+    return arguments[index:]
+
+
+def command_command_arguments(arguments):
+    """command の引数列から、command が実際に起動するコマンドの引数列を返す。
+
+    -p（既定の PATH を使う）は実行の形を変えないため読み飛ばす。-v / -V は
+    コマンドの場所を表示するだけで実行しないため None を返す。コマンドが
+    続かない場合も None を返す。
+    """
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            index += 1
+            break
+        if token.startswith("-") and token != "-":
+            if "v" in token[1:] or "V" in token[1:]:
+                return None
+            index += 1
+            continue
+        break
+    if index >= len(arguments):
+        return None
+    return arguments[index:]
+
+
+def exec_command_arguments(arguments):
+    """exec の引数列から、exec が実際に起動するコマンドの引数列を返す。
+
+    -c（環境を空にする）と -l（ログインシェルとして起動する）、引数を取る
+    -a（argv[0] の指定）を読み飛ばす。コマンドが続かない場合（リダイレク
+    トの適用だけ）はコマンドを実行しないため None を返す。
+    """
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            index += 1
+            break
+        if token.startswith("-") and token != "-":
+            step = 1
+            for position, option in enumerate(token[1:]):
+                if option == "a":
+                    if position == len(token) - 2:
+                        step = 2
+                    break
+            index += step
+            continue
+        break
+    if index >= len(arguments):
+        return None
+    return arguments[index:]
+
+
+COMMAND_WRAPPERS = {
+    "command": command_command_arguments,
+    "env": env_command_arguments,
+    "exec": exec_command_arguments,
+    "nice": nice_command_arguments,
+    "sudo": sudo_command_arguments,
+    "time": time_command_arguments,
+}
+
+
+def strip_command_wrappers(tokens_of_command):
+    """単純コマンドの先頭にあるコマンドラッパーを、重なりも含めて読み飛ばす。
+
+    env / sudo / nice / time / command / exec は、後ろのコマンドを起動する
+    ラッパーである。各ラッパーのオプションと引数を読み飛ばし、ラッパーが
+    重なっている場合（`sudo env FOO=1 python3 ...` など）は内側までほどく。
+    ラッパーの前後にある制御語と環境変数代入（sudo が受け取る NAME=VALUE
+    を含む）もあわせて読み飛ばす。この読み飛ばしは公開コマンドの検出
+    （invoked_publish_stages）からだけ使う。
+
+    一覧の表示や検証だけを行う形式（command -v、sudo -l など）と、コマンド
+    が続かない形式は、実行ではないため空の列を返す。ラッパー越しであって
+    も、実行しない形式（bash -n など）を実行として扱うことはない（判定は
+    ほどいた先の通常の経路で行われる）。
+
+    builtin はラッパーとして扱わない。builtin が実行できるのはシェルの
+    組み込みコマンドだけであり、外部コマンドである publish.py やインタプ
+    リタは起動できない（bash では `builtin python3` は "not a shell
+    builtin" で失敗する）ため、公開コマンドの実行形式にはならない。
+    """
+    for _ in range(10):
+        tokens_of_command = strip_command_prefix(tokens_of_command)
+        if not tokens_of_command:
+            return tokens_of_command
+        unwrapper = COMMAND_WRAPPERS.get(tokens_of_command[0].rsplit("/", 1)[-1])
+        if unwrapper is None:
+            return tokens_of_command
+        rest = unwrapper(tokens_of_command[1:])
+        if rest is None:
+            return []
+        tokens_of_command = rest
+    return []
+
+
 def shell_command_string(arguments):
     """bash / sh の引数列から、-c で実行されるスクリプトを返す。
 
@@ -1355,8 +1681,11 @@ def invoked_publish_stages(command, depth=0):
     bash -c や sh -c の内側のスクリプトへ再帰し、単純コマンドの先頭にある
     publish.py の呼び出し（直接実行、または python 系インタプリタ（バー
     ジョン付きの名前を含む）の引数としての実行）だけを拾う。コマンド先頭
-    の環境変数代入と python のオプションは読み飛ばす。-n 付きのシェルと、
-    python の -c / -m は実行として扱わない。
+    の環境変数代入と python のオプションは読み飛ばす。env / sudo / nice /
+    time / command / exec のラッパーは、重なっていてもほどいて内側の
+    コマンドを判定する。ただし一覧の表示や検証だけを行う形式（command -v、
+    sudo -l など）は実行として扱わない。-n 付きのシェルと、python の
+    -c / -m は実行として扱わない。
     echo の引数や引用符内の文字列、コメント、ヒアドキュメントの本文は、
     コマンド文字列の任意の位置に publish.py と段階名が並んでいても起動として
     扱わない。
@@ -1369,7 +1698,7 @@ def invoked_publish_stages(command, depth=0):
     except ValueError:
         return found
     for tokens_of_command in simple_commands(tokens):
-        tokens_of_command = strip_command_prefix(tokens_of_command)
+        tokens_of_command = strip_command_wrappers(tokens_of_command)
         if not tokens_of_command:
             continue
         head = tokens_of_command[0]
