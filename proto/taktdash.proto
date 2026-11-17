@@ -242,6 +242,7 @@ message PendingDecision {
   bool stale = 10;                        // 滞留の判定済みフラグ
   string inquiry_id = 11;                 // 問い合わせの識別子（AnswerInquiry の inquiry_id に渡す。マージ待ちは空。ゴールに属さない問い合わせには回答できない）
   optional int32 revision = 12;           // ゴール登録の承認待ちの revision（承認・却下に渡す。それ以外は省略）
+  optional TaskStatus merge_task_last = 13;  // マージ待ちのゴールの仕上げタスクの最後の状態（それ以外は省略する）
 }
 
 // 異常判定の基準を表す。

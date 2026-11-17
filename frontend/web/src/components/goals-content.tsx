@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import type { DashboardGoal as Goal, DashboardState } from "../state/restore-state";
-import { isHumanMergeWaiting, taskStatusLabel } from "../state/dashboard";
+import { isHumanMergeWaiting, mergeTaskFailureNote, taskStatusLabel } from "../state/dashboard";
 import { goalStateSentence } from "../state/goal-badge";
 import { goalDisplayName } from "../state/goal-summary";
 import { TASK_STATUS } from "../state/proto-values";
@@ -23,7 +23,8 @@ const countEntries = (goal: Goal): Array<{ label: string; count: number }> => {
 };
 
 // ゴール一覧は全サーバー・全プロジェクトのゴールを既定で表示し、?project= があるときだけ
-// そのプロジェクトに絞り込む。マージ待ちの判定は backend と同じ規則を使う。
+// そのプロジェクトに絞り込む。マージ待ちの判定と仕上げタスクの失敗の表示は dashboard の
+// 関数を使う。
 export function GoalsContent({ state, project }: GoalsContentProps): ReactElement {
   const goals = project === undefined ? state.goals : state.goals.filter((goal) => goal.project === project);
   return (
@@ -52,6 +53,7 @@ export function GoalsContent({ state, project }: GoalsContentProps): ReactElemen
               </div>
               <p>{goalStateSentence(goal)}</p>
               <p>{isHumanMergeWaiting(goal) ? "マージの承認待ちです。" : "マージの承認待ちではありません。"}</p>
+              {mergeTaskFailureNote(goal) !== undefined ? <p>{mergeTaskFailureNote(goal)}</p> : null}
               <p className="k">タスクの件数</p>
               <div className="kv task-counts">
                 {countEntries(goal).map((entry) => (

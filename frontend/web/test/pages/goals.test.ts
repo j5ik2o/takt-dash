@@ -99,6 +99,21 @@ test("ゴール一覧の各行は状態の文面・状態別のタスク件数�
     taskCounts: { pending: 0, running: 1, completed: 2, failed: 0, exceeded: 0, prFailed: 0 },
     mergeTaskLast: TaskStatus.TASK_STATUS_RUNNING,
   });
+  const exceededLast = createGoal({
+    goalId: "goal-exceeded-last",
+    name: "仕上げが上限超過したゴール",
+    status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+    taskCounts: { pending: 0, running: 0, completed: 7, failed: 0, exceeded: 1, prFailed: 0 },
+    mergeTaskLast: TaskStatus.TASK_STATUS_EXCEEDED,
+    pullRequest: { number: 420, url: "https://example.test/pr/420" },
+  });
+  const prFailedLast = createGoal({
+    goalId: "goal-pr-failed-last",
+    name: "仕上げのPR作成が失敗したゴール",
+    status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+    taskCounts: { pending: 0, running: 0, completed: 7, failed: 0, exceeded: 0, prFailed: 1 },
+    mergeTaskLast: TaskStatus.TASK_STATUS_PR_FAILED,
+  });
   const counts = createGoal({
     goalId: "goal-counts",
     name: "状態別の件数を持つゴール",
@@ -106,7 +121,7 @@ test("ゴール一覧の各行は状態の文面・状態別のタスク件数�
     taskCounts: { pending: 11, running: 12, completed: 13, failed: 14, exceeded: 15, prFailed: 16 },
   });
   const state = createDashboardState();
-  const html = renderGoals({ ...state, goals: [humanMerge, failedLast, running, counts] });
+  const html = renderGoals({ ...state, goals: [humanMerge, failedLast, running, exceededLast, prFailedLast, counts] });
 
   const humanRow = rowFor(html, "人のマージ待ちのゴール");
   assert.match(humanRow, /人のマージ待ち/);
@@ -117,12 +132,23 @@ test("ゴール一覧の各行は状態の文面・状態別のタスク件数�
   assert.match(humanRow, /418/);
   assert.match(humanRow, /https:\/\/example\.test\/pr\/418/);
 
+  // 仕上げタスクが失敗したゴールは、人のマージ待ちとして出し、失敗した旨も示す（issue #231）。
   const failedRow = rowFor(html, "仕上げが失敗したゴール");
-  assert.match(failedRow, /マージの承認待ちではありません/);
-  assert.doesNotMatch(failedRow, /マージの承認待ちです/);
+  assert.match(failedRow, /マージの承認待ちです/);
+  assert.doesNotMatch(failedRow, /マージの承認待ちではありません/);
+  assert.match(failedRow, /仕上げタスクが失敗しました/);
+
+  const exceededRow = rowFor(html, "仕上げが上限超過したゴール");
+  assert.match(exceededRow, /マージの承認待ちです/);
+  assert.match(exceededRow, /仕上げタスクが上限超過で止まりました/);
+
+  const prFailedRow = rowFor(html, "仕上げのPR作成が失敗したゴール");
+  assert.match(prFailedRow, /マージの承認待ちです/);
+  assert.match(prFailedRow, /仕上げタスクのプルリクエスト作成が失敗しました/);
 
   const runningRow = rowFor(html, "実行中のゴール");
   assert.match(runningRow, /マージの承認待ちではありません/);
+  assert.doesNotMatch(runningRow, /仕上げタスクが/);
 
   const countsRow = rowFor(html, "状態別の件数を持つゴール");
   for (const entry of [
