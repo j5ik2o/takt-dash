@@ -73,7 +73,7 @@ test("タスクの全体は6種類の状態の合計で、失敗は失敗・超�
     taskCounts: counts({ pending: 2, running: 1, completed: 3, failed: 1, exceeded: 1, prFailed: 1 }),
   });
 
-  assert.deepEqual(progress, { completed: 3, total: 9, failed: 3 });
+  assert.deepEqual(progress, { completed: 3, total: 9, failed: 3, running: 1 });
 });
 
 test("失敗だけを数え、完了・待機・実行中を失敗に混ぜない", () => {
@@ -81,9 +81,9 @@ test("失敗だけを数え、完了・待機・実行中を失敗に混ぜな�
     taskCounts: counts({ pending: 5, running: 4, completed: 6, failed: 0, exceeded: 0, prFailed: 0 }),
   });
 
-  assert.deepEqual(progress, { completed: 6, total: 15, failed: 0 });
+  assert.deepEqual(progress, { completed: 6, total: 15, failed: 0, running: 4 });
 });
 
 test("タスクの件数が無いゴールは全件0として扱う", () => {
-  assert.deepEqual(goalTaskProgress({ taskCounts: undefined }), { completed: 0, total: 0, failed: 0 });
+  assert.deepEqual(goalTaskProgress({ taskCounts: undefined }), { completed: 0, total: 0, failed: 0, running: 0 });
 });

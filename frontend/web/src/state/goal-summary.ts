@@ -47,16 +47,18 @@ export type GoalTaskProgress = {
   completed: number;
   total: number;
   failed: number;
+  running: number;
 };
 
 // タスクの全体は6種類の合計、失敗は失敗・超過・PR失敗の合計。件数が無いゴールは
-// 実在しない件数を補わず、すべて0として扱う。
+// 実在しない件数を補わず、すべて0として扱う。実行中の件数は、ゴールの状態表示が
+// 実際に run が動いているかどうかを区別するために使う（issue #189）。
 export function goalTaskProgress(goal: {
   taskCounts?: TaskStatusCounts | undefined;
 }): GoalTaskProgress {
   const counts = goal.taskCounts;
   if (counts === undefined) {
-    return { completed: 0, total: 0, failed: 0 };
+    return { completed: 0, total: 0, failed: 0, running: 0 };
   }
   return {
     completed: counts.completed,
@@ -68,5 +70,6 @@ export function goalTaskProgress(goal: {
       counts.exceeded +
       counts.prFailed,
     failed: counts.failed + counts.exceeded + counts.prFailed,
+    running: counts.running,
   };
 }
