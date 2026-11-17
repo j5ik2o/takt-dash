@@ -99,3 +99,17 @@ test("判断待ちは切断中に取得した時刻つきで最後の内容を�
   assert.match(html, /最終読み取り時刻/, "最後に取れた内容の取得時刻を表示します");
   assert.doesNotMatch(html, /TAKTDASH_BACKEND_ADDR/);
 });
+
+
+test("概要は1件も読めていない切断中に、現在時刻を最終読み取り時刻として表示しない", () => {
+  const state = { ...createDashboardState(), readAt: undefined };
+  const html = renderToStaticMarkup(
+    createElement(OverviewContent, {
+      view: buildOverviewView(state, NOW),
+      disconnected: true,
+      unavailableSituation: { failure: "unreachable", respondedBefore: true, durationMs: 5_000 },
+    }),
+  );
+  assert.doesNotMatch(html, /最終読み取り時刻/, "読めた時刻が無い場合は時刻の表示を作りません");
+  assert.match(html, /takt-mcp からまだ読めていません/, "サーバーカードと同じ未読の文言を出します");
+});
