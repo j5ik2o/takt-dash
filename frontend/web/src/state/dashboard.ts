@@ -11,7 +11,7 @@ import type {
   TaskStatus,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
-import { toSilentMinutes, toStaleMinutes, type ValidatedAnomalyThresholds } from "./domain-primitives";
+import { toRunCount, toSilentMinutes, toStaleMinutes, type RunCount, type ValidatedAnomalyThresholds } from "./domain-primitives";
 import {
   CONNECTION_STATE,
   EXECUTION_STATUS,
@@ -223,21 +223,35 @@ export function toRunView(
   return { ...derived, connected: true, state: "live", label: "実行中", note: "" };
 }
 
-const serverState = (server: Server, runs: readonly RunInput[]): OverviewServerView["state"] => {
-  if (!server.connected) {
+// サーバーの状態は接続の有無と run の件数だけで決め、概要のサーバーカードと
+// サイドバーで同じ関数と同じ文言を使う。別々の基準で決めると、同じサーバーが
+// 「動作中」と「待機中」のように食い違って見える（issue #188）。run の件数は
+// 検証済みの専用型 RunCount で受け取り、生の数値を流通させない。
+export const serverStateFrom = (
+  connected: boolean,
+  runCount: RunCount,
+): OverviewServerView["state"] => {
+  if (!connected) {
     return "down";
   }
-  return runs.length > 0 ? "live" : "idle";
+  return runCount > 0 ? "live" : "idle";
 };
 
-const serverStateLabel = (state: OverviewServerView["state"]): string => {
+const serverState = (server: Server, runs: readonly RunInput[]): OverviewServerView["state"] =>
+  serverStateFrom(server.connected, toRunCount(runs.length));
+
+// idle は「接続できているが run が無い」状態であり、接続そのものができていない
+// down（応答なし）と区別できる文言にする。文言は「接続中」と短くし、run が無いことは
+// サイドバーの「run 0件」とカードの件数表示で別途分かるため文言には含めない。
+// 長い文言は幅の狭いサイドバーの行にはみ出すおそれがある（issue #188）。
+export const serverStateLabel = (state: OverviewServerView["state"]): string => {
   switch (state) {
     case "down":
       return "応答なし";
     case "live":
       return "動作中";
     case "idle":
-      return "待機中";
+      return "接続中";
   }
 };
 

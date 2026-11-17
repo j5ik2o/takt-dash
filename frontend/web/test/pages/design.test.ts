@@ -481,10 +481,14 @@ test("760px 以下でもサーバーの状態テキストを隠さない", async
     "760px 以下でサーバーの状態を消さない",
   );
 
+  const state = createDashboardState();
   const html = renderToStaticMarkup(
     createElement(Sidebar, {
-      servers: createDashboardState().servers,
+      servers: state.servers,
       pendingCount: 0,
+      // 状態は run の件数でも決まるため、run があるサーバーが「動作中」になる
+      // 前提をそろえて渡す（issue #188）。
+      runs: state.runs,
       frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
       backendBuild: { commit: "a1b2c3d", branch: "takt/backend" },
     }),
