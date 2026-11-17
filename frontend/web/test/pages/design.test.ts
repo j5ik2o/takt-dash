@@ -320,6 +320,13 @@ test("サーバーのカードは 1280px 以下で1列になり、run 行は3列
   );
 });
 
+test("run 行の状態ラベルは列の中で折り返し、隣の本文へ重ならない", async () => {
+  const css = await readCss();
+
+  const whiteSpace = requireDeclaration(css, /\.runs\s+\.st$/, "white-space", ".runs .st");
+  assert.equal(whiteSpace, "normal", "長い状態ラベルは 96px の状態列の中で折り返す");
+});
+
 test("760px 以下でモバイルの1列構成にし、旧 720px の切り替えを残さない", async () => {
   const css = await readCss();
 
