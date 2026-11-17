@@ -451,22 +451,26 @@ def strip_shell_comments(command):
 
     未クォート・未エスケープの # から行末までを除去する。行の区切りを保つため改行は
     残す。単一引用符の内側ではバックスラッシュと # をそのまま扱い、二重引用符の
-    内側ではバックスラッシュで次の 1 文字をエスケープする。shlex の comments=True と
-    同じく、語の途中にある未クォートの # もコメントの開始とみなす。
+    内側ではバックスラッシュで次の 1 文字をエスケープする。# がコメントを始めるのは、
+    シェルの語の先頭（行頭・空白・演算子の直後）にある場合だけであり、語の途中にある
+    未クォートの #（例: issue#123）は通常の文字として残す。
     """
     result = []
     quote = None
     escaped = False
     in_comment = False
+    at_word_start = True
     for char in str(command):
         if in_comment:
             if char == "\n":
                 in_comment = False
+                at_word_start = True
                 result.append(char)
             continue
         if escaped:
             result.append(char)
             escaped = False
+            at_word_start = False
             continue
         if quote == "'":
             result.append(char)
@@ -483,14 +487,17 @@ def strip_shell_comments(command):
         if char == "\\":
             escaped = True
             result.append(char)
+            at_word_start = False
             continue
         if char in ("'", '"'):
             quote = char
             result.append(char)
+            at_word_start = False
             continue
-        if char == "#":
+        if char == "#" and at_word_start:
             in_comment = True
             continue
+        at_word_start = char in " \t\r\n;&|()"
         result.append(char)
     return "".join(result)
 
@@ -722,8 +729,10 @@ def strip_heredoc_bodies(command):
 
     引用符とエスケープとコメントを考慮して走査し、引用符の外にある
     <<区切り語 だけをヒアドキュメントの開始として扱う。開始を含む行の
-    改行の直後から、区切り語だけの行まで（区切り語の行を含む）を除去し、
-    演算子と区切り語もコマンド行から取り除く。本文はシェルの構文として
+    改行の直後から、区切り語だけの行まで（区切り語の行を含む）を除去する。
+    演算子と区切り語はコマンド行に残す。本文だけを取り除くことで、リダイ
+    レクトだけのコマンド（<<区切り語 だけの行）が存在したことが、後段の
+    トークン列にも残る。本文はシェルの構文として
     解釈されないため、本文に含まれる引用符や # が、後段のコメント除去や
     トークン化へ影響することはない。引用符内の `<<`（例: echo "<<EOF"）や
     コメント内の `<<` は開始として扱わない。算術式展開 $(( ... )) の中に
@@ -814,8 +823,7 @@ def strip_heredoc_bodies(command):
             if parsed is not None:
                 delimiter, strip_tabs, end = parsed
                 pending.append((delimiter, strip_tabs))
-                if digits:
-                    del result[len(result) - digits :]
+                result.append(text[index:end])
                 index = end
                 continue
             result.append(char)
@@ -976,34 +984,23 @@ def heredoc_delimiter(token):
 def simple_commands(tokens):
     """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。
 
-    ヒアドキュメントの本文はコマンドとして実行されないため、コマンド解析の
-    対象から外す。本文は通常、shell_tokens の段階で取り除かれている。ここでの
-    読み飛ばしは、トークン列に開始のトークンが残っている場合の備えである。
-    本文は、ヒアドキュメントを含むコマンド行の改行の直後から、区切り語だけの
-    行までである。
+    ヒアドキュメントの本文は、shell_tokens の段階（strip_heredoc_bodies）で
+    取り除かれているため、ここでは本文の読み飛ばしを行わない。開始のトークン
+    （<<区切り語）はリダイレクトの一部として、そのコマンドのトークンに残る。
+    リダイレクトだけのコマンドは、開始のトークンだけのコマンドとして残る。
+    区切り語の保留は、本文が残っている場合の備えとして追跡だけを行い、改行で
+    破棄する。
     """
     current = []
     pending_delimiters = []
-    body_delimiters = []
-    body_line = []
     expecting_delimiter = False
     for token in tokens:
-        if body_delimiters:
-            if token == "\n" and is_shell_operator(token):
-                if len(body_line) == 1 and body_line[0] == body_delimiters[0]:
-                    body_delimiters.pop(0)
-                body_line = []
-            else:
-                body_line.append(token)
-            continue
         if token in SHELL_SEPARATORS and is_shell_operator(token):
             if current:
                 yield current
             current = []
-            if token == "\n" and pending_delimiters:
-                body_delimiters = pending_delimiters
+            if token == "\n":
                 pending_delimiters = []
-                body_line = []
             continue
         if expecting_delimiter:
             pending_delimiters.append(str(token))
@@ -1604,8 +1601,12 @@ def shell_command_string(arguments):
     """bash / sh の引数列から、-c で実行されるスクリプトを返す。
 
     -n（読み込むが実行しない）が付いている場合、そのスクリプトは実行されない
-    ため None を返す。-c が無い場合（スクリプトファイルの実行など）も None を
-    返す。-o のように引数を取るオプションは、その引数も読み飛ばす。
+    ため None を返す。-o noexec も -n と同じく実行しない指定であるため、その
+    場合も None を返す。-c が無い場合（スクリプトファイルの実行など）も None を
+    返す。-cn のように -c と同じ引数へ結合したオプションも最後まで解析し、
+    -c の後ろに -n や -o noexec があっても実行として扱わない。-o のように
+    引数を取るオプションは、その引数も読み飛ばす。-o が -c と同じ引数に
+    ある場合は、-o の引数の後ろが -c のスクリプトになる。
     """
     noexec = False
     index = 0
@@ -1622,17 +1623,27 @@ def shell_command_string(arguments):
             index += 1
             continue
         step = 1
-        for position, option in enumerate(token[1:]):
+        saw_command = False
+        options = token[1:]
+        for position, option in enumerate(options):
             if option == "n":
                 noexec = True
             elif option == "c":
-                if noexec or index + 1 >= len(arguments):
-                    return None
-                return arguments[index + 1]
+                saw_command = True
             elif option == "o":
-                if position == len(token) - 2:
+                if position == len(options) - 1:
+                    value = arguments[index + 1] if index + 1 < len(arguments) else None
                     step = 2
+                else:
+                    value = options[position + 1 :]
+                if value == "noexec":
+                    noexec = True
                 break
+        if saw_command:
+            script_index = index + step
+            if noexec or script_index >= len(arguments):
+                return None
+            return arguments[script_index]
         index += step
     return None
 
@@ -1645,8 +1656,10 @@ def python_script_arguments(arguments):
 
     インタプリタのオプション（-u など。引数を取る -W / -X はその引数も）を
     読み飛ばす。-c や -m はスクリプトファイルの実行ではないため、その場合は
-    None を返す。--help や --version のようにスクリプトを実行しない場合と、
-    スクリプトが無い場合も None を返す。
+    None を返す。-h や -V、--help や --version、--help-env、--help-xoptions、
+    --help-all のような、表示だけを行って終了するオプションがある場合も、
+    スクリプトは実行されないため None を返す。スクリプトが無い場合も None を
+    返す。
     """
     index = 0
     while index < len(arguments):
@@ -1657,13 +1670,21 @@ def python_script_arguments(arguments):
         if not token.startswith("-") or token == "-":
             break
         if token.startswith("--"):
-            if token[2:].split("=", 1)[0] in ("help", "version"):
+            if token[2:].split("=", 1)[0] in (
+                "help",
+                "version",
+                "help-env",
+                "help-xoptions",
+                "help-all",
+            ):
                 return None
             index += 1
             continue
         step = 1
         for position, option in enumerate(token[1:]):
             if option in ("c", "m"):
+                return None
+            if option in ("h", "V"):
                 return None
             if option in ("W", "X"):
                 if position == len(token) - 2:
@@ -1675,17 +1696,48 @@ def python_script_arguments(arguments):
     return arguments[index:]
 
 
+REDIRECTION_OPERATOR = re.compile(r"^\d*(?:>>|<>|>&|<&|>|<)$")
+REDIRECTION_WITH_TARGET = re.compile(r"^\d*(?:>>|<>|>&|<&|>|<).", re.DOTALL)
+
+
+def strip_leading_redirections(tokens_of_command):
+    """単純コマンドの先頭にあるリダイレクトとその対象を読み飛ばす。
+
+    `>/dev/null python3 ...` のように、リダイレクトはコマンド名より前に
+    置ける。対象が同じトークンに付いている形（>/dev/null、2>file）と、
+    次のトークンが対象になる形（> /dev/null、2> file）の両方を読み飛ばす。
+    引用符で作られた語はリダイレクトではないため読み飛ばさない。ヒアド
+    キュメント（<<）は本文の読み飛ばしが別に担うため対象にしない。
+    """
+    index = 0
+    while index < len(tokens_of_command):
+        token = tokens_of_command[index]
+        if getattr(token, "quoted", False):
+            break
+        if REDIRECTION_OPERATOR.fullmatch(token):
+            index += 1
+            if index < len(tokens_of_command) and not is_shell_operator(tokens_of_command[index]):
+                index += 1
+            continue
+        if REDIRECTION_WITH_TARGET.match(token):
+            index += 1
+            continue
+        break
+    return tokens_of_command[index:]
+
+
 def invoked_publish_stages(command, depth=0):
     """コマンド文字列が実際に起動する publish.py の段階を集める。
 
     bash -c や sh -c の内側のスクリプトへ再帰し、単純コマンドの先頭にある
     publish.py の呼び出し（直接実行、または python 系インタプリタ（バー
-    ジョン付きの名前を含む）の引数としての実行）だけを拾う。コマンド先頭
-    の環境変数代入と python のオプションは読み飛ばす。env / sudo / nice /
-    time / command / exec のラッパーは、重なっていてもほどいて内側の
-    コマンドを判定する。ただし一覧の表示や検証だけを行う形式（command -v、
-    sudo -l など）は実行として扱わない。-n 付きのシェルと、python の
-    -c / -m は実行として扱わない。
+    ジョン付きの名前を含む）の引数としての実行）だけを拾う。シェル名は
+    /bin/bash のようなパス付きの形も含めて basename で比べる。コマンド先頭
+    の環境変数代入と python のオプション、先頭のリダイレクトとその対象は
+    読み飛ばす。env / sudo / nice / time / command / exec のラッパーは、
+    重なっていてもほどいて内側のコマンドを判定する。ただし一覧の表示や
+    検証だけを行う形式（command -v、sudo -l など）は実行として扱わない。
+    -n 付きのシェルと、python の -c / -m は実行として扱わない。
     echo の引数や引用符内の文字列、コメント、ヒアドキュメントの本文は、
     コマンド文字列の任意の位置に publish.py と段階名が並んでいても起動として
     扱わない。
@@ -1699,10 +1751,11 @@ def invoked_publish_stages(command, depth=0):
         return found
     for tokens_of_command in simple_commands(tokens):
         tokens_of_command = strip_command_wrappers(tokens_of_command)
+        tokens_of_command = strip_leading_redirections(tokens_of_command)
         if not tokens_of_command:
             continue
         head = tokens_of_command[0]
-        if head in ("bash", "sh"):
+        if head.rsplit("/", 1)[-1] in ("bash", "sh"):
             script = shell_command_string(tokens_of_command[1:])
             if script is not None:
                 found |= invoked_publish_stages(script, depth + 1)

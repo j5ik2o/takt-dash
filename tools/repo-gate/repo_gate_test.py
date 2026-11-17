@@ -1350,6 +1350,13 @@ def test_publish_stage_detection() -> None:
     オプションと引数を読み飛ばし、重なっていてもほどいて内側の呼び出しを
     拾う。一覧の表示や検証だけを行う形式（command -v、sudo -l など）と、
     ラッパー越しの bash -n は実行として扱わない。
+    シェル名は /bin/bash のようなパス付きの形も含めて basename で比べる。
+    先頭のリダイレクトとその対象は読み飛ばす。# がコメントを始めるのは
+    語の先頭にある場合だけであり、語の途中にある #（issue#123 など）は
+    後ろの呼び出しを消さない。-c と同じ引数に結合した -n（-cn）と
+    -o noexec は実行として扱わず、-o pipefail は実行として扱う。python の
+    表示専用オプション（-h、-V、--help-env、--help-xoptions、--help-all）
+    は実行として扱わない。
     """
     with Sandbox() as sandbox:
         module = sandbox.module
@@ -1562,6 +1569,51 @@ def test_publish_stage_detection() -> None:
         assert module.publish_stages(step("exec")) == {}, (
             "コマンドが続かない exec は実行として扱わない"
         )
+        assert module.publish_stages(
+            step("/bin/bash -c 'python3 tools/project-status/publish.py commit'")
+        ) == {"commit": "commit"}, "パス付きのシェル（/bin/bash -c）の内側の実起動を拾う"
+        assert module.publish_stages(
+            step("/bin/sh -c 'python3 tools/project-status/publish.py commit'")
+        ) == {"commit": "commit"}, "パス付きのシェル（/bin/sh -c）の内側の実起動を拾う"
+        assert module.publish_stages(
+            step(">/dev/null python3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "先頭のリダイレクト（対象が同じトークン）を読み飛ばして実起動を拾う"
+        assert module.publish_stages(
+            step("> /dev/null python3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "先頭のリダイレクト（対象が次のトークン）を読み飛ばして実起動を拾う"
+        assert module.publish_stages(
+            step("2>/dev/null python3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "fd 付きの先頭のリダイレクトを読み飛ばして実起動を拾う"
+        assert module.publish_stages(
+            step("echo issue#123; python3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "語の途中にある # はコメントではなく、後ろの実起動を拾う"
+        assert module.publish_stages(
+            step("bash -cn 'python3 tools/project-status/publish.py commit'")
+        ) == {}, "-c と同じ引数に結合した -n（-cn）は実行として扱わない"
+        assert module.publish_stages(
+            step("bash -o noexec -c 'python3 tools/project-status/publish.py commit'")
+        ) == {}, "-o noexec は実行として扱わない"
+        assert module.publish_stages(
+            step("bash -onoexec -c 'python3 tools/project-status/publish.py commit'")
+        ) == {}, "くっついた -o noexec（-onoexec）も実行として扱わない"
+        assert module.publish_stages(
+            step("bash -o pipefail -c 'python3 tools/project-status/publish.py commit'")
+        ) == {"commit": "commit"}, "-o pipefail は実行を止めないため、内側の実起動を拾う"
+        assert module.publish_stages(
+            step("python3 -h tools/project-status/publish.py commit")
+        ) == {}, "python の -h はヘルプを表示するだけで実行として扱わない"
+        assert module.publish_stages(
+            step("python3 -V tools/project-status/publish.py commit")
+        ) == {}, "python の -V は版を表示するだけで実行として扱わない"
+        assert module.publish_stages(
+            step("python3 --help-env tools/project-status/publish.py commit")
+        ) == {}, "python の --help-env は表示だけで実行として扱わない"
+        assert module.publish_stages(
+            step("python3 --help-xoptions tools/project-status/publish.py commit")
+        ) == {}, "python の --help-xoptions は表示だけで実行として扱わない"
+        assert module.publish_stages(
+            step("python3 --help-all tools/project-status/publish.py commit")
+        ) == {}, "python の --help-all は表示だけで実行として扱わない"
 
 
 def test_publish_workflow_passes() -> None:
@@ -1978,8 +2030,10 @@ def test_aislop_check_must_return_its_failure() -> None:
     """チェックの失敗が呼び出し元へ返る構成だけを、aislop チェックの起動と判定する。
 
     後続のコマンドで終了状態を上書きする形、パイプで終了状態を潰す形、バックグラウンド
-    実行、否定、前段の成功でチェックを飛ばす形を拒否する。前段を && でつなぐ形、
-    チェックが最終行にある複数行の記述、リダイレクションは受理する。
+    実行、否定、前段の成功でチェックを飛ばす形を拒否する。チェックの後ろにリダイレクト
+    だけのコマンド（ヒアドキュメントだけの行）が続く形も、終了状態が 0 で上書きされる
+    ため拒否する。前段を && でつなぐ形、チェックが最終行にある複数行の記述、リダイ
+    レクション、チェック自身のヒアドキュメントは受理する。
     """
     with Sandbox() as sandbox:
         invokes = sandbox.module.invokes_aislop_check
@@ -2001,6 +2055,9 @@ def test_aislop_check_must_return_its_failure() -> None:
             "前段が成功するとチェックを飛ばす ||": f"npm ci || {AISLOP_CHECK}",
             "改行で続けた || の後ろ": f"npm ci ||\n{AISLOP_CHECK}",
             "次の行の true で終了状態を上書きする": f"{AISLOP_CHECK}\ntrue\n",
+            "後ろにヒアドキュメントだけのコマンドが続く": (
+                f"{AISLOP_CHECK}\n<<'EOF'\nbody\nEOF\n"
+            ),
         }
         for label, command in rejected.items():
             assert not invokes(command), f"{label} を起動とみなしました: {command!r}"
@@ -2014,6 +2071,7 @@ def test_aislop_check_must_return_its_failure() -> None:
             "ファイルへのリダイレクション": f"{AISLOP_CHECK} > out.txt",
             "&>file へのリダイレクション": f"{AISLOP_CHECK} &>file",
             "&> file へのリダイレクション": f"{AISLOP_CHECK} &> file",
+            "チェック自身のヒアドキュメント": f"{AISLOP_CHECK} <<'EOF'\nbody\nEOF\n",
         }
         for label, command in accepted.items():
             assert invokes(command), f"{label} を起動とみなしませんでした: {command!r}"
