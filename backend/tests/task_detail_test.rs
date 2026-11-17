@@ -423,6 +423,7 @@ async fn get_task_detail_succeeds_for_a_task_with_an_empty_goal_id() {
 
   assert_eq!(detail.task_name, "standalone-task");
   assert_eq!(detail.status, ProtoTaskStatus::Pending as i32);
+  assert!(detail.goal_id.is_none(), "goalId が空文字のタスクはゴール ID を未設定にします");
   assert!(detail.branch.is_none(), "goalId が空文字のタスクは branch を未設定にします");
   assert!(detail.pull_request_url.is_none(), "goalId が空文字のタスクはプルリクエスト URL を未設定にします");
 

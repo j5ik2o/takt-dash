@@ -201,10 +201,15 @@ pub(super) fn parse_task_detail(project: &str, value: &Value, links: TaskLinkFie
       linked_run_slugs.push(slug.clone());
     }
   }
+  // goalId が空文字のタスクはゴール未所属とし、一覧（parse_task）と同じく None で表します。
+  let goal_id = match optional_string(value, "goalId") {
+    | Some(text) if text.is_empty() => None,
+    | other => other,
+  };
   Ok(TaskDetail {
     project: project.to_owned(),
     task_name: string_field(value, "name")?,
-    goal_id: optional_string(value, "goalId"),
+    goal_id,
     status: parse_task_status(value.get("status"))?,
     summary: optional_string(value, "summary").unwrap_or_default(),
     created_at: parse_time(value.get("createdAt"))?,
