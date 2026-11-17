@@ -765,7 +765,7 @@ test("新着ログで発光する run 行だけが flash クラスを持ち、�
   assert.match(css, /\.run-row\.flash\s*\{[^}]*animation:\s*flash\s+1s/, "基本規則は1秒の flash アニメーション");
 });
 
-test("遅延中の run 行は idle にせず遅延の点と注記を描画する", () => {
+test("遅延中の run 行は idle にせず、ログが出続けていれば実行中として描画する", () => {
   const state = createDashboardStateWithProjectConnection(
     "corporate-site",
     ConnectionState.CONNECTION_STATE_DELAYED,
@@ -773,10 +773,10 @@ test("遅延中の run 行は idle にせず遅延の点と注記を描画する
   );
   const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
 
-  assert.match(html, /class="st delayed"/, "状態のラベルを遅延の見た目で出す");
-  assert.match(html, /class="dot delayed"/, "状態の点を遅延の見た目で出す");
-  assert.match(html, /class="run-note delayed"/, "遅延の注記を専用の見た目で出す");
-  assert.match(html, /読み取りが遅れています（最後に読めたのは 300 秒前）/);
+  assert.match(html, /class="st live"/, "ログが出続けている run は実行中の見た目で出す");
+  assert.match(html, /class="dot live"/, "状態の点も実行中の見た目で出す");
+  assert.doesNotMatch(html, /run-note delayed/, "読み取り遅延の注記は出さない");
+  assert.doesNotMatch(html, /読み取りが遅れています/, "読み取り時刻の注記は出さない");
   assert.doesNotMatch(html, /class="st idle"/, "遅延中の run 行を応答なしの見た目にしない");
 });
 

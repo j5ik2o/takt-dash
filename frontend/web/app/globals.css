@@ -538,10 +538,6 @@ a {
   color: var(--muted);
 }
 
-.st.delayed {
-  color: var(--orange-d);
-}
-
 .run-main {
   min-width: 0;
 }
@@ -638,10 +634,6 @@ a {
   background: var(--idle);
 }
 
-.bar.delayed > i {
-  background: var(--warn);
-}
-
 .dot {
   display: inline-block;
   width: 10px;
@@ -680,11 +672,6 @@ a {
 
 .run-row .dot.idle {
   background: var(--down);
-}
-
-.dot.delayed,
-.run-row .dot.delayed {
-  background: var(--orange);
 }
 
 @keyframes pulse {
@@ -1031,11 +1018,6 @@ pre {
   margin-bottom: 10px;
   color: var(--teal-d);
   font-size: 14px;
-  font-weight: 600;
-}
-
-.run-note.delayed {
-  color: var(--orange-d);
   font-weight: 600;
 }
 
