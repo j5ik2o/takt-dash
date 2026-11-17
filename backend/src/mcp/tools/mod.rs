@@ -705,7 +705,15 @@ impl<'a> ToolSet<'a> {
   /// instructionId を使って1件ずつ本文を取得します。
   pub async fn read_run_detail(&mut self, run_slug: &RunSlug) -> Result<RunDetail, ToolError> {
     let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
-    let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_ref() == Some(run_slug));
+    // runSlug の一致を優先し、無ければ sourceRunSlug の一致でタスクを引きます。
+    // 完了タスクが sourceRunSlug だけを持つ場合でもゴールとタスク名を補えるように
+    // するためです。
+    let tasks = self.list_tasks().await?;
+    let task = tasks
+      .iter()
+      .find(|task| task.run_slug.as_ref() == Some(run_slug))
+      .or_else(|| tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())))
+      .cloned();
     let mut step_logs = step_log_entries(&value);
     let mut next_offset = step_log_next_offset(&value);
     let mut pages_taken = 0;

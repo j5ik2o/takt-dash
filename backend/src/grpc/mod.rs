@@ -465,7 +465,14 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let stored_run = view.runs.iter().find(|run| run.run_slug == run_slug.as_str()).cloned();
     // 完了した run は実行中一覧から消えるため、状態ストアの完了タスクからゴールと
     // タスク名を補います。run の詳細 URL は完了後も同じまま取得できます。
-    let stored_task = view.tasks.iter().find(|task| task.run_slug.as_ref() == Some(&run_slug));
+    // runSlug の一致を優先し、無ければ sourceRunSlug の一致で完了タスクを引きます
+    // （run_log の解決と同じ優先順位）。完了タスクが sourceRunSlug だけを持つ場合でも
+    // ゴールとタスク名を補えるようにするためです。
+    let stored_task = view
+      .tasks
+      .iter()
+      .find(|task| task.run_slug.as_ref() == Some(&run_slug))
+      .or_else(|| view.tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())));
     let view_server_id = ServerId::try_from(view.server_id.as_str())
       .map_err(|error| Status::internal(format!("状態ストアの server_id が不正です: {error}")))?;
     let view_project = ProjectName::try_from(view.name.as_str())
