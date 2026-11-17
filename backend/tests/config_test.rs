@@ -389,3 +389,33 @@ fn project_concurrency_defaults_to_one_without_a_takt_value() {
     "数値として読めなければ既定値1にする"
   );
 }
+
+#[test]
+fn project_concurrency_accepts_valid_yaml_notations() {
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("\"concurrency\": 3\n")),
+    3,
+    "キーを二重引用した表記でも上限を読む"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("'concurrency': 4\n")),
+    4,
+    "キーを単一引用した表記でも上限を読む"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("  other: true\n  concurrency: 5\n")),
+    5,
+    "ルート全体をインデントした表記でも上限を読む"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("concurrency:\n  6\n")),
+    6,
+    "数値を次行に置く表記でも上限を読む"
+  );
+  assert_eq!(concurrency_resolved_from_takt_config(Some("{concurrency: 7}\n")), 7, "フローマッピングでも上限を読む");
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("{ other: true, concurrency: 8 }\n")),
+    8,
+    "フローマッピングに他のキーがあっても上限を読む"
+  );
+}

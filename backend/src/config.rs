@@ -175,22 +175,156 @@ fn read_project_concurrency(cwd: &Path) -> i32 {
 
 /// takt の設定（YAML）のトップレベルの concurrency を取り出す。ネストした
 /// 同名のキーは対象にしない。値が正の整数でない場合は None を返す。
+///
+/// 対応する表記は、平坦なブロックマッピングに加えて、キーの引用（単一・
+/// 二重）、ルート全体のインデント、数値を次の行へ置く書き方、1行のフロー
+/// マッピングである。アンカーや複数行にまたがるフローマッピングなどの
+/// 完全な YAML 構文は対象にしない。
 fn parse_takt_concurrency(text: &str) -> Option<i32> {
-  for line in text.lines() {
-    if line.starts_with(char::is_whitespace) {
+  let lines = yaml_content_lines(text);
+  let first = lines.first().map(|(_, content)| *content)?;
+  parse_block_concurrency(&lines).or_else(|| parse_flow_concurrency(first))
+}
+
+/// ブロックマッピングからトップレベルの concurrency を取り出す。ネストした
+/// 同名のキーは対象にしない。値が正の整数でない場合は None を返す。
+fn parse_block_concurrency(lines: &[(usize, &str)]) -> Option<i32> {
+  let root_indent = lines.iter().map(|(indent, _)| *indent).min()?;
+  for (index, (indent, content)) in lines.iter().enumerate() {
+    if *indent != root_indent {
       continue;
     }
-    let Some((key, value)) = line.split_once(':') else {
+    let Some((key, value)) = split_yaml_entry(content) else {
       continue;
     };
-    if key.trim() != "concurrency" {
+    if unquote_yaml_scalar(key) != "concurrency" {
       continue;
     }
-    let value = value.split('#').next()?.trim().trim_matches(['"', '\'']);
-    let parsed: i32 = value.parse().ok()?;
-    return (parsed > 0).then_some(parsed);
+    if !value.trim().is_empty() {
+      return parse_concurrency_value(value);
+    }
+    // 値が同じ行に無い場合は、より深くインデントされた次の行が単独の
+    // スカラーであるときだけ、その行を値として扱う。
+    let (next_indent, next) = lines.get(index + 1)?;
+    if *next_indent > root_indent && is_plain_scalar_line(next) {
+      return parse_concurrency_value(next);
+    }
+    return None;
   }
   None
+}
+
+/// 1行のフローマッピング（`{ key: value, ... }`）からトップレベルの
+/// concurrency を取り出す。値が正の整数でない場合は None を返す。
+fn parse_flow_concurrency(line: &str) -> Option<i32> {
+  let inner = line.trim().strip_prefix('{')?.strip_suffix('}')?;
+  for entry in split_flow_entries(inner) {
+    let Some((key, value)) = split_yaml_entry(entry) else {
+      continue;
+    };
+    if unquote_yaml_scalar(key) == "concurrency" {
+      return parse_concurrency_value(value);
+    }
+  }
+  None
+}
+
+/// concurrency の値を正の整数として検証する。引用符で囲まれた数値も受け付ける。
+fn parse_concurrency_value(value: &str) -> Option<i32> {
+  let parsed: i32 = unquote_yaml_scalar(value).parse().ok()?;
+  (parsed > 0).then_some(parsed)
+}
+
+/// YAML の内容行を（インデント幅, インデントを除いた内容）の列にする。
+/// 空行とコメントだけの行は落とす。
+fn yaml_content_lines(text: &str) -> Vec<(usize, &str)> {
+  text
+    .lines()
+    .filter_map(|line| {
+      let line = strip_yaml_comment(line).trim_end();
+      let content = line.trim_start();
+      if content.is_empty() {
+        return None;
+      }
+      Some((line.len() - content.len(), content))
+    })
+    .collect()
+}
+
+/// 行からコメントを取り除く。引用符の中の # はコメントとみなさない。
+/// YAML の規則どおり、# の直前が行頭か空白の場合だけコメントとして扱う。
+fn strip_yaml_comment(line: &str) -> &str {
+  let mut quote: Option<char> = None;
+  let mut after_boundary = true;
+  for (index, ch) in line.char_indices() {
+    match quote {
+      | Some(open) if ch == open => quote = None,
+      | Some(_) => {},
+      | None if ch == '"' || ch == '\'' => quote = Some(ch),
+      | None if ch == '#' && after_boundary => return &line[..index],
+      | None => {},
+    }
+    after_boundary = ch == ' ' || ch == '\t';
+  }
+  line
+}
+
+/// `key: value` の形の行をキーと値へ分ける。キーが引用符で始まる場合は、
+/// 閉じ引用符の直後のコロンを区切りとする。コロンが無ければ None を返す。
+fn split_yaml_entry(content: &str) -> Option<(&str, &str)> {
+  let content = content.trim();
+  if let Some(quote) = content.chars().next().filter(|ch| *ch == '"' || *ch == '\'') {
+    let rest = &content[quote.len_utf8()..];
+    let close = rest.find(quote)?;
+    let key = &content[..quote.len_utf8() + close + quote.len_utf8()];
+    let value = rest[close + quote.len_utf8()..].trim_start().strip_prefix(':')?;
+    return Some((key, value));
+  }
+  content.split_once(':')
+}
+
+/// フローマッピングの中身を、入れ子と引用符を考慮しながらカンマで分ける。
+fn split_flow_entries(inner: &str) -> Vec<&str> {
+  let mut entries = Vec::new();
+  let mut depth = 0usize;
+  let mut quote: Option<char> = None;
+  let mut start = 0;
+  for (index, ch) in inner.char_indices() {
+    match quote {
+      | Some(open) if ch == open => quote = None,
+      | Some(_) => {},
+      | None => match ch {
+        | '"' | '\'' => quote = Some(ch),
+        | '{' | '[' => depth += 1,
+        | '}' | ']' => depth = depth.saturating_sub(1),
+        | ',' if depth == 0 => {
+          entries.push(&inner[start..index]);
+          start = index + ch.len_utf8();
+        },
+        | _ => {},
+      },
+    }
+  }
+  entries.push(&inner[start..]);
+  entries
+}
+
+/// スカラーの前後の引用符（単一・二重）を、対になっている場合だけ取り除く。
+fn unquote_yaml_scalar(value: &str) -> &str {
+  let value = value.trim();
+  let bytes = value.as_bytes();
+  if value.len() >= 2 {
+    let first = bytes[0];
+    if (first == b'"' || first == b'\'') && bytes[value.len() - 1] == first {
+      return &value[1..value.len() - 1];
+    }
+  }
+  value
+}
+
+/// ネストしたマッピングやシーケンスではなく、値そのものを表す行かどうか。
+fn is_plain_scalar_line(content: &str) -> bool {
+  !content.trim_start().starts_with("- ") && split_yaml_entry(content).is_none()
 }
 
 /// 設定の本文と、相対パスの解決に使う基準ディレクトリから [`Config`] を組み立てる。
