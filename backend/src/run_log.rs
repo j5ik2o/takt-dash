@@ -17,6 +17,10 @@
 //! ディレクトリの下にあることを確かめてから読みます。シンボリックリンクで外を指すものは
 //! 無いものとして扱います。
 //!
+//! セッションログ（`logs/phase1-execution/*.jsonl`）は、道具の呼び出しの件数と直近の道具名だけを
+//! 追記読みで数えます。セッションログのレコードには時刻が無いため、新しさはファイルの更新時刻で
+//! 決めます。プロンプトや本文は結果へ含めません。
+//!
 //! 前提:
 //! - 読み取り層は同期の関数として提供し、非同期の処理の中から直接呼びません。呼ぶ側は
 //!   `spawn_blocking` などで別スレッドから呼びます。
@@ -26,7 +30,7 @@
 use std::{
   collections::BTreeMap,
   fs::{self, File},
-  io::{self, Read, Seek, SeekFrom},
+  io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
   os::unix::fs::MetadataExt,
   path::{Component, Path, PathBuf},
 };
@@ -46,6 +50,9 @@ const REPORTS_DIRECTORY: &str = "reports";
 const REPORT_FILE_SUFFIX: &str = ".md";
 const MAX_SUMMARY_CHARS: usize = 512;
 const PROMPT_FIELDS: [&str; 4] = ["systemPrompt", "userInstruction", "instruction", "content"];
+/// セッションログの行のうち、JSON として解釈する前に道具の呼び出しの候補を絞る文字列。長い本文を
+/// 持つ行（`content_chunk` など）を毎回解釈しないために使います。
+const TOOL_USE_MARKER: &[u8] = b"\"tool_use\"";
 /// takt の LiveInterventionFileStore が指示書のイベントを書くファイル名。
 const INTERVENTIONS_FILE: &str = "interventions.jsonl";
 
@@ -121,6 +128,26 @@ pub struct ReportFile {
   pub size_bytes: u64,
 }
 
+/// セッションログからの活動の印。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionActivity {
+  /// `tool_use` を持つファイルのうち更新時刻が最も新しいファイルの、最後の道具名。
+  pub latest_tool:    Option<String>,
+  /// 現存するセッションログの道具の呼び出しの件数の合計。
+  pub tool_use_count: u64,
+  /// セッションログのファイルの更新時刻の最大値。
+  pub updated_at:     Option<DateTime<Utc>>,
+}
+
+/// セッションログの1ファイルについて、読んだ位置と数えた結果。
+#[derive(Debug, Clone)]
+struct SessionFileState {
+  offset:    u64,
+  inode:     u64,
+  tool_uses: u64,
+  last_tool: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Cursor {
   offset: u64,
@@ -141,6 +168,7 @@ pub struct RunLogReader {
   worktrees_root: PathBuf,
   cursors:        BTreeMap<PathBuf, Cursor>,
   initial_read:   InitialRead,
+  sessions:       BTreeMap<PathBuf, SessionFileState>,
 }
 
 impl RunLogReader {
@@ -157,6 +185,7 @@ impl RunLogReader {
       worktrees_root: normalize(&worktrees_root),
       cursors: BTreeMap::new(),
       initial_read,
+      sessions: BTreeMap::new(),
     }
   }
 
@@ -329,6 +358,50 @@ impl RunLogReader {
       });
     }
     latest
+  }
+
+  /// `logs/phase1-execution/` のセッションログを追記読みし、活動の印を返す。
+  ///
+  /// ファイルごとに読んだ位置と件数を持ち、追記分だけを数えます。書きかけの最終行は数えず、
+  /// 置き換わったか縮小したファイルは先頭から数え直します。消えたファイルの件数は捨てます。
+  /// 本体ログの読み位置には触れません。
+  pub fn read_session_activity(&mut self, run_dir: &Path) -> SessionActivity {
+    let phase1_dir = contained_dir(run_dir, &Path::new(LOGS_DIRECTORY).join(PHASE1_DIRECTORY));
+    let files = phase1_dir.as_deref().map(regular_files).unwrap_or_default();
+    if let Ok(root) = fs::canonicalize(run_dir) {
+      self.sessions.retain(|path, _| !path.starts_with(&root) || files.contains(path));
+    }
+
+    let mut activity = SessionActivity::default();
+    let mut latest_tool_modified: Option<DateTime<Utc>> = None;
+    for path in files {
+      let Ok(metadata) = fs::metadata(&path) else {
+        continue;
+      };
+      let modified = metadata.modified().ok().map(DateTime::<Utc>::from);
+      let state = match self.sessions.remove(&path) {
+        | Some(state) if state.inode == metadata.ino() && metadata.len() >= state.offset => state,
+        | _ => SessionFileState { offset: 0, inode: metadata.ino(), tool_uses: 0, last_tool: None },
+      };
+      let state = read_session_file(&path, state);
+      activity.tool_use_count += state.tool_uses;
+      if let Some(modified) = modified {
+        activity.updated_at = Some(activity.updated_at.map_or(modified, |current| current.max(modified)));
+      }
+      if let Some(tool) = &state.last_tool {
+        let newer = match (latest_tool_modified, modified) {
+          | (None, _) => true,
+          | (Some(current), Some(modified)) => modified >= current,
+          | (Some(_), None) => false,
+        };
+        if newer {
+          activity.latest_tool = Some(tool.clone());
+          latest_tool_modified = modified;
+        }
+      }
+      self.sessions.insert(path, state);
+    }
+    activity
   }
 
   /// `reports/` の下にある、名前が `.md` で終わる通常ファイルを、相対パスの昇順で返す。
@@ -601,6 +674,52 @@ fn set_state(
     instruction.state = state;
   }
   Ok(())
+}
+
+/// セッションログの1ファイルを、前回の位置から最後の改行まで読み、道具の呼び出しを数える。
+/// 開けない・読めない場合は、前回までの結果を保ったまま返します。
+fn read_session_file(path: &Path, mut state: SessionFileState) -> SessionFileState {
+  let Ok(mut file) = File::open(path) else {
+    return state;
+  };
+  if file.seek(SeekFrom::Start(state.offset)).is_err() {
+    return state;
+  }
+  let mut reader = BufReader::new(file);
+  let mut line = Vec::new();
+  loop {
+    line.clear();
+    let Ok(read) = reader.read_until(b'\n', &mut line) else {
+      return state;
+    };
+    // 改行で終わらない行は書きかけなので、位置を進めずに次回へ残す。
+    if read == 0 || line.last() != Some(&b'\n') {
+      return state;
+    }
+    state.offset += read as u64;
+    if let Some(tool) = tool_use_name(&line) {
+      state.tool_uses += 1;
+      state.last_tool = Some(tool);
+    }
+  }
+}
+
+/// セッションログの1行が道具の呼び出し（`provider_event` の `tool_use`）なら、上限で切り詰めた
+/// 道具名を返す。
+fn tool_use_name(line: &[u8]) -> Option<String> {
+  if !line.windows(TOOL_USE_MARKER.len()).any(|window| window == TOOL_USE_MARKER) {
+    return None;
+  }
+  let record: Value = serde_json::from_slice(line).ok()?;
+  if record.get("kind").and_then(Value::as_str) != Some("provider_event") {
+    return None;
+  }
+  let event = record.get("event")?;
+  if event.get("type").and_then(Value::as_str) != Some("tool_use") {
+    return None;
+  }
+  let tool = event.get("data")?.get("tool")?.as_str()?;
+  Some(tool.chars().take(MAX_SUMMARY_CHARS).collect())
 }
 
 /// run のデータ（`meta.json` または本体ログ）を持つディレクトリかを返す。

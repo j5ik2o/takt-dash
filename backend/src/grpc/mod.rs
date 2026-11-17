@@ -7,9 +7,12 @@
 //! の会話を読みます。GetGoals・ GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
 //! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
 //! 全件を返し、定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
+//! GetRunUpdates は本体ログの追記分を返し、要求の検証と応答の組み立ては [`run_updates`]
+//! に置きます。
 
 pub mod assembly;
 pub mod mapping;
+mod run_updates;
 
 use std::{
   path::PathBuf,
@@ -23,6 +26,7 @@ use mapping::{
   execution_status, goal_question, goal_status, goal_task, goal_work_log, optional_timestamp, run_status, step_log,
   task_status, timestamp,
 };
+use run_updates::{parse_log_cursor, run_updates_response};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -39,8 +43,8 @@ use crate::{
   model::{self},
   run_log::{ContentRead, InitialRead, Instruction},
   run_progress::{
-    read_instruction_body, read_report_content, read_run, read_run_instructions, RunLogHandle, RunLogHandles,
-    RunReadFailure,
+    read_instruction_body, read_report_content, read_run, read_run_instructions, read_run_updates, RunLogHandle,
+    RunLogHandles, RunReadFailure,
   },
   store::StateStore,
   takt_dash::v1::{
@@ -49,9 +53,10 @@ use crate::{
     GetActivityRequest, GetActivityResponse, GetConversationRequest, GetConversationResponse, GetGoalDetailRequest,
     GetGoalDetailResponse, GetGoalsRequest, GetGoalsResponse, GetOverviewRequest, GetPendingDecisionsRequest,
     GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse, GetRunContentRequest, GetRunContentResponse,
-    GetRunDetailRequest, GetRunDetailResponse, GetTaskDetailRequest, GetTaskDetailResponse, GoalRegistrationProposal,
-    ListGoalRegistrationProposalsRequest, ListGoalRegistrationProposalsResponse, OperationAnswerReport,
-    RejectGoalRegistrationRequest, RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, WatchStateRequest,
+    GetRunDetailRequest, GetRunDetailResponse, GetRunUpdatesRequest, GetRunUpdatesResponse, GetTaskDetailRequest,
+    GetTaskDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
+    ListGoalRegistrationProposalsResponse, OperationAnswerReport, RejectGoalRegistrationRequest,
+    RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, WatchStateRequest,
   },
 };
 
@@ -514,6 +519,28 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       },
       | Err(failure) => return Err(run_read_failure_status(failure)),
     }
+    Ok(Response::new(response))
+  }
+
+  async fn get_run_updates(
+    &self,
+    request: Request<GetRunUpdatesRequest>,
+  ) -> Result<Response<GetRunUpdatesResponse>, Status> {
+    let _timing = RpcTimingGuard::start("GetRunUpdates", &self.activity);
+    let request = request.into_inner();
+    let run_slug = parse_run_slug(request.run_slug)?;
+    let after = parse_log_cursor(request.epoch, request.after_sequence)?;
+    let target = self.resolve_run_target(&run_slug)?;
+    // GetRunDetail と同じ取っ手を使い、本体ログを前回の読み位置の続きから読む。
+    let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
+    let response = match read_run_updates(&run_logs, run_slug.clone(), after).await {
+      | Ok(updates) => run_updates_response(&run_slug, updates),
+      // 保存場所が残っていない run はエラーにせず、ログが残っていないことを返します。
+      | Err(RunReadFailure::Missing) => {
+        GetRunUpdatesResponse { run_slug: run_slug.as_str().to_owned(), logs_removed: true, ..Default::default() }
+      },
+      | Err(failure) => return Err(run_read_failure_status(failure)),
+    };
     Ok(Response::new(response))
   }
 

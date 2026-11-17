@@ -1003,6 +1003,56 @@ export interface GetRunContentResponse {
   truncated: boolean;
 }
 
+/** run 詳細の追記分の取得を要求する。続きの位置（epoch と after_sequence）は両方を送るか、両方を省く。 */
+export interface GetRunUpdatesRequest {
+  /** runSlug */
+  runSlug: string;
+  /** 前回の応答の世代 */
+  epoch?:
+    | number
+    | undefined;
+  /** 前回までに受け取った最後の行の番号 */
+  afterSequence?: number | undefined;
+}
+
+/** run 詳細のログの1行を表す。 */
+export interface RunLogLine {
+  /** 行の番号（同じ世代の中で増えていく） */
+  sequence: number;
+  /** 「時刻 種類 ステップ」の行 */
+  text: string;
+}
+
+/** セッションログ（logs/phase1-execution/）からの活動の印を表す。 */
+export interface RunSessionActivity {
+  /** 直近の道具名 */
+  latestTool?:
+    | string
+    | undefined;
+  /** 道具の呼び出しの件数 */
+  toolUseCount: number;
+  /** セッションログのファイルの最新の更新時刻 */
+  updatedAt?: Date | undefined;
+}
+
+/** run 詳細の追記分の取得への応答を表す。 */
+export interface GetRunUpdatesResponse {
+  /** runSlug */
+  runSlug: string;
+  /** 行の番号の世代 */
+  epoch: number;
+  /** 行を置き換えるか（偽なら前回の続きとして足す） */
+  reset: boolean;
+  /** 返す行（古い順） */
+  lines: RunLogLine[];
+  /** セッションログからの活動の印 */
+  activity:
+    | RunSessionActivity
+    | undefined;
+  /** run の保存場所が残っていない */
+  logsRemoved: boolean;
+}
+
 /** ゴール一覧の要求。 */
 export interface GetGoalsRequest {
 }
@@ -5564,6 +5614,472 @@ export const GetRunContentResponse: MessageFns<GetRunContentResponse> = {
   },
 };
 
+function createBaseGetRunUpdatesRequest(): GetRunUpdatesRequest {
+  return { runSlug: "", epoch: undefined, afterSequence: undefined };
+}
+
+export const GetRunUpdatesRequest: MessageFns<GetRunUpdatesRequest> = {
+  encode(message: GetRunUpdatesRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runSlug !== "") {
+      writer.uint32(10).string(message.runSlug);
+    }
+    if (message.epoch !== undefined) {
+      writer.uint32(16).int64(message.epoch);
+    }
+    if (message.afterSequence !== undefined) {
+      writer.uint32(24).int64(message.afterSequence);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetRunUpdatesRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGetRunUpdatesRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.runSlug = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.epoch = longToNumber(reader.int64());
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.afterSequence = longToNumber(reader.int64());
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GetRunUpdatesRequest {
+    return {
+      runSlug: isSet(object.runSlug)
+        ? globalThis.String(object.runSlug)
+        : isSet(object.run_slug)
+        ? globalThis.String(object.run_slug)
+        : "",
+      epoch: isSet(object.epoch) ? globalThis.Number(object.epoch) : undefined,
+      afterSequence: isSet(object.afterSequence)
+        ? globalThis.Number(object.afterSequence)
+        : isSet(object.after_sequence)
+        ? globalThis.Number(object.after_sequence)
+        : undefined,
+    };
+  },
+
+  toJSON(message: GetRunUpdatesRequest): unknown {
+    const obj: any = {};
+    if (message.runSlug !== "") {
+      obj.runSlug = message.runSlug;
+    }
+    if (message.epoch !== undefined) {
+      obj.epoch = Math.round(message.epoch);
+    }
+    if (message.afterSequence !== undefined) {
+      obj.afterSequence = Math.round(message.afterSequence);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetRunUpdatesRequest>, I>>(base?: I): GetRunUpdatesRequest {
+    return GetRunUpdatesRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetRunUpdatesRequest>, I>>(object: I): GetRunUpdatesRequest {
+    const message = createBaseGetRunUpdatesRequest();
+    message.runSlug = object.runSlug ?? "";
+    message.epoch = object.epoch ?? undefined;
+    message.afterSequence = object.afterSequence ?? undefined;
+    return message;
+  },
+};
+
+function createBaseRunLogLine(): RunLogLine {
+  return { sequence: 0, text: "" };
+}
+
+export const RunLogLine: MessageFns<RunLogLine> = {
+  encode(message: RunLogLine, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.sequence !== 0) {
+      writer.uint32(8).int64(message.sequence);
+    }
+    if (message.text !== "") {
+      writer.uint32(18).string(message.text);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RunLogLine {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseRunLogLine();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.sequence = longToNumber(reader.int64());
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.text = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): RunLogLine {
+    return {
+      sequence: isSet(object.sequence) ? globalThis.Number(object.sequence) : 0,
+      text: isSet(object.text) ? globalThis.String(object.text) : "",
+    };
+  },
+
+  toJSON(message: RunLogLine): unknown {
+    const obj: any = {};
+    if (message.sequence !== 0) {
+      obj.sequence = Math.round(message.sequence);
+    }
+    if (message.text !== "") {
+      obj.text = message.text;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RunLogLine>, I>>(base?: I): RunLogLine {
+    return RunLogLine.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RunLogLine>, I>>(object: I): RunLogLine {
+    const message = createBaseRunLogLine();
+    message.sequence = object.sequence ?? 0;
+    message.text = object.text ?? "";
+    return message;
+  },
+};
+
+function createBaseRunSessionActivity(): RunSessionActivity {
+  return { latestTool: undefined, toolUseCount: 0, updatedAt: undefined };
+}
+
+export const RunSessionActivity: MessageFns<RunSessionActivity> = {
+  encode(message: RunSessionActivity, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.latestTool !== undefined) {
+      writer.uint32(10).string(message.latestTool);
+    }
+    if (message.toolUseCount !== 0) {
+      writer.uint32(16).int64(message.toolUseCount);
+    }
+    if (message.updatedAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.updatedAt), writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RunSessionActivity {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseRunSessionActivity();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.latestTool = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.toolUseCount = longToNumber(reader.int64());
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.updatedAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): RunSessionActivity {
+    return {
+      latestTool: isSet(object.latestTool)
+        ? globalThis.String(object.latestTool)
+        : isSet(object.latest_tool)
+        ? globalThis.String(object.latest_tool)
+        : undefined,
+      toolUseCount: isSet(object.toolUseCount)
+        ? globalThis.Number(object.toolUseCount)
+        : isSet(object.tool_use_count)
+        ? globalThis.Number(object.tool_use_count)
+        : 0,
+      updatedAt: isSet(object.updatedAt)
+        ? fromJsonTimestamp(object.updatedAt)
+        : isSet(object.updated_at)
+        ? fromJsonTimestamp(object.updated_at)
+        : undefined,
+    };
+  },
+
+  toJSON(message: RunSessionActivity): unknown {
+    const obj: any = {};
+    if (message.latestTool !== undefined) {
+      obj.latestTool = message.latestTool;
+    }
+    if (message.toolUseCount !== 0) {
+      obj.toolUseCount = Math.round(message.toolUseCount);
+    }
+    if (message.updatedAt !== undefined) {
+      obj.updatedAt = message.updatedAt.toISOString();
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RunSessionActivity>, I>>(base?: I): RunSessionActivity {
+    return RunSessionActivity.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RunSessionActivity>, I>>(object: I): RunSessionActivity {
+    const message = createBaseRunSessionActivity();
+    message.latestTool = object.latestTool ?? undefined;
+    message.toolUseCount = object.toolUseCount ?? 0;
+    message.updatedAt = object.updatedAt ?? undefined;
+    return message;
+  },
+};
+
+function createBaseGetRunUpdatesResponse(): GetRunUpdatesResponse {
+  return { runSlug: "", epoch: 0, reset: false, lines: [], activity: undefined, logsRemoved: false };
+}
+
+export const GetRunUpdatesResponse: MessageFns<GetRunUpdatesResponse> = {
+  encode(message: GetRunUpdatesResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runSlug !== "") {
+      writer.uint32(10).string(message.runSlug);
+    }
+    if (message.epoch !== 0) {
+      writer.uint32(16).int64(message.epoch);
+    }
+    if (message.reset !== false) {
+      writer.uint32(24).bool(message.reset);
+    }
+    for (const v of message.lines) {
+      RunLogLine.encode(v!, writer.uint32(34).fork()).join();
+    }
+    if (message.activity !== undefined) {
+      RunSessionActivity.encode(message.activity, writer.uint32(42).fork()).join();
+    }
+    if (message.logsRemoved !== false) {
+      writer.uint32(48).bool(message.logsRemoved);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetRunUpdatesResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseGetRunUpdatesResponse();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.runSlug = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.epoch = longToNumber(reader.int64());
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.reset = reader.bool();
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.lines.push(RunLogLine.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.activity = RunSessionActivity.decode(reader, reader.uint32());
+            continue;
+          }
+          case 6: {
+            if (tag !== 48) {
+              break;
+            }
+
+            message.logsRemoved = reader.bool();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): GetRunUpdatesResponse {
+    return {
+      runSlug: isSet(object.runSlug)
+        ? globalThis.String(object.runSlug)
+        : isSet(object.run_slug)
+        ? globalThis.String(object.run_slug)
+        : "",
+      epoch: isSet(object.epoch) ? globalThis.Number(object.epoch) : 0,
+      reset: isSet(object.reset) ? globalThis.Boolean(object.reset) : false,
+      lines: globalThis.Array.isArray(object?.lines) ? object.lines.map((e: any) => RunLogLine.fromJSON(e)) : [],
+      activity: isSet(object.activity) ? RunSessionActivity.fromJSON(object.activity) : undefined,
+      logsRemoved: isSet(object.logsRemoved)
+        ? globalThis.Boolean(object.logsRemoved)
+        : isSet(object.logs_removed)
+        ? globalThis.Boolean(object.logs_removed)
+        : false,
+    };
+  },
+
+  toJSON(message: GetRunUpdatesResponse): unknown {
+    const obj: any = {};
+    if (message.runSlug !== "") {
+      obj.runSlug = message.runSlug;
+    }
+    if (message.epoch !== 0) {
+      obj.epoch = Math.round(message.epoch);
+    }
+    if (message.reset !== false) {
+      obj.reset = message.reset;
+    }
+    if (message.lines?.length) {
+      obj.lines = message.lines.map((e) => RunLogLine.toJSON(e));
+    }
+    if (message.activity !== undefined) {
+      obj.activity = RunSessionActivity.toJSON(message.activity);
+    }
+    if (message.logsRemoved !== false) {
+      obj.logsRemoved = message.logsRemoved;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<GetRunUpdatesResponse>, I>>(base?: I): GetRunUpdatesResponse {
+    return GetRunUpdatesResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetRunUpdatesResponse>, I>>(object: I): GetRunUpdatesResponse {
+    const message = createBaseGetRunUpdatesResponse();
+    message.runSlug = object.runSlug ?? "";
+    message.epoch = object.epoch ?? 0;
+    message.reset = object.reset ?? false;
+    message.lines = object.lines?.map((e) => RunLogLine.fromPartial(e)) || [];
+    message.activity = (object.activity !== undefined && object.activity !== null)
+      ? RunSessionActivity.fromPartial(object.activity)
+      : undefined;
+    message.logsRemoved = object.logsRemoved ?? false;
+    return message;
+  },
+};
+
 function createBaseGetGoalsRequest(): GetGoalsRequest {
   return {};
 }
@@ -8921,6 +9437,20 @@ export const TaktDashServiceService = {
       Buffer.from(GetRunContentResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): GetRunContentResponse => GetRunContentResponse.decode(value),
   },
+  /**
+   * run 詳細の追記分（本体ログの行とセッションログの活動の印）を、前回の続きから返す。
+   * 続きを示せないときは reset を立て、全体を置き換える行を返す。
+   */
+  getRunUpdates: {
+    path: "/takt_dash.v1.TaktDashService/GetRunUpdates" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: GetRunUpdatesRequest): Buffer => Buffer.from(GetRunUpdatesRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): GetRunUpdatesRequest => GetRunUpdatesRequest.decode(value),
+    responseSerialize: (value: GetRunUpdatesResponse): Buffer =>
+      Buffer.from(GetRunUpdatesResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): GetRunUpdatesResponse => GetRunUpdatesResponse.decode(value),
+  },
   /** manager の会話を時系列で返す。after_seq で増分取得できる。 */
   getConversation: {
     path: "/takt_dash.v1.TaktDashService/GetConversation" as const,
@@ -9056,6 +9586,11 @@ export interface TaktDashServiceServer extends UntypedServiceImplementation {
   getRunDetail: handleUnaryCall<GetRunDetailRequest, GetRunDetailResponse>;
   /** run のレポートまたは指示書の本文を1件だけ返す。run のディレクトリの外は読まない。 */
   getRunContent: handleUnaryCall<GetRunContentRequest, GetRunContentResponse>;
+  /**
+   * run 詳細の追記分（本体ログの行とセッションログの活動の印）を、前回の続きから返す。
+   * 続きを示せないときは reset を立て、全体を置き換える行を返す。
+   */
+  getRunUpdates: handleUnaryCall<GetRunUpdatesRequest, GetRunUpdatesResponse>;
   /** manager の会話を時系列で返す。after_seq で増分取得できる。 */
   getConversation: handleUnaryCall<GetConversationRequest, GetConversationResponse>;
   /** すべてのサーバー・すべてのプロジェクトのゴールを返す。 */
@@ -9180,6 +9715,25 @@ export interface TaktDashServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: GetRunContentResponse) => void,
+  ): ClientUnaryCall;
+  /**
+   * run 詳細の追記分（本体ログの行とセッションログの活動の印）を、前回の続きから返す。
+   * 続きを示せないときは reset を立て、全体を置き換える行を返す。
+   */
+  getRunUpdates(
+    request: GetRunUpdatesRequest,
+    callback: (error: ServiceError | null, response: GetRunUpdatesResponse) => void,
+  ): ClientUnaryCall;
+  getRunUpdates(
+    request: GetRunUpdatesRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: GetRunUpdatesResponse) => void,
+  ): ClientUnaryCall;
+  getRunUpdates(
+    request: GetRunUpdatesRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: GetRunUpdatesResponse) => void,
   ): ClientUnaryCall;
   /** manager の会話を時系列で返す。after_seq で増分取得できる。 */
   getConversation(

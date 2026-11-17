@@ -26,6 +26,10 @@ service TaktDashService {
   // run のレポートまたは指示書の本文を1件だけ返す。run のディレクトリの外は読まない。
   rpc GetRunContent(GetRunContentRequest) returns (GetRunContentResponse);
 
+  // run 詳細の追記分（本体ログの行とセッションログの活動の印）を、前回の続きから返す。
+  // 続きを示せないときは reset を立て、全体を置き換える行を返す。
+  rpc GetRunUpdates(GetRunUpdatesRequest) returns (GetRunUpdatesResponse);
+
   // manager の会話を時系列で返す。after_seq で増分取得できる。
   rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);
 
@@ -398,6 +402,36 @@ message GetRunContentResponse {
   string content = 2;    // 本文（上限を超えた分は切り詰める）
   int64 size_bytes = 3;  // 本文全体の大きさ（バイト）
   bool truncated = 4;    // 上限で切り詰めたか
+}
+
+// run 詳細の追記分の取得を要求する。続きの位置（epoch と after_sequence）は両方を送るか、両方を省く。
+message GetRunUpdatesRequest {
+  string run_slug = 1;                // runSlug
+  optional int64 epoch = 2;           // 前回の応答の世代
+  optional int64 after_sequence = 3;  // 前回までに受け取った最後の行の番号
+}
+
+// run 詳細のログの1行を表す。
+message RunLogLine {
+  int64 sequence = 1;  // 行の番号（同じ世代の中で増えていく）
+  string text = 2;     // 「時刻 種類 ステップ」の行
+}
+
+// セッションログ（logs/phase1-execution/）からの活動の印を表す。
+message RunSessionActivity {
+  optional string latest_tool = 1;                    // 直近の道具名
+  int64 tool_use_count = 2;                           // 道具の呼び出しの件数
+  optional google.protobuf.Timestamp updated_at = 3;  // セッションログのファイルの最新の更新時刻
+}
+
+// run 詳細の追記分の取得への応答を表す。
+message GetRunUpdatesResponse {
+  string run_slug = 1;                  // runSlug
+  int64 epoch = 2;                      // 行の番号の世代
+  bool reset = 3;                       // 行を置き換えるか（偽なら前回の続きとして足す）
+  repeated RunLogLine lines = 4;        // 返す行（古い順）
+  RunSessionActivity activity = 5;      // セッションログからの活動の印
+  bool logs_removed = 6;                // run の保存場所が残っていない
 }
 
 // ゴール一覧の要求。

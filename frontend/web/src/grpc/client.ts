@@ -17,6 +17,8 @@ import {
   type GetRunContentRequest,
   type GetRunContentResponse,
   type GetRunDetailResponse,
+  type GetRunUpdatesRequest,
+  type GetRunUpdatesResponse,
   type GetTaskDetailRequest,
   type GetTaskDetailResponse,
   type RejectGoalRegistrationRequest,
@@ -25,6 +27,7 @@ import {
 } from "../proto/taktdash";
 import type { TimingSink } from "../telemetry/timing";
 import type { InstructionId, ReportFilename, RunSlug } from "../state/domain-primitives";
+import type { RunLogCursor } from "../state/run-log-stream";
 
 export const BACKEND_ADDR_ENV = "TAKTDASH_BACKEND_ADDR";
 
@@ -109,6 +112,8 @@ export type BackendClient = {
   getActivity(timing?: TimingSink): Promise<GetActivityResponse>;
   getRunDetail(runSlug: string, timing?: TimingSink): Promise<GetRunDetailResponse>;
   getRunContent(runSlug: RunSlug, target: RunContentTarget): Promise<GetRunContentResponse>;
+  // 位置を省くと、backend は全体を置き換える行を返す。
+  getRunUpdates(runSlug: RunSlug, cursor: RunLogCursor | undefined): Promise<GetRunUpdatesResponse>;
   getConversation(request: GetConversationRequest, timing?: TimingSink): Promise<GetConversationResponse>;
   getGoalDetail(goalId: string, timing?: TimingSink): Promise<GetGoalDetailResponse>;
   getTaskDetail(project: string, taskName: string, goalId?: string, timing?: TimingSink): Promise<GetTaskDetailResponse>;
@@ -190,6 +195,27 @@ const timedUnary = async <Response>(
   }
 };
 
+// run を対象にする RPC の結果から「run が見つからない」を作る。backend の NOT_FOUND と、要求と違う
+// runSlug の応答を RunNotFoundError にし、backend を利用できない失敗はそのまま投げる。
+const expectRun = async <Response extends { runSlug: string }>(
+  runSlug: string,
+  call: () => Promise<Response>,
+): Promise<Response> => {
+  const response = await call().catch((error: unknown) => {
+    if (error instanceof BackendUnavailableError) {
+      throw error;
+    }
+    if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
+      throw new RunNotFoundError(runSlug);
+    }
+    throw error;
+  });
+  if (response.runSlug !== runSlug) {
+    throw new RunNotFoundError(runSlug);
+  }
+  return response;
+};
+
 export function createBackendClient(options: CreateBackendClientOptions = {}): BackendClient {
   const env = options.env ?? process.env;
   const address = resolveBackendAddress(env);
@@ -238,28 +264,17 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
           readOptions(),
         ),
       ),
-    getRunDetail: async (runSlug, timing) => {
-      const detail = await timedUnary(timing, "GetRunDetail", () =>
-        unary<{ runSlug: string }, GetRunDetailResponse>(
-          (request, metadata, callOptions, callback) =>
-            client.getRunDetail(request, metadata, callOptions, callback),
-          { runSlug },
-          readOptions(),
+    getRunDetail: (runSlug, timing) =>
+      expectRun(runSlug, () =>
+        timedUnary(timing, "GetRunDetail", () =>
+          unary<{ runSlug: string }, GetRunDetailResponse>(
+            (request, metadata, callOptions, callback) =>
+              client.getRunDetail(request, metadata, callOptions, callback),
+            { runSlug },
+            readOptions(),
+          ),
         ),
-      ).catch((error: unknown) => {
-        if (error instanceof BackendUnavailableError) {
-          throw error;
-        }
-        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
-          throw new RunNotFoundError(runSlug);
-        }
-        throw error;
-      });
-      if (detail.runSlug !== runSlug) {
-        throw new RunNotFoundError(runSlug);
-      }
-      return detail;
-    },
+      ),
     getRunContent: async (runSlug, target) => {
       const request: GetRunContentRequest =
         "report" in target ? { runSlug, reportFilename: target.report } : { runSlug, instructionId: target.instruction };
@@ -281,6 +296,18 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
         throw new RunContentNotFoundError(runSlug);
       }
       return content;
+    },
+    getRunUpdates: (runSlug, cursor) => {
+      const request: GetRunUpdatesRequest =
+        cursor === undefined ? { runSlug } : { runSlug, epoch: cursor.epoch, afterSequence: cursor.sequence };
+      return expectRun(runSlug, () =>
+        unary<GetRunUpdatesRequest, GetRunUpdatesResponse>(
+          (unaryRequest, metadata, callOptions, callback) =>
+            client.getRunUpdates(unaryRequest, metadata, callOptions, callback),
+          request,
+          readOptions(),
+        ),
+      );
     },
     getConversation: (request, timing) =>
       timedUnary(timing, "GetConversation", () =>

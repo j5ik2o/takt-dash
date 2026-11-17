@@ -11,12 +11,20 @@
 //! [`InitialRead::Tail`] で末尾の一定量から読み始めます。そのため、本体ログが上限より大きい run を
 //! 初めて開いたときは、ステップの記録と現在ステップの実行回数が末尾の範囲に含まれる分だけに
 //! なります。読み位置を持った後は、どちらの取っ手も追記分だけを読みます。
+//!
+//! run 詳細の追記の配信（[`read_run_updates`]）のため、ログの行には通し番号を付け、行を初期化する
+//! たびに世代（epoch）を変えます。取っ手はプロジェクトで1つを共有するため、読み位置ではなく、
+//! 利用者が送る世代と番号で「前回の続き」を選びます。
 
 use std::{
   borrow::Borrow,
   collections::{BTreeMap, VecDeque},
   path::{Path, PathBuf},
-  sync::{Arc, Mutex},
+  sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+  },
+  time::{SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{DateTime, Utc};
@@ -25,7 +33,9 @@ use serde_json::Value;
 use crate::{
   domain::{InstructionId, ReportFilename, RunSlug},
   model::{ReportEntry, RunEntry, RunStatus, RunStepEntry, StepLogEntry, TaskEntry},
-  run_log::{self, ContentRead, InitialRead, Instruction, InstructionsRead, MetaRead, RunLocation, RunLogReader},
+  run_log::{
+    self, ContentRead, InitialRead, Instruction, InstructionsRead, MetaRead, RunLocation, RunLogReader, SessionActivity,
+  },
 };
 
 /// takt が既定で worktree を置く、プロジェクトの親ディレクトリの下の名前。
@@ -35,6 +45,50 @@ const WORKTREES_DIRECTORY: &str = "takt-worktrees";
 const MAX_TRACKED_RUNS: usize = 32;
 /// ログの末尾として保持する記録の件数。
 const LOG_TAIL_RECORDS: usize = 20;
+/// run 詳細の追記の配信のために、番号付きで保持する行の上限。画面が保持する行の上限と同じです。
+/// 利用者の位置がこれより古い行を指すときは、続きを示せないため全体を置き換えます。
+const LOG_UPDATE_BUFFER_RECORDS: usize = 200;
+
+/// 世代の初期値はプロセスの開始時刻（ミリ秒）から作り、backend を起動し直しても前のプロセスの
+/// 世代と重ならないようにします。
+static EPOCH_BASE: OnceLock<u64> = OnceLock::new();
+static NEXT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// プロセスの中で重ならない新しい世代を返す。
+fn fresh_epoch() -> u64 {
+  let base = *EPOCH_BASE.get_or_init(|| {
+    SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+      .unwrap_or_default()
+  });
+  base.saturating_add(NEXT_EPOCH.fetch_add(1, Ordering::Relaxed))
+}
+
+/// 利用者が前回受け取った行の位置（世代と最後の行の番号）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogCursor {
+  pub epoch:    u64,
+  pub sequence: u64,
+}
+
+/// 番号付きのログの1行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLine {
+  pub sequence: u64,
+  pub text:     String,
+}
+
+/// run 詳細の追記分。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunUpdates {
+  /// 行の番号の世代。
+  pub epoch:    u64,
+  /// 真なら `lines` で全体を置き換え、偽なら前回の続きとして足す。
+  pub reset:    bool,
+  pub lines:    Vec<LogLine>,
+  pub activity: SessionActivity,
+}
 
 /// run を保存場所から読めなかった理由。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -176,15 +230,21 @@ struct StepStart {
 /// 1つの run の集計。本体ログの読み取り位置もここに持ちます。
 #[derive(Debug)]
 struct RunProgress {
-  reader:       RunLogReader,
+  reader:        RunLogReader,
   /// 読み位置を持たない本体ログの読み始め。末尾から読む集計は、読み直しのときに自分で初期化します。
-  initial_read: InitialRead,
+  initial_read:  InitialRead,
   /// 最初の `workflow_start` を読むまでは記録を数えない（takt と同じ）。
-  active:       bool,
-  completions:  Vec<StepCompletion>,
-  starts:       Vec<StepStart>,
-  log_tail:     VecDeque<String>,
-  last_read:    u64,
+  active:        bool,
+  completions:   Vec<StepCompletion>,
+  starts:        Vec<StepStart>,
+  log_tail:      VecDeque<String>,
+  /// 番号付きの行。`log_tail` と同じ箇所で足し、同じ箇所で初期化します。
+  lines:         VecDeque<LogLine>,
+  /// `lines` の番号の世代。`lines` を初期化するたびに変えます。
+  epoch:         u64,
+  /// 次に足す行の番号。
+  next_sequence: u64,
+  last_read:     u64,
 }
 
 impl RunProgress {
@@ -196,18 +256,25 @@ impl RunProgress {
       completions: Vec::new(),
       starts: Vec::new(),
       log_tail: VecDeque::new(),
+      lines: VecDeque::new(),
+      epoch: fresh_epoch(),
+      next_sequence: 1,
       last_read: 0,
     }
   }
 
+  fn resolve(&self, run_slug: &RunSlug) -> Result<PathBuf, RunReadFailure> {
+    match self.reader.resolve(run_slug) {
+      | RunLocation::Found(run_dir) => Ok(run_dir),
+      | RunLocation::Missing => Err(RunReadFailure::Missing),
+      | RunLocation::NotListed => Err(RunReadFailure::NotListed),
+      | RunLocation::Unreadable(reason) => Err(RunReadFailure::Unreadable(reason)),
+      | RunLocation::Rejected(reason) => Err(RunReadFailure::Rejected(reason)),
+    }
+  }
+
   fn read(&mut self, run_slug: &RunSlug) -> Result<RunLogView, RunReadFailure> {
-    let run_dir = match self.reader.resolve(run_slug) {
-      | RunLocation::Found(run_dir) => run_dir,
-      | RunLocation::Missing => return Err(RunReadFailure::Missing),
-      | RunLocation::NotListed => return Err(RunReadFailure::NotListed),
-      | RunLocation::Unreadable(reason) => return Err(RunReadFailure::Unreadable(reason)),
-      | RunLocation::Rejected(reason) => return Err(RunReadFailure::Rejected(reason)),
-    };
+    let run_dir = self.resolve(run_slug)?;
     let meta = match self.reader.read_meta(&run_dir) {
       | MetaRead::Found(meta) => meta,
       | MetaRead::Missing => return Err(RunReadFailure::Missing),
@@ -231,24 +298,7 @@ impl RunProgress {
     let current_iteration = meta.current_iteration.map(|value| meta_i32(value, "currentIteration")).transpose()?;
     let phase = meta.phase.map(|value| meta_i32(value, "phase")).transpose()?;
 
-    // 読み取り層はファイルの縮小や置き換えで読み位置を捨て、読み直す。先頭から読む集計は、先頭の
-    // workflow_start で初期化される。末尾から読む集計は workflow_start を読まないことがあるため、
-    // 読み直したときは記録を取り込む前に自分で初期化する。本体ログが複数ある run でも、どれかを
-    // 読み直せば集計全体を初期化する。
-    let body_log = self.reader.read_body_log(&run_dir);
-    if matches!(self.initial_read, InitialRead::Tail(_)) && body_log.restarted {
-      self.active = false;
-      self.completions.clear();
-      self.starts.clear();
-      self.log_tail.clear();
-    }
-    // 末尾から読み始めた場合は、範囲より前にある workflow_start を読めないため、ここから数える。
-    if body_log.skipped_head {
-      self.active = true;
-    }
-    for record in &body_log.records {
-      self.ingest(record);
-    }
+    let body_log_bytes_read = self.ingest_body_log(&run_dir);
     let (current_step_started_at, current_step_execution_count) =
       self.current_step_start(meta.current_step.as_deref(), meta.current_iteration, meta.workflow.as_deref());
     Ok(RunLogView {
@@ -261,7 +311,7 @@ impl RunProgress {
       current_step_started_at,
       current_step_execution_count,
       task_text: meta.task,
-      body_log_bytes_read: body_log.bytes_read,
+      body_log_bytes_read,
       completions: self.completions.clone(),
       latest_log_update: self.reader.latest_log_update(&run_dir),
       reports: self
@@ -278,9 +328,62 @@ impl RunProgress {
     })
   }
 
+  /// 本体ログの追記分を集計へ取り込み、読んだバイト数を返す。
+  fn ingest_body_log(&mut self, run_dir: &Path) -> u64 {
+    // 読み取り層はファイルの縮小や置き換えで読み位置を捨て、読み直す。先頭から読む集計は、先頭の
+    // workflow_start で初期化される。末尾から読む集計は workflow_start を読まないことがあるため、
+    // 読み直したときは記録を取り込む前に自分で初期化する。本体ログが複数ある run でも、どれかを
+    // 読み直せば集計全体を初期化する。
+    let body_log = self.reader.read_body_log(run_dir);
+    if matches!(self.initial_read, InitialRead::Tail(_)) && body_log.restarted {
+      self.active = false;
+      self.completions.clear();
+      self.starts.clear();
+      self.clear_log_lines();
+    }
+    // 末尾から読み始めた場合は、範囲より前にある workflow_start を読めないため、ここから数える。
+    if body_log.skipped_head {
+      self.active = true;
+    }
+    for record in &body_log.records {
+      self.ingest(record);
+    }
+    body_log.bytes_read
+  }
+
+  /// 本体ログの追記分を取り込み、`after` の続きの行とセッションログの活動の印を返す。
+  ///
+  /// `after` が無い、世代が違う、番号がこの世代の範囲に無い、または保持している行より古い行を
+  /// 指すときは、続きを示せないため `reset` を立て、`log_tail` と同じ末尾の行を返します。
+  fn read_updates(&mut self, run_slug: &RunSlug, after: Option<LogCursor>) -> Result<RunUpdates, RunReadFailure> {
+    let run_dir = self.resolve(run_slug)?;
+    self.ingest_body_log(&run_dir);
+    let activity = self.reader.read_session_activity(&run_dir);
+    let continued = after.filter(|cursor| self.continues_from(*cursor));
+    let lines = match continued {
+      | Some(cursor) => self.lines.iter().filter(|line| line.sequence > cursor.sequence).cloned().collect(),
+      | None => self.lines.iter().skip(self.lines.len().saturating_sub(LOG_TAIL_RECORDS)).cloned().collect(),
+    };
+    Ok(RunUpdates { epoch: self.epoch, reset: continued.is_none(), lines, activity })
+  }
+
+  /// `cursor` の後の行を、取りこぼしなく今の行から選べるか。
+  fn continues_from(&self, cursor: LogCursor) -> bool {
+    let latest = self.next_sequence - 1;
+    let oldest_kept = self.lines.front().map_or(self.next_sequence, |line| line.sequence);
+    cursor.epoch == self.epoch && cursor.sequence <= latest && cursor.sequence + 1 >= oldest_kept
+  }
+
+  /// ログの行を初期化する。番号付きの行も同時に捨て、世代を変える。
+  fn clear_log_lines(&mut self) {
+    self.log_tail.clear();
+    self.lines.clear();
+    self.epoch = fresh_epoch();
+  }
+
   fn ingest(&mut self, record: &Value) {
     if record.get("type").and_then(Value::as_str) == Some("workflow_start") {
-      self.log_tail.clear();
+      self.clear_log_lines();
     }
     self.push_log_tail(record);
     match record.get("type").and_then(Value::as_str) {
@@ -310,7 +413,12 @@ impl RunProgress {
     if self.log_tail.len() == LOG_TAIL_RECORDS {
       self.log_tail.pop_front();
     }
-    self.log_tail.push_back(line);
+    self.log_tail.push_back(line.clone());
+    if self.lines.len() == LOG_UPDATE_BUFFER_RECORDS {
+      self.lines.pop_front();
+    }
+    self.lines.push_back(LogLine { sequence: self.next_sequence, text: line });
+    self.next_sequence += 1;
   }
 
   /// 現在ステップの開始時刻と実行回数を、takt_get_run と同じ規則で求める。
@@ -437,6 +545,18 @@ impl ProjectRunLogs {
 
   /// run を読み、前回の続きを集計へ足して現在の状態を返す。
   pub fn read(&mut self, run_slug: &RunSlug) -> Result<RunLogView, RunReadFailure> {
+    self.with_progress(run_slug, |progress| progress.read(run_slug))
+  }
+
+  /// run の追記分を読み、`after` の続きの行と活動の印を返す。集計の取り出し方と追い出しは
+  /// [`ProjectRunLogs::read`] と同じです。
+  pub fn read_updates(&mut self, run_slug: &RunSlug, after: Option<LogCursor>) -> Result<RunUpdates, RunReadFailure> {
+    self.with_progress(run_slug, |progress| progress.read_updates(run_slug, after))
+  }
+
+  /// run の集計を取り出すか作り、最後に読んだ順を記録して `read` を呼ぶ。呼んだ後に、保持する
+  /// run の上限を超えた分を、最後に読んだのが古い順に捨てる。
+  fn with_progress<T>(&mut self, run_slug: &RunSlug, read: impl FnOnce(&mut RunProgress) -> T) -> T {
     self.read_sequence += 1;
     let sequence = self.read_sequence;
     let progress = self
@@ -444,9 +564,9 @@ impl ProjectRunLogs {
       .entry(run_slug.clone())
       .or_insert_with(|| RunProgress::new(self.project_cwd.clone(), self.worktrees_root.clone(), self.initial_read));
     progress.last_read = sequence;
-    let view = progress.read(run_slug);
+    let result = read(progress);
     self.evict_least_recently_read();
-    view
+    result
   }
 
   /// 指定した run 以外の集計を捨てる。
@@ -532,6 +652,22 @@ pub async fn read_run(handle: &RunLogHandle, run_slug: RunSlug) -> Result<RunLog
     let mut logs =
       handle.lock().map_err(|error| RunReadFailure::Unreadable(format!("集計を取得できません: {error}")))?;
     logs.read(&run_slug)
+  })
+  .await
+  .map_err(|error| RunReadFailure::Unreadable(format!("読み取りのスレッドが終了しました: {error}")))?
+}
+
+/// 読み取り層を別スレッドで呼び、run 詳細の追記分を読む。
+pub async fn read_run_updates(
+  handle: &RunLogHandle,
+  run_slug: RunSlug,
+  after: Option<LogCursor>,
+) -> Result<RunUpdates, RunReadFailure> {
+  let handle = handle.clone();
+  tokio::task::spawn_blocking(move || {
+    let mut logs =
+      handle.lock().map_err(|error| RunReadFailure::Unreadable(format!("集計を取得できません: {error}")))?;
+    logs.read_updates(&run_slug, after)
   })
   .await
   .map_err(|error| RunReadFailure::Unreadable(format!("読み取りのスレッドが終了しました: {error}")))?

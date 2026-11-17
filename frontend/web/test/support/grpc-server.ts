@@ -21,6 +21,8 @@ import {
   type GetRunContentRequest,
   type GetRunContentResponse,
   type GetRunDetailResponse,
+  type GetRunUpdatesRequest,
+  type GetRunUpdatesResponse,
   type GetTaskDetailRequest,
   type GetTaskDetailResponse,
   type RejectGoalRegistrationRequest,
@@ -49,6 +51,8 @@ export type ServerBehavior = {
   runDetail?: GetRunDetailResponse | ServerError;
   runContent?: GetRunContentResponse | ServerError;
   onGetRunContent?: (request: GetRunContentRequest) => void;
+  runUpdates?: GetRunUpdatesResponse | ServerError;
+  onGetRunUpdates?: (request: GetRunUpdatesRequest) => void;
   goalDetail?: GetGoalDetailResponse | ServerError;
   taskDetail?: GetTaskDetailResponse | ServerError;
   onGetGoalDetail?: (request: GetGoalDetailRequest) => void;
@@ -230,6 +234,23 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       const result = behavior.runContent;
       if (!result) {
         callback(notFound("本文が見つかりません"));
+        return;
+      }
+      if ("code" in result) {
+        callback(result);
+        return;
+      }
+      callback(null, result);
+    },
+    getRunUpdates: (
+      call: grpc.ServerUnaryCall<GetRunUpdatesRequest, unknown>,
+      callback: grpc.sendUnaryData<GetRunUpdatesResponse>,
+    ) => {
+      behavior.calls?.push("GetRunUpdates");
+      behavior.onGetRunUpdates?.(call.request);
+      const result = behavior.runUpdates;
+      if (!result) {
+        callback(notFound("run が見つかりません"));
         return;
       }
       if ("code" in result) {

@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import type { GetRunDetailResponse } from "../proto/taktdash";
 import { formatClock, formatDateTime, formatDuration } from "../state/format";
+import { LiveRunLog } from "./live-run-log";
 import { RunContentToggle } from "./run-content-toggle";
 
 type RunDetailContentProps = {
@@ -9,7 +10,7 @@ type RunDetailContentProps = {
 };
 
 // run 詳細は状態ストアと run の保存場所から backend が組み立てた範囲だけを表示する。
-// ログは末尾（logTail）だけを示し、JSONL の生ログは表示しない。レポートと指示書は一覧だけを
+// ログは末尾（logTail）から示し、開いている間は LiveRunLog が追記分を足す。JSONL の生ログは表示しない。レポートと指示書は一覧だけを
 // 描画し、本文は利用者が項目を開いたときに RunContentToggle が取得する。
 export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactElement {
   const elapsed =
@@ -104,11 +105,12 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
         <h2 className="sec" id="h-log">
           ログの末尾
         </h2>
-        {detail.logsRemoved ? (
-          <p className="note">ログは残っていません。run の保存場所が掃除されたため、画面はステップとログを表示できません。</p>
-        ) : (
-          <pre className="log-tail">{detail.logTail}</pre>
-        )}
+        <LiveRunLog
+          key={detail.runSlug}
+          runSlug={detail.runSlug}
+          logTail={detail.logTail}
+          logsRemoved={detail.logsRemoved}
+        />
       </section>
 
       <section aria-labelledby="h-reports">
