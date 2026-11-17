@@ -198,9 +198,9 @@ test("概要の判断待ちパネルの「内容を見る」は判断待ちペ�
   const overview = renderOverviewWithState(state);
   const decisions = renderDecisionsWithState(state);
 
-  const href = "/decisions#decision-inquiry:mini:esa:inquiry-schedule";
+  const href = "/decisions#decision-inquiry:mini:esa:goal-2:inquiry-schedule";
   anchorFor(overview, href);
-  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:esa:inquiry-schedule");
+  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:esa:goal-2:inquiry-schedule");
   assert.equal(name, "li", "判断待ちページの項目に同じ id を付ける");
 });
 
@@ -214,8 +214,8 @@ test("判断待ちのアンカー id は既存の見出し id と衝突しない
   const decisions = renderDecisionsWithState(state);
 
   assert.equal(overview.split('id="h-projects"').length - 1, 1, "概要の見出し id は1つだけ残す");
-  anchorFor(overview, "/decisions#decision-inquiry:mini:h-projects:x");
-  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:h-projects:x");
+  anchorFor(overview, "/decisions#decision-inquiry:mini:h-projects:goal-2:x");
+  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:h-projects:goal-2:x");
   assert.equal(name, "li", "判断待ちの id は decision- 接頭辞を付ける");
   assert.equal(decisions.split('id="h-projects"').length - 1, 0, "見出しの id と同じ id を作らない");
 });

@@ -224,7 +224,7 @@ test("判断待ちパネルは項目ごとに1行で出し、滞留を強調し�
   assert.ok(staleRow !== undefined, "滞留したマージ待ちの行がある");
   assert.match(staleRow, /class="[^"]*\bstale\b/, "滞留した項目を強調する");
 
-  assert.match(callout, /href="\/decisions#decision-inquiry:mini:esa:inquiry-schedule"/, "問い合わせの項目へ移動できる");
+  assert.match(callout, /href="\/decisions#decision-inquiry:mini:esa:goal-2:inquiry-schedule"/, "問い合わせの項目へ移動できる");
   assert.match(callout, /href="\/decisions#decision-merge:mini:corporate-site:goal-1"/, "マージ待ちの項目へ移動できる");
 });
 
