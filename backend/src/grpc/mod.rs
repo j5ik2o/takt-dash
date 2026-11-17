@@ -274,21 +274,26 @@ fn assemble_pending_decisions(store: &StateStore, now: DateTime<Utc>) -> Vec<Pen
     .pending_decisions(now, model::PendingDecisionFilter::All)
     .into_iter()
     .map(|decision| PendingDecision {
-      r#type:       pending_decision_type(decision.decision_type) as i32,
-      server_id:    decision.server_id,
-      project:      decision.project,
-      goal_id:      decision.goal_id,
-      inquiry_kind: inquiry_kind(decision.inquiry_kind) as i32,
-      created_at:   Some(timestamp(decision.created_at)),
-      body:         decision.body,
-      options:      decision.options,
-      pull_request: pull_request(
+      r#type:          pending_decision_type(decision.decision_type) as i32,
+      server_id:       decision.server_id,
+      project:         decision.project,
+      goal_id:         decision.goal_id,
+      inquiry_kind:    inquiry_kind(decision.inquiry_kind) as i32,
+      created_at:      Some(timestamp(decision.created_at)),
+      body:            decision.body,
+      options:         decision.options,
+      pull_request:    pull_request(
         decision.pull_request_number.map(PullRequestNumber::get),
         decision.pull_request_url.as_deref(),
       ),
-      stale:        decision.stale,
-      inquiry_id:   decision.inquiry_id.as_ref().map(|inquiry_id| inquiry_id.as_str().to_owned()).unwrap_or_default(),
-      revision:     decision.revision.map(RegistrationRevision::get),
+      stale:           decision.stale,
+      inquiry_id:      decision
+        .inquiry_id
+        .as_ref()
+        .map(|inquiry_id| inquiry_id.as_str().to_owned())
+        .unwrap_or_default(),
+      revision:        decision.revision.map(RegistrationRevision::get),
+      merge_task_last: decision.merge_task_last.map(|status| task_status(status) as i32),
     })
     .collect()
 }

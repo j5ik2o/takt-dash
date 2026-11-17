@@ -409,6 +409,8 @@ pub struct PendingDecision {
   pub inquiry_id:          Option<InquiryId>,
   /// ゴール登録の承認待ちの revision。それ以外の種別は持ちません。
   pub revision:            Option<RegistrationRevision>,
+  /// マージ待ちのゴールの仕上げタスクの最後の状態。それ以外の種別は持ちません。
+  pub merge_task_last:     Option<TaskStatus>,
 }
 
 /// ゴール登録の承認待ち。提案そのものの保持と射影に使います。
