@@ -1645,3 +1645,67 @@ async fn restart_with_a_delayed_phase_does_not_duplicate_the_recorded_lost() {
   assert_eq!(restored, 1, "再起動前の切断に対応する復帰を1件だけ記録します");
   restarted.shutdown().await;
 }
+
+#[tokio::test]
+async fn restart_with_pending_history_lookup_across_the_threshold_records_the_lost_once() {
+  // 再起動直後の種付け照会が失敗し続けている間に読み取りの失敗が応答なしの閾値を
+  // 跨ぐと、保留中の遷移は捨てられるため切断が記録されません。その後、照会が成功
+  // して（履歴に未対応の切断は無い）保留が解けると、比較基準だけが応答なしとして
+  // 確定し、回復したときに切断の無い復帰だけが残ります。保留中に跨いだ切断は、
+  // 照会が成功した時点で1件だけ記録して、復帰と対応させます。
+  // 照会の失敗は、events テーブルを別名へ退避して決定的に作ります。
+  let harness = Harness::new(state_with_goal("g1"));
+  harness.rewrite_connection_thresholds(3, 1);
+  std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
+  hide_events_table(&harness.activity_db_path);
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+
+  // 照会が失敗し続ける間に失敗を3回続けます。1回目と2回目は遅延中で、
+  // 3回目で応答なしへ跨ぎます。
+  for _ in 0..3 {
+    restarted.read_cycle_once().await.expect("照会が失敗してもサイクルは完了します");
+  }
+  restore_events_table(&harness.activity_db_path);
+
+  // 照会が成功するサイクルでも、読み取りは失敗したままにします。この時点で、
+  // 保留中に跨いだ切断が1件だけ記録されます。
+  restarted.read_cycle_once().await.expect("照会が成功するサイクルを実行できます");
+  let lost: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionLost)
+    .count();
+  assert_eq!(lost, 1, "保留中に跨いだ切断を、照会が成功した時点で1件だけ記録します");
+
+  // 回復したら、保留中に跨いだ切断に対応する復帰を1件だけ記録します。
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  harness.rewrite_state(state_with_goal("g1"));
+  restarted.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
+  let restored: Vec<_> = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .collect();
+  assert_eq!(restored.len(), 1, "保留中に跨いだ切断に対応する復帰を1件だけ記録します");
+  assert!(
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰イベントの本文に、保留中に跨いだ切断から数えた切断していた時間を入れます: {}",
+    restored[0].body
+  );
+
+  // 続く成功サイクルでも、復帰を二重に記録しません。
+  restarted.read_cycle_once().await.expect("続くサイクルを実行できます");
+  let restored_after: usize = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .count();
+  assert_eq!(restored_after, 1, "復帰を二重に記録しません");
+  restarted.shutdown().await;
+}

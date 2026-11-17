@@ -46,6 +46,12 @@ pub struct Poller {
   /// 照会が成功するまでサイクルのたびに照会を試し直します。確定を保留している
   /// 間は、読み取りの成否で比較基準を進めません。
   seed_pending:   BTreeSet<String>,
+  /// 照会の保留中に状態ストアが応答なしへ跨いだプロジェクトについて、その跨ぎの
+  /// 遷移と時刻。保留中は接続の出来事を記録しないため、このままでは跨ぎが失われ、
+  /// 照会が成功した後に比較基準だけが応答なしとして確定して、回復したときに
+  /// 切断の無い復帰だけが残ります。照会が成功した時点で、履歴に未対応の切断が
+  /// 無ければこの切断を1件だけ記録して調整します（`seed_connection_baseline`）。
+  deferred_lost:  BTreeMap<String, (DateTime<Utc>, ConnectionTransition)>,
   changes:        broadcast::Sender<()>,
   last_signature: Option<StoreSignature>,
 }
@@ -81,6 +87,7 @@ impl Poller {
       notified: BTreeMap::new(),
       seeded_outages: BTreeMap::new(),
       seed_pending: BTreeSet::new(),
+      deferred_lost: BTreeMap::new(),
       changes,
       last_signature: None,
     }
@@ -175,6 +182,17 @@ impl Poller {
           // 記録済みの接続の出来事への照会がまだ成功していないプロジェクトは、
           // 未対応の切断が残っているか分からないため、接続の出来事を記録しません。
           let transition = if self.seed_pending.contains(&project.name) {
+            // 保留中は接続の出来事を記録しませんが、応答なしへ跨いだ事実は失わずに
+            // 残し、照会が成功した時点で調整します。初回接触（遷移前が無い場合）は
+            // 通常の経路と同じく基準化のみとし、対象にしません。
+            if let Some(store_transition) = failure {
+              let crossed = store_transition.previous.is_some()
+                && store_transition.previous != Some(ConnectionState::Unresponsive)
+                && store_transition.next == Some(ConnectionState::Unresponsive);
+              if crossed {
+                self.deferred_lost.entry(project.name.clone()).or_insert((read_at, store_transition));
+              }
+            }
             None
           } else {
             next.and_then(|next| {
@@ -256,6 +274,9 @@ impl Poller {
   /// 復帰を記録できます。記録の読み取りに失敗した場合は「履歴なし」と区別して
   /// 基準の確定を保留し（`seed_pending`）、照会が成功するまでサイクルのたびに
   /// 照会を試し直します。保留の間は、読み取りの成否で比較基準を進めません。
+  /// 保留の間に状態ストアが応答なしへ跨いだ場合は、その跨ぎを `deferred_lost` へ
+  /// 残し、照会が成功した時点で、履歴に未対応の切断が無ければその切断を1件だけ
+  /// 記録して調整します。
   fn seed_connection_baseline(&mut self, project: &Project) {
     if self.notified.contains_key(&project.name) && !self.seed_pending.contains(&project.name) {
       return;
@@ -264,8 +285,29 @@ impl Poller {
       | Ok(last) => {
         self.seed_pending.remove(&project.name);
         if let Some((EventKind::ConnectionLost, lost_at)) = last {
+          // 履歴の未対応の切断が、保留中に跨いだ分も含めてこの障害の記録です。
+          // 二重に記録しないよう、保留中の跨ぎは破棄します。
+          self.deferred_lost.remove(&project.name);
           self.notified.insert(project.name.clone(), ConnectionState::Unresponsive);
           self.seeded_outages.insert(project.name.clone(), lost_at);
+        } else if let Some((crossed_at, crossing)) = self.deferred_lost.get(&project.name).copied() {
+          // 履歴に未対応の切断が無く、保留中に応答なしへ跨いでいた場合は、その
+          // 切断をこの時点で1件だけ記録し、比較基準を応答なしとして確定します。
+          // 記録に失敗した場合は保留へ戻し、次のサイクルで照会から試し直します。
+          // 保留へ戻すことで、通常の経路が記録の無いまま基準だけを確定することも
+          // 防ぎます。
+          let empty = ProjectSnapshot::empty();
+          let events = detect(&project.server, &project.name, None, &empty, Some(crossing), crossed_at);
+          match self.record_events(&events) {
+            | Ok(()) => {
+              self.deferred_lost.remove(&project.name);
+              self.notified.insert(project.name.clone(), ConnectionState::Unresponsive);
+              self.seeded_outages.insert(project.name.clone(), crossed_at);
+            },
+            | Err(_) => {
+              self.seed_pending.insert(project.name.clone());
+            },
+          }
         }
       },
       | Err(_) => {
@@ -300,6 +342,7 @@ impl Poller {
     self.notified.remove(project);
     self.seeded_outages.remove(project);
     self.seed_pending.remove(project);
+    self.deferred_lost.remove(project);
     self.store.reset_project(project);
   }
 
