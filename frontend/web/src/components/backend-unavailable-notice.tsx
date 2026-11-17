@@ -43,11 +43,14 @@ export function backendUnavailableMessage(situation: BackendUnavailableSituation
   return BACKEND_UNREACHABLE_MESSAGE;
 }
 
+// props の既定値は置かない。React は props オブジェクトを必ず渡すため実行時に
+// 既定値は使われず、既定値があると createElement の props 型推論が崩れて
+// situation を渡す呼び出しが型検査を通らなくなる。
 export function BackendUnavailableNotice({
   situation,
 }: {
   situation?: BackendUnavailableSituation;
-} = {}): ReactElement {
+}): ReactElement {
   return (
     <p className="banner warn" role="alert">
       {situation === undefined ? BACKEND_UNAVAILABLE_MESSAGE : backendUnavailableMessage(situation)}

@@ -79,7 +79,7 @@ test("SSE の受信で切断フラグが消え、切断で立ち、切断中も�
 
 test("切断の開始時刻と接続履歴を Context 値に保持する", () => {
   const initial: StateStreamContextValue = {
-    state: createDashboardState(),
+    state: dashboardStateFromProto(createDashboardState()),
     disconnected: false,
     disconnectedSince: null,
     respondedBefore: true,
@@ -95,7 +95,7 @@ test("切断の開始時刻と接続履歴を Context 値に保持する", () =>
   handlers.onError();
   assert.equal(holder.current.disconnectedSince, since, "切断が続く間は開始時刻を保つ");
 
-  handlers.onState(createDashboardState());
+  handlers.onState(dashboardStateFromProto(createDashboardState()));
   assert.equal(holder.current.disconnected, false, "受信で切断フラグが消える");
   assert.equal(holder.current.disconnectedSince, null, "受信で切断の開始時刻を消す");
   assert.equal(holder.current.respondedBefore, true, "受信で接続履歴が残る");
@@ -151,9 +151,12 @@ const renderInitialValue = (props: {
     holder.current = useLiveState();
     return null;
   };
-  renderToStaticMarkup(
-    createElement(StateStreamProvider, { initialState: createDashboardState(), ...props }, createElement(Probe)),
-  );
+  const providerProps: ComponentProps<typeof StateStreamProvider> = {
+    initialState: createDashboardState(),
+    ...props,
+    children: createElement(Probe),
+  };
+  renderToStaticMarkup(createElement(StateStreamProvider, providerProps));
   const current = holder.current;
   if (current === undefined) {
     throw new Error("Provider の初期値を観測できませんでした。");
