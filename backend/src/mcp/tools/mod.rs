@@ -684,9 +684,11 @@ impl<'a> ToolSet<'a> {
             continue;
           }
         }
+        // goalId が空文字のタスクはゴール未所属（parse_task と同じ扱い）とし、
+        // takt_get_goal を呼ばずに、ID が欠落する場合と同じ既定値を使う。
         let links = match optional_string(item, "goalId") {
-          | Some(task_goal_id) => self.read_task_link_fields(&task_goal_id).await?,
-          | None => TaskLinkFields::default(),
+          | Some(task_goal_id) if !task_goal_id.is_empty() => self.read_task_link_fields(&task_goal_id).await?,
+          | _ => TaskLinkFields::default(),
         };
         return Ok(Some(parse_task_detail(project, item, links)?));
       }
