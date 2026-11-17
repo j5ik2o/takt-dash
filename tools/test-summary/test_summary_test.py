@@ -286,6 +286,44 @@ def test_bound_is_respected_for_smaller_max_bytes() -> None:
         assert name in stripped, name
 
 
+# --- 小さい上限（issue #184） -----------------------------------------------
+
+def test_issue_repro_line_stays_within_bound() -> None:
+    # issue #184 の再現入力。失敗の集計の行だけの入力でも上限を守る。
+    data = b"test result: FAILED. 0 passed; 1 failed\n"
+    for max_bytes in (1, 100, 200):
+        output = run_ok(data, max_bytes=max_bytes)
+        assert len(output) <= max_bytes, (max_bytes, len(output))
+        output.decode("utf-8")  # 文字の途中で切れていれば例外になる
+    # 100 バイトでは短い形式になり、失敗の集計の行が残る。
+    output = run_ok(data, max_bytes=100)
+    assert b"test result: FAILED." in output, output
+
+
+def test_tiny_max_bytes_stays_within_bound_for_cargo_failures() -> None:
+    failed = cargo_failed_block([("tests::early_fails", "表明のメッセージ", 4)])
+    data = (compile_log() + failed + cargo_ok_output(60000)).encode("utf-8")
+    for max_bytes in (1, 100, 200):
+        output = run_ok(data, max_bytes=max_bytes)
+        assert len(output) <= max_bytes, (max_bytes, len(output))
+        output.decode("utf-8")
+
+
+def test_tiny_max_bytes_stays_within_bound_for_npm_failures() -> None:
+    body = (
+        npm_header()
+        + "✖ bad one (0.39ms)\n"
+        + npm_counts(2, 1, 1)
+        + "\n✖ failing tests:\n\n"
+        + npm_failing_item("test/x.test.ts:4:1", "bad one", "一致しない")
+    )
+    data = body.encode("utf-8")
+    for max_bytes in (1, 100, 200):
+        output = run_ok(data, max_bytes=max_bytes)
+        assert len(output) <= max_bytes, (max_bytes, len(output))
+        output.decode("utf-8")
+
+
 # --- npm の失敗 -------------------------------------------------------------
 
 
@@ -367,6 +405,9 @@ def main() -> int:
         test_huge_assertion_body_keeps_its_panicked_line,
         test_many_failures_stay_within_bound_without_losing_names,
         test_bound_is_respected_for_smaller_max_bytes,
+        test_issue_repro_line_stays_within_bound,
+        test_tiny_max_bytes_stays_within_bound_for_cargo_failures,
+        test_tiny_max_bytes_stays_within_bound_for_npm_failures,
         test_npm_failing_section_is_summarized_without_stack,
         test_first_npm_failure_survives_long_later_failures,
         test_pipefail_keeps_make_test_exit_code,
