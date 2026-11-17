@@ -142,6 +142,7 @@ export type DecisionsStateInput = {
   thresholds: AnomalyThresholds | undefined;
   pendingDecisions: readonly PendingDecisionInput[];
   servers: readonly Server[];
+  projects: readonly Project[];
 };
 
 const minutesSince = (from: Date, now: Date): number => Math.max(0, (now.getTime() - from.getTime()) / 60_000);

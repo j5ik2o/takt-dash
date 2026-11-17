@@ -91,7 +91,21 @@ test("判断待ち一覧はまだ読めていないサーバーがあるとき0�
     servers: base.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
   });
   assert.doesNotMatch(html, /判断待ちはありません/);
-  assert.match(html, /まだ読めていないサーバーがあります/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /判断待ちがあるかどうかは分かりません/);
+});
+
+test("判断待ち一覧はサーバーが既読でも未読のプロジェクトがあるとき0件でも「判断待ちはありません」と断定しない", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    pendingDecisions: [],
+    projects: base.projects.map((project, index) =>
+      index === 0 ? { ...project, lastReadAt: undefined } : project,
+    ),
+  });
+  assert.doesNotMatch(html, /判断待ちはありません/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
   assert.match(html, /判断待ちがあるかどうかは分かりません/);
 });
 
@@ -101,7 +115,7 @@ test("判断待ち一覧はまだ読めていないサーバーがあっても�
     ...base,
     servers: base.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
   });
-  assert.match(html, /まだ読めていないサーバーがあります/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
   assert.match(html, /リリースの日取りはどうしますか/);
 });
 
