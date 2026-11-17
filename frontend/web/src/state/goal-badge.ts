@@ -7,6 +7,9 @@
 // あれば「実行中」、どちらでもなければ「進行中」とし、タスクが未登録なのか、
 // 実際に run が動いているのかを文言で区別する（issue #189）。
 // この対応表を1か所に閉じ、画面の各所で組み合わせを分岐させない。
+// カードと詳細の文面（goalStateSentence）も同じ対応表から作る。状態と実行状態の
+// ラベルをそのまま並べると「ゴールは完了で、実行状態は稼働中です」のように矛盾
+// して読めるため、文面でも組み合わせを先に確定する（issue #198）。
 import type { Goal } from "../proto/taktdash";
 import { goalTaskProgress } from "./goal-summary";
 import { EXECUTION_STATUS, GOAL_STATUS } from "./proto-values";
@@ -50,4 +53,41 @@ export function goalBadge(
     return { kind: "running", label: "実行中", tone: "live" };
   }
   return { kind: "active", label: "進行中", tone: "live" };
+}
+
+// ゴールの状態を1文で表す文面（issue #198）。
+//
+// バッジと同じ優先順位で組み合わせを確定する。中止はゴール自体の中止として述べ、
+// 完了したゴールは完了としてだけ述べる。完了後に実行中のタスクが残っている場合
+// だけ、その件数を補う。作成済みのゴールは、実行状態の生の値ではなくタスクの
+// 実態（未登録・実行中・進行中）で述べ、稼働中とは出さない。
+export function goalStateSentence(
+  goal: Pick<Goal, "status" | "executionStatus" | "taskCounts">,
+): string {
+  if (goal.executionStatus === EXECUTION_STATUS.ABORTED) {
+    return "ゴールは中止されました。";
+  }
+  const progress = goalTaskProgress(goal);
+  if (goal.status === GOAL_STATUS.COMPLETED) {
+    if (progress.running > 0) {
+      return `ゴールは完了しています。実行中のタスクが ${progress.running} 件残っています。`;
+    }
+    return "ゴールは完了しています。";
+  }
+  if (goal.executionStatus === EXECUTION_STATUS.PAUSED) {
+    if (goal.status === GOAL_STATUS.AWAITING_MERGE) {
+      return "ゴールは人のマージ待ちで、実行は一時停止しています。";
+    }
+    return "ゴールは作成済みで、実行は一時停止しています。";
+  }
+  if (goal.status === GOAL_STATUS.AWAITING_MERGE) {
+    return "ゴールは人のマージ待ちです。";
+  }
+  if (progress.total === 0) {
+    return "ゴールは作成済みで、タスクはまだ登録されていません。";
+  }
+  if (progress.running > 0) {
+    return `ゴールは作成済みで、実行中のタスクが ${progress.running} 件あります。`;
+  }
+  return "ゴールは作成済みで、タスクは進行中です。";
 }

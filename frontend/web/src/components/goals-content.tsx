@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import type { DashboardGoal as Goal, DashboardState } from "../state/restore-state";
-import { executionStatusLabel, goalStatusLabel, isHumanMergeWaiting, taskStatusLabel } from "../state/dashboard";
+import { isHumanMergeWaiting, taskStatusLabel } from "../state/dashboard";
+import { goalStateSentence } from "../state/goal-badge";
 import { TASK_STATUS } from "../state/proto-values";
 
 type GoalsContentProps = {
@@ -48,9 +49,7 @@ export function GoalsContent({ state, project }: GoalsContentProps): ReactElemen
                 </h3>
                 <span className="about">{goal.project}</span>
               </div>
-              <p>
-                ゴールは{goalStatusLabel(goal.status)}で、実行状態は{executionStatusLabel(goal.executionStatus)}です。
-              </p>
+              <p>{goalStateSentence(goal)}</p>
               <p>{isHumanMergeWaiting(goal) ? "マージの承認待ちです。" : "マージの承認待ちではありません。"}</p>
               <p className="k">タスクの件数</p>
               <div className="kv">
