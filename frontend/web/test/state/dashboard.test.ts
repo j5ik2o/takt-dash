@@ -34,7 +34,7 @@ import {
   summarizePendingDecisions,
   toRunView,
 } from "../../src/state/dashboard.ts";
-import { DomainPrimitiveError } from "../../src/state/domain-primitives.ts";
+import { DomainPrimitiveError, toRunCount } from "../../src/state/domain-primitives.ts";
 import { decisionKey } from "../../src/state/decision-actions.ts";
 
 test("判断待ちは待ち時間の長い順に並ぶ", () => {
@@ -665,10 +665,10 @@ test("ゴールに属さない run も概要とサーバー別の run 行に表�
 });
 
 test("サーバーの状態は接続の有無と run の件数だけで決まる", () => {
-  assert.equal(serverStateFrom(false, 3), "down", "未接続なら run があっても応答なしの側にする");
-  assert.equal(serverStateFrom(false, 0), "down", "未接続なら down にする");
-  assert.equal(serverStateFrom(true, 1), "live", "接続済みで run があれば live にする");
-  assert.equal(serverStateFrom(true, 0), "idle", "接続済みで run が無ければ idle にする");
+  assert.equal(serverStateFrom(false, toRunCount(3)), "down", "未接続なら run があっても応答なしの側にする");
+  assert.equal(serverStateFrom(false, toRunCount(0)), "down", "未接続なら down にする");
+  assert.equal(serverStateFrom(true, toRunCount(1)), "live", "接続済みで run があれば live にする");
+  assert.equal(serverStateFrom(true, toRunCount(0)), "idle", "接続済みで run が無ければ idle にする");
 });
 
 test("サーバーの状態の文言は接続と活動を区別する", () => {

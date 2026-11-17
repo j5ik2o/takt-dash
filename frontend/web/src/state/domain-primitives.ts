@@ -43,6 +43,7 @@ export type InquiryId = string & { readonly __brand: "InquiryId" };
 export type PullRequestNumber = number & { readonly __brand: "PullRequestNumber" };
 export type RegistrationRevision = number & { readonly __brand: "RegistrationRevision" };
 export type TaskCount = number & { readonly __brand: "TaskCount" };
+export type RunCount = number & { readonly __brand: "RunCount" };
 export type StaleMinutes = number & { readonly __brand: "StaleMinutes" };
 export type SilentMinutes = number & { readonly __brand: "SilentMinutes" };
 
@@ -110,6 +111,9 @@ export const toRegistrationRevision = (value: unknown): RegistrationRevision =>
 
 export const toTaskCount = (value: unknown): TaskCount =>
   boundedInteger("タスク件数", value, 0, I32_MAX) as TaskCount;
+
+export const toRunCount = (value: unknown): RunCount =>
+  boundedInteger("run 件数", value, 0, I32_MAX) as RunCount;
 
 export const toStaleMinutes = (value: unknown): StaleMinutes =>
   boundedInteger("滞留の閾値", value, 0, I32_MAX) as StaleMinutes;

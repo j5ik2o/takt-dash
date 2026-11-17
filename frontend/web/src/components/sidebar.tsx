@@ -6,6 +6,7 @@ import { serverHref } from "../state/anchors";
 import { commitsDiffer, type BuildInfo } from "../state/build-info";
 import { formatClock } from "../state/format";
 import { serverStateFrom, serverStateLabel } from "../state/dashboard";
+import { toRunCount } from "../state/domain-primitives";
 
 type SidebarProps = {
   servers: Server[];
@@ -50,7 +51,9 @@ export function Sidebar({
         <p className="side-title">サーバー</p>
         <ul className="srv-list">
           {servers.map((server) => {
-            const runCount = runs?.filter((run) => run.serverId === server.serverId).length ?? 0;
+            const runCount = toRunCount(
+              runs?.filter((run) => run.serverId === server.serverId).length ?? 0,
+            );
             // 状態の決め方と文言は概要のサーバーカードと共通の関数を使う。
             // 接続だけで決めると、run が無いサーバーがカードの表示と食い違う（issue #188）。
             const state = serverStateFrom(server.connected, runCount);
