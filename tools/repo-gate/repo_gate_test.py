@@ -1341,6 +1341,7 @@ def test_publish_stage_detection() -> None:
     --require-published）だけを置ける。publish.py への言及があるのに正規形に
     一致しないコマンドは、正規形を示す理由つきで拒否する。echo の引数・
     コメント・引用符内の文字列・ラッパー越し・複数行など、記法を問わない。
+    オプションの値に後続コマンドやコマンド置換を付けた入力も受理しない。
     publish.py への言及が無いコマンドは公開と無関係であり、そのまま通す。
     """
     with Sandbox() as sandbox:
@@ -1415,6 +1416,23 @@ def test_publish_stage_detection() -> None:
             "段階が違う": "python3 tools/project-status/publish.py deploy",
             "publish.py に無いオプション": "python3 tools/project-status/publish.py commit --verbose",
             "後段との連結": "python3 tools/project-status/publish.py commit; echo done",
+            "オプション値への後続コマンドの付加": (
+                "python3 tools/project-status/publish.py commit --status x;true"
+            ),
+            "オプション値の連結": "python3 tools/project-status/publish.py status --status x&&true",
+            "オプション値のパイプ": "python3 tools/project-status/publish.py status --status x|true",
+            "オプション値のリダイレクト": (
+                "python3 tools/project-status/publish.py status --status x>/dev/null"
+            ),
+            "オプション値のコマンド置換": (
+                "python3 tools/project-status/publish.py status --status $(true)"
+            ),
+            "引用符内のコマンド置換": (
+                'python3 tools/project-status/publish.py status --status "$(true)"'
+            ),
+            "オプション値のバッククォート": (
+                "python3 tools/project-status/publish.py status --status `true`"
+            ),
         }
         for label, command in rejected.items():
             try:
