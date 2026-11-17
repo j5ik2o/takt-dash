@@ -27,6 +27,7 @@ import {
   DEFAULT_ANOMALY_THRESHOLDS,
   projectKey,
   isHumanMergeWaiting,
+  mergeTaskFailureNote,
   resolveThresholds,
   serverStateFrom,
   serverStateLabel,
@@ -534,6 +535,11 @@ test("進行中ゴールは完了・中止・人のマージ待ちを除き、�
         status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
         mergeTaskLast: TaskStatus.TASK_STATUS_PENDING,
       }),
+      goal({
+        goalId: "g-merge-failed",
+        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+        mergeTaskLast: TaskStatus.TASK_STATUS_FAILED,
+      }),
     ],
   };
   const view = buildOverviewView(state, NOW);
@@ -575,13 +581,21 @@ test("人のマージ待ちは仕上げタスクの末尾状態だけで判定�
     "仕上げタスクの末尾状態が未設定でも人のマージ待ちです",
   );
 
+  // 仕上げタスクが失敗系の状態で終わったゴールは、自動では進まず人の判断が要るため
+  // 人のマージ待ちに含める（issue #231）。
   for (const status of [
-    TaskStatus.TASK_STATUS_PENDING,
-    TaskStatus.TASK_STATUS_RUNNING,
     TaskStatus.TASK_STATUS_FAILED,
     TaskStatus.TASK_STATUS_EXCEEDED,
     TaskStatus.TASK_STATUS_PR_FAILED,
   ]) {
+    assert.equal(
+      isHumanMergeWaiting(awaiting(status)),
+      true,
+      `仕上げタスクの末尾状態が ${TaskStatus[status]} なら人のマージ待ちです`,
+    );
+  }
+
+  for (const status of [TaskStatus.TASK_STATUS_PENDING, TaskStatus.TASK_STATUS_RUNNING]) {
     assert.equal(
       isHumanMergeWaiting(awaiting(status)),
       false,
@@ -595,6 +609,45 @@ test("人のマージ待ちは仕上げタスクの末尾状態だけで判定�
     ),
     false,
     "awaiting_merge 以外のゴールは人のマージ待ちではありません",
+  );
+});
+
+test("仕上げタスクの失敗の文面は失敗系の末尾状態だけに出る", () => {
+  const awaiting = (mergeTaskLast?: TaskStatus): ReturnType<typeof createGoal> =>
+    createGoal({ status: GoalStatus.GOAL_STATUS_AWAITING_MERGE, mergeTaskLast });
+
+  assert.equal(
+    mergeTaskFailureNote(awaiting(TaskStatus.TASK_STATUS_FAILED)),
+    "仕上げタスクが失敗しました。",
+  );
+  assert.equal(
+    mergeTaskFailureNote(awaiting(TaskStatus.TASK_STATUS_EXCEEDED)),
+    "仕上げタスクが上限超過で止まりました。",
+  );
+  assert.equal(
+    mergeTaskFailureNote(awaiting(TaskStatus.TASK_STATUS_PR_FAILED)),
+    "仕上げタスクのプルリクエスト作成が失敗しました。",
+  );
+
+  for (const status of [
+    undefined,
+    TaskStatus.TASK_STATUS_PENDING,
+    TaskStatus.TASK_STATUS_RUNNING,
+    TaskStatus.TASK_STATUS_COMPLETED,
+  ]) {
+    assert.equal(
+      mergeTaskFailureNote(awaiting(status)),
+      undefined,
+      `仕上げタスクの末尾状態が ${status === undefined ? "未設定" : TaskStatus[status]} なら失敗の文面は出ない`,
+    );
+  }
+
+  assert.equal(
+    mergeTaskFailureNote(
+      createGoal({ status: GoalStatus.GOAL_STATUS_CREATED, mergeTaskLast: TaskStatus.TASK_STATUS_FAILED }),
+    ),
+    undefined,
+    "awaiting_merge 以外のゴールでは失敗の文面を出さない",
   );
 });
 
