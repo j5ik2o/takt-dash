@@ -1340,7 +1340,9 @@ def test_publish_stage_detection() -> None:
     publish.py は実行とみなさない。bash -c の内側のスクリプトと、&& でつないだ
     後段の呼び出しは実行として拾う。コマンド先頭の環境変数代入と python の
     オプションは読み飛ばし、-n 付きのシェルと python の -c / -m は実行として
-    扱わない。
+    扱わない。引用符内の << はヒアドキュメントの開始として扱わず、本文に
+    引用符が含まれていても本文の読み飛ばしは崩れない。行継続（バックス
+    ラッシュ＋改行）は、継続行が字下げされていても引数として残らない。
     """
     with Sandbox() as sandbox:
         module = sandbox.module
@@ -1403,6 +1405,21 @@ def test_publish_stage_detection() -> None:
                 "python3 tools/project-status/publish.py commit"
             )
         ) == {"commit": "commit"}, "ヒアドキュメントの後ろにある実起動は拾う"
+        assert module.publish_stages(
+            step('echo "<<EOF"\npython3 tools/project-status/publish.py commit')
+        ) == {"commit": "commit"}, "引用符内の << はヒアドキュメントの開始として扱わない"
+        assert module.publish_stages(
+            step("cat <<'EOF'\nIt's ready\nEOF\npython3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "本文に引用符があっても、ヒアドキュメントの後ろにある実起動は拾う"
+        assert module.publish_stages(
+            step("cat <<'EOF'\nIt's python3 tools/project-status/publish.py commit\nEOF")
+        ) == {}, "本文に引用符と publish.py があっても実行として扱わない"
+        assert module.publish_stages(
+            step("python3 \\\n  tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "行継続を挟み、継続行が字下げされていても実起動を拾う"
+        assert module.publish_stages(
+            step("python3 \\\n  -u tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "行継続の後ろに python のオプションがあっても実起動を拾う"
 
 
 def test_publish_workflow_passes() -> None:
@@ -1432,6 +1449,44 @@ def test_publish_workflow_accepts_option_and_assignment_forms() -> None:
         "python のオプション付き": lambda line: line.replace("python3 ", "python3 -u ", 1),
         "環境変数代入付き": lambda line: line.replace(
             "          python3 ", "          PYTHONUNBUFFERED=1 python3 ", 1
+        ),
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_success(sandbox, label)
+
+
+def test_publish_workflow_accepts_heredoc_and_continuation_forms() -> None:
+    """公開コマンドの有効な記法（ヒアドキュメントの前置き、行継続）でも関門を通る。
+
+    ヒアドキュメントの本文は実行されないが、本文に引用符が含まれていても
+    読み飛ばしは崩れず、後ろにある実起動は段階として検出されなければなら
+    ない。引用符内の << はヒアドキュメントの開始ではない。YAML のブロック
+    内で python3 とスクリプトパスをバックスラッシュ＋改行で折り返し、継続行
+    が字下げされる形も、シェルでは行継続として取り除かれるため、実起動と
+    して検出されなければならない。検出から漏らすと、段階の入力が無いもの
+    として正しいワークフローが拒否される。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "引用符を含むヒアドキュメントの前置き": lambda line: (
+            "          cat <<'EOF'\n          It's a publish step\n          EOF\n" + line
+        ),
+        "引用符内の << の前置き": lambda line: '          echo "<<EOF"\n' + line,
+        "行継続で折り返す": lambda line: line.replace(
+            "python3 ", "python3 \\\n            ", 1
         ),
     }
     for label, transform in cases.items():
@@ -2128,6 +2183,7 @@ def main() -> int:
         test_publish_stage_detection,
         test_publish_workflow_passes,
         test_publish_workflow_accepts_option_and_assignment_forms,
+        test_publish_workflow_accepts_heredoc_and_continuation_forms,
         test_publish_commands_must_invoke_publish_py,
         test_publish_success_rule_must_precede_unconditional_rule,
         test_machine_gate_requires_six_system_inputs,

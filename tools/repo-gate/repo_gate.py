@@ -593,13 +593,187 @@ class ShellToken(str):
     演算子に見える文字列でも、引用されたものは演算子ではない。
     space_before: 直前に空白（スペース・タブ・復帰）があった場合に真。
     `&>` と `& >` の区別に使う。
+    heredoc_operator: 語の先頭（数字の fd 指定の後）に、引用されていない
+    `<<` がある場合に真。shell_tokens が設定し、それ以外は偽。
     """
+
+    heredoc_operator = False
 
     def __new__(cls, text, *, quoted=False, space_before=False):
         token = super().__new__(cls, text)
         token.quoted = quoted
         token.space_before = space_before
         return token
+
+
+def parse_heredoc_operator(text, start):
+    """text[start] から始まる <<区切り語 を解析し、(区切り語, タブ除去, 終端位置) を返す。
+
+    start は最初の `<` の位置。`<<-` の場合はタブ除去を真とする。区切り語は
+    空白と演算子の手前までで、引用符とエスケープは取り除いて読む。区切り語が
+    無い場合は None を返す。
+    """
+    index = start + 2
+    strip_tabs = False
+    if index < len(text) and text[index] == "-":
+        strip_tabs = True
+        index += 1
+    while index < len(text) and text[index] in " \t":
+        index += 1
+    chars = []
+    while index < len(text):
+        char = text[index]
+        if char in " \t\r\n;&|()<>":
+            break
+        if char in ("'", '"'):
+            quote = char
+            index += 1
+            while index < len(text) and text[index] != quote:
+                if quote == '"' and text[index] == "\\" and index + 1 < len(text):
+                    index += 1
+                chars.append(text[index])
+                index += 1
+            if index >= len(text):
+                return None
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(text):
+            chars.append(text[index + 1])
+            index += 2
+            continue
+        chars.append(char)
+        index += 1
+    delimiter = "".join(chars)
+    if not delimiter:
+        return None
+    return delimiter, strip_tabs, index
+
+
+def skip_heredoc_bodies(text, index, pending):
+    """ヒアドキュメントの本文の行を読み飛ばし、本文の直後の位置を返す。
+
+    pending の (区切り語, タブ除去) の順に、各本文を区切り語だけの行まで
+    読み飛ばす。区切り語の行自体も読み飛ばす。
+    """
+    queue = list(pending)
+    while queue and index < len(text):
+        end = text.find("\n", index)
+        if end == -1:
+            line = text[index:]
+            index = len(text)
+        else:
+            line = text[index:end]
+            index = end + 1
+        delimiter, strip_tabs = queue[0]
+        candidate = line[:-1] if line.endswith("\r") else line
+        if strip_tabs:
+            candidate = candidate.lstrip("\t")
+        if candidate == delimiter:
+            queue.pop(0)
+    return index
+
+
+def strip_heredoc_bodies(command):
+    """ヒアドキュメントの本文を、コマンド文字列から取り除く。
+
+    引用符とエスケープとコメントを考慮して走査し、引用符の外にある
+    <<区切り語 だけをヒアドキュメントの開始として扱う。開始を含む行の
+    改行の直後から、区切り語だけの行まで（区切り語の行を含む）を除去し、
+    演算子と区切り語もコマンド行から取り除く。本文はシェルの構文として
+    解釈されないため、本文に含まれる引用符や # が、後段のコメント除去や
+    トークン化へ影響することはない。引用符内の `<<`（例: echo "<<EOF"）や
+    コメント内の `<<` は開始として扱わない。<<<（ヒアストリング）は本文を
+    持たないため対象にしない。<< が語の途中にある場合（例: a<<EOF）は、
+    トークン化側の扱いに合わせて開始として扱わない。数字だけの語の直後に
+    ある場合は、fd 指定付きのリダイレクトとして扱う。
+    """
+    text = str(command)
+    result = []
+    pending = []
+    index = 0
+    quote = None
+    in_comment = False
+
+    def operator_position():
+        """結果の末尾から見て、<< がリダイレクトの開始位置にあるかを返す。
+
+        末尾の語が空（行頭・空白・演算子の直後）か、数字だけ（fd 指定）の
+        ときに開始位置とする。あわせて、その数字の並びの長さを返す。
+        """
+        digits = 0
+        for char in reversed(result):
+            if char in " \t\r\n;&|()":
+                break
+            if not char.isdigit():
+                return None
+            digits += 1
+        return digits
+
+    while index < len(text):
+        char = text[index]
+        if in_comment:
+            result.append(char)
+            index += 1
+            if char == "\n":
+                in_comment = False
+                if pending:
+                    index = skip_heredoc_bodies(text, index, pending)
+                    pending = []
+            continue
+        if quote == "'":
+            result.append(char)
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            result.append(char)
+            if char == "\\" and index + 1 < len(text):
+                result.append(text[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(text):
+            result.append(char)
+            result.append(text[index + 1])
+            index += 2
+            continue
+        if char in ("'", '"'):
+            quote = char
+            result.append(char)
+            index += 1
+            continue
+        if char == "#":
+            in_comment = True
+            result.append(char)
+            index += 1
+            continue
+        if char == "\n":
+            result.append(char)
+            index += 1
+            if pending:
+                index = skip_heredoc_bodies(text, index, pending)
+                pending = []
+            continue
+        if char == "<" and text[index + 1 : index + 2] == "<" and text[index + 2 : index + 3] != "<":
+            digits = operator_position()
+            parsed = parse_heredoc_operator(text, index) if digits is not None else None
+            if parsed is not None:
+                delimiter, strip_tabs, end = parsed
+                pending.append((delimiter, strip_tabs))
+                if digits:
+                    del result[len(result) - digits :]
+                index = end
+                continue
+            result.append(char)
+            index += 1
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
 
 
 def shell_tokens(command):
@@ -610,15 +784,22 @@ def shell_tokens(command):
     の判定はこの情報を使うため、引用符内の `&&` や `;`、エスケープされた
     `;` は演算子にならない。`&>` と `& >` も区別できる。閉じていない
     引用符がある場合は、shlex と同じく ValueError を上げる。
+
+    トークン化の前に、ヒアドキュメントの本文と行継続（バックスラッシュ＋
+    改行）を取り除く。本文はシェルの構文として解釈されないため、本文の
+    引用符や改行がトークンを壊すことはない。行継続は入力から取り除かれる
+    ため、継続行の字下げが余分な引数になることもない。
     """
-    text = strip_shell_comments(command)
+    text = strip_shell_comments(strip_heredoc_bodies(command))
     tokens = []
     index = 0
     pending_space = False
 
-    def flush_word(chars, quoted, space_before):
+    def flush_word(chars, quoted, space_before, flags):
         if chars or quoted:
-            tokens.append(ShellToken("".join(chars), quoted=quoted, space_before=space_before))
+            token = ShellToken("".join(chars), quoted=quoted, space_before=space_before)
+            token.heredoc_operator = starts_with_heredoc_operator(chars, flags)
+            tokens.append(token)
 
     while index < len(text):
         char = text[index]
@@ -641,13 +822,18 @@ def shell_tokens(command):
         word_space = pending_space
         pending_space = False
         chars = []
+        flags = []
         quoted = False
         while index < len(text):
             char = text[index]
             if char in " \t\r" or char in SHELL_OPERATOR_CHARS:
                 break
             if char == "\\" and index + 1 < len(text):
+                if text[index + 1] == "\n":
+                    index += 2
+                    continue
                 chars.append(text[index + 1])
+                flags.append(True)
                 quoted = True
                 index += 2
                 continue
@@ -656,20 +842,51 @@ def shell_tokens(command):
                 quoted = True
                 index += 1
                 while index < len(text) and text[index] != quote:
+                    if (
+                        quote == '"'
+                        and text[index] == "\\"
+                        and index + 1 < len(text)
+                        and text[index + 1] == "\n"
+                    ):
+                        index += 2
+                        continue
                     if quote == '"' and text[index] == "\\" and index + 1 < len(text):
                         chars.append(text[index + 1])
+                        flags.append(True)
                         index += 2
                         continue
                     chars.append(text[index])
+                    flags.append(True)
                     index += 1
                 if index >= len(text):
                     raise ValueError("No closing quotation")
                 index += 1
                 continue
             chars.append(char)
+            flags.append(False)
             index += 1
-        flush_word(chars, quoted, word_space)
+        flush_word(chars, quoted, word_space, flags)
     return tokens
+
+
+def starts_with_heredoc_operator(chars, flags):
+    """語の先頭（数字の fd 指定の後）に、引用されていない << があるかを返す。
+
+    `<<'EOF'` のように区切り語だけが引用されている場合は演算子として扱う。
+    `"<<EOF"` のように << 自体が引用符の中にある場合は、ヒアドキュメントの
+    開始ではない。<<<（ヒアストリング）は本文を持たないため対象にしない。
+    """
+    index = 0
+    while index < len(chars) and chars[index].isdigit() and not flags[index]:
+        index += 1
+    return (
+        index + 1 < len(chars)
+        and chars[index] == "<"
+        and not flags[index]
+        and chars[index + 1] == "<"
+        and not flags[index + 1]
+        and (index + 2 >= len(chars) or chars[index + 2] != "<")
+    )
 
 
 def heredoc_delimiter(token):
@@ -677,8 +894,12 @@ def heredoc_delimiter(token):
 
     区切り語が次のトークンに分かれている形式（<< だけのトークン）では空文字列を
     返す。ヒアドキュメントでない場合は None を返す。<<<（ヒアストリング）は
-    本文を持たないため対象にしない。
+    本文を持たないため対象にしない。`<<` 自体が引用符の中にあるトークン
+    （例: echo の引数 "<<EOF"）は、引用されていない `<<` で始まるトークン
+    ではないため対象にしない。
     """
+    if not getattr(token, "heredoc_operator", False):
+        return None
     text = str(token)
     index = 0
     while index < len(text) and text[index].isdigit():
@@ -696,8 +917,10 @@ def simple_commands(tokens):
     """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。
 
     ヒアドキュメントの本文はコマンドとして実行されないため、コマンド解析の
-    対象から外す。本文は、ヒアドキュメントを含むコマンド行の改行の直後から、
-    区切り語だけの行までである。
+    対象から外す。本文は通常、shell_tokens の段階で取り除かれている。ここでの
+    読み飛ばしは、トークン列に開始のトークンが残っている場合の備えである。
+    本文は、ヒアドキュメントを含むコマンド行の改行の直後から、区切り語だけの
+    行までである。
     """
     current = []
     pending_delimiters = []
