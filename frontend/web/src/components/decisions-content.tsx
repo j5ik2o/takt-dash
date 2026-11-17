@@ -48,13 +48,13 @@ const targetLabel = (decision: PendingDecision): string | undefined => {
 const waitSeconds = (decision: PendingDecisionView): number => Math.round(decision.waitMinutes * 60);
 
 // 本文は takt-mcp の原文をそのまま運ぶ。空行を段落の区切りとして扱い、段落内の改行は
-// 空白へ畳まずに残す（issue #37 受け入れ条件1）。
+// 空白へ畳まずに残す（issue #37 受け入れ条件1）。段落の先頭の字下げも残すため、trim は
+// 空の段落を取り除く判定にだけ使い、表示する文字列自体は切り取らない（issue #48）。
 const splitBodyParagraphs = (body: string): string[] =>
   body
     .replace(/\r\n?/g, "\n")
     .split(/\n[ \t]*\n+/)
-    .map((paragraph) => paragraph.trim())
-    .filter((paragraph) => paragraph !== "");
+    .filter((paragraph) => paragraph.trim() !== "");
 
 export function DecisionsContent({ state, now, disconnected, readAt, unavailableSituation }: DecisionsContentProps): ReactElement {
   const thresholds = resolveThresholds(state.thresholds);

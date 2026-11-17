@@ -442,6 +442,37 @@ test("判断待ちページは CRLF の改行も段落の区切りとして扱�
   assert.match(textParagraphs[1]!, /第2段落。/);
 });
 
+test("判断待ちページは本文の先頭の字下げを残して描画する", () => {
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "  字下げした行です。\n同じ段落の2行目です。" }),
+    now: NOW,
+  });
+  const descBlock = elementsByClass(html, "desc")[0];
+  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  const paragraphs = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
+  assert.equal(paragraphs.length, 1, "単一改行では段落を分けない");
+  assert.match(
+    paragraphs[0]!,
+    /^<p> {2}字下げした行です。\n同じ段落の2行目です。<\/p>$/,
+    "段落の先頭の空白を切り取らずに表示する",
+  );
+});
+
+test("判断待ちページは空行で段落を分け、空行直後の段落の字下げも残す", () => {
+  const body = "第1段落です。\n\n　字下げした第2段落です。\n\n  字下げした第3段落です。";
+  const html = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body }),
+    now: NOW,
+  });
+  const descBlock = elementsByClass(html, "desc")[0];
+  const descHtml = html.slice(html.indexOf(descBlock!), html.indexOf('class="wait"'));
+  const paragraphs = descHtml.match(/<p[^>]*>[\s\S]*?<\/p>/g) ?? [];
+  assert.equal(paragraphs.length, 3, "空行で区切られた3つの段落がそれぞれ別の要素になる");
+  assert.match(paragraphs[0]!, /^<p>第1段落です。<\/p>$/);
+  assert.match(paragraphs[1]!, /^<p>　字下げした第2段落です。<\/p>$/, "空行直後の段落の全角の字下げを残す");
+  assert.match(paragraphs[2]!, /^<p> {2}字下げした第3段落です。<\/p>$/, "空行直後の段落の半角の字下げを残す");
+});
+
 const headingBlocks = (html: string): string[] =>
   Array.from(html.matchAll(/<div class="proj">([\s\S]*?)<\/div>/g), (match) => match[1]);
 
