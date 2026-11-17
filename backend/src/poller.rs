@@ -17,7 +17,9 @@ use crate::{
   config::{load_config, Config, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
   mcp::{client_config, McpClientRegistry, ToolError, ToolSet},
-  model::{ConnectionState, ConnectionTransition, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot},
+  model::{
+    ConnectionState, ConnectionTransition, EventKind, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot,
+  },
   store::StateStore,
 };
 
@@ -30,6 +32,10 @@ pub struct Poller {
   previous:       BTreeMap<String, ProjectSnapshot>,
   /// 最後に出来事の記録へ成功した接続状態。接続断・復帰の再検出を防ぐ比較基準。
   notified:       BTreeMap<String, ConnectionState>,
+  /// 記録済みの切断から基準化したプロジェクトについて、その切断を記録した時刻。
+  /// 復帰の出来事へ切断していた時間を入れるとき、状態ストアの起点が再起動で
+  /// 消えている代わりに、この時刻から数えます。
+  seeded_outages: BTreeMap<String, DateTime<Utc>>,
   changes:        broadcast::Sender<()>,
   last_signature: Option<StoreSignature>,
 }
@@ -63,6 +69,7 @@ impl Poller {
       registry,
       previous: BTreeMap::new(),
       notified: BTreeMap::new(),
+      seeded_outages: BTreeMap::new(),
       changes,
       last_signature: None,
     }
@@ -108,13 +115,21 @@ impl Poller {
       if self.registry.take_rebuilt_for(&project.server, &project.name) {
         self.reset_project_baseline(&project.name);
       }
+      // 再起動や作り直しで比較基準が無いプロジェクトは、記録済みの接続の出来事から
+      // 基準を作り、未対応の切断を取りこぼさないようにします。
+      self.seed_connection_baseline(project);
       let read_at = Utc::now();
       let prev = self.previous.get(&project.name).cloned();
       match self.read_one(project, prev.as_ref()).await {
         | Ok(snapshot) => {
           // 接続断・復帰の比較基準は、最後に記録へ成功した状態（`notified`）に置きます。
           // 記録に失敗したサイクルでは基準を進めず、次サイクルで同じ差分を再検出します。
-          let outage = self.store.success_transition(&project.name, read_at).and_then(|transition| transition.outage);
+          let mut outage =
+            self.store.success_transition(&project.name, read_at).and_then(|transition| transition.outage);
+          if let Some(lost_at) = self.seeded_outages.get(&project.name) {
+            // 記録済みの切断から基準化した場合は、状態ストアの起点ではなく記録の時刻から数えます。
+            outage = Some(read_at - *lost_at);
+          }
           let transition = self.notified_transition(&project.name, ConnectionState::Connected, outage);
           let events = detect(&project.server, &project.name, prev.as_ref(), &snapshot, transition, read_at);
           match self.record_events(&events) {
@@ -123,6 +138,7 @@ impl Poller {
               self.store.record_success(&project.name, snapshot.clone(), read_at);
               self.previous.insert(project.name.clone(), snapshot);
               self.notified.insert(project.name.clone(), ConnectionState::Connected);
+              self.seeded_outages.remove(&project.name);
               report.projects_read += 1;
               report.events_recorded += events.len();
             },
@@ -134,15 +150,33 @@ impl Poller {
         | Err(error) => {
           // 接続状態は失敗のたびに進め、表示へ反映します。一方で接続断の出来事の比較基準は
           // 記録に成功するまで進めないため、記録に失敗した接続断は回復後に1回だけ記録されます。
-          let next = self.store.record_failure(&project.name, read_at).and_then(|transition| transition.next);
-          let transition = next.and_then(|next| self.notified_transition(&project.name, next, None));
+          let failure = self.store.record_failure(&project.name, read_at);
+          let next = failure.and_then(|transition| transition.next);
+          // 比較基準がまだ無い場合は、状態ストア側の遷移前を比較基準に使います。基準が無いまま
+          // 応答なしへ跨ぐと切断を記録できず、回復したときに復帰だけが残ってしまいます。
+          // ただし、状態ストア側にも遷移前が無い初回接触は基準化のみとし、切断を出しません。
+          let transition = next.and_then(|next| {
+            self.notified_transition(&project.name, next, None).or_else(|| {
+              failure.filter(|store| store.previous.is_some()).map(|store| ConnectionTransition {
+                previous: store.previous,
+                next:     Some(next),
+                outage:   None,
+              })
+            })
+          });
           let empty = ProjectSnapshot::empty();
           let next_snapshot = prev.as_ref().unwrap_or(&empty);
           let events = detect(&project.server, &project.name, prev.as_ref(), next_snapshot, transition, read_at);
           match self.record_events(&events) {
             | Ok(()) => {
               if let Some(next) = next {
-                self.notified.insert(project.name.clone(), next);
+                // 記録済みの切断から基準化したプロジェクトは、応答なしの基準を弱い状態で
+                // 上書きしません。上書きすると、しきい値を跨いだときに記録済みの切断を
+                // 二重に記録してしまいます。基準は読み取りの成功でだけ閉じます。
+                let seeded_open = self.seeded_outages.contains_key(&project.name);
+                if !seeded_open || next == ConnectionState::Unresponsive {
+                  self.notified.insert(project.name.clone(), next);
+                }
               }
               report.events_recorded += events.len();
             },
@@ -190,6 +224,26 @@ impl Poller {
     })
   }
 
+  /// 接続状態の比較基準がまだ無いプロジェクトについて、記録済みの接続の出来事から基準を作る。
+  ///
+  /// プロセスの再起動やクライアントの作り直しでメモリ上の基準が消えても、記録済みで
+  /// まだ復帰が対応していない切断があれば「応答なし」として基準化します。これにより、
+  /// 読み取りの失敗が続く間は切断を二重に記録せず、回復したときは切断へ対応する
+  /// 復帰を記録できます。記録の読み取りに失敗した場合は基準を作らず、次のサイクルで
+  /// 改めて試します。
+  fn seed_connection_baseline(&mut self, project: &Project) {
+    if self.notified.contains_key(&project.name) {
+      return;
+    }
+    let Ok(last) = self.activity.last_connection_event(&project.server, &project.name) else {
+      return;
+    };
+    if let Some((EventKind::ConnectionLost, lost_at)) = last {
+      self.notified.insert(project.name.clone(), ConnectionState::Unresponsive);
+      self.seeded_outages.insert(project.name.clone(), lost_at);
+    }
+  }
+
   /// すべてのプロジェクトの子プロセスを終了する。
   pub async fn shutdown(&mut self) {
     self.registry.shutdown_all().await;
@@ -214,6 +268,7 @@ impl Poller {
   fn reset_project_baseline(&mut self, project: &str) {
     self.previous.remove(project);
     self.notified.remove(project);
+    self.seeded_outages.remove(project);
     self.store.reset_project(project);
   }
 
