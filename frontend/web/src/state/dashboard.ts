@@ -291,6 +291,12 @@ const isInProgressGoal = (goal: Goal): boolean =>
 const waitingTaskCount = (goals: readonly Goal[]): number =>
   goals.reduce((total, goal) => total + (goal.taskCounts?.pending ?? 0), 0);
 
+// 失敗系の合計の表示名。failedTaskCount が数える「失敗」は、失敗・上限超過・PR 失敗の
+// 3状態の合計である。ゴールページの状態別の欄と同じ文言（taskStatusLabel の「失敗」、
+// 「上限超過」、「PR 失敗」）で内訳を示し、概要の合計をゴールページの欄の合計と
+// 照合できるようにする（issue #260）。
+export const FAILED_TASK_KINDS_LABEL = "失敗・上限超過・PR 失敗";
+
 const failedTaskCount = (goals: readonly Goal[]): number =>
   goals.reduce(
     (total, goal) =>
