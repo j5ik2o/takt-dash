@@ -333,6 +333,13 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* ゴール一覧のタスク件数は、項目どうしを余白で区切って並べる（issue #232）。 */
+.task-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
 .sec {
   font-size: 16px;
   margin-bottom: 12px;
@@ -1269,6 +1276,8 @@ pre {
 
   .tray-item .proj {
     grid-column: 1;
+    /* 待ち時間の行が本文のすぐ下に来るよう、左の項目は2行分にまたがらせる（issue #233）。 */
+    grid-row: 1 / span 2;
   }
 
   .tray-item .desc {
@@ -1372,6 +1381,7 @@ pre {
   .tray-item .opts,
   .tray-item .wait {
     grid-column: auto;
+    grid-row: auto;
   }
 
   .tray-item .wait b {

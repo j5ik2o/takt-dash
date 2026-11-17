@@ -161,6 +161,8 @@ test("ゴール一覧の各行は状態の文面・状態別のタスク件数�
   ]) {
     assert.ok(countsRow.includes(entry), `状態別の件数が「${entry}」と表示される`);
   }
+  // 件数の項目どうしは、区切りを持つコンテナの中に並ぶ（issue #232）。
+  assert.match(countsRow, /class="kv task-counts"/);
 });
 
 test("ゴール一覧の各行はゴール ID をエスケープした詳細へのリンクを持つ", () => {
