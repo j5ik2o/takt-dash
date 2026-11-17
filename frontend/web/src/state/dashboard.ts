@@ -142,6 +142,7 @@ export type DecisionsStateInput = {
   thresholds: AnomalyThresholds | undefined;
   pendingDecisions: readonly PendingDecisionInput[];
   servers: readonly Server[];
+  projects: readonly Project[];
 };
 
 const minutesSince = (from: Date, now: Date): number => Math.max(0, (now.getTime() - from.getTime()) / 60_000);
@@ -309,6 +310,17 @@ const failedTaskCount = (goals: readonly Goal[]): number =>
 
 const isUnresponsiveProject = (project: Project): boolean =>
   project.connectionState === CONNECTION_STATE.UNRESPONSIVE;
+
+// まだ一度も読めていないサーバーとプロジェクト。最後に読めた時刻が無い対象は、
+// 配下の一覧が空でも「無い」とは断定できない。一覧の件数を表示する画面は、
+// 未読の対象があるとき件数へ注記を付け、空の断定を避ける（issue #259）。
+export function neverReadServers(servers: readonly Server[]): Server[] {
+  return servers.filter((server) => server.lastReadAt === undefined);
+}
+
+export function neverReadProjects(projects: readonly Project[]): Project[] {
+  return projects.filter((project) => project.lastReadAt === undefined);
+}
 
 // 応答のないサーバー・プロジェクトから最後に読めた時刻のうち、最も古いものを集計の基準にする。
 // 1件も読めた時刻が無ければ undefined のままにし、実在しない時刻を補わない。

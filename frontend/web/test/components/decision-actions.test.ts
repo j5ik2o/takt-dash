@@ -83,6 +83,42 @@ test("判断待ち一覧は種別ごとの操作要素を描画する", () => {
   assert.match(html, /<button[^>]*>却下<\/button>/);
 });
 
+test("判断待ち一覧はまだ読めていないサーバーがあるとき0件でも「判断待ちはありません」と断定しない", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    pendingDecisions: [],
+    servers: base.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
+  });
+  assert.doesNotMatch(html, /判断待ちはありません/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /判断待ちがあるかどうかは分かりません/);
+});
+
+test("判断待ち一覧はサーバーが既読でも未読のプロジェクトがあるとき0件でも「判断待ちはありません」と断定しない", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    pendingDecisions: [],
+    projects: base.projects.map((project, index) =>
+      index === 0 ? { ...project, lastReadAt: undefined } : project,
+    ),
+  });
+  assert.doesNotMatch(html, /判断待ちはありません/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /判断待ちがあるかどうかは分かりません/);
+});
+
+test("判断待ち一覧はまだ読めていないサーバーがあっても読めた分の一覧はそのまま描画する", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    servers: base.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
+  });
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /リリースの日取りはどうしますか/);
+});
+
 test("作業の依頼には実施結果の2択だけを描画し、テキスト入力を出さない", () => {
   const html = renderDecisions(
     stateWith([findDecision((decision) => decision.inquiryId === "inquiry-operation")]),

@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ExecutionStatus, GoalStatus, TaskStatus } from "../../src/proto/taktdash.ts";
+import { ConnectionState, ExecutionStatus, GoalStatus, TaskStatus } from "../../src/proto/taktdash.ts";
 import { createDashboardState, createGoal } from "../support/fixtures.ts";
 import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
 import { GoalsContent } from "../../src/components/goals-content.tsx";
@@ -63,6 +63,25 @@ test("ゴール一覧は0件のとき空であることが分かる表示にな�
   const state = createDashboardState();
   const html = renderGoals({ ...state, goals: [] });
   assert.match(html, /ゴールはありません/);
+});
+
+test("ゴール一覧はまだ読めていないとき0件でも「ゴールはありません」と断定しない", () => {
+  const base = createDashboardState();
+  const html = renderGoals({
+    ...base,
+    readAt: undefined,
+    servers: base.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
+    projects: base.projects.map((item) => ({
+      ...item,
+      connected: false,
+      connectionState: ConnectionState.CONNECTION_STATE_UNSPECIFIED,
+      lastReadAt: undefined,
+    })),
+    goals: [],
+  });
+  assert.doesNotMatch(html, /ゴールはありません/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /ゴールがあるかどうかは分かりません/);
 });
 
 test("ゴール一覧ページは ?project= を一覧へ渡してそのプロジェクトだけを表示する", async () => {
