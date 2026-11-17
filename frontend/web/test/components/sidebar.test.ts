@@ -141,8 +141,8 @@ test("サイドバーのサーバー状態は概要カードと同じ基準と�
   const withoutRuns = renderSidebarWithServers([]);
   assert.deepEqual(
     serverRow(withoutRuns, "Mac mini"),
-    { dot: "idle", state: "接続中（run なし）" },
-    "接続済みで run が無いサーバーは、カードと同じく接続中（run なし）にし、動作中と食い違わせない",
+    { dot: "idle", state: "接続中" },
+    "接続済みで run が無いサーバーは、カードと同じく接続中にし、動作中と食い違わせない",
   );
   assert.deepEqual(
     serverRow(withoutRuns, "Mac Studio"),

@@ -676,18 +676,18 @@ test("サーバーの状態の文言は接続と活動を区別する", () => {
   assert.equal(serverStateLabel("live"), "動作中", "run がある場合は動作中にする");
   assert.equal(
     serverStateLabel("idle"),
-    "接続中（run なし）",
+    "接続中",
     "接続済みで run が無いことを、応答なしとも動作中とも違う文言で示す",
   );
 });
 
-test("接続済みで run が0件のサーバーは概要カードで「接続中（run なし）」になる", () => {
+test("接続済みで run が0件のサーバーは概要カードで「接続中」になる", () => {
   const state = createDashboardState();
   const overview = buildOverviewView({ ...state, runs: [] }, NOW);
 
   const mini = overview.servers.find((item) => item.server.serverId === "mini");
   assert.equal(mini?.state, "idle", "接続済みで run が無いサーバーは idle である");
-  assert.equal(mini?.stateLabel, "接続中（run なし）", "カードの文言が接続できていることを示す");
+  assert.equal(mini?.stateLabel, "接続中", "カードの文言が接続できていることを示す");
 
   const down = overview.servers.find((item) => item.server.serverId === "down");
   assert.equal(down?.state, "down", "未接続のサーバーは down のままである");

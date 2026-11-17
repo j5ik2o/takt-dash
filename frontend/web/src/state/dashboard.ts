@@ -240,8 +240,9 @@ const serverState = (server: Server, runs: readonly RunInput[]): OverviewServerV
   serverStateFrom(server.connected, runs.length);
 
 // idle は「接続できているが run が無い」状態であり、接続そのものができていない
-// down（応答なし）と区別できる文言にする。接続できていることを文言に含め、
-// 接続だけを見る表示と並んでも食い違って見えないようにする（issue #188）。
+// down（応答なし）と区別できる文言にする。文言は「接続中」と短くし、run が無いことは
+// サイドバーの「run 0件」とカードの件数表示で別途分かるため文言には含めない。
+// 長い文言は幅の狭いサイドバーの行にはみ出すおそれがある（issue #188）。
 export const serverStateLabel = (state: OverviewServerView["state"]): string => {
   switch (state) {
     case "down":
@@ -249,7 +250,7 @@ export const serverStateLabel = (state: OverviewServerView["state"]): string => 
     case "live":
       return "動作中";
     case "idle":
-      return "接続中（run なし）";
+      return "接続中";
   }
 };
 
