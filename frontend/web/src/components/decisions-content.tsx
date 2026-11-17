@@ -18,7 +18,8 @@ import {
   type PendingDecisionView,
 } from "../state/dashboard";
 import { decisionAnchorId } from "../state/anchors";
-import { formatDuration } from "../state/format";
+import { formatClock, formatDateTime, formatDuration } from "../state/format";
+import type { BackendUnavailableSituation } from "../grpc/client";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { DecisionActions } from "./decision-actions";
 import { DecisionResults } from "./decision-results";
@@ -27,6 +28,10 @@ type DecisionsContentProps = {
   state: DecisionsStateInput;
   now: Date;
   disconnected: boolean;
+  /** 切断時に残す最後の内容の取得時刻。ライブ表示だけが渡す。 */
+  readAt?: Date;
+  /** 切断時の通知の文面を決める状況。ライブ表示だけが渡す。 */
+  unavailableSituation?: BackendUnavailableSituation;
 };
 
 const targetLabel = (decision: PendingDecision): string | undefined => {
@@ -50,7 +55,7 @@ const splitBodyParagraphs = (body: string): string[] =>
     .map((paragraph) => paragraph.trim())
     .filter((paragraph) => paragraph !== "");
 
-export function DecisionsContent({ state, now, disconnected }: DecisionsContentProps): ReactElement {
+export function DecisionsContent({ state, now, disconnected, readAt, unavailableSituation }: DecisionsContentProps): ReactElement {
   const thresholds = resolveThresholds(state.thresholds);
   const decisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
@@ -65,13 +70,18 @@ export function DecisionsContent({ state, now, disconnected }: DecisionsContentP
 
   return (
     <main className="page">
-      {disconnected ? <BackendUnavailableNotice /> : null}
+      {disconnected ? <BackendUnavailableNotice situation={unavailableSituation} /> : null}
       <header className="page-head">
         <div>
           <h1>判断待ち</h1>
           <p>
             全サーバーで、人の判断を待っている項目が {decisions.length}件あります。待ち時間の長い順に並べています。
           </p>
+          {disconnected && readAt !== undefined ? (
+            <p className="stale-note">
+              最終読み取り時刻 {formatClock(readAt)}（{formatDateTime(readAt)}）時点の内容を表示しています。
+            </p>
+          ) : null}
         </div>
       </header>
 

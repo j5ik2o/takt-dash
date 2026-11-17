@@ -60,3 +60,42 @@ test("判断待ちは切断中も最後に読めた状態の表示を残す", ()
   assert.match(html, /corporate-site/, "最後に読めた判断待ちの対象プロジェクトを残します");
   assert.match(html, /プルリクエスト #418/, "最後に読めた判断待ちの本文を残します");
 });
+
+test("概要は一度接続できた後の切断では設定の確認を促さない", () => {
+  const html = renderToStaticMarkup(
+    createElement(OverviewContent, {
+      view: buildOverviewView(createDashboardState(), NOW),
+      disconnected: true,
+      unavailableSituation: { failure: "unreachable", respondedBefore: true, durationMs: 5_000 },
+    }),
+  );
+  assert.match(html, /backend に接続できません/);
+  assert.doesNotMatch(html, /TAKTDASH_BACKEND_ADDR/);
+});
+
+test("概要は切断が60秒を超えたら起動の確認を促す", () => {
+  const html = renderToStaticMarkup(
+    createElement(OverviewContent, {
+      view: buildOverviewView(createDashboardState(), NOW),
+      disconnected: true,
+      unavailableSituation: { failure: "unreachable", respondedBefore: true, durationMs: 120_000 },
+    }),
+  );
+  assert.match(html, /backend の起動を確認してください/);
+  assert.doesNotMatch(html, /TAKTDASH_BACKEND_ADDR/);
+});
+
+test("判断待ちは切断中に取得した時刻つきで最後の内容を残す", () => {
+  const state = createDashboardState();
+  const html = renderToStaticMarkup(
+    createElement(DecisionsContent, {
+      state,
+      now: NOW,
+      disconnected: true,
+      readAt: state.readAt,
+      unavailableSituation: { failure: "unreachable", respondedBefore: true, durationMs: 5_000 },
+    }),
+  );
+  assert.match(html, /最終読み取り時刻/, "最後に取れた内容の取得時刻を表示します");
+  assert.doesNotMatch(html, /TAKTDASH_BACKEND_ADDR/);
+});

@@ -4,12 +4,15 @@ import type { OverviewView } from "../state/dashboard";
 import { decisionKey, decisionTypeLabel } from "../state/decision-actions";
 import { formatClock, formatDateTime, formatDuration, formatModel } from "../state/format";
 import { decisionHref, projectHref, serverAnchorId } from "../state/anchors";
+import type { BackendUnavailableSituation } from "../grpc/client";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 
 type OverviewContentProps = {
   view: OverviewView;
   flashingRunSlugs?: ReadonlySet<string>;
   disconnected: boolean;
+  /** 切断時の通知の文面を決める状況。ライブ表示だけが渡す。 */
+  unavailableSituation?: BackendUnavailableSituation;
 };
 
 const positionText = (stepNumber?: number, totalSteps?: number, iteration?: number): string => {
@@ -33,6 +36,7 @@ export function OverviewContent({
   view,
   flashingRunSlugs,
   disconnected,
+  unavailableSituation,
 }: OverviewContentProps): ReactElement {
   const { pendingCounts } = view;
   const hasUnresponsiveServer = view.unresponsiveServers.length > 0;
@@ -50,7 +54,7 @@ export function OverviewContent({
   const longestWait = view.pendingDecisions[0];
   return (
     <main className="page overview">
-      {disconnected ? <BackendUnavailableNotice /> : null}
+      {disconnected ? <BackendUnavailableNotice situation={unavailableSituation} /> : null}
       <header className="page-head">
         <div>
           <h1>概要</h1>

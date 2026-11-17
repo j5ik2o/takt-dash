@@ -10,6 +10,7 @@ import * as grpc from "@grpc/grpc-js";
 import { createTaskDetailResponse } from "../support/fixtures.ts";
 import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-server.ts";
 import { formatDateTime } from "../../src/state/format.ts";
+import { resetBackendResponded } from "../../src/grpc/client.ts";
 import { TaskDetailContent } from "../../src/components/task-detail-content.tsx";
 import { TaskDetailLoader } from "../../src/components/task-detail-loader.tsx";
 import TaskDetailPage from "../../app/tasks/[project]/page.tsx";
@@ -228,6 +229,9 @@ test("応答のプロジェクトが要求と一致しないときも本番経�
 });
 
 test("backend に接続できないときタスク詳細のローダーは落ちず不通の旨を描画する", async () => {
+  // このテストは、一度も backend の応答を受けていない Web プロセスを前提にする。
+  // 同じファイルの成功ケースで残った接続履歴の影響を受けないよう、前提を明示する。
+  resetBackendResponded();
   const closedAddress = await reserveClosedAddress();
   await withServerEnv(closedAddress, async () => {
     const html = renderToStaticMarkup(await loadTask(TASK_NAME));
