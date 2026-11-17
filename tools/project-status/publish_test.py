@@ -483,6 +483,20 @@ def test_status_builds_issue_url_from_number() -> None:
         assert "--value In Review" in edits[0], edits
 
 
+def test_status_builds_issue_url_from_number_with_trailing_period() -> None:
+    with Repo() as repo:
+        repo.write_order("Fix issue #32.\n")
+        repo.write_status_config(base_status_config(repository="j5ik2o/takt-dash"))
+        expected = "https://github.com/j5ik2o/takt-dash/issues/32"
+        repo.gh_with_item(expected)
+        repo.mark_published()
+        run_ok(repo, "status", "--status", "In Review", "--require-published")
+        edits = [line for line in repo.gh_calls() if line.startswith("gh project item-edit")]
+        assert len(edits) == 1, repo.gh_calls()
+        assert f"--url {expected}" in edits[0], edits
+        assert "--value In Review" in edits[0], edits
+
+
 def test_status_require_published_changes_after_publish() -> None:
     with Repo() as repo:
         repo.goal_task()
@@ -610,6 +624,7 @@ def main() -> int:
         test_new_commit_invalidates_previous_push,
         test_status_changes_issue_url_from_order,
         test_status_builds_issue_url_from_number,
+        test_status_builds_issue_url_from_number_with_trailing_period,
         test_status_require_published_changes_after_publish,
         test_status_without_require_published_ignores_markers,
         test_status_pull_url_is_unprocessed,

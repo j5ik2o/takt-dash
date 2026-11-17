@@ -24,6 +24,9 @@
   9. ブロックスカラー（`>-` / `|-` など）の本文にある `- TR-00x:` 行ではエントリを
      分割せず、エントリの先頭と同じインデントの `- ` 行だけを境界にする。
   10. tasks.yaml を読めないとき（OSError・不正な UTF-8）は ContextError にする。
+  11. issue 参照の抽出は、番号の直後の句読点（ピリオド・読点・閉じ括弧）を許し、
+      数字が続くピリオド（小数・バージョン表記）は issue 番号として扱わない。
+      URL があるときは番号より URL を優先し、pull request の URL は扱わない。
 
 実 gh・実 Git は呼ばない。すべて一時ディレクトリで完結する。
 """
@@ -362,6 +365,36 @@ def test_missing_tasks_yaml_read_is_context_error() -> None:
         expect_context_error(module, module.parse_tasks_yaml, workspace.root / ".takt" / "tasks.yaml")
 
 
+def test_issue_reference_allows_trailing_punctuation() -> None:
+    module = load_module()
+    cases = [
+        "Fix issue #123.",
+        "issue #123. 次の文に進みます。",
+        "対象は issue #123, あわせて確認してください。",
+        "(issue #123)",
+        "issue #123",
+        "issue 123",
+    ]
+    for text in cases:
+        found = module.extract_issue_reference(text)
+        assert found == "123", f"{text!r} から issue 番号 123 を取り出す必要があります: {found!r}"
+
+
+def test_issue_reference_rejects_version_like_number() -> None:
+    module = load_module()
+    found = module.extract_issue_reference("issue #123.5 を参照してください。")
+    assert found is None, f"数字が続くピリオドはバージョン表記として issue 番号にしない必要があります: {found!r}"
+
+
+def test_issue_reference_prefers_url_and_ignores_pull_url() -> None:
+    module = load_module()
+    url = "https://github.com/j5ik2o/takt-dash/issues/45"
+    found = module.extract_issue_reference(f"対象は {url} です。issue #99 も関係します。")
+    assert found == url, f"URL があるときは番号より URL を優先する必要があります: {found!r}"
+    found = module.extract_issue_reference("対象は https://github.com/j5ik2o/takt-dash/pull/45 です。")
+    assert found is None, f"pull request の URL は issue 参照として扱いません: {found!r}"
+
+
 def main() -> int:
     tests = [
         test_response_file_resolves_context_order,
@@ -385,6 +418,9 @@ def main() -> int:
         test_entry_start_indent_keeps_second_entry,
         test_unreadable_tasks_yaml_is_context_error,
         test_missing_tasks_yaml_read_is_context_error,
+        test_issue_reference_allows_trailing_punctuation,
+        test_issue_reference_rejects_version_like_number,
+        test_issue_reference_prefers_url_and_ignores_pull_url,
     ]
     failures = 0
     for test in tests:
