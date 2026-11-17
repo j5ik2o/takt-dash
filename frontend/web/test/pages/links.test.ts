@@ -97,6 +97,7 @@ test("プロジェクト名が既存の見出し id と衝突してもカード 
         about: "衝突を確かめるプロジェクト",
         serverId: "mini",
         completedTasks24h: 1,
+        concurrency: 1,
         connected: true,
         lastReadAt: NOW,
         connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
@@ -140,7 +141,7 @@ test("サーバー ID が既存の見出し id と衝突してもカード id �
   const base = createDashboardState();
   const state = {
     ...base,
-    servers: [{ serverId: "h-servers", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, concurrency: 4 }],
+    servers: [{ serverId: "h-servers", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW }],
     runs: [],
   };
   const sidebar = renderSidebarWithState(state);
@@ -229,6 +230,7 @@ test("名前に %20 を含むプロジェクトでも概要のリンクが該当
         about: "% を含む名前のプロジェクト",
         serverId: "mini",
         completedTasks24h: 1,
+        concurrency: 1,
         connected: true,
         lastReadAt: NOW,
         connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
@@ -255,6 +257,7 @@ test("名前に % を含むプロジェクトでも概要のリンクが該当�
         about: "% を含む名前のプロジェクト",
         serverId: "mini",
         completedTasks24h: 1,
+        concurrency: 1,
         connected: true,
         lastReadAt: NOW,
         connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
@@ -275,7 +278,7 @@ test("ID に % を含むサーバーでもサイドバーのリンクが該当�
   const base = createDashboardState();
   const state = {
     ...base,
-    servers: [{ serverId: "100%", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, concurrency: 4 }],
+    servers: [{ serverId: "100%", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW }],
     runs: [],
   };
   const sidebar = renderSidebarWithState(state);

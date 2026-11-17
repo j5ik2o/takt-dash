@@ -477,25 +477,19 @@ fn set_projects_projects_added_projects_as_unread_and_removes_deleted_ones() {
 #[test]
 fn set_servers_replaces_adds_and_removes_server_metadata() {
   let mut servers = BTreeMap::new();
-  servers.insert("mac-mini".to_owned(), ServerMeta {
-    name:        "j5ik2o-mac-mini".to_owned(),
-    kind:        "Mac mini".to_owned(),
-    concurrency: 4,
-  });
+  servers.insert("mac-mini".to_owned(), ServerMeta { name: "j5ik2o-mac-mini".to_owned(), kind: "Mac mini".to_owned() });
   let store =
     StateStore::new(servers, vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))], thresholds());
 
   // 稼働中の再読み込みで、既存サーバーの表示情報を変え、新規サーバーを追加し、旧サーバーを消す。
   let mut refreshed = BTreeMap::new();
-  refreshed.insert("mac-mini".to_owned(), ServerMeta {
-    name:        "mini-renamed".to_owned(),
-    kind:        "Mac mini (改称)".to_owned(),
-    concurrency: 8,
-  });
+  refreshed
+    .insert("mac-mini".to_owned(), ServerMeta {
+      name: "mini-renamed".to_owned(), kind: "Mac mini (改称)".to_owned()
+    });
   refreshed.insert("mac-studio".to_owned(), ServerMeta {
-    name:        "j5ik2o-mac-studio".to_owned(),
-    kind:        "Mac Studio".to_owned(),
-    concurrency: 2,
+    name: "j5ik2o-mac-studio".to_owned(),
+    kind: "Mac Studio".to_owned(),
   });
   store.set_servers(refreshed);
 
@@ -504,7 +498,6 @@ fn set_servers_replaces_adds_and_removes_server_metadata() {
   let mini = after.get("mac-mini").expect("既存サーバーは残ります");
   assert_eq!(mini.name, "mini-renamed", "既存サーバーの表示情報を新しい設定で置き換えます");
   assert_eq!(mini.kind, "Mac mini (改称)");
-  assert_eq!(mini.concurrency, 8, "並列度の変更も反映します");
   assert_eq!(after.get("mac-studio").expect("追加サーバーがあります").name, "j5ik2o-mac-studio");
 }
 
@@ -565,15 +558,10 @@ fn set_servers_replaces_server_meta_on_the_same_store() {
 
   // 稼働中の再読み込みで、既存サーバーの表示情報を変え、新しいサーバーを追加する。
   let mut changed = BTreeMap::new();
-  changed.insert("mac-mini".to_owned(), ServerMeta {
-    name:        "renamed-mini".to_owned(),
-    kind:        "Mac Studio".to_owned(),
-    concurrency: 8,
-  });
+  changed.insert("mac-mini".to_owned(), ServerMeta { name: "renamed-mini".to_owned(), kind: "Mac Studio".to_owned() });
   changed.insert("mac-studio".to_owned(), ServerMeta {
-    name:        "j5ik2o-mac-studio".to_owned(),
-    kind:        "Mac Studio".to_owned(),
-    concurrency: 2,
+    name: "j5ik2o-mac-studio".to_owned(),
+    kind: "Mac Studio".to_owned(),
   });
   store.set_servers(changed);
 
@@ -581,7 +569,6 @@ fn set_servers_replaces_server_meta_on_the_same_store() {
   assert_eq!(after.len(), 2, "追加したサーバーを投影に載せます");
   assert_eq!(after["mac-mini"].name, "renamed-mini", "改名を同じストアへ反映します");
   assert_eq!(after["mac-mini"].kind, "Mac Studio", "種類の変更も反映します");
-  assert_eq!(after["mac-mini"].concurrency, 8, "同時実行数の変更も反映します");
   assert_eq!(after["mac-studio"].name, "j5ik2o-mac-studio");
 
   // 設定から消えたサーバーは投影に残さない。

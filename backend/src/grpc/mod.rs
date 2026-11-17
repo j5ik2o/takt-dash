@@ -138,7 +138,6 @@ fn assemble_servers(
         kind: meta.kind.clone(),
         connected,
         last_read_at: optional_timestamp(last_read_at),
-        concurrency: meta.concurrency,
       }
     })
     .collect()
@@ -156,6 +155,7 @@ fn assemble_projects(views: &[model::ProjectView], activity: &ActivityStore, now
         name: view.name.clone(),
         about: view.about.clone(),
         server_id: view.server_id.clone(),
+        concurrency: view.concurrency,
         completed_tasks_24h,
         connected: view.connected,
         last_read_at: optional_timestamp(view.last_read_at),

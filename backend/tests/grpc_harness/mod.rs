@@ -154,7 +154,6 @@ impl GrpcHarnessBuilder {
       "servers": servers.iter().map(|(server_id, meta)| (server_id.clone(), json!({
         "name": meta.name,
         "kind": meta.kind,
-        "concurrency": meta.concurrency,
       }))).collect::<serde_json::Map<_, _>>(),
       "projects": projects.iter().map(|project| json!({
         "name": project.name,
@@ -245,7 +244,6 @@ impl GrpcHarness {
     value["servers"][server_id] = json!({
       "name": meta.name,
       "kind": meta.kind,
-      "concurrency": meta.concurrency,
     });
     std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
   }

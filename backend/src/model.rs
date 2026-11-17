@@ -434,6 +434,8 @@ pub struct ProjectView {
   pub name:             String,
   pub about:            String,
   pub server_id:        String,
+  /// 同時実行の上限（プロジェクトの .takt/config.yaml 由来）。
+  pub concurrency:      i32,
   pub connected:        bool,
   /// 接続状態。まだ一度も読めていない場合は None。
   pub connection_state: Option<ConnectionState>,

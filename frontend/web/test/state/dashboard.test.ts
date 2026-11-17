@@ -376,7 +376,7 @@ test("応答なしのプロジェクトの run は従来どおり最後に読め
 test("概要は実行上限・24時間完了・失敗・中止・無音を導出する", () => {
   const view = buildOverviewView(createDashboardState(), NOW);
 
-  assert.equal(view.runLimit, 8, "全サーバーの concurrency の合計を実行上限にする");
+  assert.equal(view.runLimit, 8, "全プロジェクトの concurrency の合計を実行上限にする");
   assert.equal(view.completedTasks24h, 4, "全プロジェクトの24時間完了タスクを合計する");
   assert.equal(view.failedTaskCount, 1, "失敗・上限超過・PR作成失敗を合わせて数える");
   assert.equal(view.abortedGoalCount, 0, "中止したゴールは無い");
@@ -446,7 +446,7 @@ test("runLimit は concurrency が0でも破綻しない", () => {
   const base = createHealthyDashboardState();
   const state = {
     ...base,
-    servers: base.servers.map((server) => ({ ...server, concurrency: 0 })),
+    projects: base.projects.map((project) => ({ ...project, concurrency: 0 })),
   };
   const view = buildOverviewView(state, NOW);
 
@@ -460,7 +460,7 @@ test("サーバーごとの下端値は run・進行中ゴール・判断待ち�
   assert.ok(mini, "mini のカードがある");
   assert.ok(down, "down のカードがある");
 
-  assert.equal(mini.runLimit, 4, "サーバーの concurrency を上限にする");
+  assert.equal(mini.runLimit, 8, "配下のプロジェクトの concurrency の合計を上限にする");
   assert.equal(mini.runningRuns, 1, "実行中の run を数える");
   assert.equal(mini.inProgressGoals, 1, "人のマージ待ちを除いた進行中のゴールを数える");
   assert.equal(mini.pendingCount, 2, "そのサーバーの判断待ちを数える");
@@ -714,4 +714,34 @@ test("接続済みで run があるサーバーは概要カードで「動作中
   const mini = overview.servers.find((item) => item.server.serverId === "mini");
   assert.equal(mini?.state, "live", "run があるサーバーは live である");
   assert.equal(mini?.stateLabel, "動作中", "カードの文言は動作中である");
+});
+
+test("runLimit はサーバーの concurrency ではなく、プロジェクトの concurrency の合計にする", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    projects: base.projects.map((project) =>
+      project.name === "corporate-site" ? { ...project, concurrency: 1 } : { ...project, concurrency: 2 },
+    ),
+  };
+  const view = buildOverviewView(state, NOW);
+
+  assert.equal(view.runLimit, 3, "全プロジェクトの concurrency の合計を実行上限にする");
+  const mini = view.servers.find((item) => item.server.serverId === "mini");
+  assert.ok(mini, "mini のカードがある");
+  assert.equal(mini.runLimit, 3, "サーバーの上限は配下のプロジェクトの concurrency の合計にする");
+  const down = view.servers.find((item) => item.server.serverId === "down");
+  assert.ok(down, "down のカードがある");
+  assert.equal(down.runLimit, 0, "プロジェクトが無いサーバーの上限は0にする");
+});
+
+test("プロジェクトごとに実行中の run 件数とそのプロジェクトの上限を対比できる", () => {
+  const view = buildOverviewView(createDashboardState(), NOW);
+  const corporate = view.projects.find((project) => project.name === "corporate-site");
+  assert.ok(corporate, "corporate-site のカードがある");
+  assert.equal(corporate.concurrency, 4, "プロジェクト自身の concurrency を上限として持つ");
+  assert.equal(corporate.runningRuns, 1, "そのプロジェクトの実行中の run を数える");
+  const esa = view.projects.find((project) => project.name === "esa");
+  assert.ok(esa, "esa のカードがある");
+  assert.equal(esa.runningRuns, 0, "実行中の run が無いプロジェクトは0件にする");
 });

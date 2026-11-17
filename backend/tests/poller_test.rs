@@ -707,8 +707,7 @@ async fn server_meta_change_is_applied_on_the_same_running_poller() {
   harness.rewrite_config(|value| {
     value["servers"]["mac-mini"]["name"] = json!("renamed-mini");
     value["servers"]["mac-mini"]["kind"] = json!("Mac Studio");
-    value["servers"]["mac-mini"]["concurrency"] = json!(8);
-    value["servers"]["mac-studio"] = json!({ "name": "j5ik2o-mac-studio", "kind": "Mac Studio", "concurrency": 2 });
+    value["servers"]["mac-studio"] = json!({ "name": "j5ik2o-mac-studio", "kind": "Mac Studio" });
   });
   poller.read_cycle_once().await.expect("サーバー表示情報を変えたサイクルを実行できます");
 
@@ -716,13 +715,53 @@ async fn server_meta_change_is_applied_on_the_same_running_poller() {
   let mini = servers.get("mac-mini").expect("改名後もサーバーがあります");
   assert_eq!(mini.name, "renamed-mini", "稼働中でも改名を同じストアへ反映します");
   assert_eq!(mini.kind, "Mac Studio", "種類の変更も反映します");
-  assert_eq!(mini.concurrency, 8, "同時実行数の変更も反映します");
   assert_eq!(
     servers.get("mac-studio").expect("追加したサーバーがあります").name,
     "j5ik2o-mac-studio",
     "追加したサーバーも同じストアへ反映します"
   );
   assert!(changes.try_recv().is_ok(), "サーバー表示情報だけが変わったサイクルでも変化を通知します");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn project_concurrency_change_is_applied_and_notified_on_the_same_running_poller() {
+  // 同じ Poller 実体と状態ストアのまま、プロジェクトの .takt/config.yaml の
+  // concurrency だけを変える。変化指紋がプロジェクトの concurrency を見ない実装では、
+  // ストアの投影へ新しい上限が反映されても変化が通知されず、画面の上限が古いままになる。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut changes = harness.changes.subscribe();
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  let _ = changes.try_recv();
+
+  // .takt/config.yaml が無い間は、takt の既定値が上限になる。
+  let view = harness
+    .store
+    .project_views()
+    .into_iter()
+    .find(|view| view.name == "takt-dash")
+    .expect("プロジェクトの投影があります");
+  assert_eq!(view.concurrency, 1, "takt 設定が無い間は既定値の上限です");
+
+  let takt_dir = harness._directory.path().join("project").join(".takt");
+  std::fs::create_dir_all(&takt_dir).expect("プロジェクトの .takt を作れます");
+  std::fs::write(takt_dir.join("config.yaml"), "concurrency: 4\n").expect("プロジェクトの takt 設定を書けます");
+  poller.read_cycle_once().await.expect("concurrency を変えたサイクルを実行できます");
+
+  let view = harness
+    .store
+    .project_views()
+    .into_iter()
+    .find(|view| view.name == "takt-dash")
+    .expect("プロジェクトの投影があります");
+  assert_eq!(view.concurrency, 4, "稼働中でも新しい上限を同じストアへ反映します");
+  assert!(changes.try_recv().is_ok(), "concurrency だけが変わったサイクルでも変化を通知します");
+
+  // 続く無変更のサイクルでは通知しません。
+  poller.read_cycle_once().await.expect("状態を変えないサイクルを実行できます");
+  assert!(changes.try_recv().is_err(), "状態を変えないサイクルでは通知しません");
 
   poller.shutdown().await;
 }
@@ -1112,7 +1151,7 @@ async fn config_server_changes_are_reflected_after_a_cycle_and_notify_watchers()
 
   // プロジェクトと状態はそのままに、サーバーの表示情報と並列度だけを変える。
   harness.rewrite_config(|value| {
-    value["servers"]["mac-mini"] = json!({ "name": "j5ik2o-mac-mini-renamed", "kind": "Mac mini", "concurrency": 8 });
+    value["servers"]["mac-mini"] = json!({ "name": "j5ik2o-mac-mini-renamed", "kind": "Mac mini" });
   });
   poller.read_cycle_once().await.expect("サーバー情報を変えたサイクルを実行できます");
   poller.shutdown().await;
@@ -1120,7 +1159,6 @@ async fn config_server_changes_are_reflected_after_a_cycle_and_notify_watchers()
   let servers = harness.store.servers();
   let meta = servers.get("mac-mini").expect("既存サーバーの情報があります");
   assert_eq!(meta.name, "j5ik2o-mac-mini-renamed", "再読み込み後の servers は新しい設定の表示名になります");
-  assert_eq!(meta.concurrency, 8, "並列度の変更も状態ストアへ反映されます");
   assert!(watch.try_recv().is_ok(), "サーバー情報だけが変わったサイクルでも変化通知を1回送ります");
 }
 

@@ -28,6 +28,9 @@ pub const DEFAULT_CONNECTION_DELAY_SECONDS: u32 = 120;
 pub const DEFAULT_SQLITE_PATH: &str = "data/taktdash.sqlite";
 /// gRPC サーバーの待ち受けアドレスの既定値。
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50051";
+/// プロジェクトの同時実行上限の既定値。プロジェクトの .takt/config.yaml に
+/// concurrency キーが無い場合の takt 自身の既定値に合わせる。
+pub const DEFAULT_PROJECT_CONCURRENCY: i32 = 1;
 
 /// 設定ファイルの読み込みと検証で起きる失敗。
 #[derive(Debug, thiserror::Error)]
@@ -61,21 +64,24 @@ pub struct McpServer {
   pub env:     BTreeMap<String, String>,
 }
 
-/// サーバーの表示情報。
+/// サーバーの表示情報。同時実行の上限はサーバー単位には存在しないため持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerMeta {
-  pub name:        String,
-  pub kind:        String,
-  pub concurrency: i32,
+  pub name: String,
+  pub kind: String,
 }
 
 /// 集約対象のプロジェクト。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
-  pub name:   String,
-  pub server: String,
-  pub about:  String,
-  pub cwd:    PathBuf,
+  pub name:        String,
+  pub server:      String,
+  pub about:       String,
+  pub cwd:         PathBuf,
+  /// 同時実行の上限。プロジェクトの .takt/config.yaml の concurrency から解決し、
+  /// キーが無い場合は takt の既定値にする。parse_config では既定値を入れ、
+  /// load_config がファイルから解決した値で置き換える。
+  pub concurrency: i32,
 }
 
 /// 異常判定の閾値。
@@ -115,9 +121,8 @@ struct RawMcpServer {
 
 #[derive(Debug, Deserialize)]
 struct RawServerMeta {
-  name:        Option<String>,
-  kind:        Option<String>,
-  concurrency: Option<i32>,
+  name: Option<String>,
+  kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,7 +155,42 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
   let text =
     std::fs::read_to_string(path).map_err(|source| ConfigError::Read { path: path.display().to_string(), source })?;
   let base_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-  parse_config(&text, &base_dir)
+  let mut config = parse_config(&text, &base_dir)?;
+  for project in &mut config.projects {
+    project.concurrency = read_project_concurrency(&project.cwd);
+  }
+  Ok(config)
+}
+
+/// プロジェクトの .takt/config.yaml から同時実行の上限を読む。ファイルが無い・
+/// キーが無い・値が不正な場合は takt の既定値を使う。表示に使う値であり、
+/// 読めないことを設定エラーにはしない。
+fn read_project_concurrency(cwd: &Path) -> i32 {
+  let path = cwd.join(".takt").join("config.yaml");
+  let Ok(text) = std::fs::read_to_string(&path) else {
+    return DEFAULT_PROJECT_CONCURRENCY;
+  };
+  parse_takt_concurrency(&text).unwrap_or(DEFAULT_PROJECT_CONCURRENCY)
+}
+
+/// takt の設定（YAML）のトップレベルの concurrency を取り出す。ネストした
+/// 同名のキーは対象にしない。値が正の整数でない場合は None を返す。
+fn parse_takt_concurrency(text: &str) -> Option<i32> {
+  for line in text.lines() {
+    if line.starts_with(char::is_whitespace) {
+      continue;
+    }
+    let Some((key, value)) = line.split_once(':') else {
+      continue;
+    };
+    if key.trim() != "concurrency" {
+      continue;
+    }
+    let value = value.split('#').next()?.trim().trim_matches(['"', '\'']);
+    let parsed: i32 = value.parse().ok()?;
+    return (parsed > 0).then_some(parsed);
+  }
+  None
 }
 
 /// 設定の本文と、相対パスの解決に使う基準ディレクトリから [`Config`] を組み立てる。
@@ -170,9 +210,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
     validate_server_id(&id)?;
     let name = meta.name.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の name がありません。")))?;
     let kind = meta.kind.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の kind がありません。")))?;
-    let concurrency =
-      meta.concurrency.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の concurrency がありません。")))?;
-    server_meta.insert(id, ServerMeta { name, kind, concurrency });
+    server_meta.insert(id, ServerMeta { name, kind });
   }
   let mut projects = Vec::new();
   let mut seen_names = std::collections::BTreeSet::new();
@@ -204,6 +242,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
       server: project.server,
       about: project.about.unwrap_or_default(),
       cwd,
+      concurrency: DEFAULT_PROJECT_CONCURRENCY,
     });
   }
   let sqlite_raw = raw.sqlite.path.unwrap_or_else(|| DEFAULT_SQLITE_PATH.to_owned());
