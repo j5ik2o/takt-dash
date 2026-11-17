@@ -21,7 +21,8 @@ type LoadResult =
 const firstValue = (value: string | string[] | undefined): string | undefined =>
   Array.isArray(value) ? value[0] : value;
 
-// タスクが見つからないときは 404 を返す。gRPC の NOT_FOUND と応答の taskName・project・
+// タスクが見つからないときと、task が未指定・空文字・空白のみのときは 404 を返す。
+// gRPC の NOT_FOUND と応答の taskName・project・
 // goalId の不一致は、どれも TaskNotFoundError として扱う。backend 自体に接続できない
 // ときはページを落とさず、接続できない旨を表示する。
 export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoaderProps): Promise<ReactElement> {
@@ -29,7 +30,7 @@ export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoade
   const query = await searchParams;
   const taskName = firstValue(query.task);
   const goalId = firstValue(query.goal);
-  if (taskName === undefined) {
+  if (taskName === undefined || taskName.trim() === "") {
     notFound();
   }
   const client = createBackendClient();
