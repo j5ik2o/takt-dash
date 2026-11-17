@@ -206,3 +206,52 @@ test("判断待ちのアンカー id は既存の見出し id と衝突しない
   assert.equal(name, "li", "判断待ちの id は decision- 接頭辞を付ける");
   assert.equal(decisions.split('id="h-projects"').length - 1, 0, "見出しの id と同じ id を作らない");
 });
+
+test("名前に %20 を含むプロジェクトでも概要のリンクが該当カードへ遷移する", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    projects: [{ name: "release%20candidate", about: "% を含む名前のプロジェクト", serverId: "mini", completedTasks24h: 1 }],
+  };
+  const overview = renderOverviewWithState(state);
+  const href = "/projects#project-release%2520candidate";
+  anchorFor(overview, href);
+  const projects = renderProjectsWithState(state);
+  const fragment = decodeURIComponent(href.split("#")[1]);
+  const { name, tag } = openingTagWithAttribute(projects, "id", fragment);
+  assert.equal(name, "article", "カードの article に id を付ける");
+  assert.match(tag, /class="[^"]*\bcard\b/, "id はカードの article に付く");
+});
+
+test("名前に % を含むプロジェクトでも概要のリンクが該当カードへ遷移する", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    projects: [{ name: "100%", about: "% を含む名前のプロジェクト", serverId: "mini", completedTasks24h: 1 }],
+  };
+  const overview = renderOverviewWithState(state);
+  const href = "/projects#project-100%25";
+  anchorFor(overview, href);
+  const projects = renderProjectsWithState(state);
+  const fragment = decodeURIComponent(href.split("#")[1]);
+  const { name, tag } = openingTagWithAttribute(projects, "id", fragment);
+  assert.equal(name, "article", "カードの article に id を付ける");
+  assert.match(tag, /class="[^"]*\bcard\b/, "id はカードの article に付く");
+});
+
+test("ID に % を含むサーバーでもサイドバーのリンクが該当カードへ遷移する", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    servers: [{ serverId: "100%", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, concurrency: 4 }],
+    runs: [],
+  };
+  const sidebar = renderSidebarWithState(state);
+  const href = "/#server-100%25";
+  anchorFor(sidebar, href);
+  const overview = renderOverviewWithState(state);
+  const fragment = decodeURIComponent(href.split("#")[1]);
+  const { name, tag } = openingTagWithAttribute(overview, "id", fragment);
+  assert.equal(name, "article", "サーバーカードの article に id を付ける");
+  assert.match(tag, /class="[^"]*\bscard\b/, "id はサーバーカードに付く");
+});
