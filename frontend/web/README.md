@@ -89,6 +89,10 @@ npm run test
 テストは `node --test` で実行します。生成コードの enum を含む TypeScript をそのまま読み込むため、
 `--experimental-transform-types` と `.tsx` を変換する解決フックを使います。
 
+コンポーネントの結線テスト（`test/components/live-provider-wiring.test.ts`）は、jsdom の DOM へ
+実際にマウントして `useEffect` の結線（SSE の受信と切断の画面反映、購読の維持）まで検証します。
+その他のコンポーネントテストは、従来どおり SSR の初期描画と純粋関数で検証します。
+
 ## 見た目の退行を防ぐ（スクリーンショット比較）
 
 `docs/taktdash.html` をデザインの基準とし、実装の画面を同じ幅で撮って並べ、差分を確認します。

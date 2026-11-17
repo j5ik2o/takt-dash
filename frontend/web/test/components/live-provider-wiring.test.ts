@@ -10,10 +10,17 @@
 // initialFailure から、その失敗理由を持って切断状態で始まり、起動時の不通でも
 // 画面側の通知が失敗理由に合った文面で1回だけ出る（issue #92）。ゴール一覧の通知も
 // 同じ表示元の形であり、起動時の不通で1回だけ出ることをここで固定する（issue #252）。
+//
+// ファイルの後半では、StateStreamProvider を jsdom の DOM へ実際にマウントして結線を
+// 検証する（issue #89）。SSR は useEffect を実行しないため、Provider の useEffect が
+// openStateStream へ接続し、SSE の受信と切断が Context と画面へ反映されることと、
+// router.refresh 相当の再描画でも購読が維持されることは、マウントしなければ検証できない。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createElement, type ComponentProps } from "react";
+import { act, createElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createRoot, type Root } from "react-dom/client";
+import { JSDOM } from "jsdom";
 import { DashboardState } from "../../src/proto/taktdash.ts";
 import { createDashboardState } from "../support/fixtures.ts";
 import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
@@ -343,4 +350,282 @@ test("ゴール一覧は初期読み込みが応答なしで失敗した場合�
     "応答なし専用の文面が画面側の1回だけ出る",
   );
   assert.equal(countOccurrences(html, BACKEND_UNAVAILABLE_MESSAGE), 0, "接続不可の文面は出ない");
+});
+
+// ===== 実際のマウントによる結線の検証（issue #89） =====
+//
+// ここまでの検証は、stateStreamHandlers → reduceLiveState の純粋な遷移と、
+// renderToStaticMarkup による初期描画が対象だった。SSR は useEffect を実行しないため、
+// StateStreamProvider の useEffect が openStateStream へ正しく接続し、受信と切断が
+// Context と画面へ反映されることは未検証だった。ここでは jsdom の DOM へ実際に
+// マウントし、ブラウザの代わりに差し替えた EventSource を通して結線全体を検証する。
+//
+// StateStreamProviderWithRefresh の useRouter 呼び出し自体は Next のランタイムが
+// 要るため対象外とする。router.refresh の影響は Provider の層では initialState prop の
+// 差し替えと revalidate prop の同一性として現れるため、購読の契約は Provider の層で
+// 固定する（ラッパーは useRouter を閉じ込めるだけの薄い部品である）。
+
+// ブラウザの EventSource の代わり。Provider の useEffect はグローバルの EventSource を
+// new するため、テストではこのクラスをグローバルへ差し替えて接続を観測する。
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  closed = false;
+  constructor(public readonly url: string) {
+    FakeEventSource.instances.push(this);
+  }
+  close(): void {
+    this.closed = true;
+  }
+}
+
+let domInstalled = false;
+
+// react-dom/client のマウントに要る DOM を jsdom で用意し、グローバルへ公開する。
+// Node がすでに持つグローバル（setTimeout など）は上書きしない。window と document と
+// navigator だけは、Node 側の有無や getter の有無によらず jsdom のものへ差し替える。
+const installDomEnvironment = (): void => {
+  if (domInstalled) {
+    return;
+  }
+  domInstalled = true;
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/" });
+  const scope = globalThis as unknown as Record<string, unknown>;
+  const win = dom.window as unknown as Record<string, unknown>;
+  for (const key of Object.getOwnPropertyNames(dom.window)) {
+    if (key in scope) {
+      continue;
+    }
+    try {
+      scope[key] = win[key];
+    } catch {
+      // 読み出せないプロパティはマウントに不要として飛ばす。
+    }
+  }
+  for (const [key, value] of [
+    ["window", dom.window],
+    ["document", dom.window.document],
+    ["navigator", dom.window.navigator],
+  ] as const) {
+    Object.defineProperty(scope, key, { value, configurable: true, writable: true });
+  }
+  scope.IS_REACT_ACT_ENVIRONMENT = true;
+};
+
+type ProviderProps = Omit<ComponentProps<typeof StateStreamProvider>, "children">;
+
+const renderProvider = async (root: Root, props: ProviderProps, children: ReactNode): Promise<void> => {
+  const providerProps: ComponentProps<typeof StateStreamProvider> = { ...props, children };
+  await act(async () => {
+    root.render(createElement(StateStreamProvider, providerProps));
+  });
+};
+
+// StateStreamProvider を jsdom の DOM へマウントする。EventSource はテスト用の
+// クラスへ差し替え、作られた接続を FakeEventSource.instances で観測する。
+const mountLive = async (
+  props: ProviderProps,
+  children: ReactNode,
+): Promise<{ container: HTMLDivElement; root: Root; unmount: () => Promise<void> }> => {
+  installDomEnvironment();
+  FakeEventSource.instances = [];
+  (globalThis as unknown as { EventSource: typeof FakeEventSource }).EventSource = FakeEventSource;
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await renderProvider(root, props, children);
+  return {
+    container,
+    root,
+    unmount: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
+};
+
+// Context 値を子から観測するプローブ。現在の値を保持し、接続状態を文字でも描く。
+const createProbe = (): { holder: { current?: StateStreamContextValue }; Probe: () => ReactElement } => {
+  const holder: { current?: StateStreamContextValue } = {};
+  const Probe = (): ReactElement => {
+    const value = useLiveState();
+    holder.current = value;
+    return createElement("output", null, value.disconnected ? "disconnected" : "connected");
+  };
+  return { holder, Probe };
+};
+
+const fireMessage = async (source: FakeEventSource, data: string): Promise<void> => {
+  await act(async () => {
+    source.onmessage?.({ data });
+  });
+};
+
+const fireError = async (source: FakeEventSource): Promise<void> => {
+  await act(async () => {
+    source.onerror?.({});
+  });
+};
+
+// 受信データは送信側と同じ DashboardState.toJSON の形で作る。
+const wireState = (mutate?: (wire: Record<string, unknown>) => void): string => {
+  const wire = JSON.parse(JSON.stringify(DashboardState.toJSON(createDashboardState()))) as Record<
+    string,
+    unknown
+  >;
+  mutate?.(wire);
+  return JSON.stringify(wire);
+};
+
+// 再接続は本番のスケジューラ（setTimeout）が初回1秒で走らせる。作られるまで待つ。
+const waitForConnections = async (count: number): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (FakeEventSource.instances.length < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`再接続が ${count} 件まで増えませんでした。`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+};
+
+test("マウントで /api/state へ接続し、SSE の受信が Context と画面へ反映される", async () => {
+  const { holder, Probe } = createProbe();
+  let revalidateCalls = 0;
+  const { container, unmount } = await mountLive(
+    {
+      initialState: createDashboardState(),
+      revalidate: () => {
+        revalidateCalls += 1;
+      },
+    },
+    [createElement(Probe, { key: "probe" }), createElement(LiveDecisions, { key: "decisions" })],
+  );
+
+  assert.equal(FakeEventSource.instances.length, 1, "マウントで接続が1つだけ開く");
+  const source = FakeEventSource.instances[0]!;
+  assert.equal(source.url, "/api/state", "本番と同じ URL へ接続する");
+  assert.equal(source.closed, false, "接続は開いたまま");
+  assert.equal(holder.current?.disconnected, false, "初期値は接続中");
+  assert.match(container.innerHTML, /corporate-site/, "初期状態の判断待ちが画面に出る");
+
+  await fireMessage(
+    source,
+    wireState((wire) => {
+      wire.pendingDecisions = [];
+    }),
+  );
+  assert.equal(holder.current?.state.pendingDecisions.length, 0, "受信で Context の state が置き換わる");
+  assert.equal(holder.current?.disconnected, false, "受信後も接続中");
+  assert.equal(revalidateCalls, 1, "受信で revalidate が1回呼ばれる");
+  assert.doesNotMatch(container.innerHTML, /corporate-site/, "置き換わった状態が画面へ反映される");
+
+  await unmount();
+  assert.equal(source.closed, true, "アンマウントで接続が閉じられる");
+});
+
+test("SSE の切断が画面の通知へ反映され、再接続後の受信で通知が消える", async () => {
+  const { holder, Probe } = createProbe();
+  const { container, unmount } = await mountLive({ initialState: createDashboardState() }, [
+    createElement(Probe, { key: "probe" }),
+    createElement(LiveDecisions, { key: "decisions" }),
+  ]);
+  const source = FakeEventSource.instances[0]!;
+  assert.equal(countOccurrences(container.innerHTML, BACKEND_UNREACHABLE_MESSAGE), 0, "接続中は通知が出ない");
+
+  await fireError(source);
+  assert.equal(holder.current?.disconnected, true, "切断で Context の切断フラグが立つ");
+  assert.equal(
+    countOccurrences(container.innerHTML, BACKEND_UNREACHABLE_MESSAGE),
+    1,
+    "切断が画面の通知へ反映される",
+  );
+  assert.equal(source.closed, true, "切断した接続は閉じられる");
+
+  await waitForConnections(2);
+  const reconnected = FakeEventSource.instances[1]!;
+  assert.equal(reconnected.url, "/api/state", "再接続も同じ URL へ向かう");
+  await fireMessage(reconnected, wireState());
+  assert.equal(holder.current?.disconnected, false, "再接続後の受信で切断フラグが消える");
+  assert.equal(countOccurrences(container.innerHTML, BACKEND_UNREACHABLE_MESSAGE), 0, "通知が画面から消える");
+  assert.match(container.innerHTML, /corporate-site/, "受信した状態が画面へ反映される");
+
+  await unmount();
+  assert.equal(reconnected.closed, true, "アンマウントで再接続した接続も閉じられる");
+});
+
+test("router.refresh 相当の再描画でも購読は維持され、状態は初期値へ戻らない", async () => {
+  const { holder, Probe } = createProbe();
+  let revalidateCalls = 0;
+  const revalidate = (): void => {
+    revalidateCalls += 1;
+  };
+  const children = [createElement(Probe, { key: "probe" })];
+  const { root, unmount } = await mountLive(
+    { initialState: createDashboardState(), revalidate },
+    children,
+  );
+  const source = FakeEventSource.instances[0]!;
+
+  await fireMessage(
+    source,
+    wireState((wire) => {
+      wire.pendingDecisions = [];
+    }),
+  );
+  assert.equal(holder.current?.state.pendingDecisions.length, 0, "受信した状態が Context にある");
+
+  // router.refresh は RSC を再取得し、Provider が新しい initialState で再描画される。
+  // revalidate の同一性は変わらないため、effect は再実行されない。
+  await renderProvider(root, { initialState: createDashboardState(), revalidate }, children);
+  assert.equal(FakeEventSource.instances.length, 1, "再描画で接続は開き直されない");
+  assert.equal(source.closed, false, "購読は維持される");
+  assert.equal(holder.current?.state.pendingDecisions.length, 0, "状態は新しい初期値へ戻らない");
+
+  await fireMessage(source, wireState());
+  assert.equal(holder.current?.state.pendingDecisions.length, 2, "再描画後も同じ購読で受信が届く");
+  assert.equal(revalidateCalls, 2, "再描画後も revalidate が呼ばれる");
+
+  await unmount();
+});
+
+test("revalidate の同一性が変わると、古い接続を閉じて1つだけ開き直す", async () => {
+  const { holder, Probe } = createProbe();
+  let callsA = 0;
+  let callsB = 0;
+  const revalidateA = (): void => {
+    callsA += 1;
+  };
+  const revalidateB = (): void => {
+    callsB += 1;
+  };
+  const children = [createElement(Probe, { key: "probe" })];
+  const { root, unmount } = await mountLive(
+    { initialState: createDashboardState(), revalidate: revalidateA },
+    children,
+  );
+  const first = FakeEventSource.instances[0]!;
+  await fireMessage(first, wireState());
+  assert.equal(callsA, 1, "最初の revalidate が呼ばれる");
+
+  await renderProvider(root, { initialState: createDashboardState(), revalidate: revalidateB }, children);
+  assert.equal(FakeEventSource.instances.length, 2, "effect の再実行で接続が1つ開き直される");
+  assert.equal(first.closed, true, "古い接続は閉じられる");
+  const second = FakeEventSource.instances[1]!;
+  assert.equal(second.closed, false, "新しい接続だけが開いている");
+
+  await fireMessage(
+    second,
+    wireState((wire) => {
+      wire.pendingDecisions = [];
+    }),
+  );
+  assert.equal(callsB, 1, "開き直した後は新しい revalidate が呼ばれる");
+  assert.equal(callsA, 1, "古い revalidate はもう呼ばれない");
+  assert.equal(holder.current?.state.pendingDecisions.length, 0, "新しい接続の受信が Context へ反映される");
+
+  await unmount();
+  assert.equal(second.closed, true, "アンマウントで新しい接続も閉じられる");
 });
