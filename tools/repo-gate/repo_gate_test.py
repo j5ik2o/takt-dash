@@ -1333,6 +1333,105 @@ def test_status_only_step_is_not_a_publish_step() -> None:
         assert_success(sandbox, "status だけを実行する開始ステップ")
 
 
+def test_publish_stage_detection() -> None:
+    """publish.py の段階検出は、実行位置にある呼び出しだけを拾う。
+
+    echo の引数・引用符内の文字列・コメントに書かれた publish.py は実行とみなさない。
+    bash -c の内側のスクリプトと、&& でつないだ後段の呼び出しは実行として拾う。
+    """
+    with Sandbox() as sandbox:
+        module = sandbox.module
+
+        def step(command, as_name="commit"):
+            return {
+                "name": "create_pr",
+                "mode": "system",
+                "system_inputs": [{"type": "command", "as": as_name, "command": command}],
+            }
+
+        assert module.publish_stages(step("python3 tools/project-status/publish.py commit")) == {
+            "commit": "commit"
+        }, "通常の起動を拾う"
+        assert module.publish_stages(step("echo python3 tools/project-status/publish.py commit")) == {}, (
+            "echo の引数を実行とみなさない"
+        )
+        assert module.publish_stages(step('echo "python3 tools/project-status/publish.py commit"')) == {}, (
+            "引用符内の文字列を実行とみなさない"
+        )
+        assert module.publish_stages(step("# python3 tools/project-status/publish.py commit")) == {}, (
+            "コメントを実行とみなさない"
+        )
+        assert module.publish_stages(
+            step("echo 準備 # コメント\npython3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "コメント行の次の実起動を拾う"
+        assert module.publish_stages(step("bash -c 'python3 tools/project-status/publish.py commit'")) == {
+            "commit": "commit"
+        }, "bash -c の内側の実起動を拾う"
+        assert module.publish_stages(
+            step("cd frontend && python3 tools/project-status/publish.py push", "push")
+        ) == {"push": "push"}, "前段を && でつないだ実起動を拾う"
+
+
+def test_publish_workflow_passes() -> None:
+    """公開ステップを置く正しい構成は、関門を通る。"""
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=PUBLISH_WORKFLOW)
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "公開ステップを置く構成")
+
+
+def test_publish_commands_must_invoke_publish_py() -> None:
+    """公開の段階が表示用の文字列だけでは、公開ステップとして受理しない。
+
+    echo の引数・引用符内の文字列・コメントに publish.py を書いても実行にはならない。
+    実行位置に呼び出しが無ければ公開ステップは無いものとして扱われ、machine_gate の
+    成功が公開ステップへ遷移する構成と矛盾するため、関門は拒否する。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "echo で表示するだけ": lambda line: "          echo " + line.strip() + "\n",
+        "引用符内の文字列で表示するだけ": lambda line: "          echo \"" + line.strip() + "\"\n",
+        "コメントに書くだけ": lambda line: "          # " + line.strip() + "\n",
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "aislop_gate")
+
+
+def test_publish_success_rule_must_precede_unconditional_rule() -> None:
+    """公開の成功規則は、when(true) の無条件規則より前に置かなければならない。
+
+    規則は先に一致したものから順に評価されるため、無条件規則が先にあると、公開が
+    成功してもそちらが選ばれて aislop_gate へ進まない。
+    """
+    success_rule = (
+        "      - condition: when(context.create_pr.commit.exit_code == 0 && "
+        "context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)\n"
+        "        next: aislop_gate\n"
+    )
+    fallback_rule = "      - condition: when(true)\n        next: fix_publish\n"
+    assert success_rule + fallback_rule in PUBLISH_WORKFLOW, "公開ステップの規則列が見つかりません"
+    workflow = PUBLISH_WORKFLOW.replace(success_rule + fallback_rule, fallback_rule + success_rule)
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=workflow)
+        stub_external_tools(sandbox)
+        assert_failure(
+            sandbox, "無条件規則が成功規則より前にある", "workflow-machine-gate", "無条件規則より後"
+        )
+
+
 def test_workflow_requires_aislop_gate_step() -> None:
     """aislop の機械ゲートが無い、順序が違う、失敗時に戻らない、のそれぞれで失敗する。"""
     machine_success_complete = MACHINE_GATE_STEP.replace(
@@ -1954,6 +2053,10 @@ def main() -> int:
         test_clippy_must_reject_warnings,
         test_done_must_install_node_dependencies_when_missing,
         test_machine_gate_develop_complete_and_mode,
+        test_publish_stage_detection,
+        test_publish_workflow_passes,
+        test_publish_commands_must_invoke_publish_py,
+        test_publish_success_rule_must_precede_unconditional_rule,
         test_machine_gate_requires_six_system_inputs,
         test_machine_gate_commands_invoke_their_make_targets,
         test_machine_gate_success_requires_all_six_exit_codes,

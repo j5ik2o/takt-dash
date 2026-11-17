@@ -21,7 +21,10 @@
                        検査ごとの失敗は対応する修正ステップへ回して machine_gate へ戻る。
                        公開ステップ（publish.py）は任意で、置く場合は commit / push / pr /
                        status の 4 段階を実行し、commit / push / pr の成功だけを完了条件に
-                       し、失敗は再試行または修正へ回し、ABORT へは遷移しない。公開ステップを
+                       し、失敗は再試行または修正へ回し、ABORT へは遷移しない。段階の検出は
+                       実行位置にある publish.py の呼び出しだけを数え、echo の引数・引用符内の
+                       文字列・コメントは実行とみなさない。成功規則は when(true) の無条件規則
+                       より前に置く（規則は先に一致したものが選ばれるため）。公開ステップを
                        置かない場合は machine_gate の成功が aislop_gate へ直結する。status
                        だけを実行するステップは公開とみなさない。
   gitignore-rules      .gitignore が Rust と Node とローカルデータの生成物を除外する。
@@ -920,19 +923,52 @@ PUBLISH_STAGES = ("commit", "push", "pr", "status")
 PUBLISH_SUCCESS_STAGES = ("commit", "push", "pr")
 
 
+def invoked_publish_stages(command, depth=0):
+    """コマンド文字列が実際に起動する publish.py の段階を集める。
+
+    bash -c や sh -c の内側のスクリプトへ再帰し、単純コマンドの先頭にある
+    publish.py の呼び出し（直接実行、または python / python3 の引数としての
+    実行）だけを拾う。echo の引数や引用符内の文字列、コメントは、コマンド
+    文字列の任意の位置に publish.py と段階名が並んでいても起動として扱わない。
+    """
+    found = set()
+    if depth > 5:
+        return found
+    try:
+        tokens = shell_tokens(command)
+    except ValueError:
+        return found
+    for tokens_of_command in simple_commands(tokens):
+        while tokens_of_command and tokens_of_command[0] in SHELL_KEYWORDS:
+            tokens_of_command = tokens_of_command[1:]
+        if not tokens_of_command:
+            continue
+        head = tokens_of_command[0]
+        if head in ("bash", "sh") and "-c" in tokens_of_command:
+            index = tokens_of_command.index("-c")
+            if index + 1 < len(tokens_of_command):
+                found |= invoked_publish_stages(tokens_of_command[index + 1], depth + 1)
+            continue
+        arguments = tokens_of_command[1:]
+        if not head.endswith("publish.py"):
+            if head.rsplit("/", 1)[-1] not in ("python", "python3"):
+                continue
+            if not arguments or not arguments[0].endswith("publish.py"):
+                continue
+            arguments = arguments[1:]
+        if arguments and arguments[0] in PUBLISH_STAGES:
+            found.add(arguments[0])
+    return found
+
+
 def publish_stages(step):
     """公開ステップが実行する publish.py の段階を、{段階名: as 名} で返す。"""
     stages = {}
     for item in step.get("system_inputs") or []:
         if not isinstance(item, dict) or item.get("type") != "command":
             continue
-        tokens = [token for token in str(item.get("command", "")).split() if token]
-        for index, token in enumerate(tokens):
-            if not token.endswith("publish.py") or index + 1 >= len(tokens):
-                continue
-            stage = tokens[index + 1]
-            if stage in PUBLISH_STAGES:
-                stages.setdefault(stage, item.get("as"))
+        for stage in invoked_publish_stages(str(item.get("command", ""))):
+            stages.setdefault(stage, item.get("as"))
     return stages
 
 
@@ -1087,13 +1123,28 @@ def publish_failure_step(publish_rules, publish_name, named):
 
 
 def check_publish_success_rule(publish_rules, publish_name, aislop_name):
-    """公開ステップの成功条件が aislop ゲートへ進む形になっていることを確かめる。"""
+    """公開ステップの成功条件が aislop ゲートへ進む形になっていることを確かめる。
+
+    規則は先に一致したものから順に評価されるため、成功規則が when(true) の
+    無条件規則より後にあると、公開が成功しても無条件規則が先に選ばれて
+    aislop ゲートへ進まない。成功規則が無条件規則より前にあることも確かめる。
+    """
     success_rules = [rule for rule in publish_rules if rule.get("condition") != "when(true)"]
     if len(success_rules) != 1:
         raise GateError(
             f"公開ステップ {publish_name} で成功を表す rule が1件ではありません: {len(success_rules)} 件"
         )
     success_rule = success_rules[0]
+    fallback_index = next(
+        (index for index, rule in enumerate(publish_rules) if rule.get("condition") == "when(true)"),
+        None,
+    )
+    if fallback_index is not None and publish_rules.index(success_rule) > fallback_index:
+        raise GateError(
+            f"公開ステップ {publish_name} の成功規則が when(true) の無条件規則より後にあります。"
+            "規則は先に一致したものが選ばれるため、公開が成功しても無条件規則が先に選ばれ、"
+            f"{aislop_name} へ進みません"
+        )
     publish_success_next = success_rule.get("next")
     if publish_success_next != aislop_name:
         raise GateError(
