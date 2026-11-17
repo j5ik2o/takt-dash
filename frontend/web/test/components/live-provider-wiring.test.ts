@@ -1,4 +1,4 @@
-// 概要と判断待ちの画面が、StateStreamProvider の Context 値を useLiveState 経由で消費する契約と、
+// 概要と判断待ちとゴール一覧の画面が、StateStreamProvider の Context 値を useLiveState 経由で消費する契約と、
 // SSE の受信・切断を本番と同じ結線で Context 値へ反映する結線の契約（issue #20 の配線層）。
 //
 // 本番のハンドラ結線は stateStreamHandlers に一本化されている。ここでは本番と同じ
@@ -8,7 +8,8 @@
 // initialState から決めるため、初期読み込みの成否が渡されない限り SSR では切断状態の
 // Live* を描画しない（未確認として扱う）。初期読み込みが失敗した場合は
 // initialFailure から、その失敗理由を持って切断状態で始まり、起動時の不通でも
-// 画面側の通知が失敗理由に合った文面で1回だけ出る（issue #92）。
+// 画面側の通知が失敗理由に合った文面で1回だけ出る（issue #92）。ゴール一覧の通知も
+// 同じ表示元の形であり、起動時の不通で1回だけ出ることをここで固定する（issue #252）。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement, type ComponentProps } from "react";
@@ -18,6 +19,7 @@ import { createDashboardState } from "../support/fixtures.ts";
 import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
 import { LiveOverview } from "../../src/components/live-overview.tsx";
 import { LiveDecisions } from "../../src/components/live-decisions.tsx";
+import { LiveGoals } from "../../src/components/live-goals.tsx";
 import {
   reduceLiveState,
   stateStreamHandlers,
@@ -231,6 +233,22 @@ const renderLiveWithInitialFailure = (
   return renderToStaticMarkup(createElement(StateStreamProvider, props));
 };
 
+// ゴール一覧は props の形が LiveOverview と共通項を持たず、createElement の
+// オーバーロード解決で共用ヘルパーの合併型へ混ぜられないため、専用の入口で描画する。
+const renderGoalsWithInitialFailure = (
+  state: DashboardState,
+  failure: BackendFailure,
+  respondedBefore: boolean,
+): string => {
+  const props: ComponentProps<typeof StateStreamProvider> = {
+    initialState: state,
+    initialFailure: failure,
+    initialRespondedBefore: respondedBefore,
+    children: createElement(LiveGoals),
+  };
+  return renderToStaticMarkup(createElement(StateStreamProvider, props));
+};
+
 const countOccurrences = (html: string, text: string): number => html.split(text).length - 1;
 
 test("初期読み込みが失敗した場合は Provider が切断状態で始まる", () => {
@@ -300,6 +318,25 @@ test("概要は初期読み込みが応答なしで失敗した場合に、応�
 
 test("判断待ちは初期読み込みが応答なしで失敗した場合に、応答なしの文面の通知を1回だけ描画する", () => {
   const html = renderLiveWithInitialFailure(LiveDecisions, createDashboardState(), "no-response", false);
+  assert.equal(
+    countOccurrences(html, BACKEND_NO_RESPONSE_MESSAGE),
+    1,
+    "応答なし専用の文面が画面側の1回だけ出る",
+  );
+  assert.equal(countOccurrences(html, BACKEND_UNAVAILABLE_MESSAGE), 0, "接続不可の文面は出ない");
+});
+
+test("ゴール一覧は初期読み込みが接続不可で失敗した場合に通知を1回だけ描画する", () => {
+  const html = renderGoalsWithInitialFailure(createDashboardState(), "unreachable", false);
+  assert.equal(
+    countOccurrences(html, BACKEND_UNAVAILABLE_MESSAGE),
+    1,
+    "起動時の不通でも通知は画面側の1回だけにする",
+  );
+});
+
+test("ゴール一覧は初期読み込みが応答なしで失敗した場合に、応答なしの文面の通知を1回だけ描画する", () => {
+  const html = renderGoalsWithInitialFailure(createDashboardState(), "no-response", false);
   assert.equal(
     countOccurrences(html, BACKEND_NO_RESPONSE_MESSAGE),
     1,

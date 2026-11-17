@@ -4,10 +4,15 @@ import { isHumanMergeWaiting, mergeTaskFailureNote, taskStatusLabel } from "../s
 import { goalStateSentence } from "../state/goal-badge";
 import { goalDisplayName } from "../state/goal-summary";
 import { TASK_STATUS } from "../state/proto-values";
+import type { BackendUnavailableSituation } from "../grpc/client";
+import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 
 type GoalsContentProps = {
   state: DashboardState;
   project?: string;
+  disconnected: boolean;
+  /** 切断時の通知の文面を決める状況。ライブ表示だけが渡す。 */
+  unavailableSituation?: BackendUnavailableSituation;
 };
 
 const countEntries = (goal: Goal): Array<{ label: string; count: number }> => {
@@ -24,11 +29,13 @@ const countEntries = (goal: Goal): Array<{ label: string; count: number }> => {
 
 // ゴール一覧は全サーバー・全プロジェクトのゴールを既定で表示し、?project= があるときだけ
 // そのプロジェクトに絞り込む。マージ待ちの判定と仕上げタスクの失敗の表示は dashboard の
-// 関数を使う。
-export function GoalsContent({ state, project }: GoalsContentProps): ReactElement {
+// 関数を使う。切断時は概要と判断待ちと同じく、内容の先頭に backend 不通の通知を
+// 1回だけ出す（issue #252）。
+export function GoalsContent({ state, project, disconnected, unavailableSituation }: GoalsContentProps): ReactElement {
   const goals = project === undefined ? state.goals : state.goals.filter((goal) => goal.project === project);
   return (
     <main className="page">
+      {disconnected ? <BackendUnavailableNotice situation={unavailableSituation} /> : null}
       <header className="page-head">
         <div>
           <h1>ゴール</h1>
