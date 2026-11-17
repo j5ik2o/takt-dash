@@ -551,6 +551,12 @@ a {
   color: var(--muted);
 }
 
+/* run 行の状態列は 96px 固定のため、長いラベル（「ログが止まっています」など）は
+   列の中で折り返し、隣の本文へ重ならないようにする（issue #238）。 */
+.runs .st {
+  white-space: normal;
+}
+
 .run-main {
   min-width: 0;
 }
