@@ -21,10 +21,11 @@
                        検査ごとの失敗は対応する修正ステップへ回して machine_gate へ戻る。
                        公開ステップ（publish.py）は任意で、置く場合は commit / push / pr /
                        status の 4 段階を実行し、commit / push / pr の成功だけを完了条件に
-                       し、失敗は再試行または修正へ回し、ABORT へは遷移しない。段階の検出は
-                       実行位置にある publish.py の呼び出しだけを数え、echo の引数・引用符内の
-                       文字列・コメントは実行とみなさない。成功規則は when(true) の無条件規則
-                       より前に置く（規則は先に一致したものが選ばれるため）。公開ステップを
+                       し、失敗は再試行または修正へ回し、ABORT へは遷移しない。公開コマンドは
+                       正規形（python3 tools/project-status/publish.py <段階> の1行）だけを
+                       受理し、publish.py への言及があるのに正規形に一致しないコマンドは、
+                       正規形を示して拒否する。成功規則は when(true) の無条件規則より前に
+                       置く（規則は先に一致したものが選ばれるため）。公開ステップを
                        置かない場合は machine_gate の成功が aislop_gate へ直結する。status
                        だけを実行するステップは公開とみなさない。
   gitignore-rules      .gitignore が Rust と Node とローカルデータの生成物を除外する。
@@ -114,8 +115,6 @@ SHELL_KEYWORDS = {
     "}",
 }
 REDIRECTION = re.compile(r"^\d*[<>]")
-# python の実行ファイル名。python3.11 のようなバージョン付きの名前も含む。
-PYTHON_EXECUTABLE = re.compile(r"python(\d+(\.\d+)*)?")
 # shell_tokens が演算子のトークンとして切り出す文字。
 SHELL_OPERATOR_CHARS = ";&|\n()"
 
@@ -451,26 +450,22 @@ def strip_shell_comments(command):
 
     未クォート・未エスケープの # から行末までを除去する。行の区切りを保つため改行は
     残す。単一引用符の内側ではバックスラッシュと # をそのまま扱い、二重引用符の
-    内側ではバックスラッシュで次の 1 文字をエスケープする。# がコメントを始めるのは、
-    シェルの語の先頭（行頭・空白・演算子の直後）にある場合だけであり、語の途中にある
-    未クォートの #（例: issue#123）は通常の文字として残す。
+    内側ではバックスラッシュで次の 1 文字をエスケープする。shlex の comments=True と
+    同じく、語の途中にある未クォートの # もコメントの開始とみなす。
     """
     result = []
     quote = None
     escaped = False
     in_comment = False
-    at_word_start = True
     for char in str(command):
         if in_comment:
             if char == "\n":
                 in_comment = False
-                at_word_start = True
                 result.append(char)
             continue
         if escaped:
             result.append(char)
             escaped = False
-            at_word_start = False
             continue
         if quote == "'":
             result.append(char)
@@ -487,17 +482,14 @@ def strip_shell_comments(command):
         if char == "\\":
             escaped = True
             result.append(char)
-            at_word_start = False
             continue
         if char in ("'", '"'):
             quote = char
             result.append(char)
-            at_word_start = False
             continue
-        if char == "#" and at_word_start:
+        if char == "#":
             in_comment = True
             continue
-        at_word_start = char in " \t\r\n;&|()"
         result.append(char)
     return "".join(result)
 
@@ -602,243 +594,13 @@ class ShellToken(str):
     演算子に見える文字列でも、引用されたものは演算子ではない。
     space_before: 直前に空白（スペース・タブ・復帰）があった場合に真。
     `&>` と `& >` の区別に使う。
-    heredoc_operator: 語の先頭（数字の fd 指定の後）に、引用されていない
-    `<<` がある場合に真。shell_tokens が設定し、それ以外は偽。
     """
-
-    heredoc_operator = False
 
     def __new__(cls, text, *, quoted=False, space_before=False):
         token = super().__new__(cls, text)
         token.quoted = quoted
         token.space_before = space_before
         return token
-
-
-def parse_heredoc_operator(text, start):
-    """text[start] から始まる <<区切り語 を解析し、(区切り語, タブ除去, 終端位置) を返す。
-
-    start は最初の `<` の位置。`<<-` の場合はタブ除去を真とする。区切り語は
-    空白と演算子の手前までで、引用符とエスケープは取り除いて読む。区切り語が
-    無い場合は None を返す。
-    """
-    index = start + 2
-    strip_tabs = False
-    if index < len(text) and text[index] == "-":
-        strip_tabs = True
-        index += 1
-    while index < len(text) and text[index] in " \t":
-        index += 1
-    chars = []
-    while index < len(text):
-        char = text[index]
-        if char in " \t\r\n;&|()<>":
-            break
-        if char in ("'", '"'):
-            quote = char
-            index += 1
-            while index < len(text) and text[index] != quote:
-                if quote == '"' and text[index] == "\\" and index + 1 < len(text):
-                    index += 1
-                chars.append(text[index])
-                index += 1
-            if index >= len(text):
-                return None
-            index += 1
-            continue
-        if char == "\\" and index + 1 < len(text):
-            chars.append(text[index + 1])
-            index += 2
-            continue
-        chars.append(char)
-        index += 1
-    delimiter = "".join(chars)
-    if not delimiter:
-        return None
-    return delimiter, strip_tabs, index
-
-
-def skip_heredoc_bodies(text, index, pending):
-    """ヒアドキュメントの本文の行を読み飛ばし、本文の直後の位置を返す。
-
-    pending の (区切り語, タブ除去) の順に、各本文を区切り語だけの行まで
-    読み飛ばす。区切り語の行自体も読み飛ばす。
-    """
-    queue = list(pending)
-    while queue and index < len(text):
-        end = text.find("\n", index)
-        if end == -1:
-            line = text[index:]
-            index = len(text)
-        else:
-            line = text[index:end]
-            index = end + 1
-        delimiter, strip_tabs = queue[0]
-        candidate = line[:-1] if line.endswith("\r") else line
-        if strip_tabs:
-            candidate = candidate.lstrip("\t")
-        if candidate == delimiter:
-            queue.pop(0)
-    return index
-
-
-def arithmetic_expansion_end(text, start):
-    """text[start] の $(( から始まる算術式展開の終端（)) の直後）を返す。
-
-    start は `$` の位置で、直後の2文字が `((` であることを呼び出し側が
-    確かめる。括弧の対応を数え、引用符とエスケープの中にある括弧は数え
-    ない。閉じていない場合は文字列の末尾を返す。
-    """
-    index = start + 3
-    depth = 2
-    quote = None
-    while index < len(text):
-        char = text[index]
-        if quote == "'":
-            if char == "'":
-                quote = None
-            index += 1
-            continue
-        if quote == '"':
-            if char == "\\" and index + 1 < len(text):
-                index += 2
-                continue
-            if char == '"':
-                quote = None
-            index += 1
-            continue
-        if char == "\\" and index + 1 < len(text):
-            index += 2
-            continue
-        if char in ("'", '"'):
-            quote = char
-            index += 1
-            continue
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return index + 1
-        index += 1
-    return len(text)
-
-
-def strip_heredoc_bodies(command):
-    """ヒアドキュメントの本文を、コマンド文字列から取り除く。
-
-    引用符とエスケープとコメントを考慮して走査し、引用符の外にある
-    <<区切り語 だけをヒアドキュメントの開始として扱う。開始を含む行の
-    改行の直後から、区切り語だけの行まで（区切り語の行を含む）を除去する。
-    演算子と区切り語はコマンド行に残す。本文だけを取り除くことで、リダイ
-    レクトだけのコマンド（<<区切り語 だけの行）が存在したことが、後段の
-    トークン列にも残る。本文はシェルの構文として
-    解釈されないため、本文に含まれる引用符や # が、後段のコメント除去や
-    トークン化へ影響することはない。引用符内の `<<`（例: echo "<<EOF"）や
-    コメント内の `<<` は開始として扱わない。算術式展開 $(( ... )) の中に
-    ある `<<` はシフト演算子であり、開始として扱わない。<<<（ヒアストリング）は本文を
-    持たないため対象にしない。<< は、空白で区切られた形だけでなく、コマ
-    ンド語や引数の直後に空白なしで続く形（例: cat<<'EOF'）でも開始として
-    扱う。シェルでは < が直前の語を終端させるため、隣接していてもヒア
-    ドキュメントが始まる。数字だけの語の直後にある場合は、fd 指定付きの
-    リダイレクトとして扱う。
-    """
-    text = str(command)
-    result = []
-    pending = []
-    index = 0
-    quote = None
-    in_comment = False
-
-    def operator_position():
-        """結果の末尾から見て、<< がリダイレクトの開始位置にあるかを返す。
-
-        末尾の語が空（行頭・空白・演算子の直後）か、数字だけ（fd 指定）の
-        ときに開始位置とし、その数字の並びの長さを返す。語の直後に空白
-        なしで続く場合（例: cat<<'EOF'）も開始位置であり、この場合は 0 を
-        返す。シェルでは < が直前の語を終端させるため、コマンド語や引数に
-        隣接していてもヒアドキュメントが始まる。引用符・コメント・エス
-        ケープ・算術式展開の中にある << は走査側が先に処理するため、ここへ
-        来る << はすべて開始位置にある。
-        """
-        digits = 0
-        for char in reversed(result):
-            if char in " \t\r\n;&|()":
-                break
-            if not char.isdigit():
-                return 0
-            digits += 1
-        return digits
-
-    while index < len(text):
-        char = text[index]
-        if in_comment:
-            result.append(char)
-            index += 1
-            if char == "\n":
-                in_comment = False
-                if pending:
-                    index = skip_heredoc_bodies(text, index, pending)
-                    pending = []
-            continue
-        if quote == "'":
-            result.append(char)
-            if char == "'":
-                quote = None
-            index += 1
-            continue
-        if quote == '"':
-            result.append(char)
-            if char == "\\" and index + 1 < len(text):
-                result.append(text[index + 1])
-                index += 2
-                continue
-            if char == '"':
-                quote = None
-            index += 1
-            continue
-        if char == "\\" and index + 1 < len(text):
-            result.append(char)
-            result.append(text[index + 1])
-            index += 2
-            continue
-        if char in ("'", '"'):
-            quote = char
-            result.append(char)
-            index += 1
-            continue
-        if char == "$" and text[index + 1 : index + 3] == "((":
-            end = arithmetic_expansion_end(text, index)
-            result.append(text[index:end])
-            index = end
-            continue
-        if char == "#":
-            in_comment = True
-            result.append(char)
-            index += 1
-            continue
-        if char == "\n":
-            result.append(char)
-            index += 1
-            if pending:
-                index = skip_heredoc_bodies(text, index, pending)
-                pending = []
-            continue
-        if char == "<" and text[index + 1 : index + 2] == "<" and text[index + 2 : index + 3] != "<":
-            digits = operator_position()
-            parsed = parse_heredoc_operator(text, index) if digits is not None else None
-            if parsed is not None:
-                delimiter, strip_tabs, end = parsed
-                pending.append((delimiter, strip_tabs))
-                result.append(text[index:end])
-                index = end
-                continue
-            result.append(char)
-            index += 1
-            continue
-        result.append(char)
-        index += 1
-    return "".join(result)
 
 
 def shell_tokens(command):
@@ -849,25 +611,15 @@ def shell_tokens(command):
     の判定はこの情報を使うため、引用符内の `&&` や `;`、エスケープされた
     `;` は演算子にならない。`&>` と `& >` も区別できる。閉じていない
     引用符がある場合は、shlex と同じく ValueError を上げる。
-
-    トークン化の前に、ヒアドキュメントの本文と行継続（バックスラッシュ＋
-    改行）を取り除く。本文はシェルの構文として解釈されないため、本文の
-    引用符や改行がトークンを壊すことはない。行継続は入力から取り除かれる
-    ため、継続行の字下げが余分な引数になることもない。算術式展開
-    $(( ... )) は1つの語の構成要素として丸ごと取り込み、中の空白や `<<`
-    で語を割らない（中の `<<` はシフト演算子であり、ヒアドキュメントの
-    開始ではない）。
     """
-    text = strip_shell_comments(strip_heredoc_bodies(command))
+    text = strip_shell_comments(command)
     tokens = []
     index = 0
     pending_space = False
 
-    def flush_word(chars, quoted, space_before, flags):
+    def flush_word(chars, quoted, space_before):
         if chars or quoted:
-            token = ShellToken("".join(chars), quoted=quoted, space_before=space_before)
-            token.heredoc_operator = starts_with_heredoc_operator(chars, flags)
-            tokens.append(token)
+            tokens.append(ShellToken("".join(chars), quoted=quoted, space_before=space_before))
 
     while index < len(text):
         char = text[index]
@@ -890,136 +642,46 @@ def shell_tokens(command):
         word_space = pending_space
         pending_space = False
         chars = []
-        flags = []
         quoted = False
         while index < len(text):
             char = text[index]
             if char in " \t\r" or char in SHELL_OPERATOR_CHARS:
                 break
             if char == "\\" and index + 1 < len(text):
-                if text[index + 1] == "\n":
-                    index += 2
-                    continue
                 chars.append(text[index + 1])
-                flags.append(True)
                 quoted = True
                 index += 2
-                continue
-            if char == "$" and text[index + 1 : index + 3] == "((":
-                end = arithmetic_expansion_end(text, index)
-                for position in range(index, end):
-                    chars.append(text[position])
-                    flags.append(False)
-                index = end
                 continue
             if char in ("'", '"'):
                 quote = char
                 quoted = True
                 index += 1
                 while index < len(text) and text[index] != quote:
-                    if (
-                        quote == '"'
-                        and text[index] == "\\"
-                        and index + 1 < len(text)
-                        and text[index + 1] == "\n"
-                    ):
-                        index += 2
-                        continue
                     if quote == '"' and text[index] == "\\" and index + 1 < len(text):
                         chars.append(text[index + 1])
-                        flags.append(True)
                         index += 2
                         continue
                     chars.append(text[index])
-                    flags.append(True)
                     index += 1
                 if index >= len(text):
                     raise ValueError("No closing quotation")
                 index += 1
                 continue
             chars.append(char)
-            flags.append(False)
             index += 1
-        flush_word(chars, quoted, word_space, flags)
+        flush_word(chars, quoted, word_space)
     return tokens
 
 
-def starts_with_heredoc_operator(chars, flags):
-    """語の先頭（数字の fd 指定の後）に、引用されていない << があるかを返す。
-
-    `<<'EOF'` のように区切り語だけが引用されている場合は演算子として扱う。
-    `"<<EOF"` のように << 自体が引用符の中にある場合は、ヒアドキュメントの
-    開始ではない。<<<（ヒアストリング）は本文を持たないため対象にしない。
-    """
-    index = 0
-    while index < len(chars) and chars[index].isdigit() and not flags[index]:
-        index += 1
-    return (
-        index + 1 < len(chars)
-        and chars[index] == "<"
-        and not flags[index]
-        and chars[index + 1] == "<"
-        and not flags[index + 1]
-        and (index + 2 >= len(chars) or chars[index + 2] != "<")
-    )
-
-
-def heredoc_delimiter(token):
-    """トークンがヒアドキュメントの開始（<<区切り語）なら、その区切り語を返す。
-
-    区切り語が次のトークンに分かれている形式（<< だけのトークン）では空文字列を
-    返す。ヒアドキュメントでない場合は None を返す。<<<（ヒアストリング）は
-    本文を持たないため対象にしない。`<<` 自体が引用符の中にあるトークン
-    （例: echo の引数 "<<EOF"）は、引用されていない `<<` で始まるトークン
-    ではないため対象にしない。
-    """
-    if not getattr(token, "heredoc_operator", False):
-        return None
-    text = str(token)
-    index = 0
-    while index < len(text) and text[index].isdigit():
-        index += 1
-    rest = text[index:]
-    if not rest.startswith("<<") or rest.startswith("<<<"):
-        return None
-    delimiter = rest[2:]
-    if delimiter.startswith("-"):
-        delimiter = delimiter[1:]
-    return delimiter
-
-
 def simple_commands(tokens):
-    """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。
-
-    ヒアドキュメントの本文は、shell_tokens の段階（strip_heredoc_bodies）で
-    取り除かれているため、ここでは本文の読み飛ばしを行わない。開始のトークン
-    （<<区切り語）はリダイレクトの一部として、そのコマンドのトークンに残る。
-    リダイレクトだけのコマンドは、開始のトークンだけのコマンドとして残る。
-    区切り語の保留は、本文が残っている場合の備えとして追跡だけを行い、改行で
-    破棄する。
-    """
+    """トークン列を、&& / || / ; / | / 改行などの区切りで単純コマンドへ分ける。"""
     current = []
-    pending_delimiters = []
-    expecting_delimiter = False
     for token in tokens:
         if token in SHELL_SEPARATORS and is_shell_operator(token):
             if current:
                 yield current
             current = []
-            if token == "\n":
-                pending_delimiters = []
             continue
-        if expecting_delimiter:
-            pending_delimiters.append(str(token))
-            expecting_delimiter = False
-            current.append(token)
-            continue
-        delimiter = heredoc_delimiter(token)
-        if delimiter is not None:
-            if delimiter == "":
-                expecting_delimiter = True
-            else:
-                pending_delimiters.append(delimiter)
         current.append(token)
     if current:
         yield current
@@ -1262,532 +924,56 @@ PUBLISH_STAGES = ("commit", "push", "pr", "status")
 PUBLISH_SUCCESS_STAGES = ("commit", "push", "pr")
 
 
-ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# 公開コマンドの正規形。公開ステップのコマンドは、この形に一致する1行だけを
+# 受理する。段階の後ろには publish.py 自身のオプションだけを置ける。
+PUBLISH_COMMAND_FORM = (
+    'python3 tools/project-status/publish.py <段階> [--status "<名前>"] [--require-published]'
+)
+CANONICAL_PUBLISH_COMMAND = re.compile(
+    r"^python3 tools/project-status/publish\.py (commit|push|pr|status)"
+    r"(?: --status (?:\"[^\"]+\"|'[^']+'|\S+)| --require-published)*$"
+)
 
 
-def strip_command_prefix(tokens_of_command):
-    """単純コマンドの先頭にある制御語と環境変数代入を読み飛ばす。
+def canonical_publish_stage(command):
+    """コマンド文字列が公開コマンドの正規形なら、その段階名を返す。
 
-    `FOO=1 python3 ...` の代入はコマンド名ではなく、その後ろの実行ファイルが
-    起動する。代入だけのコマンドは空の列になる。
+    正規形は `python3 tools/project-status/publish.py <段階>` の1行であり、
+    段階の後ろには publish.py 自身のオプション（--status と
+    --require-published）だけを置ける。正規形でなければ None を返す。
     """
-    while tokens_of_command and (
-        tokens_of_command[0] in SHELL_KEYWORDS or ENV_ASSIGNMENT.match(tokens_of_command[0])
-    ):
-        tokens_of_command = tokens_of_command[1:]
-    return tokens_of_command
-
-
-def split_string_command(string, extra_arguments):
-    """env の -S の引数（コマンド文字列）を、起動するコマンドのトークン列へ変える。
-
-    env は文字列を分割して1つのプログラムを直接起動する（シェルは経由しない）
-    ため、実行されるのは先頭の単純コマンドだけであり、後ろの引数はその
-    コマンドへ追加の引数として渡される。
-    """
-    try:
-        commands = list(simple_commands(shell_tokens(string)))
-    except ValueError:
+    text = str(command).strip()
+    if "\n" in text:
         return None
-    if not commands:
+    match = CANONICAL_PUBLISH_COMMAND.match(text)
+    if match is None:
         return None
-    return list(commands[0]) + list(extra_arguments)
-
-
-def env_command_arguments(arguments):
-    """env の引数列から、env が実際に起動するコマンドの引数列を返す。
-
-    オプション（-i、引数を取る -u / -C、--unset=... の形を含む）と、コマンド
-    の前にある NAME=VALUE の代入を読み飛ばす。コマンドが続かない場合（環境
-    の表示だけ）は None を返す。--help / --version もコマンドを実行しない
-    ため None を返す。
-
-    -S（--split-string）は、引数自体がコマンド文字列であり、後ろの引数は
-    そのコマンドへ追加されるため、split_string_command でトークン列へ変える。
-    """
-    index = 0
-    while index < len(arguments):
-        token = arguments[index]
-        if token == "--":
-            index += 1
-            break
-        if token == "-":
-            index += 1
-            continue
-        if token.startswith("--"):
-            name, separator, attached = token[2:].partition("=")
-            if name in ("help", "version"):
-                return None
-            if name == "split-string":
-                if separator:
-                    return split_string_command(attached, arguments[index + 1 :])
-                if index + 1 >= len(arguments):
-                    return None
-                return split_string_command(arguments[index + 1], arguments[index + 2 :])
-            if name in ("unset", "chdir") and not separator:
-                index += 2
-            else:
-                index += 1
-            continue
-        if token.startswith("-"):
-            step = 1
-            for position, option in enumerate(token[1:]):
-                if option in ("u", "C"):
-                    if position == len(token) - 2:
-                        step = 2
-                    break
-                if option == "S":
-                    attached = token[position + 2 :]
-                    if attached:
-                        return split_string_command(attached, arguments[index + 1 :])
-                    if index + 1 >= len(arguments):
-                        return None
-                    return split_string_command(arguments[index + 1], arguments[index + 2 :])
-            index += step
-            continue
-        break
-    while index < len(arguments) and ENV_ASSIGNMENT.match(arguments[index]):
-        index += 1
-    if index >= len(arguments):
-        return None
-    return arguments[index:]
-
-
-SUDO_OPTIONS_WITH_ARGUMENT = {"C", "D", "R", "T", "U", "g", "p", "r", "t", "u"}
-SUDO_LONG_OPTIONS_WITH_ARGUMENT = {
-    "chdir",
-    "close-from",
-    "command-timeout",
-    "group",
-    "host",
-    "login-class",
-    "prompt",
-    "role",
-    "target",
-    "type",
-    "user",
-}
-SUDO_OPTIONS_WITHOUT_EXECUTION = {"K", "V", "e", "l", "v"}
-SUDO_LONG_OPTIONS_WITHOUT_EXECUTION = {
-    "edit",
-    "help",
-    "list",
-    "remove-timestamp",
-    "validate",
-    "version",
-}
-
-
-def sudo_command_arguments(arguments):
-    """sudo の引数列から、sudo が実際に起動するコマンドの引数列を返す。
-
-    オプション（引数を取る -u / -g / --user=... など）を読み飛ばす。一覧の
-    表示やタイムスタンプの操作、ファイルの編集だけを行う形式（-l / -v /
-    -K / -V / -e、--list など）はコマンドを実行しないため None を返す。
-    コマンドが続かない場合も None を返す。コマンドの前に置かれる
-    NAME=VALUE は sudo 自身が環境変数として受け取るため、ここでは読み飛
-    ばさず、呼び出し側の strip_command_prefix に委ねる。
-
-    -h は、くっついた引数がある場合はホストの指定、無い場合はヘルプの表示
-    として扱う。
-    """
-    index = 0
-    while index < len(arguments):
-        token = arguments[index]
-        if token == "--":
-            index += 1
-            break
-        if token.startswith("--"):
-            name, separator, _attached = token[2:].partition("=")
-            if name in SUDO_LONG_OPTIONS_WITHOUT_EXECUTION:
-                return None
-            if name in SUDO_LONG_OPTIONS_WITH_ARGUMENT and not separator:
-                index += 2
-            else:
-                index += 1
-            continue
-        if token.startswith("-") and token != "-":
-            step = 1
-            for position, option in enumerate(token[1:]):
-                if option in SUDO_OPTIONS_WITHOUT_EXECUTION:
-                    return None
-                if option == "h":
-                    if position == len(token) - 2:
-                        return None
-                    break
-                if option in SUDO_OPTIONS_WITH_ARGUMENT:
-                    if position == len(token) - 2:
-                        step = 2
-                    break
-            index += step
-            continue
-        break
-    if index >= len(arguments):
-        return None
-    return arguments[index:]
-
-
-def nice_command_arguments(arguments):
-    """nice の引数列から、nice が実際に起動するコマンドの引数列を返す。
-
-    -n（--adjustment）と、旧式の -5 のような符号付き数値の調整値を読み飛
-    ばす。--help / --version はコマンドを実行しないため None を返す。
-    コマンドが続かない場合（現在のナイス値の表示だけ）も None を返す。
-    """
-    index = 0
-    while index < len(arguments):
-        token = arguments[index]
-        if token == "--":
-            index += 1
-            break
-        if token.startswith("--"):
-            name, separator, _attached = token[2:].partition("=")
-            if name in ("help", "version"):
-                return None
-            if name == "adjustment" and not separator:
-                index += 2
-            else:
-                index += 1
-            continue
-        if re.fullmatch(r"[+-]\d+", token):
-            index += 1
-            continue
-        if token.startswith("-") and token != "-":
-            step = 1
-            for position, option in enumerate(token[1:]):
-                if option == "n":
-                    if position == len(token) - 2:
-                        step = 2
-                    break
-            index += step
-            continue
-        break
-    if index >= len(arguments):
-        return None
-    return arguments[index:]
-
-
-TIME_OPTIONS_WITH_ARGUMENT = {"f", "o"}
-TIME_LONG_OPTIONS_WITH_ARGUMENT = {"format", "output"}
-
-
-def time_command_arguments(arguments):
-    """time の引数列から、time が実際に起動するコマンドの引数列を返す。
-
-    引数を取る -o / -f（--output / --format）を読み飛ばす。--help /
-    --version はコマンドを実行しないため None を返す。コマンドが続かない
-    場合も None を返す。
-    """
-    index = 0
-    while index < len(arguments):
-        token = arguments[index]
-        if token == "--":
-            index += 1
-            break
-        if token.startswith("--"):
-            name, separator, _attached = token[2:].partition("=")
-            if name in ("help", "version"):
-                return None
-            if name in TIME_LONG_OPTIONS_WITH_ARGUMENT and not separator:
-                index += 2
-            else:
-                index += 1
-            continue
-        if token.startswith("-") and token != "-":
-            step = 1
-            for position, option in enumerate(token[1:]):
-                if option in TIME_OPTIONS_WITH_ARGUMENT:
-                    if position == len(token) - 2:
-                        step = 2
-                    break
-            index += step
-            continue
-        break
-    if index >= len(arguments):
-        return None
-    return arguments[index:]
-
-
-def command_command_arguments(arguments):
-    """command の引数列から、command が実際に起動するコマンドの引数列を返す。
-
-    -p（既定の PATH を使う）は実行の形を変えないため読み飛ばす。-v / -V は
-    コマンドの場所を表示するだけで実行しないため None を返す。コマンドが
-    続かない場合も None を返す。
-    """
-    index = 0
-    while index < len(arguments):
-        token = arguments[index]
-        if token == "--":
-            index += 1
-            break
-        if token.startswith("-") and token != "-":
-            if "v" in token[1:] or "V" in token[1:]:
-                return None
-            index += 1
-            continue
-        break
-    if index >= len(arguments):
-        return None
-    return arguments[index:]
-
-
-def exec_command_arguments(arguments):
-    """exec の引数列から、exec が実際に起動するコマンドの引数列を返す。
-
-    -c（環境を空にする）と -l（ログインシェルとして起動する）、引数を取る
-    -a（argv[0] の指定）を読み飛ばす。コマンドが続かない場合（リダイレク
-    トの適用だけ）はコマンドを実行しないため None を返す。
-    """
-    index = 0
-    while index < len(arguments):
-        token = arguments[index]
-        if token == "--":
-            index += 1
-            break
-        if token.startswith("-") and token != "-":
-            step = 1
-            for position, option in enumerate(token[1:]):
-                if option == "a":
-                    if position == len(token) - 2:
-                        step = 2
-                    break
-            index += step
-            continue
-        break
-    if index >= len(arguments):
-        return None
-    return arguments[index:]
-
-
-COMMAND_WRAPPERS = {
-    "command": command_command_arguments,
-    "env": env_command_arguments,
-    "exec": exec_command_arguments,
-    "nice": nice_command_arguments,
-    "sudo": sudo_command_arguments,
-    "time": time_command_arguments,
-}
-
-
-def strip_command_wrappers(tokens_of_command):
-    """単純コマンドの先頭にあるコマンドラッパーを、重なりも含めて読み飛ばす。
-
-    env / sudo / nice / time / command / exec は、後ろのコマンドを起動する
-    ラッパーである。各ラッパーのオプションと引数を読み飛ばし、ラッパーが
-    重なっている場合（`sudo env FOO=1 python3 ...` など）は内側までほどく。
-    ラッパーの前後にある制御語と環境変数代入（sudo が受け取る NAME=VALUE
-    を含む）もあわせて読み飛ばす。この読み飛ばしは公開コマンドの検出
-    （invoked_publish_stages）からだけ使う。
-
-    一覧の表示や検証だけを行う形式（command -v、sudo -l など）と、コマンド
-    が続かない形式は、実行ではないため空の列を返す。ラッパー越しであって
-    も、実行しない形式（bash -n など）を実行として扱うことはない（判定は
-    ほどいた先の通常の経路で行われる）。
-
-    builtin はラッパーとして扱わない。builtin が実行できるのはシェルの
-    組み込みコマンドだけであり、外部コマンドである publish.py やインタプ
-    リタは起動できない（bash では `builtin python3` は "not a shell
-    builtin" で失敗する）ため、公開コマンドの実行形式にはならない。
-    """
-    for _ in range(10):
-        tokens_of_command = strip_command_prefix(tokens_of_command)
-        if not tokens_of_command:
-            return tokens_of_command
-        unwrapper = COMMAND_WRAPPERS.get(tokens_of_command[0].rsplit("/", 1)[-1])
-        if unwrapper is None:
-            return tokens_of_command
-        rest = unwrapper(tokens_of_command[1:])
-        if rest is None:
-            return []
-        tokens_of_command = rest
-    return []
-
-
-def shell_command_string(arguments):
-    """bash / sh の引数列から、-c で実行されるスクリプトを返す。
-
-    -n（読み込むが実行しない）が付いている場合、そのスクリプトは実行されない
-    ため None を返す。-o noexec も -n と同じく実行しない指定であるため、その
-    場合も None を返す。-c が無い場合（スクリプトファイルの実行など）も None を
-    返す。-cn のように -c と同じ引数へ結合したオプションも最後まで解析し、
-    -c の後ろに -n や -o noexec があっても実行として扱わない。-o のように
-    引数を取るオプションは、その引数も読み飛ばす。-o が -c と同じ引数に
-    ある場合は、-o の引数の後ろが -c のスクリプトになる。
-    """
-    noexec = False
-    index = 0
-    while index < len(arguments):
-        token = arguments[index]
-        if token == "--":
-            return None
-        if token.startswith("+") and len(token) > 1:
-            index += 1
-            continue
-        if not token.startswith("-") or token == "-":
-            return None
-        if token.startswith("--"):
-            index += 1
-            continue
-        step = 1
-        saw_command = False
-        options = token[1:]
-        for position, option in enumerate(options):
-            if option == "n":
-                noexec = True
-            elif option == "c":
-                saw_command = True
-            elif option == "o":
-                if position == len(options) - 1:
-                    value = arguments[index + 1] if index + 1 < len(arguments) else None
-                    step = 2
-                else:
-                    value = options[position + 1 :]
-                if value == "noexec":
-                    noexec = True
-                break
-        if saw_command:
-            script_index = index + step
-            if noexec or script_index >= len(arguments):
-                return None
-            return arguments[script_index]
-        index += step
-    return None
-
-
-def python_script_arguments(arguments):
-    """python 系インタプリタの引数列から、実行するスクリプトとその引数を返す。
-
-    対象のインタプリタは python、python3、python3.11 のようなバージョン
-    付きの名前を含む。
-
-    インタプリタのオプション（-u など。引数を取る -W / -X はその引数も）を
-    読み飛ばす。-c や -m はスクリプトファイルの実行ではないため、その場合は
-    None を返す。-h や -V、--help や --version、--help-env、--help-xoptions、
-    --help-all のような、表示だけを行って終了するオプションがある場合も、
-    スクリプトは実行されないため None を返す。スクリプトが無い場合も None を
-    返す。
-    """
-    index = 0
-    while index < len(arguments):
-        token = arguments[index]
-        if token == "--":
-            index += 1
-            break
-        if not token.startswith("-") or token == "-":
-            break
-        if token.startswith("--"):
-            if token[2:].split("=", 1)[0] in (
-                "help",
-                "version",
-                "help-env",
-                "help-xoptions",
-                "help-all",
-            ):
-                return None
-            index += 1
-            continue
-        step = 1
-        for position, option in enumerate(token[1:]):
-            if option in ("c", "m"):
-                return None
-            if option in ("h", "V"):
-                return None
-            if option in ("W", "X"):
-                if position == len(token) - 2:
-                    step = 2
-                break
-        index += step
-    if index >= len(arguments):
-        return None
-    return arguments[index:]
-
-
-REDIRECTION_OPERATOR = re.compile(r"^\d*(?:>>|<>|>&|<&|>|<)$")
-REDIRECTION_WITH_TARGET = re.compile(r"^\d*(?:>>|<>|>&|<&|>|<).", re.DOTALL)
-
-
-def strip_leading_redirections(tokens_of_command):
-    """単純コマンドの先頭にあるリダイレクトとその対象を読み飛ばす。
-
-    `>/dev/null python3 ...` のように、リダイレクトはコマンド名より前に
-    置ける。対象が同じトークンに付いている形（>/dev/null、2>file）と、
-    次のトークンが対象になる形（> /dev/null、2> file）の両方を読み飛ばす。
-    引用符で作られた語はリダイレクトではないため読み飛ばさない。ヒアド
-    キュメント（<<）は本文の読み飛ばしが別に担うため対象にしない。
-    """
-    index = 0
-    while index < len(tokens_of_command):
-        token = tokens_of_command[index]
-        if getattr(token, "quoted", False):
-            break
-        if REDIRECTION_OPERATOR.fullmatch(token):
-            index += 1
-            if index < len(tokens_of_command) and not is_shell_operator(tokens_of_command[index]):
-                index += 1
-            continue
-        if REDIRECTION_WITH_TARGET.match(token):
-            index += 1
-            continue
-        break
-    return tokens_of_command[index:]
-
-
-def invoked_publish_stages(command, depth=0):
-    """コマンド文字列が実際に起動する publish.py の段階を集める。
-
-    bash -c や sh -c の内側のスクリプトへ再帰し、単純コマンドの先頭にある
-    publish.py の呼び出し（直接実行、または python 系インタプリタ（バー
-    ジョン付きの名前を含む）の引数としての実行）だけを拾う。シェル名は
-    /bin/bash のようなパス付きの形も含めて basename で比べる。コマンド先頭
-    の環境変数代入と python のオプション、先頭のリダイレクトとその対象は
-    読み飛ばす。env / sudo / nice / time / command / exec のラッパーは、
-    重なっていてもほどいて内側のコマンドを判定する。ただし一覧の表示や
-    検証だけを行う形式（command -v、sudo -l など）は実行として扱わない。
-    -n 付きのシェルと、python の -c / -m は実行として扱わない。
-    echo の引数や引用符内の文字列、コメント、ヒアドキュメントの本文は、
-    コマンド文字列の任意の位置に publish.py と段階名が並んでいても起動として
-    扱わない。
-    """
-    found = set()
-    if depth > 5:
-        return found
-    try:
-        tokens = shell_tokens(command)
-    except ValueError:
-        return found
-    for tokens_of_command in simple_commands(tokens):
-        tokens_of_command = strip_command_wrappers(tokens_of_command)
-        tokens_of_command = strip_leading_redirections(tokens_of_command)
-        if not tokens_of_command:
-            continue
-        head = tokens_of_command[0]
-        if head.rsplit("/", 1)[-1] in ("bash", "sh"):
-            script = shell_command_string(tokens_of_command[1:])
-            if script is not None:
-                found |= invoked_publish_stages(script, depth + 1)
-            continue
-        arguments = tokens_of_command[1:]
-        if not head.endswith("publish.py"):
-            if not PYTHON_EXECUTABLE.fullmatch(head.rsplit("/", 1)[-1]):
-                continue
-            script_arguments = python_script_arguments(arguments)
-            if script_arguments is None or not script_arguments[0].endswith("publish.py"):
-                continue
-            arguments = script_arguments[1:]
-        if arguments and arguments[0] in PUBLISH_STAGES:
-            found.add(arguments[0])
-    return found
+    return match.group(1)
 
 
 def publish_stages(step):
-    """公開ステップが実行する publish.py の段階を、{段階名: as 名} で返す。"""
+    """公開ステップが実行する publish.py の段階を、{段階名: as 名} で返す。
+
+    段階の検出は正規形の照合で行う。コマンド入力に publish.py への言及が
+    あるのに正規形に一致しない場合は、正規形を示して GateError にする。
+    echo の引数・コメント・引用符内の文字列・ラッパー越しの起動など、記法を
+    問わずすべてここで落ちる。publish.py への言及が無いコマンドは公開と
+    無関係であり、そのまま通す。
+    """
     stages = {}
     for item in step.get("system_inputs") or []:
         if not isinstance(item, dict) or item.get("type") != "command":
             continue
-        for stage in invoked_publish_stages(str(item.get("command", ""))):
-            stages.setdefault(stage, item.get("as"))
+        command = str(item.get("command", ""))
+        if "publish.py" not in command:
+            continue
+        stage = canonical_publish_stage(command)
+        if stage is None:
+            raise GateError(
+                f"公開コマンドが正規形ではありません。正規形は {PUBLISH_COMMAND_FORM} の1行です"
+                f"（段階は commit / push / pr / status）: {command!r}"
+            )
+        stages.setdefault(stage, item.get("as"))
     return stages
 
 

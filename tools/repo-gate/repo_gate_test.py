@@ -1334,31 +1334,14 @@ def test_status_only_step_is_not_a_publish_step() -> None:
 
 
 def test_publish_stage_detection() -> None:
-    """publish.py の段階検出は、実行位置にある呼び出しだけを拾う。
+    """publish.py の段階検出は、正規形のコマンドだけを受理する。
 
-    echo の引数・引用符内の文字列・コメント・ヒアドキュメントの本文に書かれた
-    publish.py は実行とみなさない。bash -c の内側のスクリプトと、&& でつないだ
-    後段の呼び出しは実行として拾う。コマンド先頭の環境変数代入と python の
-    オプションは読み飛ばし、-n 付きのシェルと python の -c / -m は実行として
-    扱わない。引用符内の << はヒアドキュメントの開始として扱わず、本文に
-    引用符が含まれていても本文の読み飛ばしは崩れない。行継続（バックス
-    ラッシュ＋改行）は、継続行が字下げされていても引数として残らない。
-    バージョン付きのインタプリタ名（python3.11 など）も python として扱う。
-    算術式展開 $(( ... )) の中にある << はシフト演算子であり、ヒアドキュ
-    メントの開始として扱わない。
-    env / sudo / nice / time / command / exec のラッパーは、各ラッパーの
-    オプションと引数を読み飛ばし、重なっていてもほどいて内側の呼び出しを
-    拾う。一覧の表示や検証だけを行う形式（command -v、sudo -l など）と、
-    ラッパー越しの bash -n は実行として扱わない。
-    シェル名は /bin/bash のようなパス付きの形も含めて basename で比べる。
-    先頭のリダイレクトとその対象は読み飛ばす。# がコメントを始めるのは
-    語の先頭にある場合だけであり、語の途中にある #（issue#123 など）は
-    後ろの呼び出しを消さない。-c と同じ引数に結合した -n（-cn）と
-    -o noexec は実行として扱わず、-o pipefail は実行として扱う。python の
-    表示専用オプション（-h、-V、--help-env、--help-xoptions、--help-all）
-    は実行として扱わない。コマンド語に空白なしで隣接した <<（例:
-    cat<<'EOF'）もヒアドキュメントの開始として扱い、本文は実行として
-    扱わず、後ろの実起動を拾う。
+    正規形は `python3 tools/project-status/publish.py <段階>` の1行であり、
+    段階の後ろには publish.py 自身のオプション（--status と
+    --require-published）だけを置ける。publish.py への言及があるのに正規形に
+    一致しないコマンドは、正規形を示す理由つきで拒否する。echo の引数・
+    コメント・引用符内の文字列・ラッパー越し・複数行など、記法を問わない。
+    publish.py への言及が無いコマンドは公開と無関係であり、そのまま通す。
     """
     with Sandbox() as sandbox:
         module = sandbox.module
@@ -1370,261 +1353,78 @@ def test_publish_stage_detection() -> None:
                 "system_inputs": [{"type": "command", "as": as_name, "command": command}],
             }
 
-        assert module.publish_stages(step("python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "通常の起動を拾う"
-        assert module.publish_stages(step("echo python3 tools/project-status/publish.py commit")) == {}, (
-            "echo の引数を実行とみなさない"
-        )
-        assert module.publish_stages(step('echo "python3 tools/project-status/publish.py commit"')) == {}, (
-            "引用符内の文字列を実行とみなさない"
-        )
-        assert module.publish_stages(step("# python3 tools/project-status/publish.py commit")) == {}, (
-            "コメントを実行とみなさない"
-        )
+        for stage in ("commit", "push", "pr"):
+            assert module.publish_stages(
+                step(f"python3 tools/project-status/publish.py {stage}", stage)
+            ) == {stage: stage}, f"正規形の {stage} を拾う"
         assert module.publish_stages(
-            step("echo 準備 # コメント\npython3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "コメント行の次の実起動を拾う"
-        assert module.publish_stages(step("bash -c 'python3 tools/project-status/publish.py commit'")) == {
-            "commit": "commit"
-        }, "bash -c の内側の実起動を拾う"
+            step('python3 tools/project-status/publish.py status --status "In Review"', "status")
+        ) == {"status": "status"}, "status の --status（引用符付き）を受理する"
         assert module.publish_stages(
-            step("cd frontend && python3 tools/project-status/publish.py push", "push")
-        ) == {"push": "push"}, "前段を && でつないだ実起動を拾う"
-        assert module.publish_stages(step("python3 -u tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "python のオプション（-u）を読み飛ばして、オプションなしと同じ段階を返す"
+            step("python3 tools/project-status/publish.py status --status 'In Review'", "status")
+        ) == {"status": "status"}, "status の --status（単一引用符）を受理する"
         assert module.publish_stages(
-            step("python3 -W ignore tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "引数を取る python のオプション（-W）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step('python3 -c "python3 tools/project-status/publish.py commit"')
-        ) == {}, "python の -c はスクリプトの実行として扱わない"
-        assert module.publish_stages(step("python3 -m tools.project-status.publish commit")) == {}, (
-            "python の -m はスクリプトの実行として扱わない"
-        )
-        assert module.publish_stages(step("FOO=1 python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "先頭の環境変数代入を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("PYTHONUNBUFFERED=1 python3 -u tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "環境変数代入と python のオプションが重なっても実起動を拾う"
-        assert module.publish_stages(
-            step("bash -n -c 'python3 tools/project-status/publish.py commit'")
-        ) == {}, "構文確認だけのシェル（bash -n -c）は実行として扱わない"
-        assert module.publish_stages(
-            step("cat <<'EOF'\npython3 tools/project-status/publish.py commit\nEOF")
-        ) == {}, "ヒアドキュメントの本文は実行として扱わない"
+            step("python3 tools/project-status/publish.py status --status InReview", "status")
+        ) == {"status": "status"}, "status の --status（引用符なし）を受理する"
         assert module.publish_stages(
             step(
-                "cat <<'EOF'\npython3 tools/project-status/publish.py commit\nEOF\n"
-                "python3 tools/project-status/publish.py commit"
+                'python3 tools/project-status/publish.py status --status "In Review"'
+                " --require-published",
+                "status",
             )
-        ) == {"commit": "commit"}, "ヒアドキュメントの後ろにある実起動は拾う"
+        ) == {"status": "status"}, "--require-published を受理する"
         assert module.publish_stages(
-            step('echo "<<EOF"\npython3 tools/project-status/publish.py commit')
-        ) == {"commit": "commit"}, "引用符内の << はヒアドキュメントの開始として扱わない"
-        assert module.publish_stages(
-            step("cat <<'EOF'\nIt's ready\nEOF\npython3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "本文に引用符があっても、ヒアドキュメントの後ろにある実起動は拾う"
-        assert module.publish_stages(
-            step("cat <<'EOF'\nIt's python3 tools/project-status/publish.py commit\nEOF")
-        ) == {}, "本文に引用符と publish.py があっても実行として扱わない"
-        assert module.publish_stages(
-            step("cat<<'EOF'\nIt's ready\nEOF\npython3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "コマンド語に隣接した << でも、ヒアドキュメントの後ろにある実起動は拾う"
-        assert module.publish_stages(
-            step("cat<<'EOF'\nIt's python3 tools/project-status/publish.py commit\nEOF")
-        ) == {}, "コマンド語に隣接した << の本文も実行として扱わない"
-        assert module.publish_stages(
-            step("cat<<EOF\nbody\nEOF\npython3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "区切り語が引用されていない隣接形でも、後ろの実起動は拾う"
-        assert module.publish_stages(
-            step("python3 \\\n  tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "行継続を挟み、継続行が字下げされていても実起動を拾う"
-        assert module.publish_stages(
-            step("python3 \\\n  -u tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "行継続の後ろに python のオプションがあっても実起動を拾う"
-        assert module.publish_stages(step("python3.11 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "バージョン付きのインタプリタ名（python3.11）でも実起動を拾う"
-        assert module.publish_stages(
-            step("/usr/bin/python3.12 tools/project-status/publish.py push", "push")
-        ) == {"push": "push"}, "パス付きのバージョン付きインタプリタでも実起動を拾う"
-        assert module.publish_stages(step("python3.11 -u tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "バージョン付きのインタプリタとオプションが重なっても実起動を拾う"
-        assert module.publish_stages(
-            step("echo $((1 << 2))\npython3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "算術式の中の << はヒアドキュメントの開始として扱わず、後ろの実起動を拾う"
-        assert module.publish_stages(
-            step("echo $(( (1 << 2) + 3 ))\npython3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "算術式に括弧が入れ子になっていても、後ろの実起動を拾う"
-        assert module.publish_stages(
-            step("echo $((1 << 2))\ncat <<'EOF'\npython3 tools/project-status/publish.py commit\nEOF")
-        ) == {}, "算術式の後ろにあるヒアドキュメントの本文も実行として扱わない"
-        assert module.publish_stages(
-            step("env PYTHONUNBUFFERED=1 python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "env の代入をほどいて実起動を拾う"
-        assert module.publish_stages(step("env python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "env 越しの実起動を拾う"
-        assert module.publish_stages(step("env -i python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "env のオプション（-i）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("env -u PYTHONPATH python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "引数を取る env のオプション（-u）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("env --unset=PYTHONPATH python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "env の長いオプション（--unset=...）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(step("env -- python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "env の -- の後ろにある実起動を拾う"
-        assert module.publish_stages(
-            step("env -S python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "env の -S（コマンド文字列）をほどいて実起動を拾う"
-        assert module.publish_stages(step("env FOO=1 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "env 越しの直接実行を拾う"
-        assert module.publish_stages(
-            step("/usr/bin/env FOO=1 python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "パス付きの env でも実起動を拾う"
-        assert module.publish_stages(
-            step("env FOO=1 bash -c 'python3 tools/project-status/publish.py commit'")
-        ) == {"commit": "commit"}, "env 越しの bash -c の内側の実起動を拾う"
-        assert module.publish_stages(step("sudo python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "sudo 越しの実起動を拾う"
-        assert module.publish_stages(step("sudo -n python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "sudo のオプション（-n）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("sudo -u root python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "引数を取る sudo のオプション（-u）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("sudo --user=root python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "sudo の長いオプション（--user=...）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(step("sudo FOO=1 python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "sudo が受け取る代入を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("sudo env FOO=1 python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "sudo と env が重なっても実起動を拾う"
-        assert module.publish_stages(
-            step("env FOO=1 sudo -n python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "env と sudo が重なっても実起動を拾う"
-        assert module.publish_stages(step("nice python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "nice 越しの実起動を拾う"
-        assert module.publish_stages(step("nice -n 5 python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "nice の調整値（-n）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(step("nice -5 python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "nice の旧式の調整値（-5）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("nice --adjustment=5 python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "nice の長いオプション（--adjustment=...）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(step("time python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "time 越しの実起動を拾う"
-        assert module.publish_stages(step("time -p python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "time のオプション（-p）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("time -o /tmp/timing.txt python3 tools/project-status/publish.py push", "push")
-        ) == {"push": "push"}, "引数を取る time のオプション（-o）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(step("command python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "command 越しの実起動を拾う"
-        assert module.publish_stages(
-            step("command -p python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "command のオプション（-p）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(step("exec python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "exec 越しの実起動を拾う"
-        assert module.publish_stages(step("exec -c python3 tools/project-status/publish.py commit")) == {
-            "commit": "commit"
-        }, "exec のオプション（-c）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("exec -a publish python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "引数を取る exec のオプション（-a）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("command -v python3 tools/project-status/publish.py commit")
-        ) == {}, "command -v は場所を表示するだけで実行として扱わない"
-        assert module.publish_stages(
-            step("command -V python3 tools/project-status/publish.py commit")
-        ) == {}, "command -V は場所を表示するだけで実行として扱わない"
-        assert module.publish_stages(
-            step("sudo -l python3 tools/project-status/publish.py commit")
-        ) == {}, "sudo -l は一覧を表示するだけで実行として扱わない"
-        assert module.publish_stages(
-            step("sudo -v python3 tools/project-status/publish.py commit")
-        ) == {}, "sudo -v はタイムスタンプの操作だけで実行として扱わない"
-        assert module.publish_stages(
-            step("env FOO=1 bash -n -c 'python3 tools/project-status/publish.py commit'")
-        ) == {}, "ラッパー越しでも、構文確認だけのシェルは実行として扱わない"
-        assert module.publish_stages(
-            step("sudo bash -n -c 'python3 tools/project-status/publish.py commit'")
-        ) == {}, "sudo 越しでも、構文確認だけのシェルは実行として扱わない"
-        assert module.publish_stages(
-            step("nice --help python3 tools/project-status/publish.py commit")
-        ) == {}, "nice --help は使い方を表示するだけで実行として扱わない"
-        assert module.publish_stages(
-            step("time --version python3 tools/project-status/publish.py commit")
-        ) == {}, "time --version は版を表示するだけで実行として扱わない"
-        assert module.publish_stages(step("env FOO=1")) == {}, (
-            "env だけ（環境の表示）は実行として扱わない"
-        )
-        assert module.publish_stages(step("exec")) == {}, (
-            "コマンドが続かない exec は実行として扱わない"
+            step(
+                'python3 tools/project-status/publish.py status --require-published'
+                ' --status "In Review"',
+                "status",
+            )
+        ) == {"status": "status"}, "オプションの順序は問わない"
+        assert module.publish_stages(step("make done")) == {}, (
+            "publish.py への言及が無いコマンドはそのまま通す"
         )
         assert module.publish_stages(
-            step("/bin/bash -c 'python3 tools/project-status/publish.py commit'")
-        ) == {"commit": "commit"}, "パス付きのシェル（/bin/bash -c）の内側の実起動を拾う"
-        assert module.publish_stages(
-            step("/bin/sh -c 'python3 tools/project-status/publish.py commit'")
-        ) == {"commit": "commit"}, "パス付きのシェル（/bin/sh -c）の内側の実起動を拾う"
-        assert module.publish_stages(
-            step(">/dev/null python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "先頭のリダイレクト（対象が同じトークン）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("> /dev/null python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "先頭のリダイレクト（対象が次のトークン）を読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("2>/dev/null python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "fd 付きの先頭のリダイレクトを読み飛ばして実起動を拾う"
-        assert module.publish_stages(
-            step("echo issue#123; python3 tools/project-status/publish.py commit")
-        ) == {"commit": "commit"}, "語の途中にある # はコメントではなく、後ろの実起動を拾う"
-        assert module.publish_stages(
-            step("bash -cn 'python3 tools/project-status/publish.py commit'")
-        ) == {}, "-c と同じ引数に結合した -n（-cn）は実行として扱わない"
-        assert module.publish_stages(
-            step("bash -o noexec -c 'python3 tools/project-status/publish.py commit'")
-        ) == {}, "-o noexec は実行として扱わない"
-        assert module.publish_stages(
-            step("bash -onoexec -c 'python3 tools/project-status/publish.py commit'")
-        ) == {}, "くっついた -o noexec（-onoexec）も実行として扱わない"
-        assert module.publish_stages(
-            step("bash -o pipefail -c 'python3 tools/project-status/publish.py commit'")
-        ) == {"commit": "commit"}, "-o pipefail は実行を止めないため、内側の実起動を拾う"
-        assert module.publish_stages(
-            step("python3 -h tools/project-status/publish.py commit")
-        ) == {}, "python の -h はヘルプを表示するだけで実行として扱わない"
-        assert module.publish_stages(
-            step("python3 -V tools/project-status/publish.py commit")
-        ) == {}, "python の -V は版を表示するだけで実行として扱わない"
-        assert module.publish_stages(
-            step("python3 --help-env tools/project-status/publish.py commit")
-        ) == {}, "python の --help-env は表示だけで実行として扱わない"
-        assert module.publish_stages(
-            step("python3 --help-xoptions tools/project-status/publish.py commit")
-        ) == {}, "python の --help-xoptions は表示だけで実行として扱わない"
-        assert module.publish_stages(
-            step("python3 --help-all tools/project-status/publish.py commit")
-        ) == {}, "python の --help-all は表示だけで実行として扱わない"
+            {
+                "name": "create_pr",
+                "mode": "system",
+                "system_inputs": [
+                    {"type": "command", "as": "note", "command": "echo 公開の準備"},
+                    {
+                        "type": "command",
+                        "as": "commit",
+                        "command": "python3 tools/project-status/publish.py commit",
+                    },
+                ],
+            }
+        ) == {"commit": "commit"}, "言及の無いコマンドと正規形が混ざっても正規形だけを拾う"
+
+        rejected = {
+            "echo の引数": "echo python3 tools/project-status/publish.py commit",
+            "引用符内の文字列": 'echo "python3 tools/project-status/publish.py commit"',
+            "コメント": "# python3 tools/project-status/publish.py commit",
+            "bash -c の内側": "bash -c 'python3 tools/project-status/publish.py commit'",
+            "前段との連結": "cd frontend && python3 tools/project-status/publish.py commit",
+            "python のオプション付き": "python3 -u tools/project-status/publish.py commit",
+            "環境変数代入付き": "FOO=1 python3 tools/project-status/publish.py commit",
+            "ラッパー越し": "env FOO=1 python3 tools/project-status/publish.py commit",
+            "バージョン付きインタプリタ": "python3.11 tools/project-status/publish.py commit",
+            "パス付きインタプリタ": "/usr/bin/python3 tools/project-status/publish.py commit",
+            "直接実行": "tools/project-status/publish.py commit",
+            "複数行": "cat <<'EOF'\nready\nEOF\npython3 tools/project-status/publish.py commit",
+            "段階が無い": "python3 tools/project-status/publish.py",
+            "段階が違う": "python3 tools/project-status/publish.py deploy",
+            "publish.py に無いオプション": "python3 tools/project-status/publish.py commit --verbose",
+            "後段との連結": "python3 tools/project-status/publish.py commit; echo done",
+        }
+        for label, command in rejected.items():
+            try:
+                module.publish_stages(step(command))
+            except module.GateError as error:
+                assert "正規形" in str(error), (
+                    f"{label}: 拒否の理由に正規形が含まれません: {error}"
+                )
+            else:
+                raise AssertionError(f"{label}: 正規形でないコマンドが受理されました")
 
 
 def test_publish_workflow_passes() -> None:
@@ -1635,12 +1435,12 @@ def test_publish_workflow_passes() -> None:
         assert_success(sandbox, "公開ステップを置く構成")
 
 
-def test_publish_workflow_accepts_option_and_assignment_forms() -> None:
-    """公開コマンドの有効な記法（python のオプション、環境変数代入）でも関門を通る。
+def test_publish_workflow_rejects_noncanonical_forms() -> None:
+    """公開コマンドの正規形でない記法は、正規形を示す理由つきで拒否する。
 
-    `python3 -u ...` と `PYTHONUNBUFFERED=1 python3 ...` は、シェルでは公開
-    スクリプトを起動する有効な記法である。段階の検出から漏らすと、段階の入力が
-    無いものとして正しいワークフローが拒否される。
+    python のオプション・環境変数代入・ラッパー・バージョン付きインタプリタ・
+    ヒアドキュメントの前置き・行継続・前段との連結は、シェルでは公開スクリプトを
+    起動する有効な記法だが、正規形に一致しないため公開コマンドとして受理しない。
     """
     stage_lines = [
         "          python3 tools/project-status/publish.py commit\n",
@@ -1655,48 +1455,17 @@ def test_publish_workflow_accepts_option_and_assignment_forms() -> None:
         "環境変数代入付き": lambda line: line.replace(
             "          python3 ", "          PYTHONUNBUFFERED=1 python3 ", 1
         ),
-    }
-    for label, transform in cases.items():
-        workflow = PUBLISH_WORKFLOW
-        for line in stage_lines:
-            workflow = workflow.replace(line, transform(line))
-        with Sandbox() as sandbox:
-            repository(sandbox, workflow=workflow)
-            stub_external_tools(sandbox)
-            assert_success(sandbox, label)
-
-
-def test_publish_workflow_accepts_heredoc_and_continuation_forms() -> None:
-    """公開コマンドの有効な記法（ヒアドキュメントの前置き、行継続）でも関門を通る。
-
-    ヒアドキュメントの本文は実行されないが、本文に引用符が含まれていても
-    読み飛ばしは崩れず、後ろにある実起動は段階として検出されなければなら
-    ない。コマンド語に空白なしで隣接した <<（cat<<'EOF'）でも同じである。
-    引用符内の << はヒアドキュメントの開始ではない。YAML のブロック
-    内で python3 とスクリプトパスをバックスラッシュ＋改行で折り返し、継続行
-    が字下げされる形も、シェルでは行継続として取り除かれるため、実起動と
-    して検出されなければならない。検出から漏らすと、段階の入力が無いもの
-    として正しいワークフローが拒否される。
-    """
-    stage_lines = [
-        "          python3 tools/project-status/publish.py commit\n",
-        "          python3 tools/project-status/publish.py push\n",
-        "          python3 tools/project-status/publish.py pr\n",
-        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
-    ]
-    for line in stage_lines:
-        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
-    cases = {
-        "引用符を含むヒアドキュメントの前置き": lambda line: (
-            "          cat <<'EOF'\n          It's a publish step\n          EOF\n" + line
+        "ラッパー越し": lambda line: line.replace(
+            "python3 ", "env PYTHONUNBUFFERED=1 python3 ", 1
         ),
-        "引用符内の << の前置き": lambda line: '          echo "<<EOF"\n' + line,
-        "コマンド語に隣接した << の前置き": lambda line: (
-            "          cat<<'EOF'\n          It's a publish step\n          EOF\n" + line
+        "バージョン付きインタプリタ": lambda line: line.replace("python3 ", "python3.11 ", 1),
+        "ヒアドキュメントの前置き": lambda line: (
+            "          cat <<'EOF'\n          It's a publish step\n          EOF\n" + line
         ),
         "行継続で折り返す": lambda line: line.replace(
             "python3 ", "python3 \\\n            ", 1
         ),
+        "前段との連結": lambda line: line.replace("python3 ", "true && python3 ", 1),
     }
     for label, transform in cases.items():
         workflow = PUBLISH_WORKFLOW
@@ -1705,90 +1474,15 @@ def test_publish_workflow_accepts_heredoc_and_continuation_forms() -> None:
         with Sandbox() as sandbox:
             repository(sandbox, workflow=workflow)
             stub_external_tools(sandbox)
-            assert_success(sandbox, label)
+            assert_failure(sandbox, label, "workflow-machine-gate", "正規形")
 
 
-def test_publish_workflow_accepts_versioned_interpreter_and_arithmetic_forms() -> None:
-    """公開コマンドの有効な記法（バージョン付きインタプリタ、算術式の前置き）でも関門を通る。
+def test_publish_commands_must_use_canonical_form() -> None:
+    """publish.py への言及だけでは、公開ステップとして受理しない。
 
-    `python3.11 ...` のようなバージョン付きのインタプリタ名は、シェルでは
-    python3 と同じ公開スクリプトを起動する有効な記法である。また、
-    `echo $((1 << 2))` の << は算術式の中のシフト演算子であり、ヒアドキュ
-    メントの開始ではない。どちらも検出から漏らすと、段階の入力が無いもの
-    として正しいワークフローが拒否される。
-    """
-    stage_lines = [
-        "          python3 tools/project-status/publish.py commit\n",
-        "          python3 tools/project-status/publish.py push\n",
-        "          python3 tools/project-status/publish.py pr\n",
-        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
-    ]
-    for line in stage_lines:
-        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
-    cases = {
-        "バージョン付きインタプリタ": lambda line: line.replace("python3 ", "python3.11 ", 1),
-        "算術式の前置き": lambda line: "          echo $((1 << 2))\n" + line,
-    }
-    for label, transform in cases.items():
-        workflow = PUBLISH_WORKFLOW
-        for line in stage_lines:
-            workflow = workflow.replace(line, transform(line))
-        with Sandbox() as sandbox:
-            repository(sandbox, workflow=workflow)
-            stub_external_tools(sandbox)
-            assert_success(sandbox, label)
-
-
-def test_publish_workflow_accepts_wrapper_forms() -> None:
-    """公開コマンドの有効な記法（コマンドラッパー）でも関門を通る。
-
-    `env PYTHONUNBUFFERED=1 python3 ...` のようなラッパー越しの起動は、
-    シェルでは公開スクリプトを起動する有効な記法である。sudo / nice /
-    time / command / exec も同じであり、ラッパーが重なっても内側のコマンド
-    が実行される。段階の検出から漏らすと、段階の入力が無いものとして
-    正しいワークフローが拒否される。
-    """
-    stage_lines = [
-        "          python3 tools/project-status/publish.py commit\n",
-        "          python3 tools/project-status/publish.py push\n",
-        "          python3 tools/project-status/publish.py pr\n",
-        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
-    ]
-    for line in stage_lines:
-        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
-    cases = {
-        "env の代入付き": lambda line: line.replace(
-            "python3 ", "env PYTHONUNBUFFERED=1 python3 ", 1
-        ),
-        "env のオプション付き": lambda line: line.replace("python3 ", "env -i python3 ", 1),
-        "sudo のオプション付き": lambda line: line.replace("python3 ", "sudo -n python3 ", 1),
-        "nice の調整値付き": lambda line: line.replace("python3 ", "nice -n 5 python3 ", 1),
-        "time のオプション付き": lambda line: line.replace("python3 ", "time -p python3 ", 1),
-        "command 付き": lambda line: line.replace("python3 ", "command python3 ", 1),
-        "exec 付き": lambda line: line.replace("python3 ", "exec python3 ", 1),
-        "ラッパーの重なり": lambda line: line.replace(
-            "python3 ", "sudo env PYTHONUNBUFFERED=1 python3 ", 1
-        ),
-    }
-    for label, transform in cases.items():
-        workflow = PUBLISH_WORKFLOW
-        for line in stage_lines:
-            workflow = workflow.replace(line, transform(line))
-        with Sandbox() as sandbox:
-            repository(sandbox, workflow=workflow)
-            stub_external_tools(sandbox)
-            assert_success(sandbox, label)
-
-
-def test_publish_commands_must_invoke_publish_py() -> None:
-    """公開の段階が表示用の文字列だけでは、公開ステップとして受理しない。
-
-    echo の引数・引用符内の文字列・コメント・ヒアドキュメントの本文に publish.py を
-    書いても、構文確認だけのシェル（bash -n -c）に渡しても実行にはならない。
-    場所の表示だけを行う command -v や、ラッパー越しに構文確認だけのシェルへ
-    渡しても実行にはならない。
-    実行位置に呼び出しが無ければ公開ステップは無いものとして扱われ、machine_gate の
-    成功が公開ステップへ遷移する構成と矛盾するため、関門は拒否する。
+    echo の引数・引用符内の文字列・コメント・ヒアドキュメントの本文・構文確認
+    だけのシェル・場所の表示だけを行う command -v など、publish.py に言及する
+    だけのコマンドは、正規形を示す理由つきで拒否する。
     """
     stage_lines = [
         "          python3 tools/project-status/publish.py commit\n",
@@ -1822,7 +1516,7 @@ def test_publish_commands_must_invoke_publish_py() -> None:
         with Sandbox() as sandbox:
             repository(sandbox, workflow=workflow)
             stub_external_tools(sandbox)
-            assert_failure(sandbox, label, "workflow-machine-gate", "aislop_gate")
+            assert_failure(sandbox, label, "workflow-machine-gate", "正規形")
 
 
 def test_publish_success_rule_must_precede_unconditional_rule() -> None:
@@ -2045,10 +1739,8 @@ def test_aislop_check_must_return_its_failure() -> None:
     """チェックの失敗が呼び出し元へ返る構成だけを、aislop チェックの起動と判定する。
 
     後続のコマンドで終了状態を上書きする形、パイプで終了状態を潰す形、バックグラウンド
-    実行、否定、前段の成功でチェックを飛ばす形を拒否する。チェックの後ろにリダイレクト
-    だけのコマンド（ヒアドキュメントだけの行）が続く形も、終了状態が 0 で上書きされる
-    ため拒否する。前段を && でつなぐ形、チェックが最終行にある複数行の記述、リダイ
-    レクション、チェック自身のヒアドキュメントは受理する。
+    実行、否定、前段の成功でチェックを飛ばす形を拒否する。前段を && でつなぐ形、
+    チェックが最終行にある複数行の記述、リダイレクションは受理する。
     """
     with Sandbox() as sandbox:
         invokes = sandbox.module.invokes_aislop_check
@@ -2070,9 +1762,6 @@ def test_aislop_check_must_return_its_failure() -> None:
             "前段が成功するとチェックを飛ばす ||": f"npm ci || {AISLOP_CHECK}",
             "改行で続けた || の後ろ": f"npm ci ||\n{AISLOP_CHECK}",
             "次の行の true で終了状態を上書きする": f"{AISLOP_CHECK}\ntrue\n",
-            "後ろにヒアドキュメントだけのコマンドが続く": (
-                f"{AISLOP_CHECK}\n<<'EOF'\nbody\nEOF\n"
-            ),
         }
         for label, command in rejected.items():
             assert not invokes(command), f"{label} を起動とみなしました: {command!r}"
@@ -2086,7 +1775,6 @@ def test_aislop_check_must_return_its_failure() -> None:
             "ファイルへのリダイレクション": f"{AISLOP_CHECK} > out.txt",
             "&>file へのリダイレクション": f"{AISLOP_CHECK} &>file",
             "&> file へのリダイレクション": f"{AISLOP_CHECK} &> file",
-            "チェック自身のヒアドキュメント": f"{AISLOP_CHECK} <<'EOF'\nbody\nEOF\n",
         }
         for label, command in accepted.items():
             assert invokes(command), f"{label} を起動とみなしませんでした: {command!r}"
@@ -2477,11 +2165,8 @@ def main() -> int:
         test_status_only_step_is_not_a_publish_step,
         test_publish_stage_detection,
         test_publish_workflow_passes,
-        test_publish_workflow_accepts_option_and_assignment_forms,
-        test_publish_workflow_accepts_heredoc_and_continuation_forms,
-        test_publish_workflow_accepts_versioned_interpreter_and_arithmetic_forms,
-        test_publish_workflow_accepts_wrapper_forms,
-        test_publish_commands_must_invoke_publish_py,
+        test_publish_workflow_rejects_noncanonical_forms,
+        test_publish_commands_must_use_canonical_form,
         test_publish_success_rule_must_precede_unconditional_rule,
         test_machine_gate_requires_six_system_inputs,
         test_machine_gate_commands_invoke_their_make_targets,
