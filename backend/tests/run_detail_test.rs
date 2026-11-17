@@ -610,6 +610,133 @@ async fn get_run_detail_resolves_a_completed_task_that_only_has_a_source_run_slu
   server.stop().await;
 }
 
+#[tokio::test]
+async fn get_run_detail_fills_goal_and_task_name_from_a_stored_task_that_only_has_a_source_run_slug() {
+  // 状態ストアの完了タスクが runSlug を持たず sourceRunSlug だけを持つ場合でも、
+  // mock の応答とタスク一覧にゴールとタスク名がないときは、状態ストアの完了タスクから
+  // それらを補うことを観測します（grpc 側の完了タスク検索が sourceRunSlug も照合する）。
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", project_dir()),
+      server_meta(),
+      json!({
+        "runs": { "run-1": {
+          "runSlug": "run-1",
+          "sessionId": "sess-1",
+          "summary": "完了した run",
+          "status": "completed",
+          "startedAt": "2026-11-13T09:00:00Z",
+          "currentStep": "review",
+          "lastLogAt": "2026-11-13T09:30:00Z",
+          "stepLogs": []
+        } }
+      }),
+    )
+    .build();
+  let snapshot = ProjectSnapshot {
+    goals:         vec![],
+    tasks:         vec![TaskEntry {
+      name:            TaskName::try_from("implement").expect("テストのタスク名は有効です"),
+      goal_id:         Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
+      status:          TaskStatus::Completed,
+      started_at:      Some(time("2026-11-13T09:00:00Z")),
+      run_slug:        None,
+      source_run_slug: Some("run-1".to_owned()),
+      current_step:    Some("review".to_owned()),
+      merge_task:      false,
+    }],
+    inquiries:     vec![],
+    runs:          vec![],
+    notifications: vec![],
+    proposals:     vec![],
+  };
+  harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("sourceRunSlug だけを持つ完了タスクからも run 詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(detail.run_slug, "run-1");
+  assert_eq!(detail.project, "takt-dash", "sourceRunSlug からプロジェクトを解決します");
+  assert_eq!(detail.goal_id, "g1", "状態ストアの完了タスクからゴールを補います");
+  assert_eq!(detail.task_name, "implement", "状態ストアの完了タスクからタスク名を補います");
+  assert_eq!(detail.status, RunStatus::Completed as i32);
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_run_detail_fills_goal_id_from_a_listed_task_that_only_has_a_source_run_slug() {
+  // takt_list_tasks の完了タスクが runSlug を持たず sourceRunSlug だけを持つ場合でも、
+  // read_run_detail がそのタスクを見つけてゴールを補うことを観測します（道具側の
+  // タスク検索が sourceRunSlug も照合する）。状態ストアの完了タスクはゴールを持たない
+  // ため、ゴールは道具側の検索からしか補えません。
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", project_dir()),
+      server_meta(),
+      json!({
+        "tasks": [
+          {
+            "name": "implement",
+            "goalId": "g1",
+            "status": "completed",
+            "startedAt": "2026-11-13T09:00:00Z",
+            "sourceRunSlug": "run-1"
+          }
+        ],
+        "runs": { "run-1": {
+          "runSlug": "run-1",
+          "sessionId": "sess-1",
+          "summary": "完了した run",
+          "status": "completed",
+          "startedAt": "2026-11-13T09:00:00Z",
+          "currentStep": "review",
+          "lastLogAt": "2026-11-13T09:30:00Z",
+          "stepLogs": []
+        } }
+      }),
+    )
+    .build();
+  let snapshot = ProjectSnapshot {
+    goals:         vec![],
+    tasks:         vec![TaskEntry {
+      name:            TaskName::try_from("implement").expect("テストのタスク名は有効です"),
+      goal_id:         None,
+      status:          TaskStatus::Completed,
+      started_at:      Some(time("2026-11-13T09:00:00Z")),
+      run_slug:        None,
+      source_run_slug: Some("run-1".to_owned()),
+      current_step:    Some("review".to_owned()),
+      merge_task:      false,
+    }],
+    inquiries:     vec![],
+    runs:          vec![],
+    notifications: vec![],
+    proposals:     vec![],
+  };
+  harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("sourceRunSlug だけを持つ完了タスクからも run 詳細を取得できます")
+    .into_inner();
+
+  assert_eq!(detail.run_slug, "run-1");
+  assert_eq!(detail.goal_id, "g1", "takt_list_tasks の完了タスクからゴールを補います");
+  assert_eq!(detail.task_name, "implement", "タスク名を補います");
+  assert_eq!(detail.status, RunStatus::Completed as i32);
+
+  server.stop().await;
+}
+
 /// 51 件の stepLogs を持つ状態を作る。先頭ページは 50 件で、51 件目（2 ページ目）の
 /// timestamp を `latest_step_at` にする。`last_log_at` を `null` にすると応答の `lastLogAt` を
 /// 持たない状態を作れる。
