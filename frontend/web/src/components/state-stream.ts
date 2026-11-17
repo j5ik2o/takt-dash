@@ -86,6 +86,9 @@ export function openStateStream(options: OpenStateStreamOptions): StateStream {
       options.onError?.();
       const delayMs = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** consecutiveFailures, RECONNECT_MAX_DELAY_MS);
       consecutiveFailures += 1;
+      // 新しい予約の前に既存の予約を必ず解除する。解除せずに上書きすると前の
+      // タイマーが残り、再接続が二重に走って EventSource が2つ開いてしまう。
+      cancelScheduledReconnect?.();
       cancelScheduledReconnect = scheduleReconnect(() => {
         cancelScheduledReconnect = undefined;
         if (!closed) {

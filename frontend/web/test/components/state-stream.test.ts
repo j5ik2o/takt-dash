@@ -201,6 +201,31 @@ test("close は予約済みの再接続を取り消す", () => {
   assert.equal(Ctor.instances.length, 1);
 });
 
+test("同じ接続でエラーが複数回発火しても、再接続の予約は1つだけ残り、接続は増えない", () => {
+  const Ctor = freshFakes();
+  const scheduler = new FakeScheduler();
+  const stream = open(Ctor, {}, scheduler);
+  const first = Ctor.instances[0]!;
+
+  first.onerror?.({});
+  first.onerror?.({});
+  first.onerror?.({});
+
+  assert.equal(scheduler.scheduled.length, 3, "エラーごとに再接続を予約する");
+  const pending = scheduler.scheduled.filter((entry) => !entry.cancelled);
+  assert.equal(pending.length, 1, "新しい予約の前に既存の予約を解除し、有効な予約は1つだけにする");
+  assert.equal(pending[0], scheduler.latest(), "残るのは最後の予約");
+
+  // 予約したタイマーが発火しても、再接続で作る新しい接続は1つだけにする。
+  for (const entry of [...scheduler.scheduled]) {
+    if (!entry.cancelled) {
+      entry.run();
+    }
+  }
+  assert.equal(Ctor.instances.length, 2, "再接続で作る新しい接続は1つだけ");
+  stream.close();
+});
+
 test("受信前の状態は上書きされず、受信後に置き換わる", () => {
   const Ctor = freshFakes();
   let current: DashboardState = createDashboardState();
