@@ -12,6 +12,7 @@ import {
   type DecisionResult,
 } from "../state/decision-actions";
 import {
+  neverReadServers,
   pendingDecisionMergeFailureNote,
   resolveThresholds,
   sortPendingDecisions,
@@ -63,6 +64,9 @@ export function DecisionsContent({ state, now, disconnected, readAt, unavailable
   });
   // サーバー一覧に表示名が無い応答でも、項目を識別できるよう ID を使う。
   const serverNames = new Map(state.servers.map((server) => [server.serverId, server.name]));
+  // まだ読めていないサーバーがあると、その配下に判断待ちがあっても一覧へ出てこない。
+  // 0件でも「判断待ちはありません」とは断定できないため、未読を注記する（issue #259）。
+  const unreadServers = neverReadServers(state.servers);
   const [results, setResults] = useState<DecisionResult[]>([]);
 
   const handleResult = useCallback((next: DecisionResult) => {
@@ -78,6 +82,11 @@ export function DecisionsContent({ state, now, disconnected, readAt, unavailable
           <p>
             全サーバーで、人の判断を待っている項目が {decisions.length}件あります。待ち時間の長い順に並べています。
           </p>
+          {unreadServers.length > 0 ? (
+            <p className="stale-note">
+              まだ読めていないサーバーがあります。表示している件数には、まだ読めていないサーバーの分は含まれていません。
+            </p>
+          ) : null}
           {disconnected && readAt !== undefined ? (
             <p className="stale-note">
               最終読み取り時刻 {formatClock(readAt)}（{formatDateTime(readAt)}）時点の内容を表示しています。
@@ -89,7 +98,11 @@ export function DecisionsContent({ state, now, disconnected, readAt, unavailable
       <section className="tray" aria-label="判断待ちの一覧">
         <DecisionResults results={results} />
         {decisions.length === 0 ? (
-          <p className="note">判断待ちはありません。</p>
+          unreadServers.length > 0 ? (
+            <p className="note">サーバーからまだ読めていないため、判断待ちがあるかどうかは分かりません。</p>
+          ) : (
+            <p className="note">判断待ちはありません。</p>
+          )
         ) : (
           <ul className="tray-list">
             {decisions.map((decision) => {
