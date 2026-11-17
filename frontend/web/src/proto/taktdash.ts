@@ -733,7 +733,11 @@ export interface PendingDecision {
   /** 問い合わせの識別子（AnswerInquiry の inquiry_id に渡す。マージ待ちは空。ゴールに属さない問い合わせには回答できない） */
   inquiryId: string;
   /** ゴール登録の承認待ちの revision（承認・却下に渡す。それ以外は省略） */
-  revision?: number | undefined;
+  revision?:
+    | number
+    | undefined;
+  /** マージ待ちのゴールの仕上げタスクの最後の状態（それ以外は省略する） */
+  mergeTaskLast?: TaskStatus | undefined;
 }
 
 /** 異常判定の基準を表す。 */
@@ -2820,6 +2824,7 @@ function createBasePendingDecision(): PendingDecision {
     stale: false,
     inquiryId: "",
     revision: undefined,
+    mergeTaskLast: undefined,
   };
 }
 
@@ -2860,6 +2865,9 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     }
     if (message.revision !== undefined) {
       writer.uint32(96).int32(message.revision);
+    }
+    if (message.mergeTaskLast !== undefined) {
+      writer.uint32(104).int32(message.mergeTaskLast);
     }
     return writer;
   },
@@ -2973,6 +2981,14 @@ export const PendingDecision: MessageFns<PendingDecision> = {
             message.revision = reader.int32();
             continue;
           }
+          case 13: {
+            if (tag !== 104) {
+              break;
+            }
+
+            message.mergeTaskLast = reader.int32() as any;
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -3025,6 +3041,11 @@ export const PendingDecision: MessageFns<PendingDecision> = {
         ? globalThis.String(object.inquiry_id)
         : "",
       revision: isSet(object.revision) ? globalThis.Number(object.revision) : undefined,
+      mergeTaskLast: isSet(object.mergeTaskLast)
+        ? taskStatusFromJSON(object.mergeTaskLast)
+        : isSet(object.merge_task_last)
+        ? taskStatusFromJSON(object.merge_task_last)
+        : undefined,
     };
   },
 
@@ -3066,6 +3087,9 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     if (message.revision !== undefined) {
       obj.revision = Math.round(message.revision);
     }
+    if (message.mergeTaskLast !== undefined) {
+      obj.mergeTaskLast = taskStatusToJSON(message.mergeTaskLast);
+    }
     return obj;
   },
 
@@ -3088,6 +3112,7 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     message.stale = object.stale ?? false;
     message.inquiryId = object.inquiryId ?? "";
     message.revision = object.revision ?? undefined;
+    message.mergeTaskLast = object.mergeTaskLast ?? undefined;
     return message;
   },
 };

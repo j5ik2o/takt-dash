@@ -12,6 +12,7 @@ import {
   type DecisionResult,
 } from "../state/decision-actions";
 import {
+  pendingDecisionMergeFailureNote,
   resolveThresholds,
   sortPendingDecisions,
   type DecisionsStateInput,
@@ -94,6 +95,7 @@ export function DecisionsContent({ state, now, disconnected, readAt, unavailable
             {decisions.map((decision) => {
               const serverName = serverNames.get(decision.serverId) ?? decision.serverId;
               const target = targetLabel(decision);
+              const mergeFailureNote = pendingDecisionMergeFailureNote(decision);
               return (
                 <li
                   id={decisionAnchorId(decisionKey(decision))}
@@ -111,6 +113,7 @@ export function DecisionsContent({ state, now, disconnected, readAt, unavailable
                       <p key={paragraphIndex}>{paragraph}</p>
                     ))}
                   </div>
+                  {mergeFailureNote !== undefined ? <p>{mergeFailureNote}</p> : null}
                   {decision.options.length > 0 ? (
                     <div className="opts">
                       <span className="opts-label">選択肢</span>

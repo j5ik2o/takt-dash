@@ -28,6 +28,7 @@ import {
   projectKey,
   isHumanMergeWaiting,
   mergeTaskFailureNote,
+  pendingDecisionMergeFailureNote,
   resolveThresholds,
   serverStateFrom,
   serverStateLabel,
@@ -648,6 +649,44 @@ test("仕上げタスクの失敗の文面は失敗系の末尾状態だけに�
     ),
     undefined,
     "awaiting_merge 以外のゴールでは失敗の文面を出さない",
+  );
+});
+
+test("判断待ちの失敗の文面はマージ待ちで失敗系の末尾状態のときだけ出る", () => {
+  const merge = createDashboardState().pendingDecisions[1]!;
+  const withLast = (mergeTaskLast?: TaskStatus): PendingDecision => ({ ...merge, mergeTaskLast });
+
+  assert.equal(
+    pendingDecisionMergeFailureNote(withLast(TaskStatus.TASK_STATUS_FAILED)),
+    "仕上げタスクが失敗しました。",
+  );
+  assert.equal(
+    pendingDecisionMergeFailureNote(withLast(TaskStatus.TASK_STATUS_EXCEEDED)),
+    "仕上げタスクが上限超過で止まりました。",
+  );
+  assert.equal(
+    pendingDecisionMergeFailureNote(withLast(TaskStatus.TASK_STATUS_PR_FAILED)),
+    "仕上げタスクのプルリクエスト作成が失敗しました。",
+  );
+
+  for (const status of [
+    undefined,
+    TaskStatus.TASK_STATUS_PENDING,
+    TaskStatus.TASK_STATUS_RUNNING,
+    TaskStatus.TASK_STATUS_COMPLETED,
+  ]) {
+    assert.equal(
+      pendingDecisionMergeFailureNote(withLast(status)),
+      undefined,
+      `仕上げタスクの末尾状態が ${status === undefined ? "未設定" : TaskStatus[status]} なら失敗の文面は出ない`,
+    );
+  }
+
+  const inquiry = createDashboardState().pendingDecisions[0]!;
+  assert.equal(
+    pendingDecisionMergeFailureNote({ ...inquiry, mergeTaskLast: TaskStatus.TASK_STATUS_FAILED }),
+    undefined,
+    "マージ待ち以外の判断待ちでは失敗の文面を出さない",
   );
 });
 

@@ -454,14 +454,10 @@ export function isHumanMergeWaiting(goal: Goal): boolean {
   return goal.mergeTaskLast !== TASK_STATUS.PENDING && goal.mergeTaskLast !== TASK_STATUS.RUNNING;
 }
 
-// 仕上げタスクが失敗系の状態で終わったことを示す文面（issue #231）。人のマージ待ちとして
-// 出すときに、仕上げが止まった理由が分かるようにする。awaiting_merge でないゴールと、
-// 失敗系でない末尾状態では undefined を返す。
-export function mergeTaskFailureNote(goal: Goal): string | undefined {
-  if (goal.status !== GOAL_STATUS.AWAITING_MERGE) {
-    return undefined;
-  }
-  switch (goal.mergeTaskLast) {
+// 仕上げタスクの末尾状態が失敗系のときに、仕上げが止まった理由を示す文面を返す。
+// ゴール一覧のカードと判断待ちのカードで同じ文面を使うため、末尾状態だけから決める。
+const mergeTaskFailureNoteForLast = (mergeTaskLast: TaskStatus | undefined): string | undefined => {
+  switch (mergeTaskLast) {
     case TASK_STATUS.FAILED:
       return "仕上げタスクが失敗しました。";
     case TASK_STATUS.EXCEEDED:
@@ -471,4 +467,24 @@ export function mergeTaskFailureNote(goal: Goal): string | undefined {
     default:
       return undefined;
   }
+};
+
+// 仕上げタスクが失敗系の状態で終わったことを示す文面（issue #231）。人のマージ待ちとして
+// 出すときに、仕上げが止まった理由が分かるようにする。awaiting_merge でないゴールと、
+// 失敗系でない末尾状態では undefined を返す。
+export function mergeTaskFailureNote(goal: Goal): string | undefined {
+  if (goal.status !== GOAL_STATUS.AWAITING_MERGE) {
+    return undefined;
+  }
+  return mergeTaskFailureNoteForLast(goal.mergeTaskLast);
+}
+
+// 判断待ちのカードに出す、仕上げタスクの失敗を示す文面（issue #231）。マージ待ちの項目で、
+// 仕上げタスクが失敗系の状態で終わったときだけ返す。それ以外の種別と末尾状態では
+// undefined を返す。
+export function pendingDecisionMergeFailureNote(decision: PendingDecision): string | undefined {
+  if (decision.type !== PENDING_DECISION_TYPE.AWAITING_MERGE) {
+    return undefined;
+  }
+  return mergeTaskFailureNoteForLast(decision.mergeTaskLast);
 }
