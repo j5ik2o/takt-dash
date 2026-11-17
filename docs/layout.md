@@ -99,7 +99,7 @@ issue #119（画面のレイアウトの土台作り）の一部として、fron
 
 - `grid-template-columns: repeat(3, …)` のように列数を数で固定しません。並べる要素には `.l-cluster` や `.l-split` の折り返しを使います。グリッドが必要なときは `repeat(auto-fit, minmax(…))` のように、幅から列数が決まる書き方にします。
 - 台数や件数に合わせて列数を変える分岐を、コンポーネントに書きません。
-- 既存の `.tiles`（3 列）、`.cards` と `.scards`（2 列）は、列数を固定してメディアクエリで切り替えています。これらは部品を適用する前の書き方であり、新しい画面では同じ書き方をしません。
+- 既存の `.cards`（2 列）は、列数を固定してメディアクエリで切り替えています。これは部品を適用する前の書き方であり、新しい画面では同じ書き方をしません。概要の画面（issue #120）は、タイルを `.tiles` の `repeat(auto-fit, minmax(160px, 220px))`、プロジェクトのカードを概要専用の `.overview-cards` の `repeat(auto-fit, minmax(…, 1fr))` で並べています。
 
 ## 色を直書きしない原則
 
@@ -164,10 +164,10 @@ CSS では、コメントを除いたすべての宣言の値を調べます。
 
 ### 既存の例外
 
-部品を適用する前の既存の宣言（`.tiles`、`.cards`、`.scards`、`.sum-grid` の列数と、`.run-row .bar.live > i`、`.dot.live`、`@keyframes pulse`、`@keyframes flash`、`.scard.down`、`.dialog-backdrop` の色、計 14 件）は、`tools/repo-gate/gate_frontend_style.py` の `EXISTING_EXCEPTIONS` に載せて通しています。
+部品を適用する前の既存の宣言（`.cards`、`.sum-grid` の列数と、`.run-row .bar.live > i`、`.dot.live`、`@keyframes pulse`、`@keyframes flash`、`.dialog-backdrop` の色、計 11 件）は、`tools/repo-gate/gate_frontend_style.py` の `EXISTING_EXCEPTIONS` に載せて通しています。
 
 - 例外は、ファイル、文脈（`@media` などの入れ子とセレクタ）、プロパティ、値（空白を 1 つに詰めたもの）が完全に一致するときだけ通します。値を変えた宣言や、同じセレクタに新しく書いた違反は検出されます。
-- 部品の適用（issue #120・#121）などで宣言が消えたり値が変わったりしたら、一覧から外してください。一覧に残った項目が CSS に見つからないと、検査が失敗します。
+- 部品の適用（issue #121 など）で宣言が消えたり値が変わったりしたら、一覧から外してください。issue #120 では、概要で使わなくなった `.tiles`、`.scards`、`.scard.down` の 3 件を外しました。一覧に残った項目が CSS に見つからないと、検査が失敗します。
 - 新しい例外は足しません。色は `:root` の変数で、列数は部品か `auto-fit` で書いてください。
 
 ## 撮影

@@ -82,12 +82,6 @@ type OverviewServerView = {
   server: Server;
   state: "live" | "idle" | "down";
   stateLabel: string;
-  runs: RunView[];
-  runLimit: number;
-  runningRuns: number;
-  inProgressGoals: number;
-  pendingCount: number;
-  waitingTasks: number;
 };
 
 export type OverviewView = {
@@ -251,28 +245,6 @@ const serverStateLabel = (state: OverviewServerView["state"]): string => {
   }
 };
 
-// 仕上げタスクが pending/running/failed などでまだ終わっていなければ、人のマージ待ちではなく
-// 進行中のゴールとして数える。merge_task_last が未設定または完了なら人の判断待ちになる。
-const MERGE_TASK_IN_PROGRESS: ReadonlySet<number> = new Set([
-  TASK_STATUS.PENDING,
-  TASK_STATUS.RUNNING,
-  TASK_STATUS.FAILED,
-  TASK_STATUS.EXCEEDED,
-  TASK_STATUS.PR_FAILED,
-]);
-
-const isHumanMerge = (goal: Goal): boolean =>
-  goal.status === GOAL_STATUS.AWAITING_MERGE &&
-  !(goal.mergeTaskLast !== undefined && MERGE_TASK_IN_PROGRESS.has(goal.mergeTaskLast));
-
-const isInProgressGoal = (goal: Goal): boolean =>
-  goal.executionStatus !== EXECUTION_STATUS.ABORTED &&
-  goal.status !== GOAL_STATUS.COMPLETED &&
-  !isHumanMerge(goal);
-
-const waitingTaskCount = (goals: readonly Goal[]): number =>
-  goals.reduce((total, goal) => total + (goal.taskCounts?.pending ?? 0), 0);
-
 const failedTaskCount = (goals: readonly Goal[]): number =>
   goals.reduce(
     (total, goal) =>
@@ -311,22 +283,11 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
   const unresponsiveServers = state.servers.filter((server) => !server.connected);
   const unresponsiveProjects = state.projects.filter(isUnresponsiveProject);
   const servers = state.servers.map((server) => {
-    const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);
-    const serverGoals = state.goals.filter((goal) => goal.serverId === server.serverId);
-    const status = serverState(server, serverRuns);
-    return {
+    const status = serverState(
       server,
-      state: status,
-      stateLabel: serverStateLabel(status),
-      runs: serverRuns.map((run) =>
-        toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
-      ),
-      runLimit: server.concurrency,
-      runningRuns: serverRuns.filter((run) => run.status === RUN_STATUS.RUNNING).length,
-      inProgressGoals: serverGoals.filter(isInProgressGoal).length,
-      pendingCount: pendingDecisions.filter((decision) => decision.serverId === server.serverId).length,
-      waitingTasks: waitingTaskCount(serverGoals),
-    };
+      state.runs.filter((run) => run.serverId === server.serverId),
+    );
+    return { server, state: status, stateLabel: serverStateLabel(status) };
   });
   const runningRuns = state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length;
   const silentRunCount = runs.filter((run) => run.state === "warn").length;

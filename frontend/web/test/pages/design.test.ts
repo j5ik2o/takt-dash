@@ -222,13 +222,13 @@ test("応答なしのサーバーの run 行は待機の状態クラスを描画
   });
   const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
 
-  const row = /<li class="run-row">([\s\S]*?)<\/li>/.exec(html)?.[1];
+  const row = /<tr class="run-row">([\s\S]*?)<\/tr>/.exec(html)?.[1];
   assert.ok(row !== undefined, "run 行が描画されている");
   assert.match(row, /class="st idle"/, "状態ラベルを待機の見た目で出す");
   assert.match(row, /class="dot idle"/, "状態の点を待機の見た目で出す");
 });
 
-test("サーバーカードの状態バッジは状態ごとの色クラスを持つ", async () => {
+test("サーバーの状態バッジは状態ごとの色クラスを持つ", async () => {
   const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), NOW) });
   assert.match(html, /class="big-badge live"/, "動作中のバッジを実行中の見た目で出す");
   assert.match(html, /class="big-badge down"/, "応答なしのバッジを応答なしの見た目で出す");
@@ -237,12 +237,7 @@ test("サーバーカードの状態バッジは状態ごとの色クラスを�
   const live = requireDeclaration(css, /\.big-badge\.live$/, "background", ".big-badge.live");
   assert.match(live, /var\(--/, "動作中のバッジはトークンの背景色を持つ");
 
-  const down =
-    declarationMatching(css, /\.big-badge\.down$/, "color") ??
-    declarationMatching(css, /\.scard\.down\s+\.big-badge$/, "color");
-  if (down === undefined) {
-    assert.fail("応答なしのバッジの色が定義されていない");
-  }
+  const down = requireDeclaration(css, /\.big-badge\.down$/, "color", ".big-badge.down");
   assert.match(down, /var\(--/, "応答なしのバッジはトークンの色を持つ");
 });
 
@@ -301,25 +296,7 @@ test("一時停止のゴールは待機の色のバッジを付け、進行中�
   assert.doesNotMatch(active, /class="[^"]*\bidle\b[^"]*"/, "進行中を待機の色にしない");
 });
 
-test("サーバーのカードは 1280px 以下で1列になり、run 行は3列の定義を保つ", async () => {
-  const css = await readCss();
-
-  const block = mediaBlockFor(css, 1280);
-  if (block === undefined) {
-    assert.fail("@media (max-width: 1280px) の定義がない");
-  }
-  const scards = requireDeclaration(block, /^\.scards$/, "grid-template-columns", "1280px 以下の .scards");
-  assert.match(scards, /^(?:minmax\(0,\s*1fr\)|1fr)$/, "1024px を含む幅でサーバーのカードを1列にする");
-
-  const runRow = requireDeclaration(css, /^\.runs\s+\.run-row$/, "grid-template-columns", ".runs .run-row");
-  assert.match(
-    runRow,
-    /^96px\s+minmax\(0,\s*1fr\)\s+200px$/,
-    "run 行は状態・本文・進捗の3列を保つ",
-  );
-});
-
-test("760px 以下でモバイルの1列構成にし、旧 720px の切り替えを残さない", async () => {
+test("760px 以下でサイドバーと本文を1列にし、旧 720px の切り替えを残さない", async () => {
   const css = await readCss();
 
   const block = mediaBlockFor(css, 760);
@@ -328,20 +305,11 @@ test("760px 以下でモバイルの1列構成にし、旧 720px の切り替え
   }
   const shell = requireDeclaration(block, /^\.shell$/, "grid-template-columns", "760px 以下の .shell");
   assert.match(shell, /^(?:minmax\(0,\s*1fr\)|1fr)$/, "サイドバーと本文を1列にする");
-  const scards = requireDeclaration(block, /^\.scards$/, "grid-template-columns", "760px 以下の .scards");
-  assert.match(scards, /^(?:minmax\(0,\s*1fr\)|1fr)$/, "サーバーのカードを1列にする");
-  const runRow =
-    declarationMatching(block, /^\.runs\s+\.run-row$/, "grid-template-columns") ??
-    declarationMatching(block, /^\.run-row$/, "grid-template-columns");
-  if (runRow === undefined) {
-    assert.fail("760px 以下の run 行の列定義がない");
-  }
-  assert.match(runRow, /^(?:minmax\(0,\s*1fr\)|1fr)$/, "run 行を1列にする");
 
   assert.equal(mediaBlockFor(css, 720), undefined, "旧 720px の切り替えを残さない");
 });
 
-test("サイドバーはモックの幅を持ち、タイルとサーバーのカードはモックの角丸と数字の大きさを持つ", async () => {
+test("サイドバーはモックの幅を持ち、タイルはモックの角丸と数字の大きさを持つ", async () => {
   const css = await readCss();
 
   const shell = requireDeclaration(css, /^\.shell$/, "grid-template-columns", ".shell");
@@ -349,39 +317,18 @@ test("サイドバーはモックの幅を持ち、タイルとサーバーの�
 
   assert.equal(requireDeclaration(css, /^\.tile$/, "border-radius", ".tile"), "12px");
   assert.equal(requireDeclaration(css, /^\.tile\s+\.num$/, "font-size", ".tile .num"), "32px");
-  assert.equal(requireDeclaration(css, /^\.scard$/, "border-radius", ".scard"), "14px");
-
-  const scards = requireDeclaration(css, /^\.scards$/, "grid-template-columns", ".scards");
-  assert.match(scards, /^repeat\(2,/, "サーバーのカードは広い幅で2列");
 });
 
-test("概要のタイルは3列で、1280px で2列へ折り返さない", async () => {
-  const css = await readCss();
-
-  const tiles = requireDeclaration(css, /^\.tiles$/, "grid-template-columns", ".tiles");
-  assert.match(tiles, /^repeat\(3,/, "実行中 run・判断待ち・24時間完了の3枚を並べる");
-
-  const block = mediaBlockFor(css, 1280);
-  const narrowTiles = block === undefined ? undefined : declarationMatching(block, /^\.tiles$/, "grid-template-columns");
-  assert.doesNotMatch(narrowTiles ?? "", /repeat\(\s*2/, "1280px で3枚のタイルを2列へ折り返さない");
-});
-
-test("概要はタイル・サーバーカード・run 行の余白を詰め、警告と判断待ちパネルと下端の集計の見た目を持つ", async () => {
+test("概要はタイルの余白を詰め、警告と判断待ちパネルの見た目を持つ", async () => {
   const css = await readCss();
 
   assert.ok(selectorExists(css, /^\.overview\s+\.tile$/), "概要のタイルの余白を詰める規則がある");
-  assert.ok(selectorExists(css, /^\.overview\s+\.scard$/), "概要のサーバーカードの余白を詰める規則がある");
-  assert.ok(
-    selectorExists(css, /^\.overview\s+\.runs\s+\.run-row$/),
-    "概要の run 行の余白を詰める規則がある",
-  );
 
   assert.ok(selectorExists(css, /^\.health\.attention$/), "警告バナーの見た目がある");
   const attention = requireDeclaration(css, /^\.health\.attention$/, "background", ".health.attention");
   assert.match(attention, /var\(--/, "警告バナーは警告色のトークンを使う");
   assert.ok(selectorExists(css, /^\.tile\.attention$/), "判断待ちのタイルの注意の見た目がある");
   assert.ok(selectorExists(css, /^\.callout$/), "判断待ちパネルの見た目がある");
-  assert.ok(selectorExists(css, /^\.sc-foot$/), "サーバーカード下端の集計の見た目がある");
   assert.ok(selectorExists(css, /^\.side-foot$/), "サイドバー下端の見た目がある");
 });
 
