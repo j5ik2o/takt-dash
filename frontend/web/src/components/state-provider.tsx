@@ -71,8 +71,17 @@ export function reduceLiveState(current: StateStreamContextValue, event: LiveSta
 
 type StateStreamProviderProps = {
   initialState: ProtoDashboardState;
-  /** 初回の読み込みで backend に接続できなかったかどうか。接続履歴の初期値に使う。 */
+  /**
+   * 初回の読み込みで backend に接続できなかったかどうか（今回の読み込みの成否）。
+   * initialRespondedBefore が渡されない場合にだけ、接続履歴の初期値の代用にする。
+   */
   initialUnavailable?: boolean;
+  /**
+   * サーバー側の接続履歴。この Web プロセスが一度でも backend の応答を受けた
+   * ことがあるかどうか。今回の読み込みの成否とは別に受け取り、Context の
+   * 接続履歴の初期値に使う（issue #152）。
+   */
+  initialRespondedBefore?: boolean;
   revalidate?: () => void;
   children: ReactNode;
 };
@@ -80,12 +89,20 @@ type StateStreamProviderProps = {
 // 画面の状態と自動更新の所有者。初回は RSC が渡した状態を表示し、WatchState の
 // SSE を受信するたびに同じ画面の状態を置き換えます。revalidate が渡された場合は、
 // 状態の受信ごとに RSC で取得している画面の再取得を促します。
-export function StateStreamProvider({ initialState, initialUnavailable, revalidate, children }: StateStreamProviderProps) {
+export function StateStreamProvider({
+  initialState,
+  initialUnavailable,
+  initialRespondedBefore,
+  revalidate,
+  children,
+}: StateStreamProviderProps) {
   const [value, setValue] = useState<StateStreamContextValue>(() => ({
     state: dashboardStateFromProto(initialState),
     disconnected: false,
     disconnectedSince: null,
-    respondedBefore: initialUnavailable !== true,
+    // 接続履歴の初期値はサーバー側の履歴を正とする。今回の読み込みが失敗して
+    // キャッシュで描画した場合でも、過去の応答があれば履歴は消えない。
+    respondedBefore: initialRespondedBefore ?? initialUnavailable !== true,
   }));
 
   useEffect(() => {
@@ -130,11 +147,21 @@ function toEventSourceLike(source: EventSource): EventSourceLike {
 
 // App Router の router.refresh を状態ストリームへ配線する。テストで Provider を
 // 直接描画できるよう、useRouter の呼び出しはこのラッパーに閉じます。
-export function StateStreamProviderWithRefresh({ initialState, initialUnavailable, children }: Omit<StateStreamProviderProps, "revalidate">) {
+export function StateStreamProviderWithRefresh({
+  initialState,
+  initialUnavailable,
+  initialRespondedBefore,
+  children,
+}: Omit<StateStreamProviderProps, "revalidate">) {
   const router = useRouter();
   const revalidate = useCallback(() => router.refresh(), [router]);
   return (
-    <StateStreamProvider initialState={initialState} initialUnavailable={initialUnavailable} revalidate={revalidate}>
+    <StateStreamProvider
+      initialState={initialState}
+      initialUnavailable={initialUnavailable}
+      initialRespondedBefore={initialRespondedBefore}
+      revalidate={revalidate}
+    >
       {children}
     </StateStreamProvider>
   );

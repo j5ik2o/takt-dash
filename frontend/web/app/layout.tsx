@@ -1,6 +1,11 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { BackendUnavailableError, backendUnavailableSituation, createBackendClient } from "@/src/grpc/client";
+import {
+  BackendUnavailableError,
+  backendUnavailableSituation,
+  createBackendClient,
+  hasBackendResponded,
+} from "@/src/grpc/client";
 import { DashboardState } from "@/src/proto/taktdash";
 import { resolveThresholds } from "@/src/state/dashboard";
 import { StateStreamProviderWithRefresh } from "@/src/components/state-provider";
@@ -31,16 +36,25 @@ let lastLoadedState: DashboardState | undefined;
 async function loadInitialState(): Promise<{
   state: DashboardState;
   unavailable: boolean;
+  respondedBefore: boolean;
   error?: BackendUnavailableError;
 }> {
   const client = createBackendClient();
   try {
     const state = await client.getOverview();
     lastLoadedState = state;
-    return { state, unavailable: false };
+    return { state, unavailable: false, respondedBefore: hasBackendResponded() };
   } catch (error) {
     if (error instanceof BackendUnavailableError) {
-      return { state: lastLoadedState ?? EMPTY_STATE, unavailable: true, error };
+      // 今回の読み込みは失敗しても、この Web プロセスが過去に応答を受けて
+      // いれば接続履歴は応答ありのままにする（issue #152）。キャッシュを返す
+      // 経路でも履歴を落とさないよう、成否とは別に履歴を返す。
+      return {
+        state: lastLoadedState ?? EMPTY_STATE,
+        unavailable: true,
+        respondedBefore: hasBackendResponded(),
+        error,
+      };
     }
     throw error;
   } finally {
@@ -49,11 +63,15 @@ async function loadInitialState(): Promise<{
 }
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
-  const { state, unavailable, error } = await loadInitialState();
+  const { state, unavailable, respondedBefore, error } = await loadInitialState();
   return (
     <html lang="ja">
       <body>
-        <StateStreamProviderWithRefresh initialState={state} initialUnavailable={unavailable}>
+        <StateStreamProviderWithRefresh
+          initialState={state}
+          initialUnavailable={unavailable}
+          initialRespondedBefore={respondedBefore}
+        >
           <div className="shell">
             <LiveSidebar frontendBuild={FRONTEND_BUILD} />
             <div className="content">
