@@ -707,8 +707,7 @@ async fn server_meta_change_is_applied_on_the_same_running_poller() {
   harness.rewrite_config(|value| {
     value["servers"]["mac-mini"]["name"] = json!("renamed-mini");
     value["servers"]["mac-mini"]["kind"] = json!("Mac Studio");
-    value["servers"]["mac-mini"]["concurrency"] = json!(8);
-    value["servers"]["mac-studio"] = json!({ "name": "j5ik2o-mac-studio", "kind": "Mac Studio", "concurrency": 2 });
+    value["servers"]["mac-studio"] = json!({ "name": "j5ik2o-mac-studio", "kind": "Mac Studio" });
   });
   poller.read_cycle_once().await.expect("サーバー表示情報を変えたサイクルを実行できます");
 
@@ -716,7 +715,6 @@ async fn server_meta_change_is_applied_on_the_same_running_poller() {
   let mini = servers.get("mac-mini").expect("改名後もサーバーがあります");
   assert_eq!(mini.name, "renamed-mini", "稼働中でも改名を同じストアへ反映します");
   assert_eq!(mini.kind, "Mac Studio", "種類の変更も反映します");
-  assert_eq!(mini.concurrency, 8, "同時実行数の変更も反映します");
   assert_eq!(
     servers.get("mac-studio").expect("追加したサーバーがあります").name,
     "j5ik2o-mac-studio",
@@ -1112,7 +1110,7 @@ async fn config_server_changes_are_reflected_after_a_cycle_and_notify_watchers()
 
   // プロジェクトと状態はそのままに、サーバーの表示情報と並列度だけを変える。
   harness.rewrite_config(|value| {
-    value["servers"]["mac-mini"] = json!({ "name": "j5ik2o-mac-mini-renamed", "kind": "Mac mini", "concurrency": 8 });
+    value["servers"]["mac-mini"] = json!({ "name": "j5ik2o-mac-mini-renamed", "kind": "Mac mini" });
   });
   poller.read_cycle_once().await.expect("サーバー情報を変えたサイクルを実行できます");
   poller.shutdown().await;
@@ -1120,7 +1118,6 @@ async fn config_server_changes_are_reflected_after_a_cycle_and_notify_watchers()
   let servers = harness.store.servers();
   let meta = servers.get("mac-mini").expect("既存サーバーの情報があります");
   assert_eq!(meta.name, "j5ik2o-mac-mini-renamed", "再読み込み後の servers は新しい設定の表示名になります");
-  assert_eq!(meta.concurrency, 8, "並列度の変更も状態ストアへ反映されます");
   assert!(watch.try_recv().is_ok(), "サーバー情報だけが変わったサイクルでも変化通知を1回送ります");
 }
 

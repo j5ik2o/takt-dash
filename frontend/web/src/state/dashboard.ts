@@ -11,7 +11,15 @@ import type {
   TaskStatus,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
-import { toRunCount, toSilentMinutes, toStaleMinutes, type RunCount, type ValidatedAnomalyThresholds } from "./domain-primitives";
+import {
+  toRunCount,
+  toRunLimit,
+  toSilentMinutes,
+  toStaleMinutes,
+  type RunCount,
+  type RunLimit,
+  type ValidatedAnomalyThresholds,
+} from "./domain-primitives";
 import {
   CONNECTION_STATE,
   EXECUTION_STATUS,
@@ -83,21 +91,28 @@ type OverviewServerView = {
   state: "live" | "idle" | "down";
   stateLabel: string;
   runs: RunView[];
-  runLimit: number;
+  runLimit: RunLimit;
   runningRuns: number;
   inProgressGoals: number;
   pendingCount: number;
   waitingTasks: number;
 };
 
+// 概要のプロジェクト行。プロジェクト自身の同時実行上限と、そのプロジェクトで
+// 実行中の run の件数を対比できる形にする。
+export type OverviewProjectView = Omit<Project, "concurrency"> & {
+  concurrency: RunLimit;
+  runningRuns: RunCount;
+};
+
 export type OverviewView = {
   readAt: Date;
   servers: OverviewServerView[];
-  projects: Project[];
+  projects: OverviewProjectView[];
   runs: RunView[];
   thresholds: ValidatedAnomalyThresholds;
   runningRuns: number;
-  runLimit: number;
+  runLimit: RunLimit;
   completedTasks24h: number;
   failedTaskCount: number;
   abortedGoalCount: number;
@@ -325,7 +340,11 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
       runs: serverRuns.map((run) =>
         toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
       ),
-      runLimit: server.concurrency,
+      runLimit: toRunLimit(
+        state.projects
+          .filter((project) => project.serverId === server.serverId)
+          .reduce((total, project) => total + project.concurrency, 0),
+      ),
       runningRuns: serverRuns.filter((run) => run.status === RUN_STATUS.RUNNING).length,
       inProgressGoals: serverGoals.filter(isInProgressGoal).length,
       pendingCount: pendingDecisions.filter((decision) => decision.serverId === server.serverId).length,
@@ -346,11 +365,21 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
   return {
     readAt,
     servers,
-    projects: state.projects,
+    projects: state.projects.map((project) => ({
+      ...project,
+      concurrency: toRunLimit(project.concurrency),
+      runningRuns: toRunCount(
+        state.runs.filter(
+          (run) =>
+            projectKey(run.serverId, run.project) === projectKey(project.serverId, project.name) &&
+            run.status === RUN_STATUS.RUNNING,
+        ).length,
+      ),
+    })),
     runs,
     thresholds,
     runningRuns,
-    runLimit: state.servers.reduce((total, server) => total + server.concurrency, 0),
+    runLimit: toRunLimit(state.projects.reduce((total, project) => total + project.concurrency, 0)),
     completedTasks24h: state.projects.reduce(
       (total, project) => total + project.completedTasks24h,
       0,

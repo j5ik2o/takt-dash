@@ -94,20 +94,20 @@ test("概要の上部は実行中 run・判断待ち・24時間完了タスク�
   assert.doesNotMatch(html, /最終読み取り時刻/, "最終読み取り時刻のタイルを概要から外す");
 });
 
-test("実行中 run のタイルは concurrency の合計に対する件数と使用率バーを出す", () => {
+test("実行中 run のタイルはプロジェクトの concurrency の合計に対する件数と使用率バーを出す", () => {
   const html = renderOverview(createDashboardState());
   const tile = tileWithLabel(html, "実行中の run");
 
-  assert.match(tile, /1\s*<small>\/ 8 件<\/small>/, "1件と concurrency 合計8件を出す");
+  assert.match(tile, /1\s*<small>\/ 8 件<\/small>/, "1件とプロジェクトの concurrency 合計8件を出す");
   assert.match(tile, /class="[^"]*\bbar\b[^"]*"/, "使用率バーを出す");
   assert.match(tile, /width:13%/, "1 / 8 の使用率をバーの幅に反映する");
 });
 
-test("concurrency の合計が0でも使用率バーを壊さない", () => {
+test("プロジェクトの concurrency の合計が0でも使用率バーを壊さない", () => {
   const base = createDashboardState();
   const state = {
     ...base,
-    servers: base.servers.map((server) => ({ ...server, concurrency: 0 })),
+    projects: base.projects.map((project) => ({ ...project, concurrency: 0 })),
   };
   const html = renderOverview(state);
   const tile = tileWithLabel(html, "実行中の run");
@@ -243,12 +243,12 @@ test("サーバーカードの下端は run 件数・進行中ゴール・判断
   const mini = serverCard(html, "mini");
   const down = serverCard(html, "down");
 
-  assert.match(mini, /run\s*1\s*\/\s*4/, "実行中 run の件数と上限を出す");
+  assert.match(mini, /run\s*1\s*\/\s*8/, "実行中 run の件数と、配下のプロジェクトの上限の合計を出す");
   assert.match(mini, /進行中のゴール\s*1件/, "進行中のゴール数を出す");
   assert.match(mini, /判断待ち\s*2件/, "そのサーバーの判断待ち数を出す");
   assert.match(mini, /待機中のタスク\s*1件/, "待機中のタスク数を出す");
 
-  assert.match(down, /run\s*0\s*\/\s*4/, "応答なしのサーバーは run 0件として出す");
+  assert.match(down, /run\s*0\s*\/\s*0/, "プロジェクトが無いサーバーは上限0で run 0件として出す");
 });
 
 test("応答なしのときは最後に読めた時点の件数であることと時刻を示す", () => {

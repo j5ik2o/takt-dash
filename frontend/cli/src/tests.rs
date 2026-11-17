@@ -421,7 +421,6 @@ fn sample_overview() -> DashboardState {
         kind:         "Mac mini".to_owned(),
         connected:    true,
         last_read_at: Some(ts(1_731_599_000)),
-        concurrency:  4,
       },
       ServerInfo {
         server_id:    "studio".to_owned(),
@@ -429,7 +428,6 @@ fn sample_overview() -> DashboardState {
         kind:         "Mac Studio".to_owned(),
         connected:    false,
         last_read_at: None,
-        concurrency:  8,
       },
     ],
     projects:          vec![Project {
@@ -440,6 +438,7 @@ fn sample_overview() -> DashboardState {
       connected:           true,
       last_read_at:        Some(ts(1_731_599_000)),
       connection_state:    v1::ConnectionState::Connected as i32,
+      concurrency:         2,
     }],
     goals:             vec![v1::Goal {
       goal_id:           "goal-cli".to_owned(),
