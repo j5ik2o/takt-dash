@@ -106,7 +106,8 @@ export type OverviewProjectView = Omit<Project, "concurrency"> & {
 };
 
 export type OverviewView = {
-  readAt: Date;
+  // 最後に実際に読めた時刻。1件も読めていない場合は実在しない時刻を作らず undefined にする。
+  readAt?: Date;
   servers: OverviewServerView[];
   projects: OverviewProjectView[];
   runs: RunView[];
@@ -358,7 +359,7 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
     (goal) => goal.executionStatus === EXECUTION_STATUS.ABORTED,
   ).length;
   const pendingCounts = summarizePendingDecisions(pendingDecisions);
-  const readAt = state.readAt ?? now;
+  const readAt = state.readAt;
   const partialReadAt = earliestReadAt(
     [...unresponsiveServers, ...unresponsiveProjects].map((item) => item.lastReadAt),
   );

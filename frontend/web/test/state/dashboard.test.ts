@@ -745,3 +745,17 @@ test("プロジェクトごとに実行中の run 件数とそのプロジェク
   assert.ok(esa, "esa のカードがある");
   assert.equal(esa.runningRuns, 0, "実行中の run が無いプロジェクトは0件にする");
 });
+
+
+test("概要の最終読み取り時刻は、1件も読めていない場合に現在時刻で補わない", () => {
+  const state = { ...createDashboardState(), readAt: undefined };
+  const later = new Date(NOW.getTime() + 30 * 60_000);
+  const overview = buildOverviewView(state, later);
+  assert.equal(overview.readAt, undefined, "読めた時刻が無い場合は時刻を作りません");
+});
+
+test("概要の最終読み取り時刻は、表示用の現在時刻ではなく最後に実際に読めた時刻を保持する", () => {
+  const later = new Date(NOW.getTime() + 30 * 60_000);
+  const overview = buildOverviewView(createDashboardState(), later);
+  assert.equal(overview.readAt?.getTime(), NOW.getTime(), "state の readAt をそのまま使います");
+});

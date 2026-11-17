@@ -51,6 +51,9 @@ export function OverviewContent({
   const partialReadTime = view.partialReadAt
     ? `${formatClock(view.partialReadAt)} 時点`
     : "最後に読めた時刻は不明";
+  const lastReadText = view.readAt
+    ? `最終読み取り時刻 ${formatClock(view.readAt)}（${formatDateTime(view.readAt)}）時点の内容を表示しています。`
+    : "takt-mcp からまだ読めていません。";
   const longestWait = view.pendingDecisions[0];
   return (
     <main className="page overview">
@@ -67,11 +70,7 @@ export function OverviewContent({
               {partialReadTime}）。
             </p>
           ) : null}
-          {disconnected ? (
-            <p className="stale-note">
-              最終読み取り時刻 {formatClock(view.readAt)}（{formatDateTime(view.readAt)}）時点の内容を表示しています。
-            </p>
-          ) : null}
+          {disconnected ? <p className="stale-note">{lastReadText}</p> : null}
         </div>
         {view.hasAnomalies ? (
           <div className="health attention" role="status">
