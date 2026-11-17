@@ -83,15 +83,21 @@ fn human_merge_wait_excludes_pending_or_running_finish_task() {
 }
 
 #[test]
-fn human_merge_wait_excludes_failed_finish_task_states() {
+fn human_merge_wait_includes_failed_finish_task_states() {
+  // 仕上げタスクが失敗系の状態で終わったゴールは、仕上げが止まって人の判断が要る
+  // 状態として人のマージ待ちに含める（issue #231）。
   for status in [TaskStatus::Failed, TaskStatus::Exceeded, TaskStatus::PrFailed] {
     let tasks = [task_for_goal("merge", "g1", status, true)];
     let refs: Vec<&takt_dash_backend::model::TaskEntry> = tasks.iter().collect();
-    assert!(
-      !is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &refs),
-      "{status:?} は人のマージ待ちではありません"
-    );
+    assert!(is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &refs), "{status:?} は人のマージ待ちです");
   }
+}
+
+#[test]
+fn human_merge_wait_includes_goal_without_finish_task() {
+  // 仕上げタスクが無い awaiting_merge のゴールは人のマージ待ちです。
+  let refs: Vec<&takt_dash_backend::model::TaskEntry> = Vec::new();
+  assert!(is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &refs));
 }
 
 #[test]
@@ -120,6 +126,25 @@ fn human_merge_wait_ignores_other_goals_finish_tasks() {
     is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id_named("g2"), &refs),
     "g2 の仕上げタスクは完了なので待ち"
   );
+}
+
+#[test]
+fn pending_decisions_include_failed_finish_task_goal_with_last_status() {
+  let store = store_with(240, 10);
+  let snapshot = snapshot(
+    vec![merge_goal("g-merge", 99)],
+    vec![task_for_goal("merge", "g-merge", TaskStatus::Failed, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+  store.record_success("takt-dash", snapshot, now());
+
+  let decisions = store.pending_decisions(now(), PendingDecisionFilter::All);
+
+  assert_eq!(decisions.len(), 1);
+  assert_eq!(decisions[0].decision_type, PendingDecisionType::AwaitingMerge);
+  assert_eq!(decisions[0].merge_task_last, Some(TaskStatus::Failed));
 }
 
 #[test]

@@ -217,9 +217,10 @@ fn awaiting_merge_with_completed_finish_task_and_unrelated_running_task_is_a_hum
 }
 
 #[test]
-fn awaiting_merge_with_failed_finish_task_is_not_a_human_merge_wait_event() {
-  // 仕上げタスクが failed で終わったゴールは人待ちではありません。前回が人待ちでなく、
-  // 今回も人待ちでないので、人のマージ待ちは記録しません。
+fn awaiting_merge_with_failed_finish_task_is_a_human_merge_wait_event() {
+  // 仕上げタスクが failed で終わったゴールは、仕上げが止まって人の判断が要る状態として
+  // 人のマージ待ちに含める（issue #231）。前回は人待ちでなく今回が人待ちなので、
+  // 人のマージ待ちを1回記録します。
   let now = time("2026-11-13T10:00:00Z");
   let prev = snapshot(
     vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
@@ -238,9 +239,10 @@ fn awaiting_merge_with_failed_finish_task_is_not_a_human_merge_wait_event() {
 
   let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
-  assert!(
-    !ids(&events).contains(&EventKind::AwaitingMerge),
-    "仕上げタスクが失敗で終わったゴールは人のマージ待ちを記録しません: {:?}",
+  assert_eq!(
+    ids(&events).iter().filter(|kind| **kind == EventKind::AwaitingMerge).count(),
+    1,
+    "仕上げタスクが失敗で終わったゴールは人のマージ待ちを1回記録します: {:?}",
     ids(&events)
   );
 }
