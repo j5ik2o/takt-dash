@@ -4,6 +4,7 @@ import type { OverviewView } from "../state/dashboard";
 import { decisionKey, decisionTypeLabel } from "../state/decision-actions";
 import { formatClock, formatDateTime, formatDuration, formatModel } from "../state/format";
 import { decisionHref, projectHref, serverAnchorId } from "../state/anchors";
+import { goalDisplayName } from "../state/goal-summary";
 import type { BackendUnavailableSituation } from "../grpc/client";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 
@@ -232,7 +233,7 @@ export function OverviewContent({
                           </span>
                           <div className="run-main">
                             <span className="p">{runView.run.project}</span>
-                            {runView.goalName ? <span className="g">{runView.goalName}</span> : null}
+                            {runView.goalName ? <span className="g">{goalDisplayName(runView.goalName)}</span> : null}
                             <div className="task">
                               タスク「{runView.run.summary || runView.run.taskName}」
                             </div>

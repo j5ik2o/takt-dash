@@ -401,6 +401,12 @@ a {
   border-top: none;
 }
 
+/* run のスラッグは長い識別子のため、行の中で折り返して全文を見せる（issue #153）。 */
+.mini-runs .view {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .goals li {
   min-width: 0;
   border-top: 1px solid var(--line2);
