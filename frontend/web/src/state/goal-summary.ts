@@ -4,6 +4,7 @@
 // 括弧の内側の句点は文の境界ではないので、開き括弧の深さを追って深さ0の
 // 文末記号だけで切る。タスクの進み具合は6種類の状態の合計と、失敗3種の合計から作る。
 import type { TaskStatusCounts } from "../proto/taktdash";
+import { toTaskCount, type TaskCount } from "./domain-primitives";
 
 const CLOSER_BY_OPENER = new Map<string, string>([
   ["「", "」"],
@@ -47,16 +48,19 @@ export type GoalTaskProgress = {
   completed: number;
   total: number;
   failed: number;
+  running: TaskCount;
 };
 
 // タスクの全体は6種類の合計、失敗は失敗・超過・PR失敗の合計。件数が無いゴールは
-// 実在しない件数を補わず、すべて0として扱う。
+// 実在しない件数を補わず、すべて0として扱う。実行中の件数は、ゴールの状態表示が
+// 実際に run が動いているかどうかを区別するために使う（issue #189）。件数の
+// 不変条件は専用型 TaskCount で保持する。
 export function goalTaskProgress(goal: {
   taskCounts?: TaskStatusCounts | undefined;
 }): GoalTaskProgress {
   const counts = goal.taskCounts;
   if (counts === undefined) {
-    return { completed: 0, total: 0, failed: 0 };
+    return { completed: 0, total: 0, failed: 0, running: toTaskCount(0) };
   }
   return {
     completed: counts.completed,
@@ -68,5 +72,6 @@ export function goalTaskProgress(goal: {
       counts.exceeded +
       counts.prFailed,
     failed: counts.failed + counts.exceeded + counts.prFailed,
+    running: toTaskCount(counts.running),
   };
 }

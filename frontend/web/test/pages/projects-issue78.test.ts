@@ -380,10 +380,39 @@ test("タスクの進み具合は完了 n / 全体 m で出し、失敗がある
   assert.equal(healthyRow.includes('class="goal-failed warn"'), false, "失敗が無ければ警告を出さない");
 });
 
-test("タスクの件数が無いゴールは完了 0 / 全体 0 として出す", () => {
+test("タスクの件数が無いゴールは、タスクがまだ登録されていないと出す", () => {
   const card = cardFor(renderProjects([goal({ name: "件数の無い目的です。", taskCounts: undefined })]));
 
-  assert.match(progressText(goalRowFor(card, "件数の無い目的です。")), /完了\s*0\s*\/\s*全体\s*0/);
+  const row = goalRowFor(card, "件数の無い目的です。");
+  assert.equal(progressText(row), "タスクはまだ登録されていません。");
+  assert.doesNotMatch(row, /全体\s*0/, "全体 0 という意味の取れない進捗を出さない");
+});
+
+test("タスクが0件のゴールは、タスクがまだ登録されていないと出す", () => {
+  const empty = { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 };
+  const card = cardFor(renderProjects([goal({ name: "タスクの無い目的です。", taskCounts: empty })]));
+
+  assert.equal(progressText(goalRowFor(card, "タスクの無い目的です。")), "タスクはまだ登録されていません。");
+});
+
+test("ゴールのバッジは、タスクの登録と実行中の有無で未着手・実行中・進行中を区別する", () => {
+  const untouched = goal({ goalId: "goal-untouched", name: "未着手の目的です。", taskCounts: undefined });
+  const running = goal({
+    goalId: "goal-running",
+    name: "実行中の目的です。",
+    taskCounts: { pending: 0, running: 1, completed: 2, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const active = goal({
+    goalId: "goal-active",
+    name: "進行中の目的です。",
+    taskCounts: { pending: 1, running: 0, completed: 2, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const card = cardFor(renderProjects([untouched, running, active]));
+  const visible = inProgressSection(card);
+
+  assert.deepEqual(badgeTexts(goalRowFor(visible, "未着手の目的です。")), ["未着手"]);
+  assert.deepEqual(badgeTexts(goalRowFor(visible, "実行中の目的です。")), ["実行中"]);
+  assert.deepEqual(badgeTexts(goalRowFor(visible, "進行中の目的です。")), ["進行中"]);
 });
 
 test("プルリクエストの URL があるゴールだけリンクを出す", () => {

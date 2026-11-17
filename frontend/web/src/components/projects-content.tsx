@@ -31,7 +31,11 @@ function GoalRow({ goal }: { goal: Goal }): ReactElement {
         <summary>このゴールの目的の全文を表示します。</summary>
         <p className="goal-text">{goal.name}</p>
       </details>
-      <p className="goal-progress">タスクは完了 {progress.completed} / 全体 {progress.total} です。</p>
+      {progress.total === 0 ? (
+        <p className="goal-progress">タスクはまだ登録されていません。</p>
+      ) : (
+        <p className="goal-progress">タスクは完了 {progress.completed} / 全体 {progress.total} です。</p>
+      )}
       {progress.failed > 0 ? (
         <p className="goal-failed warn">失敗したタスクが {progress.failed}件あります。</p>
       ) : null}
