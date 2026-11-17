@@ -19,8 +19,12 @@ service TaktDashService {
   // 出来事の一覧と直近7日分の日次集計を返す。
   rpc GetActivity(GetActivityRequest) returns (GetActivityResponse);
 
-  // 1つの run について、takt_get_run で取得できる範囲を返す。
+  // 1つの run について、状態ストアと run の保存場所から組み立てた詳細を返す。
+  // レポートと指示書は一覧だけを返し、本文は GetRunContent で取得する。
   rpc GetRunDetail(GetRunDetailRequest) returns (GetRunDetailResponse);
+
+  // run のレポートまたは指示書の本文を1件だけ返す。run のディレクトリの外は読まない。
+  rpc GetRunContent(GetRunContentRequest) returns (GetRunContentResponse);
 
   // manager の会話を時系列で返す。after_seq で増分取得できる。
   rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);
@@ -332,23 +336,25 @@ message StepLog {
   int32 iteration = 6;                        // 反復回数
 }
 
-// run のレポートを表す。
+// run のレポートの一覧項目を表す。本文は GetRunContent で取得する。
 message RunReport {
-  string filename = 1;  // ファイル名
-  string content = 2;   // 本文
+  reserved 2;
+  reserved "content";
+  string filename = 1;  // reports/ からの相対パス
   int64 size_bytes = 3;  // 大きさ（バイト）
 }
 
-// run への指示書を表す。
+// run への指示書の一覧項目を表す。本文は GetRunContent で取得する。
 message RunInstruction {
+  reserved 4;
+  reserved "content";
   int32 instruction_id = 1;                    // 指示書の ID
   google.protobuf.Timestamp issued_at = 2;     // 発行時刻
-  string state = 3;                            // 状態
-  string content = 4;                          // 本文
+  string state = 3;                            // 状態（pending / deliveredSameSession / deliveredNextStep / unconsumedWarned）
 }
 
 // run 詳細の取得への応答を表す。
-// takt_get_run で取得できる範囲を表現する。
+// 状態ストアと run の保存場所（meta.json、本体ログの末尾、reports/、interventions.jsonl）から組み立てる。
 message GetRunDetailResponse {
   string run_slug = 1;                          // runSlug
   string session_id = 2;                        // セッション
@@ -368,12 +374,30 @@ message GetRunDetailResponse {
   optional int32 phase = 16;                    // フェーズ
   repeated StepLog step_logs = 17;              // ステップの一覧とその本文
   string log_tail = 18;                         // ログの末尾
-  repeated RunReport reports = 19;              // レポートの一覧と本文
+  repeated RunReport reports = 19;              // レポートの一覧
   repeated RunInstruction instructions = 20;    // 指示書の一覧
   optional google.protobuf.Timestamp last_log_at = 21;  // 最後のログの時刻（実行中の run は未設定があり得る）
   bool log_silent = 22;                         // ログの無音の判定済みフラグ
   bool server_connected = 23;                   // 読み先の応答の有無
   google.protobuf.Timestamp server_last_read_at = 24;  // 読み先から最後に読めた時刻
+  bool logs_removed = 25;                       // run の保存場所が残っていない（掃除済みの worktree など）
+}
+
+// run のレポートまたは指示書の本文の取得を要求する。
+message GetRunContentRequest {
+  string run_slug = 1;  // runSlug
+  oneof target {
+    string report_filename = 2;  // reports/ からの相対パス（.md）
+    int32 instruction_id = 3;    // 指示書の ID（1 以上）
+  }
+}
+
+// run のレポートまたは指示書の本文の取得への応答を表す。
+message GetRunContentResponse {
+  string run_slug = 1;   // runSlug
+  string content = 2;    // 本文（上限を超えた分は切り詰める）
+  int64 size_bytes = 3;  // 本文全体の大きさ（バイト）
+  bool truncated = 4;    // 上限で切り詰めたか
 }
 
 // ゴール一覧の要求。

@@ -1,12 +1,13 @@
-//! gRPC の GetRunDetail が、run の保存場所（`meta.json` と本体ログ）からステップの記録と状態を、
-//! takt_get_run の summary からレポートと指示書を読んで GetRunDetailResponse を組み立てることを
-//! 検証する。同じサーバーへの2回目の要求は本体ログの続きだけを読み、stepLogs のページ追従を
-//! しないことも観測する。状態ストアにない runSlug は Not Found 相当のステータスで返す。
+//! gRPC の GetRunDetail が、状態ストアと run の保存場所（`meta.json`、本体ログ、`reports/`、
+//! プロジェクト側の `interventions.jsonl`）だけから GetRunDetailResponse を組み立て、takt-mcp を
+//! 起動も呼び出しもしないことを検証する。本体ログは末尾の一定量だけを読み、同じサーバーへの2回目の
+//! 要求は続きだけを読む。worktree の run、再開した run（source_run_slug）、掃除済みの worktree の
+//! run も扱う。状態ストアにない runSlug は Not Found 相当のステータスで返す。
 
 mod common;
 mod grpc_harness;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, Utc};
 use common::*;
@@ -20,52 +21,36 @@ use takt_dash_backend::{
 };
 
 const WORKFLOW: &str = "development-core";
+/// 受入条件の「本体ログ 8MB 以上」を満たす fixture の大きさ。
+const LARGE_BODY_LOG_BYTES: u64 = 9 * 1024 * 1024;
 
 fn project_dir() -> &'static Path {
   Path::new("/abs/takt-dash")
 }
 
-/// takt-mcp が返す状態。run-1 の summary は、保存場所と食い違う status・currentStep・stepLogs と、
-/// 保存場所に無い sessionId・summary・taskText・logTail・レポート・指示書を持つ。
+/// takt-mcp が返す状態。GetRunDetail はこの状態を読まない。定期読み取り（poller）を回すテストが
+/// 状態ストアへタスクを入れるためだけに使う。
 fn mcp_state() -> Value {
   json!({
     "tasks": [
       { "name": "implement", "goalId": "g1", "status": "running", "startedAt": "2026-11-13T08:30:00Z", "runSlug": "run-1", "currentStep": "implement" }
-    ],
-    "runs": {
-      "run-1": {
-        "runSlug": "run-1",
-        "sessionId": "sess-1",
-        "summary": "実装の run",
-        "workflow": WORKFLOW,
-        "status": "completed",
-        "startedAt": "2026-11-13T07:00:00Z",
-        "currentStep": "decoy",
-        "currentIteration": 99,
-        "lastLogAt": "2026-11-13T07:30:00Z",
-        "logTail": "最後のログの行です。",
-        "taskText": "タスクの本文です。",
-        "stepLogs": [
-          { "step": "decoy", "persona": "coder", "status": "done", "content": "応答の本文", "timestamp": "2026-11-13T07:30:00Z", "iteration": 1 }
-        ],
-        "reports": [ { "filename": "plan.md", "content": "計画のレポート", "sizeBytes": 120 } ],
-        "instructions": [
-          { "instructionId": 7, "issuedAt": "2026-11-13T08:50:00Z", "state": "applied", "content": "指示の本文" }
-        ]
-      }
-    }
+    ]
   })
 }
 
-/// 状態ストアに run-1 を持つ 1 プロジェクト分の土台を作る。
+/// 状態ストアに run-1（session_id・summary・ゴールを持つ）を持つ 1 プロジェクト分の土台を作る。
 fn seeded_harness(state: Value) -> GrpcHarness {
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), state).build();
+  let mut stored_run = run("run-1", "implement", time("2026-11-13T09:06:00Z"));
+  stored_run.session_id = "sess-1".to_owned();
+  stored_run.summary = "実装の run".to_owned();
+  stored_run.goal_id = Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です"));
   let snapshot = ProjectSnapshot {
     goals:         vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
     tasks:         vec![],
     inquiries:     vec![],
-    runs:          vec![run("run-1", "implement", time("2026-11-13T09:06:00Z"))],
+    runs:          vec![stored_run],
     notifications: vec![],
     proposals:     vec![],
   };
@@ -94,12 +79,26 @@ fn running_run_files(harness: &GrpcHarness) -> RunFixture {
   fixture
 }
 
+/// プロジェクトの cwd と並ぶ、takt の既定の worktree 置き場（`<cwd>/../takt-worktrees`）の下に
+/// worktree のディレクトリを作らずにパスだけを返す。
+fn worktree_path(harness: &GrpcHarness, name: &str) -> PathBuf {
+  harness.project_dir().parent().expect("プロジェクトの cwd には親があります").join("takt-worktrees").join(name)
+}
+
 async fn request_detail(harness: &GrpcHarness, run_slug: &str) -> Result<GetRunDetailResponse, tonic::Status> {
   let server = start_server(harness).await;
   let mut client = client(server.address).await;
   let result = client.get_run_detail(GetRunDetailRequest { run_slug: run_slug.to_owned() }).await;
   server.stop().await;
   result.map(tonic::Response::into_inner)
+}
+
+/// 要求の前後で、mock の takt-mcp の起動と道具呼び出しの記録が増えていないことを確かめる。
+fn assert_no_takt_mcp_activity(harness: &GrpcHarness, processes_before: usize, calls_before: usize) {
+  let processes = harness.recorded_processes();
+  let calls = harness.recorded_calls();
+  assert_eq!(processes.len(), processes_before, "GetRunDetail は takt-mcp を起動しません: {processes:?}");
+  assert_eq!(calls.len(), calls_before, "GetRunDetail は takt-mcp の道具を呼びません: {calls:?}");
 }
 
 fn timestamp(text: &str) -> prost_types::Timestamp {
@@ -115,13 +114,22 @@ fn step_log_names(detail: &GetRunDetailResponse) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn get_run_detail_assembles_the_response_from_the_run_files_and_the_run_summary() {
+async fn get_run_detail_assembles_the_response_from_the_store_and_the_run_files() {
   let harness = seeded_harness(mcp_state());
-  running_run_files(&harness);
+  let fixture = running_run_files(&harness);
+  let mut meta = running_meta("implement", 3, WORKFLOW, "2026-11-13T09:00:00Z");
+  meta["task"] = json!("タスクの本文です。");
+  fixture.write_meta("run-1", &meta);
+  fixture.write_report("run-1", "plan.md", "計画のレポート");
+  fixture.write_interventions("run-1", &[
+    issued_event(1, "2026-11-13T08:50:00Z", "指示の本文"),
+    issued_event(2, "2026-11-13T08:55:00Z", "二つ目の指示"),
+    delivered_event(&[1], "same_session", "2026-11-13T08:51:00Z", "implement"),
+  ]);
 
   let detail = request_detail(&harness, "run-1").await.expect("run 詳細を取得できます");
 
-  // 保存場所から読む値。takt_get_run の summary の status・currentStep・stepLogs は使わない。
+  // 保存場所から読む値。
   assert_eq!(detail.status, RunStatus::Running as i32, "status は meta.json の値です");
   assert_eq!(detail.current_step.as_deref(), Some("implement"));
   assert_eq!(detail.current_iteration, Some(3));
@@ -135,24 +143,41 @@ async fn get_run_detail_assembles_the_response_from_the_run_files_and_the_run_su
   assert_eq!(detail.step_logs[0].iteration, 1);
   assert_eq!(detail.step_logs[0].timestamp, Some(timestamp("2026-11-13T09:01:00Z")));
   assert_eq!(detail.step_logs[0].content, "", "ステップの本文は持ちません");
-
-  // takt_get_run の summary と本文の取得から読む値。
-  assert_eq!(detail.session_id, "sess-1");
-  assert_eq!(detail.summary, "実装の run");
-  assert_eq!(detail.task_text, "タスクの本文です。");
-  assert_eq!(detail.log_tail, "最後のログの行です。");
   assert_eq!(detail.workflow, WORKFLOW);
+  assert_eq!(detail.task_text, "タスクの本文です。", "タスク本文は meta.json の task です");
+  assert!(!detail.logs_removed, "ログが残っている run は logs_removed を立てません");
+
+  // ログ末尾は本体ログの末尾の記録を「時刻 種類 ステップ」の行にしたものです。
+  let tail_lines: Vec<&str> = detail.log_tail.lines().collect();
+  assert_eq!(
+    tail_lines[tail_lines.len().saturating_sub(2)..].to_vec(),
+    vec!["2026-11-13T09:01:00Z step_complete plan", "2026-11-13T09:05:00Z step_start implement"],
+    "ログ末尾の最後の2行は本体ログの最後の2件です: {:?}",
+    detail.log_tail
+  );
+
+  // レポートと指示書は一覧だけを返す。本文は GetRunContent で取得する。
   assert_eq!(detail.reports.len(), 1);
   assert_eq!(detail.reports[0].filename, "plan.md");
-  assert_eq!(detail.reports[0].content, "計画のレポート");
-  assert_eq!(detail.reports[0].size_bytes, 120);
-  assert_eq!(detail.instructions.len(), 1);
-  assert_eq!(detail.instructions[0].instruction_id, 7);
-  assert_eq!(detail.instructions[0].state, "applied");
-  assert_eq!(detail.instructions[0].content, "指示の本文");
+  assert_eq!(detail.reports[0].size_bytes, "計画のレポート".len() as i64, "大きさはファイルのバイト数です");
+  let instructions: Vec<(i32, &str, Option<prost_types::Timestamp>)> = detail
+    .instructions
+    .iter()
+    .map(|instruction| (instruction.instruction_id, instruction.state.as_str(), instruction.issued_at))
+    .collect();
+  assert_eq!(
+    instructions,
+    vec![
+      (1, "deliveredSameSession", Some(timestamp("2026-11-13T08:50:00Z"))),
+      (2, "pending", Some(timestamp("2026-11-13T08:55:00Z"))),
+    ],
+    "指示書は interventions.jsonl のイベントを takt と同じ規則で畳み込んだ状態です"
+  );
 
-  // 状態ストアと takt_list_tasks から補う値。
+  // 状態ストアから補う値。
   assert_eq!(detail.run_slug, "run-1");
+  assert_eq!(detail.session_id, "sess-1", "session_id は状態ストアの run の値です");
+  assert_eq!(detail.summary, "実装の run", "summary は状態ストアの run の値です");
   assert_eq!(detail.server_id, "mac-mini");
   assert_eq!(detail.project, "takt-dash");
   assert_eq!(detail.goal_id, "g1");
@@ -162,27 +187,190 @@ async fn get_run_detail_assembles_the_response_from_the_run_files_and_the_run_su
 }
 
 #[tokio::test]
-async fn get_run_detail_does_not_follow_step_log_pages_of_takt_get_run() {
-  // takt_get_run の stepLogs が先頭ページに収まらない run でも、offset 付きの takt_get_run を
-  // 呼ばない。ステップの記録は本体ログから読む。
-  let mut state = mcp_state();
-  let step_logs: Vec<Value> = (0..120)
-    .map(|index| json!({ "step": format!("decoy{index}"), "persona": "coder", "status": "done", "timestamp": "2026-11-13T07:30:00Z", "iteration": 1 }))
-    .collect();
-  state["runs"]["run-1"]["stepLogs"] = Value::Array(step_logs);
-  let harness = seeded_harness(state);
-  running_run_files(&harness);
+async fn get_run_detail_neither_starts_nor_calls_takt_mcp() {
+  // 実行中の run の詳細を同じサーバーへ2回要求しても、mock の takt-mcp の起動記録と道具呼び出しの
+  // 記録はどちらも空のままです。
+  let harness = seeded_harness(mcp_state());
+  let fixture = running_run_files(&harness);
+  fixture.write_report("run-1", "plan.md", "計画のレポート");
+  fixture.write_interventions("run-1", &[issued_event(1, "2026-11-13T08:50:00Z", "指示の本文")]);
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
 
-  let detail = request_detail(&harness, "run-1").await.expect("run 詳細を取得できます");
+  for _ in 0..2 {
+    client.get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() }).await.expect("run 詳細を取得できます");
+  }
+  server.stop().await;
 
-  assert_eq!(step_log_names(&detail), vec!["plan".to_owned()]);
-  let paged: Vec<Value> = harness
-    .recorded_calls()
-    .into_iter()
-    .filter(|call| call.name == "takt_get_run" && call.arguments.get("offset").is_some())
-    .map(|call| call.arguments)
-    .collect();
-  assert!(paged.is_empty(), "stepLogs のページ追従をしません: {paged:?}");
+  assert_no_takt_mcp_activity(&harness, 0, 0);
+}
+
+#[tokio::test]
+async fn get_run_detail_reads_only_the_tail_of_a_large_body_log() {
+  // 9 MiB の本体ログの先頭付近に head-marker、末尾に tail-marker の step_complete を置く。
+  // 先頭から全体を読む実装は head-marker を step_logs に含めて落ちる。途中から読み始めたことで
+  // 集計が始まらない実装（workflow_start を待つ実装）は tail-marker を落として落ちる。
+  let harness = seeded_harness(mcp_state());
+  let fixture = run_files(&harness);
+  fixture.write_meta("run-1", &running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z"));
+  fixture.append_records("run-1", &[
+    workflow_start_record(WORKFLOW),
+    step_complete_record("head-marker", "architect", 1, "2026-11-13T09:01:00Z"),
+  ]);
+  append_filler_records(&fixture, "run-1", LARGE_BODY_LOG_BYTES);
+  fixture.append_records("run-1", &[step_complete_record("tail-marker", "coder", 1, "2026-11-13T09:30:00Z")]);
+  let size = std::fs::metadata(fixture.body_log("run-1")).expect("本体ログの大きさを読めます").len();
+  assert!(size >= 8 * 1024 * 1024, "fixture の本体ログは 8MB 以上です: {size}");
+
+  let detail = request_detail(&harness, "run-1").await.expect("大きな本体ログの run 詳細を取得できます");
+
+  assert_eq!(
+    step_log_names(&detail),
+    vec!["tail-marker".to_owned()],
+    "末尾の範囲の step_complete だけを集計し、先頭付近の head-marker は読みません"
+  );
+  assert!(
+    detail.log_tail.lines().any(|line| line == "2026-11-13T09:30:00Z step_complete tail-marker"),
+    "ログ末尾に tail-marker の行があります: {:?}",
+    detail.log_tail
+  );
+  assert!(
+    !detail.log_tail.lines().any(|line| line.split(' ').any(|part| part == "head-marker")),
+    "ログ末尾に先頭付近の head-marker の行はありません: {:?}",
+    detail.log_tail
+  );
+}
+
+#[tokio::test]
+async fn running_run_detail_with_a_large_body_log_returns_within_two_seconds() {
+  // 受入条件「実行中の run の詳細が2秒以内に返る」のローカル fixture での計測。読み位置を持たない
+  // 初回の要求が最も重いため、毎回新しいサーバーで初回の要求を10回測り、最大値を出力する。
+  let harness = seeded_harness(mcp_state());
+  let fixture = run_files(&harness);
+  fixture.write_meta("run-1", &running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z"));
+  fixture.append_records("run-1", &[workflow_start_record(WORKFLOW)]);
+  append_filler_records(&fixture, "run-1", LARGE_BODY_LOG_BYTES);
+  fixture.append_records("run-1", &[step_complete_record("tail-marker", "coder", 1, "2026-11-13T09:30:00Z")]);
+
+  let mut elapsed = Vec::new();
+  for _ in 0..10 {
+    let server = start_server(&harness).await;
+    let mut client = client(server.address).await;
+    let started = std::time::Instant::now();
+    client.get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() }).await.expect("run 詳細を取得できます");
+    elapsed.push(started.elapsed());
+    server.stop().await;
+  }
+  let max = elapsed.iter().max().copied().expect("10回測りました");
+  eprintln!("GetRunDetail（本体ログ {LARGE_BODY_LOG_BYTES} バイト、10回）の最大応答時間: {max:?}、各回: {elapsed:?}");
+
+  assert!(max < std::time::Duration::from_secs(2), "10回の最大応答時間は2秒未満です: {max:?}");
+}
+
+#[tokio::test]
+async fn get_run_detail_reads_a_run_in_its_worktree() {
+  // 対応表の worktree_path にある worktree 側の .takt/runs/run-1 から meta とステップを読む。
+  // プロジェクト側にも同名の run を置き、プロジェクト側を読む実装は "project-step" を返して落ちる。
+  let harness = seeded_harness(mcp_state());
+  let worktree = worktree_path(&harness, "wt-1");
+  let project_fixture = RunFixture::new(harness.project_dir());
+  project_fixture.write_worktree_tasks(&[WorktreeTaskLine {
+    run_slug:        Some("run-1"),
+    source_run_slug: None,
+    worktree_path:   &worktree,
+  }]);
+  project_fixture.write_meta("run-1", &running_meta("project-step", 1, WORKFLOW, "2026-11-13T08:00:00Z"));
+  project_fixture.append_records("run-1", &[
+    workflow_start_record(WORKFLOW),
+    step_complete_record("project-step", "coder", 1, "2026-11-13T08:01:00Z"),
+  ]);
+  let worktree_fixture = RunFixture::new(&worktree);
+  worktree_fixture.write_meta("run-1", &running_meta("review", 2, WORKFLOW, "2026-11-13T09:00:00Z"));
+  worktree_fixture.append_records("run-1", &[
+    workflow_start_record(WORKFLOW),
+    step_complete_record("worktree-step", "coder", 1, "2026-11-13T09:01:00Z"),
+  ]);
+
+  let detail = request_detail(&harness, "run-1").await.expect("worktree の run 詳細を取得できます");
+
+  assert!(!detail.logs_removed);
+  assert_eq!(detail.current_step.as_deref(), Some("review"), "状態は worktree 側の meta.json の値です");
+  assert_eq!(step_log_names(&detail), vec!["worktree-step".to_owned()], "ステップは worktree 側の本体ログです");
+  assert_no_takt_mcp_activity(&harness, 0, 0);
+}
+
+#[tokio::test]
+async fn get_run_detail_reads_a_resumed_run_from_its_source_run_slug() {
+  // 再開した run は、対応表で source_run_slug が run-source の項目と worktree_path から、worktree
+  // 側の run-source のログを読む。ゴールとタスク名は状態ストアの、source_run_slug
+  // が一致するタスクから取る。
+  let harness =
+    GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
+  let snapshot = ProjectSnapshot {
+    goals:         vec![],
+    tasks:         vec![TaskEntry {
+      name:            TaskName::try_from("resume-task").expect("テストのタスク名は有効です"),
+      goal_id:         Some(GoalId::try_from("g-resume").expect("テストのゴール ID は有効です")),
+      status:          TaskStatus::Running,
+      started_at:      Some(time("2026-11-13T09:00:00Z")),
+      run_slug:        None,
+      source_run_slug: Some("run-source".to_owned()),
+      current_step:    Some("review".to_owned()),
+      merge_task:      false,
+    }],
+    inquiries:     vec![],
+    runs:          vec![],
+    notifications: vec![],
+    proposals:     vec![],
+  };
+  harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
+  let worktree = worktree_path(&harness, "wt-resume");
+  RunFixture::new(harness.project_dir()).write_worktree_tasks(&[WorktreeTaskLine {
+    run_slug:        None,
+    source_run_slug: Some("run-source"),
+    worktree_path:   &worktree,
+  }]);
+  let worktree_fixture = RunFixture::new(&worktree);
+  worktree_fixture.write_meta("run-source", &running_meta("review", 1, WORKFLOW, "2026-11-13T09:00:00Z"));
+  worktree_fixture.append_records("run-source", &[
+    workflow_start_record(WORKFLOW),
+    step_complete_record("resumed-step", "reviewer", 1, "2026-11-13T09:10:00Z"),
+  ]);
+
+  let detail = request_detail(&harness, "run-source").await.expect("再開した run の詳細を取得できます");
+
+  assert_eq!(detail.run_slug, "run-source");
+  assert!(!detail.logs_removed);
+  assert_eq!(step_log_names(&detail), vec!["resumed-step".to_owned()], "worktree 側の run-source の本体ログです");
+  assert_eq!(detail.goal_id, "g-resume", "ゴールは source_run_slug が一致するタスクから取ります");
+  assert_eq!(detail.task_name, "resume-task", "タスク名は source_run_slug が一致するタスクから取ります");
+  assert_no_takt_mcp_activity(&harness, 0, 0);
+}
+
+#[tokio::test]
+async fn get_run_detail_reports_logs_removed_for_a_cleaned_worktree() {
+  // 対応表に worktree_path があり、そのディレクトリもプロジェクト側の run のデータも無い run は、
+  // エラーではなく logs_removed を立てた詳細を返す。ゴールとタスク名と状態は状態ストアの値です。
+  let harness = seeded_harness(mcp_state());
+  let worktree = worktree_path(&harness, "wt-cleaned");
+  RunFixture::new(harness.project_dir()).write_worktree_tasks(&[WorktreeTaskLine {
+    run_slug:        Some("run-1"),
+    source_run_slug: None,
+    worktree_path:   &worktree,
+  }]);
+  assert!(!worktree.exists(), "掃除済みの worktree は残っていません");
+
+  let detail = request_detail(&harness, "run-1").await.expect("掃除済みの worktree の run も詳細を返します");
+
+  assert!(detail.logs_removed, "ログが残っていないことを logs_removed で返します");
+  assert!(detail.step_logs.is_empty(), "ステップの記録は空です");
+  assert!(detail.reports.is_empty(), "レポートの一覧は空です");
+  assert_eq!(detail.log_tail, "", "ログ末尾は空です");
+  assert_eq!(detail.status, RunStatus::Running as i32, "状態は状態ストアの run の値です");
+  assert_eq!(detail.goal_id, "g1");
+  assert_eq!(detail.task_name, "implement");
+  assert_eq!(detail.session_id, "sess-1");
+  assert_no_takt_mcp_activity(&harness, 0, 0);
 }
 
 #[tokio::test]
@@ -213,12 +401,6 @@ async fn second_run_detail_on_the_same_server_adds_only_the_appended_step_comple
     vec!["plan".to_owned(), "implement".to_owned()],
     "追記した step_complete だけが加わり、既読の step を重複させません"
   );
-  let paged = harness
-    .recorded_calls()
-    .into_iter()
-    .filter(|call| call.name == "takt_get_run" && call.arguments.get("offset").is_some())
-    .count();
-  assert_eq!(paged, 0, "どの要求も stepLogs のページ追従をしません");
 }
 
 #[tokio::test]
@@ -544,16 +726,9 @@ async fn run_list_and_run_detail_resolve_the_same_last_log_at() {
 #[tokio::test]
 async fn 完了した実行の詳細は実行中一覧になくても取得できる() {
   // 状態ストアの runs が空でも、完了タスクの runSlug からプロジェクトを解決して詳細を返します。
-  // takt_list_tasks にもタスクが無いため、状態ストアの完了タスクからゴールとタスク名を補います。
-  let harness = GrpcHarness::builder()
-    .single_project(
-      project("takt-dash", project_dir()),
-      server_meta(),
-      json!({
-        "runs": { "run-1": { "runSlug": "run-1", "sessionId": "sess-1", "summary": "完了した run", "status": "completed", "stepLogs": [] } }
-      }),
-    )
-    .build();
+  // 状態ストアの完了タスクからゴールとタスク名を補います。
+  let harness =
+    GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
   let fixture = run_files(&harness);
   let mut meta = running_meta("review", 2, WORKFLOW, "2026-11-13T09:00:00Z");
   meta["status"] = json!("completed");
@@ -600,10 +775,7 @@ async fn get_run_detail_resolves_a_completed_task_that_only_has_a_source_run_slu
         "goals": [],
         "tasks": [
           { "name": "implement", "goalId": "g1", "status": "completed", "startedAt": "2026-11-13T09:00:00Z", "sourceRunSlug": "run-source" }
-        ],
-        "runs": {
-          "run-source": { "runSlug": "run-source", "sessionId": "sess-source", "summary": "元の run", "status": "completed", "stepLogs": [] }
-        }
+        ]
       }),
     )
     .build();
@@ -622,12 +794,17 @@ async fn get_run_detail_resolves_a_completed_task_that_only_has_a_source_run_slu
   );
   poller.read_cycle_once().await.expect("1サイクルを実行できます");
   poller.shutdown().await;
+  let processes_before = harness.recorded_processes().len();
+  let calls_before = harness.recorded_calls().len();
 
   let detail = request_detail(&harness, "run-source")
     .await
     .expect("sourceRunSlug だけを持つ完了タスクからも run 詳細を取得できます");
   assert_eq!(detail.run_slug, "run-source");
   assert_eq!(detail.project, "takt-dash", "sourceRunSlug からプロジェクトを解決します");
+  assert_eq!(detail.goal_id, "g1", "ゴールは sourceRunSlug が一致する完了タスクから取ります");
+  assert_eq!(detail.task_name, "implement", "タスク名は sourceRunSlug が一致する完了タスクから取ります");
+  assert_no_takt_mcp_activity(&harness, processes_before, calls_before);
 
   let status =
     request_detail(&harness, "does-not-exist").await.expect_err("sourceRunSlug と異なる slug は解決しません");

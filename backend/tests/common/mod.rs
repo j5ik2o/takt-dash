@@ -239,7 +239,43 @@ pub struct RunTaskLine<'a> {
   pub source_run_slug: Option<&'a str>,
 }
 
+/// worktree で動く run の `tasks.yaml` の1項目。`worktree_path` は takt が書く絶対パスです。
+pub struct WorktreeTaskLine<'a> {
+  pub run_slug:        Option<&'a str>,
+  pub source_run_slug: Option<&'a str>,
+  pub worktree_path:   &'a Path,
+}
+
 impl RunFixture {
+  /// `worktree_path` を持つ項目だけで `tasks.yaml` の対応表を書く。
+  pub fn write_worktree_tasks(&self, entries: &[WorktreeTaskLine<'_>]) {
+    let mut yaml = String::from("tasks:\n");
+    for entry in entries {
+      let mut fields = Vec::new();
+      if let Some(run_slug) = entry.run_slug {
+        fields.push(format!("run_slug: {run_slug}"));
+      }
+      if let Some(source) = entry.source_run_slug {
+        fields.push(format!("source_run_slug: {source}"));
+      }
+      fields.push(format!("worktree_path: {}", entry.worktree_path.display()));
+      for (index, field) in fields.iter().enumerate() {
+        let prefix = if index == 0 { "  - " } else { "    " };
+        yaml.push_str(&format!("{prefix}{field}\n"));
+      }
+    }
+    std::fs::write(self.project_cwd.join(".takt").join("tasks.yaml"), yaml).expect("tasks.yaml を書けます");
+  }
+
+  /// takt の LiveInterventionFileStore と同じく、プロジェクト側の
+  /// `.takt/runs/<run_slug>/interventions.jsonl` へ指示書のイベントを1行ずつ書く。
+  pub fn write_interventions(&self, run_slug: &str, events: &[serde_json::Value]) {
+    let directory = self.project_cwd.join(".takt").join("runs").join(run_slug);
+    std::fs::create_dir_all(&directory).expect("run のディレクトリを作れます");
+    let text: String = events.iter().map(|event| format!("{event}\n")).collect();
+    std::fs::write(directory.join("interventions.jsonl"), text).expect("interventions.jsonl を書けます");
+  }
+
   pub fn new(project_cwd: &Path) -> RunFixture {
     std::fs::create_dir_all(project_cwd.join(".takt")).expect("プロジェクトの .takt を作れます");
     RunFixture { project_cwd: project_cwd.to_path_buf() }
@@ -376,6 +412,46 @@ pub fn step_start_record(
     "workflow": workflow,
     "stack": stack
   })
+}
+
+/// takt の `interventions.jsonl` の issued イベント。
+pub fn issued_event(instruction_id: i64, issued_at: &str, content: &str) -> serde_json::Value {
+  serde_json::json!({ "type": "issued", "instructionId": instruction_id, "issuedAt": issued_at, "content": content })
+}
+
+/// takt の `interventions.jsonl` の delivered イベント。`mode` は same_session / next_step /
+/// batch_boundary です。
+pub fn delivered_event(instruction_ids: &[i64], mode: &str, delivered_at: &str, step: &str) -> serde_json::Value {
+  serde_json::json!({
+    "type": "delivered",
+    "instructionIds": instruction_ids,
+    "deliveredAt": delivered_at,
+    "mode": mode,
+    "step": step,
+    "phase": 1
+  })
+}
+
+/// 集計の対象にならない種類（provider の出来事）の record。本体ログを大きくするために使います。
+/// 1件の JSON はおよそ `payload_bytes` バイトです。
+pub fn filler_record(index: usize, payload_bytes: usize) -> serde_json::Value {
+  serde_json::json!({ "type": "provider_event", "index": index, "data": "x".repeat(payload_bytes) })
+}
+
+/// 本体ログの末尾へ、`total_bytes` を超えるまで集計対象外の record を追記する。
+pub fn append_filler_records(fixture: &RunFixture, run_slug: &str, total_bytes: u64) {
+  use std::io::Write;
+  let mut file =
+    std::fs::OpenOptions::new().append(true).create(true).open(fixture.body_log(run_slug)).expect("本体ログを開けます");
+  let mut written = 0_u64;
+  let mut index = 0;
+  while written <= total_bytes {
+    let mut line = filler_record(index, 4096).to_string();
+    line.push('\n');
+    file.write_all(line.as_bytes()).expect("本体ログへ追記できます");
+    written += line.len() as u64;
+    index += 1;
+  }
 }
 
 pub fn thresholds() -> Thresholds {

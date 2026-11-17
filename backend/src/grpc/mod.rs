@@ -2,10 +2,10 @@
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
-//! GetRunDetail は要求時に run の保存場所を読み、takt-mcp の takt_get_run
-//! でレポートと指示書を補います。GetConversation は保存領域の manager の会話を読みます。GetGoals・
-//! GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を 返し、GetGoalDetail と GetTaskDetail
-//! は要求時に takt-mcp を呼びます。WatchState は接続時に
+//! GetRunDetail は状態ストアと run の保存場所だけから組み立て、takt-mcp を起動しません。
+//! GetRunContent はレポートか指示書の本文を1件だけ読みます。GetConversation は保存領域の manager
+//! の会話を読みます。GetGoals・ GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
+//! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
 //! 全件を返し、定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
 
 pub mod assembly;
@@ -32,21 +32,26 @@ use crate::{
   config::{load_config, Config},
   conversation::{ConversationQuery, ConversationReader},
   domain::{
-    GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, ServerId, TaskName,
+    GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ReportFilename,
+    RunSlug, ServerId, TaskName,
   },
   mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
   model::{self},
-  run_progress::{RunLogHandle, RunLogHandles, RunReadFailure},
+  run_log::{ContentRead, InitialRead, Instruction},
+  run_progress::{
+    read_instruction_body, read_report_content, read_run, read_run_instructions, RunLogHandle, RunLogHandles,
+    RunReadFailure,
+  },
   store::StateStore,
   takt_dash::v1::{
-    self, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest, ApproveGoalMergeResponse,
-    ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse, DashboardState, GetActivityRequest,
-    GetActivityResponse, GetConversationRequest, GetConversationResponse, GetGoalDetailRequest, GetGoalDetailResponse,
-    GetGoalsRequest, GetGoalsResponse, GetOverviewRequest, GetPendingDecisionsRequest, GetPendingDecisionsResponse,
-    GetProjectsRequest, GetProjectsResponse, GetRunDetailRequest, GetRunDetailResponse, GetTaskDetailRequest,
-    GetTaskDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
-    ListGoalRegistrationProposalsResponse, OperationAnswerReport, RejectGoalRegistrationRequest,
-    RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, WatchStateRequest,
+    self, get_run_content_request, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
+    ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse, DashboardState,
+    GetActivityRequest, GetActivityResponse, GetConversationRequest, GetConversationResponse, GetGoalDetailRequest,
+    GetGoalDetailResponse, GetGoalsRequest, GetGoalsResponse, GetOverviewRequest, GetPendingDecisionsRequest,
+    GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse, GetRunContentRequest, GetRunContentResponse,
+    GetRunDetailRequest, GetRunDetailResponse, GetTaskDetailRequest, GetTaskDetailResponse, GoalRegistrationProposal,
+    ListGoalRegistrationProposalsRequest, ListGoalRegistrationProposalsResponse, OperationAnswerReport,
+    RejectGoalRegistrationRequest, RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, WatchStateRequest,
   },
 };
 
@@ -60,6 +65,14 @@ const WATCH_CHANNEL_CAPACITY: usize = 16;
 ///
 /// 開いている画面が自動更新を確認できるよう、読み取り間隔（既定30秒）より短い15秒で再送します。
 const WATCH_RESEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+/// run 詳細が、読み位置を持たない本体ログを初めて読むときに読む末尾の大きさ（1 MiB）。
+///
+/// 実行中の run の詳細を2秒以内に返すため、大きな本体ログの全体を読みません。代わりに、この大きさを
+/// 超える本体ログの run
+/// を初めて開いたときは、ステップの記録が末尾の範囲に含まれる分だけになります。
+const DETAIL_INITIAL_TAIL_BYTES: u64 = 1024 * 1024;
+/// GetRunContent が返す本文の上限（1 MiB）。gRPC の既定の受信上限（4MB）を超える応答を作りません。
+const RUN_CONTENT_MAX_BYTES: u64 = 1024 * 1024;
 
 /// unary ハンドラの処理時間と、その間に接続ロックを待った時間を記録する。
 ///
@@ -102,8 +115,9 @@ pub struct TaktDashServiceImpl {
   registry:     McpClientRegistry,
   clock:        Clock,
   /// プロジェクトごとの run の集計と、その集計を作ったときの cwd。GetRunDetail が要求をまたいで
-  /// 持ち、同じ run の本体ログを前回の続きから読むために使います。lock は取っ手の受け渡しの間だけ
-  /// 持ち、読み取りの間は持ちません。
+  /// 持ち、同じ run の本体ログを前回の続きから読むために使います。読み位置を持たない本体ログは
+  /// 末尾の [`DETAIL_INITIAL_TAIL_BYTES`] だけを読みます。lock は取っ手の受け渡しの間だけ持ち、
+  /// 読み取りの間は持ちません。
   run_logs:     Mutex<RunLogHandles<ProjectName>>,
 }
 
@@ -137,8 +151,8 @@ impl TaktDashServiceImpl {
   /// `registry` は Poller と共有する takt-mcp のクライアントのレジストリです。書き込み RPC は
   /// 同じレジストリから同じプロジェクトの子プロセスを取得します。
   ///
-  /// GetRunDetail は要求のたびに設定のパスから対象サーバーの起動方法と cwd を解決し、
-  /// run の保存場所を読んだうえで、takt-mcp の子プロセスを起動して takt_get_run を呼びます。
+  /// GetRunDetail と GetRunContent は要求のたびに設定のパスからプロジェクトの cwd を解決し、
+  /// run の保存場所だけを読みます。takt-mcp の子プロセスは起動しません。
   pub fn new(deps: ServiceDeps) -> Self {
     Self::with_clock(deps, Arc::new(Utc::now))
   }
@@ -155,7 +169,7 @@ impl TaktDashServiceImpl {
       shutdown,
       registry,
       clock,
-      run_logs: Mutex::new(RunLogHandles::default()),
+      run_logs: Mutex::new(RunLogHandles::with_initial_read(InitialRead::Tail(DETAIL_INITIAL_TAIL_BYTES))),
     }
   }
 
@@ -231,7 +245,6 @@ fn tool_error_status(error: ToolError) -> Status {
     | ToolError::Parse(message) => Status::internal(format!("takt-mcp の応答を解析できませんでした: {message}")),
     | ToolError::Tool(error) => Status::unavailable(format!("takt-mcp の道具が失敗しました: {error}")),
     | ToolError::Transport(error) => Status::unavailable(format!("takt-mcp へ接続できませんでした: {error}")),
-    | ToolError::RunLog(failure) => run_read_failure_status(failure),
   }
 }
 
@@ -242,6 +255,35 @@ fn run_read_failure_status(failure: RunReadFailure) -> Status {
     | RunReadFailure::Unreadable(_) | RunReadFailure::Rejected(_) => Status::unavailable(failure.to_string()),
     | RunReadFailure::InvalidMeta(_) => Status::internal(failure.to_string()),
   }
+}
+
+/// 要求の runSlug を検証する。空と、run のディレクトリ名にならない値は入力の誤りです。
+fn parse_run_slug(run_slug: String) -> Result<RunSlug, Status> {
+  if run_slug.trim().is_empty() {
+    return Err(Status::invalid_argument("runSlug が空です。"));
+  }
+  RunSlug::try_from(run_slug.as_str()).map_err(|error| Status::invalid_argument(format!("runSlug が不正です: {error}")))
+}
+
+/// 指示書を一覧の項目にする。本文は GetRunContent で返します。
+fn run_instruction(instruction: &Instruction) -> RunInstruction {
+  RunInstruction {
+    instruction_id: instruction.instruction_id.get(),
+    issued_at:      Some(timestamp(instruction.issued_at)),
+    state:          instruction.state.as_str().to_owned(),
+  }
+}
+
+/// GetRunContent が本文を返す対象。
+enum ContentTarget {
+  Report(ReportFilename),
+  Instruction(InstructionId),
+}
+
+/// 状態ストアから解決した run のプロジェクトと、設定から解決したその cwd。
+struct RunTarget {
+  view:     model::ProjectView,
+  resolved: ResolvedProject,
 }
 
 /// 設定から解決した、対象サーバーの起動方法とプロジェクトの cwd。
@@ -283,6 +325,20 @@ impl TaktDashServiceImpl {
     let config = load_config(&self.config_path)
       .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
     resolve_project_in(&config, server_id, project)
+  }
+
+  /// 状態ストアで run のプロジェクトを探し、設定からその cwd を解決する。takt-mcp は起動しません。
+  fn resolve_run_target(&self, run_slug: &RunSlug) -> Result<RunTarget, Status> {
+    let view = self
+      .store
+      .find_run_project(run_slug)
+      .ok_or_else(|| Status::not_found(format!("runSlug {} は状態ストアにありません。", run_slug.as_str())))?;
+    let server_id = ServerId::try_from(view.server_id.as_str())
+      .map_err(|error| Status::internal(format!("状態ストアの server_id が不正です: {error}")))?;
+    let project = ProjectName::try_from(view.name.as_str())
+      .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
+    let resolved = self.resolve_project(&server_id, &project)?;
+    Ok(RunTarget { view, resolved })
   }
 
   /// 書き込み RPC の共通の入口。型で検証済みの対象を解決する。
@@ -370,100 +426,136 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     request: Request<GetRunDetailRequest>,
   ) -> Result<Response<GetRunDetailResponse>, Status> {
     let _timing = RpcTimingGuard::start("GetRunDetail", &self.activity);
-    let run_slug_text = request.into_inner().run_slug;
-    if run_slug_text.trim().is_empty() {
-      return Err(Status::invalid_argument("runSlug が空です。"));
-    }
-    let run_slug = RunSlug::try_from(run_slug_text.as_str())
-      .map_err(|error| Status::invalid_argument(format!("runSlug が不正です: {error}")))?;
-    let view = self
-      .store
-      .find_run_project(&run_slug)
-      .ok_or_else(|| Status::not_found(format!("runSlug {} は状態ストアにありません。", run_slug.as_str())))?;
-    let stored_run = view.runs.iter().find(|run| run.run_slug == run_slug.as_str()).cloned();
-    // 完了した run は実行中一覧から消えるため、状態ストアの完了タスクからゴールと
-    // タスク名を補います。run の詳細 URL は完了後も同じまま取得できます。
-    let stored_task = view.tasks.iter().find(|task| task.run_slug.as_ref() == Some(&run_slug));
-    let view_server_id = ServerId::try_from(view.server_id.as_str())
-      .map_err(|error| Status::internal(format!("状態ストアの server_id が不正です: {error}")))?;
-    let view_project = ProjectName::try_from(view.name.as_str())
-      .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
-    let resolved = self.resolve_project(&view_server_id, &view_project)?;
-    let run_logs = self.run_log_handle(&resolved.project, &resolved.cwd)?;
-    let mut client = McpClient::new(resolved.client_config);
-    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_run_detail(&run_slug, &run_logs).await {
-      | Ok(detail) => detail,
-      | Err(error) => {
-        client.shutdown().await;
-        return Err(tool_error_status(error));
-      },
-    };
-    client.shutdown().await;
-    let server_id = resolved.server_id.as_str().to_owned();
-    // 対象 run のゴールとタスク名は、状態ストアの run（定期読み取りで task
-    // から解決済み）を正とする。 takt_get_run の応答に無い場合だけ、ストアの値で補う。
-    // run が完了して一覧から消えている場合は、完了タスクの値で補う。
-    let goal_id = detail
-      .goal_id
-      .clone()
-      .or_else(|| stored_run.as_ref().and_then(|run| run.goal_id.clone()))
-      .or_else(|| stored_task.and_then(|task| task.goal_id.clone()));
-    let fallback_task_name =
-      stored_run.as_ref().map(|run| run.task_name.clone()).or_else(|| stored_task.map(|task| task.name.clone()));
-    let task_name = detail
-      .task_name
-      .clone()
-      .or(fallback_task_name)
+    let run_slug = parse_run_slug(request.into_inner().run_slug)?;
+    let target = self.resolve_run_target(&run_slug)?;
+    let stored_run = target.view.runs.iter().find(|run| run.run_slug == run_slug.as_str()).cloned();
+    // 完了した run は実行中一覧から消えるため、状態ストアのタスクからゴールとタスク名を補います。
+    // 再開した run は、タスクの sourceRunSlug が元 run の runSlug と一致します。
+    let stored_task = target
+      .view
+      .tasks
+      .iter()
+      .find(|task| task.run_slug.as_ref() == Some(&run_slug))
+      .or_else(|| target.view.tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())))
+      .cloned();
+    let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
+    let read = read_run(&run_logs, run_slug.clone()).await;
+    let instructions =
+      read_run_instructions(target.resolved.cwd.clone(), run_slug.clone()).await.map_err(run_read_failure_status)?;
+    let goal_id = stored_run
+      .as_ref()
+      .and_then(|run| run.goal_id.clone())
+      .or_else(|| stored_task.as_ref().and_then(|task| task.goal_id.clone()));
+    let task_name = stored_run
+      .as_ref()
+      .map(|run| run.task_name.clone())
+      .or_else(|| stored_task.as_ref().map(|task| task.name.clone()))
       .map(|task_name| task_name.as_str().to_owned())
       .unwrap_or_default();
-    let session_id = if detail.session_id.is_empty() {
-      stored_run.as_ref().map(|run| run.session_id.clone()).unwrap_or_default()
-    } else {
-      detail.session_id.clone()
-    };
-    let log_silent = self.store.is_log_silent_at(detail.last_log_at, self.now());
-    Ok(Response::new(GetRunDetailResponse {
+    let mut response = GetRunDetailResponse {
       run_slug: run_slug.as_str().to_owned(),
-      session_id,
-      server_id,
-      project: view.name.clone(),
+      session_id: stored_run.as_ref().map(|run| run.session_id.clone()).unwrap_or_default(),
+      server_id: target.resolved.server_id.as_str().to_owned(),
+      project: target.view.name.clone(),
       goal_id: goal_id.map(|goal_id| goal_id.as_str().to_owned()).unwrap_or_default(),
       task_name,
-      task_text: detail.task_text,
-      summary: detail.summary,
-      workflow: detail.workflow,
-      status: run_status(detail.status) as i32,
-      started_at: optional_timestamp(detail.started_at),
-      current_step: detail.current_step,
-      current_iteration: detail.current_iteration,
-      current_step_started_at: optional_timestamp(detail.current_step_started_at),
-      current_step_execution_count: detail.current_step_execution_count,
-      phase: detail.phase,
-      step_logs: detail.step_logs.iter().map(step_log).collect(),
-      log_tail: detail.log_tail,
-      reports: detail
-        .reports
-        .into_iter()
-        .map(|report| RunReport {
-          filename:   report.filename,
-          content:    report.content,
-          size_bytes: report.size_bytes,
-        })
-        .collect(),
-      instructions: detail
-        .instructions
-        .into_iter()
-        .map(|instruction| RunInstruction {
-          instruction_id: instruction.instruction_id,
-          issued_at:      Some(timestamp(instruction.issued_at)),
-          state:          instruction.state,
-          content:        instruction.content,
-        })
-        .collect(),
-      last_log_at: optional_timestamp(detail.last_log_at),
-      log_silent,
-      server_connected: view.connected,
-      server_last_read_at: optional_timestamp(view.last_read_at),
+      summary: stored_run.as_ref().map(|run| run.summary.clone()).unwrap_or_default(),
+      instructions: instructions.iter().map(run_instruction).collect(),
+      server_connected: target.view.connected,
+      server_last_read_at: optional_timestamp(target.view.last_read_at),
+      ..Default::default()
+    };
+    match read {
+      | Ok(view) => {
+        tracing::info!(
+          run_slug = %run_slug.as_str(),
+          body_log_bytes_read = view.body_log_bytes_read,
+          "run 詳細のために本体ログを読みました。"
+        );
+        let started_at = view.started_at(stored_task.as_ref());
+        let last_log_at = view.resolve_last_log_at(started_at);
+        response.task_text = view.task_text.clone().unwrap_or_default();
+        response.workflow = view.workflow.clone().unwrap_or_default();
+        response.status = run_status(view.status) as i32;
+        response.started_at = optional_timestamp(started_at);
+        response.current_step = view.current_step.clone();
+        response.current_iteration = view.current_iteration;
+        response.current_step_started_at = optional_timestamp(view.current_step_started_at);
+        response.current_step_execution_count = view.current_step_execution_count;
+        response.phase = view.phase;
+        response.step_logs = view.step_logs().iter().map(step_log).collect();
+        response.log_tail = view.log_tail();
+        response.reports = view
+          .reports()
+          .iter()
+          .map(|report| RunReport { filename: report.filename.clone(), size_bytes: report.size_bytes })
+          .collect();
+        response.last_log_at = optional_timestamp(last_log_at);
+        response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
+      },
+      // 掃除済みの worktree など、run の保存場所が残っていない run はエラーにせず、状態ストアの値と
+      // ログが残っていないことを返します。
+      | Err(RunReadFailure::Missing) => {
+        let started_at = stored_run
+          .as_ref()
+          .and_then(|run| run.started_at)
+          .or_else(|| stored_task.as_ref().and_then(|task| task.started_at));
+        let last_log_at = stored_run.as_ref().and_then(|run| run.last_log_at);
+        response.logs_removed = true;
+        response.status =
+          stored_run.as_ref().map_or(v1::RunStatus::Unspecified as i32, |run| run_status(run.status) as i32);
+        response.started_at = optional_timestamp(started_at);
+        response.current_step = stored_run.as_ref().and_then(|run| run.current_step.clone());
+        response.current_iteration = stored_run.as_ref().and_then(|run| run.current_iteration);
+        response.current_step_started_at =
+          optional_timestamp(stored_run.as_ref().and_then(|run| run.current_step_started_at));
+        response.last_log_at = optional_timestamp(last_log_at);
+        response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
+      },
+      | Err(failure) => return Err(run_read_failure_status(failure)),
+    }
+    Ok(Response::new(response))
+  }
+
+  async fn get_run_content(
+    &self,
+    request: Request<GetRunContentRequest>,
+  ) -> Result<Response<GetRunContentResponse>, Status> {
+    let _timing = RpcTimingGuard::start("GetRunContent", &self.activity);
+    let request = request.into_inner();
+    let run_slug = parse_run_slug(request.run_slug)?;
+    let target = match request.target {
+      | Some(get_run_content_request::Target::ReportFilename(filename)) => ContentTarget::Report(
+        ReportFilename::try_from(filename.as_str())
+          .map_err(|error| Status::invalid_argument(format!("レポートの名前が不正です: {error}")))?,
+      ),
+      | Some(get_run_content_request::Target::InstructionId(instruction_id)) => ContentTarget::Instruction(
+        InstructionId::try_from(instruction_id)
+          .map_err(|error| Status::invalid_argument(format!("指示書の ID が不正です: {error}")))?,
+      ),
+      | None => return Err(Status::invalid_argument("レポートの名前か指示書の ID のどちらかを指定してください。")),
+    };
+    let resolved = self.resolve_run_target(&run_slug)?.resolved;
+    let (read, missing) = match target {
+      | ContentTarget::Report(filename) => (
+        read_report_content(resolved.cwd.clone(), run_slug.clone(), filename.clone(), RUN_CONTENT_MAX_BYTES).await,
+        format!("run {} にレポート {} はありません。", run_slug.as_str(), filename.as_str()),
+      ),
+      | ContentTarget::Instruction(instruction_id) => (
+        read_instruction_body(resolved.cwd.clone(), run_slug.clone(), instruction_id, RUN_CONTENT_MAX_BYTES).await,
+        format!("run {} に指示書 #{} はありません。", run_slug.as_str(), instruction_id.get()),
+      ),
+    };
+    let content = match read.map_err(run_read_failure_status)? {
+      | ContentRead::Found(content) => content,
+      | ContentRead::Missing => return Err(Status::not_found(missing)),
+      | ContentRead::Unreadable(reason) => return Err(Status::unavailable(reason)),
+    };
+    Ok(Response::new(GetRunContentResponse {
+      run_slug:   run_slug.as_str().to_owned(),
+      content:    content.content,
+      size_bytes: i64::try_from(content.size_bytes).unwrap_or(i64::MAX),
+      truncated:  content.truncated,
     }))
   }
 
