@@ -508,7 +508,7 @@ test("未読のプロジェクトは応答なしに含めず、異常として�
   assert.equal(view.partialReadAt, undefined, "未読を最後に読めた時刻に使わない");
 });
 
-test("進行中ゴールは完了・中止・人のマージ待ちを除き、仕上げタスクが進行中のマージ待ちを含める", () => {
+test("進行中ゴールは完了・中止・未着手・人のマージ待ちを除き、仕上げタスクが進行中のマージ待ちを含める", () => {
   const base = createHealthyDashboardState();
   const goalBase = base.goals[0]!;
   const goal = (overrides: Partial<typeof goalBase>) => ({ ...goalBase, ...overrides });
@@ -540,6 +540,12 @@ test("進行中ゴールは完了・中止・人のマージ待ちを除き、�
         goalId: "g-merge-failed",
         status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
         mergeTaskLast: TaskStatus.TASK_STATUS_FAILED,
+      }),
+      goal({
+        goalId: "g-untouched",
+        status: GoalStatus.GOAL_STATUS_CREATED,
+        executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+        taskCounts: { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 },
       }),
     ],
   };

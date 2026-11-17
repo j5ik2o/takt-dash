@@ -8,7 +8,13 @@
 // 動いているかどうかを文言で区別する（issue #189）。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { goalBadge, goalStateSentence, type GoalBadgeKind, type GoalBadgeTone } from "../../src/state/goal-badge.ts";
+import {
+  goalBadge,
+  goalSection,
+  goalStateSentence,
+  type GoalBadgeKind,
+  type GoalBadgeTone,
+} from "../../src/state/goal-badge.ts";
 import { EXECUTION_STATUS, GOAL_STATUS } from "../../src/state/proto-values.ts";
 import type { TaskStatusCounts } from "../../src/proto/taktdash.ts";
 
@@ -139,6 +145,34 @@ test("Goal.status と execution_status の全組み合わせで決まったラ�
       assert.doesNotMatch(badge.label, /稼働中/, `status=${status} executionStatus=${executionStatus}`);
     }
   }
+});
+
+const sectionFor = (status: number, executionStatus: number, taskCounts?: TaskStatusCounts) =>
+  goalSection({ status, executionStatus, taskCounts });
+
+test("区画分けは完了と中止を分け、中止を完了へ含めない（issue #243）", () => {
+  assert.equal(sectionFor(GOAL_STATUS.COMPLETED, EXECUTION_STATUS.ACTIVE), "completed");
+  assert.equal(sectionFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.ABORTED), "aborted");
+  assert.equal(sectionFor(GOAL_STATUS.COMPLETED, EXECUTION_STATUS.ABORTED), "aborted");
+  assert.equal(sectionFor(GOAL_STATUS.AWAITING_MERGE, EXECUTION_STATUS.ABORTED), "aborted");
+});
+
+test("区画分けはタスクが登録されていないゴールを作成済みでも未着手へ分ける（issue #242）", () => {
+  assert.equal(sectionFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.ACTIVE, undefined), "untouched");
+  assert.equal(sectionFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.ACTIVE, counts()), "untouched");
+});
+
+test("区画分けはタスクのある作成済み・マージ待ち・一時停止を進行中へ分ける", () => {
+  assert.equal(
+    sectionFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.ACTIVE, counts({ pending: 1, completed: 2 })),
+    "inProgress",
+  );
+  assert.equal(
+    sectionFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.ACTIVE, counts({ running: 1 })),
+    "inProgress",
+  );
+  assert.equal(sectionFor(GOAL_STATUS.AWAITING_MERGE, EXECUTION_STATUS.ACTIVE), "inProgress");
+  assert.equal(sectionFor(GOAL_STATUS.CREATED, EXECUTION_STATUS.PAUSED, undefined), "inProgress");
 });
 
 const sentenceFor = (status: number, executionStatus: number, taskCounts?: TaskStatusCounts) =>
