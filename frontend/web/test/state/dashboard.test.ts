@@ -28,8 +28,11 @@ import {
   projectKey,
   isHumanMergeWaiting,
   mergeTaskFailureNote,
+  notRespondingProjectText,
+  notRespondingProjects,
   pendingDecisionMergeFailureNote,
   resolveThresholds,
+  serverDisplayState,
   serverStateFrom,
   serverStateLabel,
   sortPendingDecisions,
@@ -856,4 +859,138 @@ test("概要の最終読み取り時刻は、表示用の現在時刻ではな�
   const later = new Date(NOW.getTime() + 30 * 60_000);
   const overview = buildOverviewView(createDashboardState(), later);
   assert.equal(overview.readAt?.getTime(), NOW.getTime(), "state の readAt をそのまま使います");
+});
+
+test("応答していないプロジェクトは応答なしと未読の両方を含み、遅延と接続済みは含めない", () => {
+  const state = createDashboardState();
+  const readAt = new Date(NOW.getTime() - 5 * 60_000);
+  const projects = [
+    ...state.projects.map((project) =>
+      project.name === "esa"
+        ? {
+            ...project,
+            connected: false,
+            connectionState: ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
+            lastReadAt: readAt,
+          }
+        : project,
+    ),
+    {
+      ...state.projects[0]!,
+      name: "unread",
+      connectionState: ConnectionState.CONNECTION_STATE_UNSPECIFIED,
+      lastReadAt: undefined,
+    },
+    {
+      ...state.projects[0]!,
+      name: "delayed",
+      connectionState: ConnectionState.CONNECTION_STATE_DELAYED,
+      lastReadAt: readAt,
+    },
+  ];
+
+  assert.deepEqual(
+    notRespondingProjects(projects).map((project) => project.name),
+    ["esa", "unread"],
+    "応答なしと未読だけを応答していないものとして数える",
+  );
+});
+
+test("応答していないプロジェクトの文言は応答なしと未読で言い方を分ける", () => {
+  const base = createDashboardState().projects[0]!;
+
+  assert.equal(
+    notRespondingProjectText({
+      ...base,
+      connectionState: ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
+    }),
+    "corporate-site から応答がありません。",
+    "応答なしの文言にする",
+  );
+  assert.equal(
+    notRespondingProjectText({
+      ...base,
+      connectionState: ConnectionState.CONNECTION_STATE_UNSPECIFIED,
+      lastReadAt: undefined,
+    }),
+    "corporate-site はまだ一度も読めていません。",
+    "未読の文言にする",
+  );
+});
+
+test("配下のプロジェクトが応答していないサーバーは表示状態が warn になる", () => {
+  const state = createDashboardState();
+  const mini = state.servers[0]!;
+  const down = state.servers[1]!;
+  const failed = state.projects.map((project) =>
+    project.name === "esa"
+      ? {
+          ...project,
+          connected: false,
+          connectionState: ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
+        }
+      : project,
+  );
+
+  assert.equal(
+    serverDisplayState(mini, toRunCount(1), failed),
+    "warn",
+    "応答なしのプロジェクトがあれば run があっても warn にする",
+  );
+  assert.equal(
+    serverDisplayState(mini, toRunCount(0), failed),
+    "warn",
+    "応答なしのプロジェクトがあれば run が無くても warn にする",
+  );
+  assert.equal(
+    serverDisplayState(mini, toRunCount(1), state.projects),
+    "live",
+    "全プロジェクトが正常なら基本状態のままにする",
+  );
+  assert.equal(
+    serverDisplayState(down, toRunCount(0), failed),
+    "down",
+    "サーバー自体の応答なしを優先する",
+  );
+  assert.equal(serverStateLabel("warn"), "一部応答なし", "warn の文言は一部応答なしにする");
+});
+
+test("まだ読めていないプロジェクトがあるサーバーも表示状態が warn になる", () => {
+  const state = createDashboardState();
+  const mini = state.servers[0]!;
+  const unread = state.projects.map((project) =>
+    project.name === "esa" ? { ...project, lastReadAt: undefined } : project,
+  );
+
+  assert.equal(serverDisplayState(mini, toRunCount(1), unread), "warn", "未読も正常とは言わない");
+});
+
+test("概要のサーバー表示は応答していないプロジェクトを抱えると warn になり、対象を保持する", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    projects: base.projects.map((project) =>
+      project.name === "esa"
+        ? {
+            ...project,
+            connected: false,
+            connectionState: ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
+          }
+        : project,
+    ),
+  };
+  const view = buildOverviewView(state, NOW);
+  const mini = view.servers.find((item) => item.server.serverId === "mini");
+  assert.ok(mini, "mini のカードがある");
+  assert.equal(mini.state, "warn", "カードの状態が正常に見えないようにする");
+  assert.equal(mini.stateLabel, "一部応答なし", "カードの文言も一部応答なしにする");
+  assert.deepEqual(
+    mini.notRespondingProjects.map((project) => project.name),
+    ["esa"],
+    "応答していないプロジェクトをカードが保持する",
+  );
+
+  const down = view.servers.find((item) => item.server.serverId === "down");
+  assert.equal(down?.state, "down", "未接続のサーバーは応答なしのままにする");
+  assert.deepEqual(down?.notRespondingProjects, [], "配下にプロジェクトが無いサーバーは空にする");
 });

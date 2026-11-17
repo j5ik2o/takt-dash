@@ -348,3 +348,53 @@ test("トークン消費のタイルは描画しない", () => {
   assert.equal(tileBlocks(html).length, 3, "概要の3タイルは描画されている");
   assert.doesNotMatch(html, /トークン/, "値を推測したトークン消費のタイルを出さない");
 });
+
+test("応答していないプロジェクトはサーバーカードにプロジェクト名と最後に読めた時刻が出る", () => {
+  const base = createHealthyDashboardState();
+  const failedAt = new Date(NOW.getTime() - 21 * 60_000);
+  const state = {
+    ...base,
+    projects: base.projects.map((project) =>
+      project.name === "esa"
+        ? {
+            ...project,
+            connected: false,
+            connectionState: ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
+            lastReadAt: failedAt,
+          }
+        : project,
+    ),
+  };
+  const html = renderOverview(state);
+  const card = serverCard(html, "mini");
+
+  assert.match(card, /一部応答なし/, "カードの状態が正常に見えないようにする");
+  assert.match(card, /esa から応答がありません/, "応答していないプロジェクト名をカードに出す");
+  assert.match(
+    card,
+    /最後に読めたのは 16:09 です/,
+    "プロジェクトごとの最後に読めた時刻をサーバーの時刻と並べる",
+  );
+  assert.match(card, /takt-mcp から 16:29 に読みました/, "サーバーの読み取り時刻も残す");
+});
+
+test("まだ読めていないプロジェクトはサーバーカードに未読と出る", () => {
+  const base = createHealthyDashboardState();
+  const state = {
+    ...base,
+    projects: base.projects.map((project) =>
+      project.name === "esa"
+        ? {
+            ...project,
+            connectionState: ConnectionState.CONNECTION_STATE_UNSPECIFIED,
+            lastReadAt: undefined,
+          }
+        : project,
+    ),
+  };
+  const html = renderOverview(state);
+  const card = serverCard(html, "mini");
+
+  assert.match(card, /一部応答なし/, "未読のプロジェクトがあるカードも正常に見せない");
+  assert.match(card, /esa はまだ一度も読めていません/, "未読のプロジェクト名をカードに出す");
+});
