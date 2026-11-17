@@ -3,12 +3,19 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import type { DashboardState as ProtoDashboardState } from "../proto/taktdash";
+import type { BackendFailure } from "../grpc/client";
 import { dashboardStateFromProto, type DashboardState } from "../state/restore-state";
 import { createStateHandlers, openStateStream, type EventSourceLike } from "./state-stream";
 
 export type StateStreamContextValue = {
   state: DashboardState;
   disconnected: boolean;
+  /**
+   * 現在の切断の失敗理由。初期読み込みの失敗理由を引き継ぎ、状態を受けてから
+   * SSE が切断した場合は unreachable になる。接続中は undefined。通知の文面は
+   * この区別で変わる（issue #92、#152）。
+   */
+  failure?: BackendFailure;
   /** 切断が始まった時刻。接続中は null。切断の継続時間で文面を変えるために使う。 */
   disconnectedSince?: Date | null;
   /**
@@ -61,6 +68,9 @@ export function reduceLiveState(current: StateStreamContextValue, event: LiveSta
       return {
         state: current.state,
         disconnected: true,
+        // 初期読み込みの失敗理由は、切断が続く間は引き継ぐ。状態を受けて
+        // 失敗理由が消えてからの切断は、SSE の切断として unreachable にする。
+        failure: current.failure ?? "unreachable",
         disconnectedSince: current.disconnectedSince ?? event.at ?? null,
         respondedBefore: current.respondedBefore,
       };
@@ -72,10 +82,13 @@ export function reduceLiveState(current: StateStreamContextValue, event: LiveSta
 type StateStreamProviderProps = {
   initialState: ProtoDashboardState;
   /**
-   * 初回の読み込みで backend に接続できなかったかどうか（今回の読み込みの成否）。
-   * initialRespondedBefore が渡されない場合にだけ、接続履歴の初期値の代用にする。
+   * 初回の読み込みで backend を利用できなかった場合の失敗理由（今回の読み込みの
+   * 成否と理由）。渡された場合は切断状態で始める。initialRespondedBefore が
+   * 渡されない場合にだけ、接続履歴の初期値の代用にもする。通知の表示元は画面側の
+   * 内容だけに一本化され、レイアウトは通知を描画しないため、起動時の不通は
+   * ここで切断として拾い、失敗理由は通知の文面の振り分けに使う（issue #92）。
    */
-  initialUnavailable?: boolean;
+  initialFailure?: BackendFailure;
   /**
    * サーバー側の接続履歴。この Web プロセスが一度でも backend の応答を受けた
    * ことがあるかどうか。今回の読み込みの成否とは別に受け取り、Context の
@@ -91,18 +104,22 @@ type StateStreamProviderProps = {
 // 状態の受信ごとに RSC で取得している画面の再取得を促します。
 export function StateStreamProvider({
   initialState,
-  initialUnavailable,
+  initialFailure,
   initialRespondedBefore,
   revalidate,
   children,
 }: StateStreamProviderProps) {
   const [value, setValue] = useState<StateStreamContextValue>(() => ({
     state: dashboardStateFromProto(initialState),
-    disconnected: false,
+    // 初期読み込みが失敗した場合は、その失敗理由を持って切断状態で始める。
+    // レイアウトは通知を描画せず、概要と判断待ちの内容が disconnected で通知を
+    // 描画するため、起動時の不通でも通知は画面側の1回だけになる（issue #92）。
+    disconnected: initialFailure !== undefined,
+    failure: initialFailure,
     disconnectedSince: null,
     // 接続履歴の初期値はサーバー側の履歴を正とする。今回の読み込みが失敗して
     // キャッシュで描画した場合でも、過去の応答があれば履歴は消えない。
-    respondedBefore: initialRespondedBefore ?? initialUnavailable !== true,
+    respondedBefore: initialRespondedBefore ?? initialFailure === undefined,
   }));
 
   useEffect(() => {
@@ -149,7 +166,7 @@ function toEventSourceLike(source: EventSource): EventSourceLike {
 // 直接描画できるよう、useRouter の呼び出しはこのラッパーに閉じます。
 export function StateStreamProviderWithRefresh({
   initialState,
-  initialUnavailable,
+  initialFailure,
   initialRespondedBefore,
   children,
 }: Omit<StateStreamProviderProps, "revalidate">) {
@@ -158,7 +175,7 @@ export function StateStreamProviderWithRefresh({
   return (
     <StateStreamProvider
       initialState={initialState}
-      initialUnavailable={initialUnavailable}
+      initialFailure={initialFailure}
       initialRespondedBefore={initialRespondedBefore}
       revalidate={revalidate}
     >

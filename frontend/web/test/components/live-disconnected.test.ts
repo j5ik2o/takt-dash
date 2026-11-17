@@ -113,3 +113,21 @@ test("概要は1件も読めていない切断中に、現在時刻を最終読�
   assert.doesNotMatch(html, /最終読み取り時刻/, "読めた時刻が無い場合は時刻の表示を作りません");
   assert.match(html, /takt-mcp からまだ読めていません/, "サーバーカードと同じ未読の文言を出します");
 });
+
+test("概要は切断中に通知をちょうど1回だけ描画する", () => {
+  const html = renderOverview(true);
+  assert.equal(
+    html.split(BACKEND_UNAVAILABLE_MESSAGE).length - 1,
+    1,
+    "通知の表示元は内容の1か所だけにする",
+  );
+});
+
+test("判断待ちは切断中に通知をちょうど1回だけ描画する", () => {
+  const html = renderDecisions(true);
+  assert.equal(
+    html.split(BACKEND_UNAVAILABLE_MESSAGE).length - 1,
+    1,
+    "通知の表示元は内容の1か所だけにする",
+  );
+});

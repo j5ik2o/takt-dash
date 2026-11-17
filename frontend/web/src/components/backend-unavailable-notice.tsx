@@ -1,7 +1,8 @@
 import type { ReactElement } from "react";
 import type { BackendUnavailableSituation } from "../grpc/client";
 
-// backend に接続できないときの表示。概要はレイアウト、他のページは各ローダーが使う。
+// backend に接続できないときの表示。概要と判断待ちは画面側の内容が、それ以外の
+// ページは各ローダーが使う（issue #92 で表示元を画面側の内容へ一本化した）。
 // hard-coded な文言を散在させないため、文言と要素はここ1か所で持つ。
 export const BACKEND_UNAVAILABLE_MESSAGE =
   "backend に接続できません。backend の起動と TAKTDASH_BACKEND_ADDR の設定を確認してください。";
