@@ -12,7 +12,8 @@
      止まる。
   3. pr は tasks.yaml の該当 run_slug の base_branch を --base に渡す。main ベースの
      タスクでは main を渡す。base を解決できないときは gh pr create を呼ばず非ゼロで
-     理由を stdout に出す。既存 PR がある場合だけ成功として扱う。
+     理由を stdout に出す。作成に失敗したときは、同じ base への既存 PR がある場合
+     だけ成功として扱い、base が異なる既存 PR だけでは成功として扱わない。
   4. 新しい commit は前回の push を無効にし、push 無しで pr を実行できない。
   5. status は order.md の issue URL を --url に渡す。issue 番号は設定の repository で
      URL にする。pull URL しか無いときは gh を呼ばず「未実施: issue の記述が
@@ -78,6 +79,12 @@ with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as handle:
     handle.write("gh " + " ".join(sys.argv[1:]) + "\\n")
 key = " ".join(sys.argv[1:3])
 entry = config.get(key, {})
+if "prs" in entry:
+    args = sys.argv[1:]
+    base = args[args.index("--base") + 1] if "--base" in args else None
+    matched = [pr for pr in entry["prs"] if base is None or pr.get("base") == base]
+    sys.stdout.write(json.dumps([{"url": pr["url"]} for pr in matched]) + "\\n")
+    raise SystemExit(entry.get("exit", 0))
 sys.stdout.write(entry.get("stdout", ""))
 sys.stderr.write(entry.get("stderr", ""))
 raise SystemExit(entry.get("exit", 0))
@@ -449,6 +456,29 @@ def test_pr_existing_pull_request_is_success() -> None:
         lists = [line for line in repo.gh_calls() if line.startswith("gh pr list")]
         assert len(lists) == 1, repo.gh_calls()
         assert f"--head {BRANCH}" in lists[0], lists
+        assert f"--base {GOAL_BASE}" in lists[0], lists
+
+
+def test_pr_existing_pull_request_with_different_base_is_failure() -> None:
+    with Repo() as repo:
+        repo.goal_task()
+        prepare_pushed(repo)
+        data = default_gh_config()
+        data["pr create"] = {"exit": 1, "stderr": "error: HTTP 422\n"}
+        data["pr list"] = {
+            "prs": [{"url": "https://github.com/example/owner/pull/59", "base": "main"}]
+        }
+        repo.set_gh(data)
+        result = repo.run("pr")
+        assert result.returncode != 0, (
+            f"base が異なる既存 PR だけでは pr を成功として扱えません: {result.stdout!r}"
+        )
+        assert "HTTP 422" in result.stdout, f"失敗理由が stdout にありません: {result.stdout!r}"
+        lists = [line for line in repo.gh_calls() if line.startswith("gh pr list")]
+        assert len(lists) == 1, repo.gh_calls()
+        assert f"--base {GOAL_BASE}" in lists[0], lists
+        for markers in (repo.context / ".publish", repo.root / ".takt" / ".publish"):
+            assert not (markers / "pr.ok").is_file(), f"失敗で pr.ok が生成されました: {markers}"
 
 
 def test_pr_failure_without_existing_pr_is_failure() -> None:
@@ -672,6 +702,7 @@ def main() -> int:
         test_pr_uses_main_for_main_based_task,
         test_pr_fails_without_base_branch,
         test_pr_existing_pull_request_is_success,
+        test_pr_existing_pull_request_with_different_base_is_failure,
         test_pr_failure_without_existing_pr_is_failure,
         test_status_requires_published_after_pr_failure,
         test_pr_requires_successful_push,
