@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import { notFound } from "next/navigation";
 import {
   BackendUnavailableError,
+  backendUnavailableSituation,
   createBackendClient,
   TaskNotFoundError,
 } from "../grpc/client";
@@ -16,7 +17,7 @@ type TaskDetailLoaderProps = {
 
 type LoadResult =
   | { kind: "found"; detail: GetTaskDetailResponse }
-  | { kind: "unavailable" };
+  | { kind: "unavailable"; error: BackendUnavailableError };
 
 const firstValue = (value: string | string[] | undefined): string | undefined =>
   Array.isArray(value) ? value[0] : value;
@@ -42,7 +43,7 @@ export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoade
       notFound();
     }
     if (error instanceof BackendUnavailableError) {
-      result = { kind: "unavailable" };
+      result = { kind: "unavailable", error };
     } else {
       throw error;
     }
@@ -50,7 +51,7 @@ export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoade
     await client.close();
   }
   if (result.kind === "unavailable") {
-    return <BackendUnavailableNotice />;
+    return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;
   }
   return (
     <LiveTaskDetail

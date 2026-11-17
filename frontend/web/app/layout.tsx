@@ -1,6 +1,11 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { BackendUnavailableError, createBackendClient } from "@/src/grpc/client";
+import {
+  BackendUnavailableError,
+  backendUnavailableSituation,
+  createBackendClient,
+  hasBackendResponded,
+} from "@/src/grpc/client";
 import { DashboardState } from "@/src/proto/taktdash";
 import { resolveThresholds } from "@/src/state/dashboard";
 import { StateStreamProviderWithRefresh } from "@/src/components/state-provider";
@@ -24,13 +29,32 @@ const EMPTY_STATE = DashboardState.create({
   thresholds: resolveThresholds(undefined),
 });
 
-async function loadInitialState(): Promise<{ state: DashboardState; unavailable: boolean }> {
+// 最後に取得できた概要の状態。読み込みに失敗しても画面を空にせず、この内容を
+// 取得時刻つきで残す（issue #152）。一度も取得できていない場合は空の状態を使う。
+let lastLoadedState: DashboardState | undefined;
+
+async function loadInitialState(): Promise<{
+  state: DashboardState;
+  unavailable: boolean;
+  respondedBefore: boolean;
+  error?: BackendUnavailableError;
+}> {
   const client = createBackendClient();
   try {
-    return { state: await client.getOverview(), unavailable: false };
+    const state = await client.getOverview();
+    lastLoadedState = state;
+    return { state, unavailable: false, respondedBefore: hasBackendResponded() };
   } catch (error) {
     if (error instanceof BackendUnavailableError) {
-      return { state: EMPTY_STATE, unavailable: true };
+      // 今回の読み込みは失敗しても、この Web プロセスが過去に応答を受けて
+      // いれば接続履歴は応答ありのままにする（issue #152）。キャッシュを返す
+      // 経路でも履歴を落とさないよう、成否とは別に履歴を返す。
+      return {
+        state: lastLoadedState ?? EMPTY_STATE,
+        unavailable: true,
+        respondedBefore: hasBackendResponded(),
+        error,
+      };
     }
     throw error;
   } finally {
@@ -39,15 +63,21 @@ async function loadInitialState(): Promise<{ state: DashboardState; unavailable:
 }
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
-  const { state, unavailable } = await loadInitialState();
+  const { state, unavailable, respondedBefore, error } = await loadInitialState();
   return (
     <html lang="ja">
       <body>
-        <StateStreamProviderWithRefresh initialState={state}>
+        <StateStreamProviderWithRefresh
+          initialState={state}
+          initialUnavailable={unavailable}
+          initialRespondedBefore={respondedBefore}
+        >
           <div className="shell">
             <LiveSidebar frontendBuild={FRONTEND_BUILD} />
             <div className="content">
-              {unavailable ? <BackendUnavailableNotice /> : null}
+              {unavailable && error !== undefined ? (
+                <BackendUnavailableNotice situation={backendUnavailableSituation(error)} />
+              ) : null}
               {children}
             </div>
           </div>
