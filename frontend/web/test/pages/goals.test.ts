@@ -14,8 +14,12 @@ import { StateStreamProvider } from "../../src/components/state-provider.tsx";
 import GoalsPage from "../../app/goals/page.tsx";
 
 // GoalsContent は内部型の状態を受けるため、proto のフィクスチャを変換して渡す。
+// このファイルは内容の契約を見るため、接続中（disconnected: false）で描画する。
+// 切断時の通知の契約は live-disconnected.test.ts と live-provider-wiring.test.ts が担う。
 const renderGoals = (state = createDashboardState(), project?: string): string =>
-  renderToStaticMarkup(createElement(GoalsContent, { state: dashboardStateFromProto(state), project }));
+  renderToStaticMarkup(
+    createElement(GoalsContent, { state: dashboardStateFromProto(state), project, disconnected: false }),
+  );
 
 // ページは RSC で searchParams を受け取り、SSE の state を配る Provider の内側で一覧を描く。
 // 描画時の配線（searchParams → LiveGoals → GoalsContent）を観測するため、ページ関数を
