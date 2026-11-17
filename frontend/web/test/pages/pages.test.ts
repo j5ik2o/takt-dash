@@ -811,7 +811,7 @@ test("遅延中の run 行は idle にせず、ログが出続けていれば実
   assert.doesNotMatch(html, /class="st idle"/, "遅延中の run 行を応答なしの見た目にしない");
 });
 
-test("アクティビティページは同一プロジェクトの隣接する接続イベントを件数と期間の1行にまとめる", () => {
+test("アクティビティページは切断と復帰を別の行にし、同種の接続イベントだけを件数と期間の1行にまとめる", () => {
   const base = createActivityResponse();
   const response = {
     ...base,
@@ -830,19 +830,33 @@ test("アクティビティページは同一プロジェクトの隣接する�
         kind: ActivityKind.ACTIVITY_KIND_CONNECTION_LOST,
         body: "接続が切れました。",
       },
+      {
+        occurredAt: new Date(NOW.getTime() - 15 * 60_000),
+        serverId: "mini",
+        project: "esa",
+        kind: ActivityKind.ACTIVITY_KIND_CONNECTION_LOST,
+        body: "接続が切れました。",
+      },
     ],
   };
 
   const html = renderPage(ActivityPage, { response, now: NOW });
   const rows = html.match(/<li class="ev[\s\S]*?<\/li>/g) ?? [];
 
-  assert.equal(rows.length, 1, "隣接する同一プロジェクトの接続イベントは1行になる");
-  const row = rows[0]!;
-  assert.match(row, /esa/, "まとめた行にプロジェクト名を出す");
-  assert.match(row, /2件/, "まとめた件数を出す");
-  assert.match(row, /16:20/, "期間の始まりを出す");
-  assert.match(row, /16:25/, "期間の終わりを出す");
-  assert.ok(row.indexOf("16:20") < row.indexOf("16:25"), "期間を最古から最新の順に出す");
+  assert.equal(rows.length, 2, "切断と復帰は別の行になり、同種の切断だけが1行にまとまる");
+  const restoredRow = rows[0]!;
+  assert.match(restoredRow, /接続の復帰/, "復帰は復帰だけの行に出す");
+  assert.match(restoredRow, /16:25/, "復帰の時刻を出す");
+  assert.match(restoredRow, /接続が復帰しました。/, "単独の行は本文をそのまま出す");
+  assert.doesNotMatch(restoredRow, /2件/, "復帰の行にまとめた件数を付けない");
+  const lostRow = rows[1]!;
+  assert.match(lostRow, /esa/, "まとめた行にプロジェクト名を出す");
+  assert.match(lostRow, /接続の切断/, "切断は切断だけの行に出す");
+  assert.match(lostRow, /2件/, "まとめた件数を出す");
+  assert.match(lostRow, /接続の状態が変わりました。/, "まとめた行は共通の本文を出す");
+  assert.match(lostRow, /16:15/, "期間の始まりを出す");
+  assert.match(lostRow, /16:20/, "期間の終わりを出す");
+  assert.ok(lostRow.indexOf("16:15") < lostRow.indexOf("16:20"), "期間を最古から最新の順に出す");
 });
 
 test("アクティビティページは接続の復帰イベントを種類と切断時間つきで描画する", () => {
