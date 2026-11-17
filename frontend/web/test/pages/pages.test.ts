@@ -752,7 +752,7 @@ test("新着ログで発光する run 行だけが flash クラスを持ち、�
   const view = buildOverviewView(state, NOW);
 
   const html = renderToStaticMarkup(
-    createElement(OverviewContent, { view, flashingRunSlugs: new Set(["run-aaa"]) }),
+    createElement(OverviewContent, { view, flashingRunSlugs: new Set(["run-aaa"]), disconnected: false }),
   );
 
   assert.equal(elementsByClass(html, "flash").length, 1, "発光するのは flashingRunSlugs に入った行だけ");
