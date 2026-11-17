@@ -9,7 +9,7 @@ use super::{
   ToolError,
 };
 use crate::{
-  domain::{GoalId, InquiryId, PullRequestNumber, RunSlug, TaskName},
+  domain::{GoalId, InquiryId, ProjectName, PullRequestNumber, RunSlug, TaskName},
   model::{
     ExecutionStatus, GoalEntry, GoalQuestionEntry, GoalStatus, GoalWorkLogEntry, InquiryEntry, InquiryKind,
     NotificationEntry, ProjectSnapshot, TaskDetail, TaskEntry, TaskStatus,
@@ -192,23 +192,43 @@ pub(super) struct TaskLinkFields {
   pub(super) pull_request_url: Option<String>,
 }
 
-pub(super) fn parse_task_detail(project: &str, value: &Value, links: TaskLinkFields) -> Result<TaskDetail, ToolError> {
-  let run_slug = optional_string(value, "runSlug");
-  let source_run_slug = optional_string(value, "sourceRunSlug");
-  let mut linked_run_slugs: Vec<String> = Vec::new();
+pub(super) fn parse_task_detail(
+  project: &ProjectName,
+  value: &Value,
+  links: TaskLinkFields,
+) -> Result<TaskDetail, ToolError> {
+  let task_name = domain_value("タスク名", TaskName::try_from(string_field(value, "name")?.as_str()))?;
+  // goalId・runSlug・sourceRunSlug が空文字のタスクは未所属とし、一覧（parse_task）と
+  // 同じく None で表します。空でない値は値オブジェクトの検証を通し、不正な値は
+  // 解析エラーにします（parse_goal のプルリクエスト番号と同じ扱い）。
+  let goal_id = match optional_string(value, "goalId") {
+    | Some(text) if text.is_empty() => None,
+    | Some(text) => Some(domain_value("ゴール ID", GoalId::try_from(text.as_str()))?),
+    | None => None,
+  };
+  let run_slug = match optional_string(value, "runSlug") {
+    | Some(text) if text.is_empty() => None,
+    | Some(text) => Some(domain_value("run slug", RunSlug::try_from(text.as_str()))?),
+    | None => None,
+  };
+  let source_run_slug = match optional_string(value, "sourceRunSlug") {
+    | Some(text) if text.is_empty() => None,
+    | Some(text) => Some(domain_value("run slug", RunSlug::try_from(text.as_str()))?),
+    | None => None,
+  };
+  let mut linked_run_slugs: Vec<RunSlug> = Vec::new();
   for slug in run_slug.iter().chain(source_run_slug.iter()) {
     if !linked_run_slugs.contains(slug) {
       linked_run_slugs.push(slug.clone());
     }
   }
-  // goalId が空文字のタスクはゴール未所属とし、一覧（parse_task）と同じく None で表します。
-  let goal_id = match optional_string(value, "goalId") {
-    | Some(text) if text.is_empty() => None,
-    | other => other,
+  let pull_request_number = match value.get("prNumber").and_then(Value::as_i64) {
+    | Some(number) => Some(domain_value("プルリクエスト番号", PullRequestNumber::try_from(number))?),
+    | None => None,
   };
   Ok(TaskDetail {
-    project: project.to_owned(),
-    task_name: string_field(value, "name")?,
+    project: project.clone(),
+    task_name,
     goal_id,
     status: parse_task_status(value.get("status"))?,
     summary: optional_string(value, "summary").unwrap_or_default(),
@@ -217,7 +237,7 @@ pub(super) fn parse_task_detail(project: &str, value: &Value, links: TaskLinkFie
     completed_at: parse_time(value.get("completedAt"))?,
     linked_run_slugs,
     run_slug,
-    pull_request_number: value.get("prNumber").and_then(Value::as_i64),
+    pull_request_number,
     branch: links.branch,
     pull_request_url: links.pull_request_url,
   })

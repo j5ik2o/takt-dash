@@ -585,7 +585,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
     let resolved = self.resolve_project(&view_server_id, &view_project)?;
     let mut client = McpClient::new(resolved.client_config);
-    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_goal_detail(goal_id.as_str()).await {
+    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_goal_detail(&goal_id).await {
       | Ok(detail) => detail,
       | Err(error) => {
         client.shutdown().await;
@@ -594,7 +594,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     };
     client.shutdown().await;
     Ok(Response::new(GetGoalDetailResponse {
-      goal_id:             detail.goal_id,
+      goal_id:             detail.goal_id.as_str().to_owned(),
       server_id:           view.server_id.clone(),
       project:             view.name.clone(),
       status:              goal_status(detail.status) as i32,
@@ -646,7 +646,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let resolved = resolve_project_in(&config, &configured_server_id, &project)?;
     let mut client = McpClient::new(resolved.client_config);
     let detail = match ToolSet::new(&mut client, resolved.cwd.clone())
-      .read_task_detail(project.as_str(), task_name.as_str(), goal_id.as_ref().map(|goal_id| goal_id.as_str()))
+      .read_task_detail(&project, &task_name, goal_id.as_ref())
       .await
     {
       | Ok(Some(detail)) => detail,
@@ -664,17 +664,17 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     };
     client.shutdown().await;
     Ok(Response::new(GetTaskDetailResponse {
-      project:             detail.project,
-      task_name:           detail.task_name,
-      goal_id:             detail.goal_id,
+      project:             detail.project.as_str().to_owned(),
+      task_name:           detail.task_name.as_str().to_owned(),
+      goal_id:             detail.goal_id.map(|goal_id| goal_id.as_str().to_owned()),
       status:              task_status(detail.status) as i32,
       summary:             detail.summary,
       created_at:          optional_timestamp(detail.created_at),
       started_at:          optional_timestamp(detail.started_at),
       completed_at:        optional_timestamp(detail.completed_at),
-      run_slug:            detail.run_slug,
-      pull_request_number: detail.pull_request_number,
-      linked_run_slugs:    detail.linked_run_slugs,
+      run_slug:            detail.run_slug.map(|run_slug| run_slug.as_str().to_owned()),
+      pull_request_number: detail.pull_request_number.map(|number| number.get()),
+      linked_run_slugs:    detail.linked_run_slugs.into_iter().map(|slug| slug.as_str().to_owned()).collect(),
       branch:              detail.branch,
       pull_request_url:    detail.pull_request_url,
     }))
