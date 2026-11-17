@@ -1356,7 +1356,9 @@ def test_publish_stage_detection() -> None:
     後ろの呼び出しを消さない。-c と同じ引数に結合した -n（-cn）と
     -o noexec は実行として扱わず、-o pipefail は実行として扱う。python の
     表示専用オプション（-h、-V、--help-env、--help-xoptions、--help-all）
-    は実行として扱わない。
+    は実行として扱わない。コマンド語に空白なしで隣接した <<（例:
+    cat<<'EOF'）もヒアドキュメントの開始として扱い、本文は実行として
+    扱わず、後ろの実起動を拾う。
     """
     with Sandbox() as sandbox:
         module = sandbox.module
@@ -1428,6 +1430,15 @@ def test_publish_stage_detection() -> None:
         assert module.publish_stages(
             step("cat <<'EOF'\nIt's python3 tools/project-status/publish.py commit\nEOF")
         ) == {}, "本文に引用符と publish.py があっても実行として扱わない"
+        assert module.publish_stages(
+            step("cat<<'EOF'\nIt's ready\nEOF\npython3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "コマンド語に隣接した << でも、ヒアドキュメントの後ろにある実起動は拾う"
+        assert module.publish_stages(
+            step("cat<<'EOF'\nIt's python3 tools/project-status/publish.py commit\nEOF")
+        ) == {}, "コマンド語に隣接した << の本文も実行として扱わない"
+        assert module.publish_stages(
+            step("cat<<EOF\nbody\nEOF\npython3 tools/project-status/publish.py commit")
+        ) == {"commit": "commit"}, "区切り語が引用されていない隣接形でも、後ろの実起動は拾う"
         assert module.publish_stages(
             step("python3 \\\n  tools/project-status/publish.py commit")
         ) == {"commit": "commit"}, "行継続を挟み、継続行が字下げされていても実起動を拾う"
@@ -1660,7 +1671,8 @@ def test_publish_workflow_accepts_heredoc_and_continuation_forms() -> None:
 
     ヒアドキュメントの本文は実行されないが、本文に引用符が含まれていても
     読み飛ばしは崩れず、後ろにある実起動は段階として検出されなければなら
-    ない。引用符内の << はヒアドキュメントの開始ではない。YAML のブロック
+    ない。コマンド語に空白なしで隣接した <<（cat<<'EOF'）でも同じである。
+    引用符内の << はヒアドキュメントの開始ではない。YAML のブロック
     内で python3 とスクリプトパスをバックスラッシュ＋改行で折り返し、継続行
     が字下げされる形も、シェルでは行継続として取り除かれるため、実起動と
     して検出されなければならない。検出から漏らすと、段階の入力が無いもの
@@ -1679,6 +1691,9 @@ def test_publish_workflow_accepts_heredoc_and_continuation_forms() -> None:
             "          cat <<'EOF'\n          It's a publish step\n          EOF\n" + line
         ),
         "引用符内の << の前置き": lambda line: '          echo "<<EOF"\n' + line,
+        "コマンド語に隣接した << の前置き": lambda line: (
+            "          cat<<'EOF'\n          It's a publish step\n          EOF\n" + line
+        ),
         "行継続で折り返す": lambda line: line.replace(
             "python3 ", "python3 \\\n            ", 1
         ),
