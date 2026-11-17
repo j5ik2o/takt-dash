@@ -726,6 +726,47 @@ async fn server_meta_change_is_applied_on_the_same_running_poller() {
 }
 
 #[tokio::test]
+async fn project_concurrency_change_is_applied_and_notified_on_the_same_running_poller() {
+  // 同じ Poller 実体と状態ストアのまま、プロジェクトの .takt/config.yaml の
+  // concurrency だけを変える。変化指紋がプロジェクトの concurrency を見ない実装では、
+  // ストアの投影へ新しい上限が反映されても変化が通知されず、画面の上限が古いままになる。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut changes = harness.changes.subscribe();
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  let _ = changes.try_recv();
+
+  // .takt/config.yaml が無い間は、takt の既定値が上限になる。
+  let view = harness
+    .store
+    .project_views()
+    .into_iter()
+    .find(|view| view.name == "takt-dash")
+    .expect("プロジェクトの投影があります");
+  assert_eq!(view.concurrency, 1, "takt 設定が無い間は既定値の上限です");
+
+  let takt_dir = harness._directory.path().join("project").join(".takt");
+  std::fs::create_dir_all(&takt_dir).expect("プロジェクトの .takt を作れます");
+  std::fs::write(takt_dir.join("config.yaml"), "concurrency: 4\n").expect("プロジェクトの takt 設定を書けます");
+  poller.read_cycle_once().await.expect("concurrency を変えたサイクルを実行できます");
+
+  let view = harness
+    .store
+    .project_views()
+    .into_iter()
+    .find(|view| view.name == "takt-dash")
+    .expect("プロジェクトの投影があります");
+  assert_eq!(view.concurrency, 4, "稼働中でも新しい上限を同じストアへ反映します");
+  assert!(changes.try_recv().is_ok(), "concurrency だけが変わったサイクルでも変化を通知します");
+
+  // 続く無変更のサイクルでは通知しません。
+  poller.read_cycle_once().await.expect("状態を変えないサイクルを実行できます");
+  assert!(changes.try_recv().is_err(), "状態を変えないサイクルでは通知しません");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
 async fn changed_cwd_rebuilds_the_client_and_reads_from_the_new_directory() {
   // 同じ Poller 実体のまま、プロジェクトの cwd を存在しないディレクトリへ変える。
   // cwd を比較しない実装では旧クライアントを再利用して成功し続けるため、

@@ -237,7 +237,8 @@ impl Poller {
 /// サイクルの前後で観測可能な状態が変わったかを判定するための指紋。
 ///
 /// WatchState
-/// は「状態が変わるたび送る」ため、プロジェクトの並び・読み取り成否・状態・閾値・サーバーの
+/// は「状態が変わるたび送る」ため、プロジェクトの並び・読み取り成否・状態・同時実行上限・閾値・
+/// サーバーの
 /// 表示情報に加えて、時刻から導出されるログの無音と判断待ちの滞留の真偽が変わったサイクルだけを
 /// 変化とみなします。読めた時刻（last_read_at）は読み取りのたびに進むため、内容が同じサイクルを
 /// 変化として扱わないよう指紋から除きます。
@@ -252,6 +253,7 @@ struct StoreSignature {
 #[derive(Debug, PartialEq, Eq)]
 struct ProjectSignature {
   name:             String,
+  concurrency:      i32,
   connection_state: Option<ConnectionState>,
   snapshot:         Option<ProjectSnapshot>,
   silent_runs:      Vec<(String, bool)>,
@@ -274,6 +276,7 @@ impl StoreSignature {
         let silent_runs = view.runs.iter().map(|run| (run.run_slug.clone(), store.is_log_silent(run, now))).collect();
         ProjectSignature {
           name: view.name,
+          concurrency: view.concurrency,
           connection_state: view.connection_state,
           snapshot: view.snapshot,
           silent_runs,
