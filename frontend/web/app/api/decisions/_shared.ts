@@ -39,43 +39,72 @@ const DEFAULT_ALLOWED_HOSTS: readonly string[] = [
   "localhost:3000",
 ];
 
-// 既定ポート（http の 80、https の 443）は、明示しても省略しても同じホストと
-// みなす。設定値・Host ヘッダ・Origin のすべてをこの形へそろえてから比べる。
-const canonicalHost = (hostname: string, port: string): string =>
-  port === "" || port === "80" || port === "443" ? hostname : `${hostname}:${port}`;
+// スキームの既定ポート。http と https 以外のスキームでは、ポートの省略と明示を
+// 同一視しない。
+const defaultPortForScheme = (protocol: string): string | undefined =>
+  protocol === "http:" ? "80" : protocol === "https:" ? "443" : undefined;
 
-// host:port の形の値だけを小文字の host:port へ正規化する。パスや userinfo 等が付く値は無効とする。
-const normalizeHost = (value: string): string | undefined => {
+// Origin のスキームの既定ポートだけは、明示しても省略しても同じホストとみなす。
+// 別のスキームの既定ポートは通常のポートとして扱い、ポートの境界を保つ。
+// 設定値・Host ヘッダ・Origin のすべてを、Origin のスキームを基準にこの形へ
+// そろえてから比べる。
+const canonicalHost = (hostname: string, port: string, defaultPort: string | undefined): string =>
+  port === "" || port === defaultPort ? hostname : `${hostname}:${port}`;
+
+// host:port の形の値から、書かれたとおりのホスト名とポートを取り出す。
+// URL の解釈はそのスキームの既定ポートを落とすため、http で解釈してポートが
+// 取れなければ https で解釈し直し、明示されたポートを失わないようにする。
+// パスや userinfo 等が付く値は無効とする。
+const parseHostPort = (value: string): { hostname: string; port: string } | undefined => {
+  let url: URL;
   try {
-    const url = new URL(`http://${value}`);
-    if (url.username !== "" || url.password !== "") {
-      return undefined;
-    }
-    if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
-      return undefined;
-    }
-    const canonical = canonicalHost(url.hostname, url.port);
-    // URL への解釈で表記が変わる値（空白の除去や符号化が起きる値）は無効とする。
-    // 既定ポートの明示だけは、正規化で落ちた形との差として許す。
-    const lowered = value.toLowerCase();
-    if (lowered !== canonical && lowered !== `${canonical}:80` && lowered !== `${canonical}:443`) {
-      return undefined;
-    }
-    return canonical;
+    url = new URL(`http://${value}`);
   } catch {
     return undefined;
   }
+  if (url.username !== "" || url.password !== "") {
+    return undefined;
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    return undefined;
+  }
+  let port = url.port;
+  if (port === "") {
+    try {
+      port = new URL(`https://${value}`).port;
+    } catch {
+      return undefined;
+    }
+  }
+  return { hostname: url.hostname, port };
+};
+
+// host:port の形の値だけを、Origin のスキームで正規化した host:port へそろえる。
+// URL への解釈で表記が変わる値（空白の除去や符号化が起きる値）は無効とする。
+const normalizeHost = (value: string, defaultPort: string | undefined): string | undefined => {
+  const parsed = parseHostPort(value);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  const hostPart = parsed.hostname.includes(":") ? `[${parsed.hostname}]` : parsed.hostname;
+  const spelled = parsed.port === "" ? hostPart : `${hostPart}:${parsed.port}`;
+  if (value.toLowerCase() !== spelled) {
+    return undefined;
+  }
+  return canonicalHost(parsed.hostname, parsed.port, defaultPort);
 };
 
 // 起動設定で一覧を差し替えられるよう、リクエストのたびに環境変数から読む。
-const resolveAllowedHosts = (env: Record<string, string | undefined>): readonly string[] => {
+// 設定値は、Origin のスキームを基準に正規化してから比べる。
+const resolveAllowedHosts = (
+  env: Record<string, string | undefined>,
+  defaultPort: string | undefined,
+): readonly string[] => {
   const configured = env[ALLOWED_HOSTS_ENV];
-  if (configured === undefined || configured.trim() === "") {
-    return DEFAULT_ALLOWED_HOSTS;
-  }
-  return configured
-    .split(",")
-    .map((entry) => normalizeHost(entry.trim()))
+  const entries =
+    configured === undefined || configured.trim() === "" ? DEFAULT_ALLOWED_HOSTS : configured.split(",");
+  return entries
+    .map((entry) => normalizeHost(entry.trim(), defaultPort))
     .filter((host): host is string => host !== undefined);
 };
 
@@ -88,9 +117,11 @@ const requestOriginIsAllowed = (request: Request): boolean => {
     return true;
   }
   let originHost: string;
+  let defaultPort: string | undefined;
   try {
     const originUrl = new URL(origin);
-    originHost = canonicalHost(originUrl.hostname, originUrl.port);
+    defaultPort = defaultPortForScheme(originUrl.protocol);
+    originHost = canonicalHost(originUrl.hostname, originUrl.port, defaultPort);
   } catch {
     return false;
   }
@@ -98,12 +129,12 @@ const requestOriginIsAllowed = (request: Request): boolean => {
   // ブラウザが開いた URL を表す Host ヘッダと比べる。x-forwarded-host は利用者が
   // 自由に付けられ、間に信頼できるプロキシも無いので判定に使わない。
   const hostHeader = request.headers.get("host");
-  const host = hostHeader === null ? undefined : normalizeHost(hostHeader);
+  const host = hostHeader === null ? undefined : normalizeHost(hostHeader, defaultPort);
   if (host === undefined || originHost !== host) {
     return false;
   }
   // Host と Origin を同時に偽れる DNS リバインディングを防ぐため、既知のホストに限る。
-  return resolveAllowedHosts(process.env).includes(host);
+  return resolveAllowedHosts(process.env, defaultPort).includes(host);
 };
 
 export type ReadJsonObjectResult =
