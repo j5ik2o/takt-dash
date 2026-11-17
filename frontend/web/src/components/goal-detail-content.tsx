@@ -36,6 +36,11 @@ const answerLines = (question: GoalQuestion): string[] => {
   return lines;
 };
 
+// 回答が無い質問の表示。取り下げ済みの質問は回答待ちではないため「未回答」とは
+// 表示せず、取り下げとして表示する（issue #127）。
+const unansweredLabel = (question: GoalQuestion): string =>
+  question.status === "withdrawn" ? "取り下げ済み" : "未回答";
+
 // 詳細の状態の文面はゴール一覧と同じ対応表（goalStateSentence）で作る。詳細の
 // 応答には件数の集計が無いため、タスク一覧から状態別の件数を数えて一覧と同じ
 // 入力にそろえる（issue #198）。
@@ -180,7 +185,7 @@ export function GoalDetailContent({ detail }: GoalDetailContentProps): ReactElem
                   </div>
                   <p>{question.body}</p>
                   {answers.length === 0 ? (
-                    <p>未回答</p>
+                    <p>{unansweredLabel(question)}</p>
                   ) : (
                     answers.map((answer, index) => <p key={`${index}-${answer}`}>{answer}</p>)
                   )}

@@ -106,6 +106,30 @@ test("ゴール詳細は回答本文が無くても回答の判断と作業の�
   assert.doesNotMatch(html, /未回答/);
 });
 
+test("ゴール詳細は取り下げ済みの質問を未回答と表示せず、取り下げとして表示する", () => {
+  const detail = createGoalDetailResponse();
+  const pending = detail.questions[1]!;
+  const html = renderDetail({
+    ...detail,
+    questions: [
+      { ...pending, questionId: "q-withdrawn", body: "この質問は後で出し直します。", status: "withdrawn" },
+    ],
+  });
+  assert.match(html, /取り下げ済み/);
+  assert.doesNotMatch(html, /未回答/);
+});
+
+test("ゴール詳細は未回答のままの通常の質問を引き続き未回答と表示する", () => {
+  const detail = createGoalDetailResponse();
+  const pending = detail.questions[1]!;
+  const html = renderDetail({
+    ...detail,
+    questions: [{ ...pending, questionId: "q-pending", status: "pending" }],
+  });
+  assert.match(html, /未回答/);
+  assert.doesNotMatch(html, /取り下げ済み/);
+});
+
 test("ゴール詳細はタスク一覧を表示し、タスク名とゴール ID をエスケープしたタスク詳細へのリンクを持つ", () => {
   const detail = createGoalDetailResponse();
   const html = renderDetail(detail);
