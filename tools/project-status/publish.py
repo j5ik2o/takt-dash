@@ -14,8 +14,8 @@
           一覧は -z で取得し、引用・エスケープされていない実パスで判定する。
   push    commit.ok があるときだけ git push を行う。成功で push.ok を書く。
   pr      push.ok があるときだけ gh pr create を行う。base は tasks.yaml の
-          該当エントリの base_branch から解決する。既に PR がある場合だけ成功と
-          して扱い、pr.ok を書く。
+          該当エントリの base_branch から解決する。作成に失敗したときは、同じ
+          base への PR が既にある場合だけ成功として扱い、pr.ok を書く。
   status  order.md の issue を対象に Status を変更する。order.md や issue の
           記述が見つからないときは「未実施」を記録して終了コード 0 にする。
           --require-published を付けると commit.ok / push.ok / pr.ok が揃って
@@ -185,9 +185,23 @@ def stage_push(environ) -> int:
     return 0
 
 
-def _existing_pull_request(branch: str):
+def _existing_pull_request(branch: str, base_branch: str):
     result = _run(
-        ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url", "--limit", "1"]
+        [
+            "gh",
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--base",
+            base_branch,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--limit",
+            "1",
+        ]
     )
     if result["status"] != 0:
         return None
@@ -228,7 +242,7 @@ def stage_pr(environ) -> int:
         print(f"PR を作成しました: {url}" if url else "PR を作成しました")
         return 0
 
-    existing = _existing_pull_request(branch)
+    existing = _existing_pull_request(branch, base_branch)
     if existing is not None:
         _write_marker(markers, PR_MARKER)
         print(f"既存の PR を確認しました: {existing}")
