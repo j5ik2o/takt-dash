@@ -178,8 +178,11 @@ fn read_project_concurrency(cwd: &Path) -> i32 {
 ///
 /// 対応する表記は、平坦なブロックマッピングに加えて、キーの引用（単一・
 /// 二重）、ルート全体のインデント、数値を次の行へ置く書き方、1行のフロー
-/// マッピングである。アンカーや複数行にまたがるフローマッピングなどの
-/// 完全な YAML 構文は対象にしない。
+/// マッピングである。引用はスカラーの開始位置にある場合だけ引用として
+/// 扱い、通常スカラーの途中に現れる引用符は文字として扱う。複数行に
+/// またがる通常スカラーは、値全体を1行で表せないため対象にしない。
+/// アンカーや複数行にまたがるフローマッピングなどの完全な YAML 構文も
+/// 対象にしない。
 fn parse_takt_concurrency(text: &str) -> Option<i32> {
   let lines = yaml_content_lines(text);
   let first = lines.first().map(|(_, content)| *content)?;
@@ -201,12 +204,22 @@ fn parse_block_concurrency(lines: &[(usize, &str)]) -> Option<i32> {
       continue;
     }
     if !value.trim().is_empty() {
+      // より深くインデントされた内容行が続けば、値は複数行の通常スカラー
+      // であり、この行の文字列だけでは値全体を表さないため受理しない。
+      if continues_on_following_line(lines, index + 1, root_indent + 1) {
+        return None;
+      }
       return parse_concurrency_value(value);
     }
     // 値が同じ行に無い場合は、より深くインデントされた次の行が単独の
     // スカラーであるときだけ、その行を値として扱う。
     let (next_indent, next) = lines.get(index + 1)?;
     if *next_indent > root_indent && is_plain_scalar_line(next) {
+      // 値の行と同じかより深いインデントの内容行が続けば、値は複数行の
+      // 通常スカラーであり、最初の行だけでは値全体を表さないため受理しない。
+      if continues_on_following_line(lines, index + 2, *next_indent) {
+        return None;
+      }
       return parse_concurrency_value(next);
     }
     return None;
@@ -254,19 +267,73 @@ fn yaml_content_lines(text: &str) -> Vec<(usize, &str)> {
 /// 行からコメントを取り除く。引用符の中の # はコメントとみなさない。
 /// YAML の規則どおり、# の直前が行頭か空白の場合だけコメントとして扱う。
 fn strip_yaml_comment(line: &str) -> &str {
-  let mut quote: Option<char> = None;
+  let mut scan = YamlQuoteScan::new();
   let mut after_boundary = true;
-  for (index, ch) in line.char_indices() {
-    match quote {
-      | Some(open) if ch == open => quote = None,
-      | Some(_) => {},
-      | None if ch == '"' || ch == '\'' => quote = Some(ch),
-      | None if ch == '#' && after_boundary => return &line[..index],
-      | None => {},
+  let mut chars = line.char_indices().peekable();
+  while let Some((index, ch)) = chars.next() {
+    let next = chars.peek().map(|(_, ch)| *ch);
+    if !scan.advance(ch, next) && ch == '#' && after_boundary {
+      return &line[..index];
     }
     after_boundary = ch == ' ' || ch == '\t';
   }
   line
+}
+
+/// YAML の1行を走査する際の引用状態。引用はスカラーの開始位置にある場合
+/// だけ引用として扱い、通常スカラーの途中に現れる引用符（アポストロフィ
+/// など）は文字として扱う。二重引用の中のエスケープと、単一引用の中で
+/// 重ねた引用符は、引用を閉じるものとして扱わない。
+struct YamlQuoteScan {
+  quote:           Option<char>,
+  escaped:         bool,
+  at_scalar_start: bool,
+}
+
+impl YamlQuoteScan {
+  fn new() -> Self {
+    Self { quote: None, escaped: false, at_scalar_start: true }
+  }
+
+  /// 文字を1つ読み進める。その文字が引用の内側（引用符そのものと
+  /// エスケープされた文字を含む）なら true を返す。呼び出し側は、true の
+  /// 文字を区切りやコメントの開始として扱わない。
+  fn advance(&mut self, ch: char, next: Option<char>) -> bool {
+    if self.escaped {
+      self.escaped = false;
+      return true;
+    }
+    if let Some(open) = self.quote {
+      if (open == '"' && ch == '\\') || (open == '\'' && ch == '\'' && next == Some('\'')) {
+        self.escaped = true;
+      } else if ch == open {
+        self.quote = None;
+        self.at_scalar_start = false;
+      }
+      return true;
+    }
+    match ch {
+      | '"' | '\'' if self.at_scalar_start => {
+        self.quote = Some(ch);
+        true
+      },
+      | ':' | ',' | '{' | '[' => {
+        self.at_scalar_start = true;
+        false
+      },
+      | ' ' | '\t' => false,
+      | _ => {
+        self.at_scalar_start = false;
+        false
+      },
+    }
+  }
+}
+
+/// 指定した位置の内容行が、基準以上のインデントを持つかどうかを返す。
+/// 通常スカラーに継続する内容行があるかの判定に使う。
+fn continues_on_following_line(lines: &[(usize, &str)], index: usize, min_indent: usize) -> bool {
+  lines.get(index).is_some_and(|(indent, _)| *indent >= min_indent)
 }
 
 /// `key: value` の形の行をキーと値へ分ける。キーが引用符で始まる場合は、
@@ -287,22 +354,22 @@ fn split_yaml_entry(content: &str) -> Option<(&str, &str)> {
 fn split_flow_entries(inner: &str) -> Vec<&str> {
   let mut entries = Vec::new();
   let mut depth = 0usize;
-  let mut quote: Option<char> = None;
+  let mut scan = YamlQuoteScan::new();
   let mut start = 0;
-  for (index, ch) in inner.char_indices() {
-    match quote {
-      | Some(open) if ch == open => quote = None,
-      | Some(_) => {},
-      | None => match ch {
-        | '"' | '\'' => quote = Some(ch),
-        | '{' | '[' => depth += 1,
-        | '}' | ']' => depth = depth.saturating_sub(1),
-        | ',' if depth == 0 => {
-          entries.push(&inner[start..index]);
-          start = index + ch.len_utf8();
-        },
-        | _ => {},
+  let mut chars = inner.char_indices().peekable();
+  while let Some((index, ch)) = chars.next() {
+    let next = chars.peek().map(|(_, ch)| *ch);
+    if scan.advance(ch, next) {
+      continue;
+    }
+    match ch {
+      | '{' | '[' => depth += 1,
+      | '}' | ']' => depth = depth.saturating_sub(1),
+      | ',' if depth == 0 => {
+        entries.push(&inner[start..index]);
+        start = index + ch.len_utf8();
       },
+      | _ => {},
     }
   }
   entries.push(&inner[start..]);

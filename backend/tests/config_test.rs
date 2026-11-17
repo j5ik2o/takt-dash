@@ -419,3 +419,31 @@ fn project_concurrency_accepts_valid_yaml_notations() {
     "フローマッピングに他のキーがあっても上限を読む"
   );
 }
+
+#[test]
+fn project_concurrency_handles_quotes_inside_plain_scalars_in_flow_mappings() {
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("{base_branch: feature/o'brien, concurrency: 8}\n")),
+    8,
+    "フローマッピングで通常文字列の中のアポストロフィを引用の開始と誤認しない"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("{base_branch: \"say \\\"hi, there\\\"\", concurrency: 9}\n")),
+    9,
+    "フローマッピングで二重引用の中のエスケープとカンマを項目の区切りと誤認しない"
+  );
+}
+
+#[test]
+fn project_concurrency_rejects_multi_line_plain_scalars() {
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("concurrency:\n  3\n  invalid\n")),
+    1,
+    "次行の値に継続行が続く場合は複数行の通常スカラーであり、値全体が数値でないため既定値1にする"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("concurrency: 3\n  invalid\n")),
+    1,
+    "同行の値に継続行が続く場合も複数行の通常スカラーとして既定値1にする"
+  );
+}
