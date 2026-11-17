@@ -1717,3 +1717,168 @@ async fn failed_spawn_backs_off_instead_of_respawning_immediately() {
   assert_eq!(spawned.lines().count(), 1, "抑制中は子プロセスを起動しません: {spawned}");
   client.shutdown().await;
 }
+
+#[test]
+fn client_config_gives_the_list_reads_a_longer_timeout() {
+  // 一覧読み取り（ゴール・タスク）だけが全体の期限（15秒）より長い60秒の期限を持ち、
+  // それ以外の道具には個別の期限が付かないことを、実測に基づく設定として固定する。
+  let server = mcp_server();
+  let config = takt_dash_backend::mcp::client_config(&server, std::path::Path::new("/tmp"));
+
+  assert_eq!(config.request_timeout, std::time::Duration::from_secs(15), "全体の期限は15秒のままです");
+  assert_eq!(
+    config.tool_timeouts.get("takt_list_goals"),
+    Some(&std::time::Duration::from_secs(60)),
+    "ゴール一覧の期限は60秒です"
+  );
+  assert_eq!(
+    config.tool_timeouts.get("takt_list_tasks"),
+    Some(&std::time::Duration::from_secs(60)),
+    "タスク一覧の期限は60秒です"
+  );
+  assert_eq!(config.tool_timeouts.len(), 2, "期限を広げるのは一覧読み取りだけです");
+}
+
+#[tokio::test]
+async fn per_tool_timeout_applies_to_the_configured_tool_only() {
+  // 道具ごとの期限を設定した道具は、全体の期限より遅い応答でも成功する。
+  // 設定していない道具は全体の期限で時間切れする。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "goals": [ { "id": "g1", "status": "created", "executionStatus": "active", "objective": "目標", "integrationBranch": "takt/g1" } ],
+      "delays": { "takt_list_goals": 1500, "takt_list_tasks": 1500 }
+    }),
+  );
+  let mut config = mock_config_with_timeout(directory.path(), &state, None, 1);
+  config.tool_timeouts.insert("takt_list_goals".to_owned(), std::time::Duration::from_secs(3));
+  let mut client = mock_client(config);
+
+  let text = client
+    .call_tool("takt_list_goals", with_cwd(directory.path(), json!({})))
+    .await
+    .expect("道具ごとの期限があれば全体の期限より遅い応答でも成功します");
+  assert!(text.contains("\"goals\""), "応答の本文テキストを返します: {text}");
+
+  let error = transport(
+    client
+      .call_tool("takt_list_tasks", with_cwd(directory.path(), json!({})))
+      .await
+      .expect_err("道具ごとの期限が無い道具は全体の期限で時間切れします"),
+  );
+  assert!(matches!(error, TransportError::Timeout(1)), "全体の期限（1秒）で時間切れします: {error}");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_snapshot_retries_the_core_lists_once_after_a_timeout() {
+  // コア読み取り（ゴール・タスクの一覧）が1回だけ時間切れしても、作り直した
+  // 子プロセスでもう1回読み直して snapshot を組み立てる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "goals": [ { "id": "g1", "status": "created", "executionStatus": "active", "objective": "目標", "integrationBranch": "takt/g1" } ],
+      "tasks": [ { "name": "a", "goalId": "g1", "status": "pending" } ],
+      "hangOnce": ["takt_list_goals", "takt_list_tasks"]
+    }),
+  );
+  let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, None, 1));
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None)
+    .await
+    .expect("コア読み取りの1回目の時間切れは再試行で回復します");
+
+  assert_eq!(snapshot.goals.len(), 1, "再試行でゴールを読めます");
+  assert_eq!(snapshot.tasks.len(), 1, "再試行でタスクを読めます");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_snapshot_degrades_questions_and_notifications_on_timeout() {
+  // 補助読み取り（ゴールに属さない問い合わせ・ゴールの質問・通知）が輸送の期限切れで
+  // 失敗しても、その項目だけ前回値を引き継ぎ、snapshot 全体は成功する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "goals": [ { "id": "g1", "status": "created", "executionStatus": "active", "objective": "目標", "integrationBranch": "takt/g1" } ],
+      "standaloneInquiries": [ { "id": "s1", "status": "pending", "kind": "question", "body": "今回の単独の問い合わせ", "createdAt": "2026-11-13T09:00:00Z" } ],
+      "goalQuestions": { "g1": [ { "id": "q1", "status": "pending", "kind": "question", "body": "今回の質問", "createdAt": "2026-11-13T09:00:00Z" } ] },
+      "notifications": { "g1": [ { "id": "n1", "kind": "progress", "body": "今回の通知", "recordedAt": "2026-11-13T09:00:00Z" } ] },
+      "delays": { "takt_list_standalone_inquiries": 2500, "takt_list_goal_questions": 2500, "takt_get_goal": 2500 }
+    }),
+  );
+  let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, None, 1));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    inquiries: vec![
+      takt_dash_backend::model::InquiryEntry {
+        inquiry_id: inquiry_id("s1"),
+        goal_id:    None,
+        kind:       takt_dash_backend::model::InquiryKind::Question,
+        body:       "前回の単独の問い合わせ".to_owned(),
+        options:    Vec::new(),
+        answered:   false,
+        created_at: time("2026-11-13T01:00:00Z"),
+      },
+      takt_dash_backend::model::InquiryEntry {
+        inquiry_id: inquiry_id("q1"),
+        goal_id:    Some(goal_id("g1")),
+        kind:       takt_dash_backend::model::InquiryKind::Question,
+        body:       "前回の質問".to_owned(),
+        options:    Vec::new(),
+        answered:   false,
+        created_at: time("2026-11-13T01:00:00Z"),
+      },
+    ],
+    notifications: vec![notification("n1", "progress", time("2026-11-13T01:00:00Z"))],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev))
+    .await
+    .expect("補助読み取りの期限切れで全体は失敗しません");
+
+  assert_eq!(snapshot.goals.len(), 1, "ゴールは今回値を読みます");
+  let s1 =
+    snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "s1").expect("単独の問い合わせを引き継ぎます");
+  assert_eq!(s1.body, "前回の単独の問い合わせ", "期限切れの単独の問い合わせは前回値を引き継ぎます");
+  let q1 =
+    snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "q1").expect("ゴールの質問を引き継ぎます");
+  assert_eq!(q1.body, "前回の質問", "期限切れのゴールの質問は前回値を引き継ぎます");
+  assert_eq!(snapshot.notifications.len(), 1, "通知を引き継ぎます");
+  assert_eq!(snapshot.notifications[0].body, "通知 n1", "期限切れの通知は前回値を引き継ぎます");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_snapshot_degrades_a_timed_out_run_to_the_previous_value() {
+  // running な run の takt_get_run が期限切れでも、その run だけ前回値を引き継ぎ、
+  // snapshot 全体は成功する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
+      "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "implement", "startedAt": "2026-11-13T10:00:00Z", "stepLogs": [ { "step": "implement", "timestamp": "2026-11-13T10:20:00Z" } ] } },
+      "delays": { "takt_get_run": 2500 }
+    }),
+  );
+  let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, None, 1));
+  let prev = takt_dash_backend::model::ProjectSnapshot {
+    runs: vec![run("r1", "a", time("2026-11-13T10:05:00Z"))],
+    ..takt_dash_backend::model::ProjectSnapshot::empty()
+  };
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev))
+    .await
+    .expect("run の期限切れで全体は失敗しません");
+
+  assert_eq!(snapshot.runs.len(), 1, "期限切れの run は前回値で残ります");
+  assert_eq!(snapshot.runs[0].last_log_at, Some(time("2026-11-13T10:05:00Z")), "期限切れの run は前回値です");
+  client.shutdown().await;
+}
