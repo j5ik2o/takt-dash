@@ -28,6 +28,7 @@ import {
 import type { TimingSink } from "../telemetry/timing";
 import type { InstructionId, ReportFilename, RunSlug } from "../state/domain-primitives";
 import type { RunLogCursor } from "../state/run-log-stream";
+import { BackendUnavailableError, markBackendResponded } from "./backend-availability";
 
 export const BACKEND_ADDR_ENV = "TAKTDASH_BACKEND_ADDR";
 
@@ -45,27 +46,16 @@ export function resolveBackendAddress(env: BackendEnv): string {
   return configured !== undefined && configured !== "" ? configured : DEFAULT_BACKEND_ADDR;
 }
 
-/**
- * backend を利用できないことを表す。
- *
- * transport は backend へ接続できない状態、server は backend が応答の中で
- * UNAVAILABLE を返した状態を指す。server の場合は backend が返した details を保つ。
- * 読み取りページはどちらも従来どおり「接続できない」表示として扱う。
- */
-export type BackendUnavailableKind = "transport" | "server";
-
-export class BackendUnavailableError extends Error {
-  readonly kind: BackendUnavailableKind;
-  readonly details: string;
-
-  constructor(cause: unknown, kind: BackendUnavailableKind = "transport", details = "") {
-    super("backend に接続できません。");
-    this.name = "BackendUnavailableError";
-    this.cause = cause;
-    this.kind = kind;
-    this.details = details;
-  }
-}
+export {
+  type BackendFailure,
+  type BackendUnavailableKind,
+  type BackendUnavailableSituation,
+  BackendUnavailableError,
+  backendUnavailableSituation,
+  hasBackendResponded,
+  markBackendResponded,
+  resetBackendResponded,
+} from "./backend-availability";
 
 /** 指定した runSlug の run が backend に存在しないことを表す。ページは 404 を返す。 */
 export class RunNotFoundError extends Error {
@@ -157,6 +147,7 @@ const toBackendUnavailable = (error: grpc.ServiceError): BackendUnavailableError
     error,
     hasResponseMetadata(error) ? "server" : "transport",
     typeof error.details === "string" ? error.details : "",
+    error.code === grpc.status.DEADLINE_EXCEEDED ? "no-response" : "unreachable",
   );
 
 const unary = <Request, Response>(
@@ -175,6 +166,7 @@ const unary = <Request, Response>(
         reject(isConnectionFailure(error) ? toBackendUnavailable(error) : error);
         return;
       }
+      markBackendResponded();
       resolve(response);
     });
   });

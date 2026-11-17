@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import { notFound } from "next/navigation";
 import {
   BackendUnavailableError,
+  backendUnavailableSituation,
   getBackendClient,
   GoalNotFoundError,
 } from "../grpc/client";
@@ -15,7 +16,7 @@ type GoalDetailLoaderProps = {
 
 type LoadResult =
   | { kind: "found"; detail: GetGoalDetailResponse }
-  | { kind: "unavailable" };
+  | { kind: "unavailable"; error: BackendUnavailableError };
 
 // ゴールが見つからないときは 404 を返す。gRPC の NOT_FOUND と応答の goalId 不一致は、
 // どちらも GoalNotFoundError として扱う。backend 自体に接続できないときはページを
@@ -31,13 +32,13 @@ export async function GoalDetailLoader({ params }: GoalDetailLoaderProps): Promi
       notFound();
     }
     if (error instanceof BackendUnavailableError) {
-      result = { kind: "unavailable" };
+      result = { kind: "unavailable", error };
     } else {
       throw error;
     }
   }
   if (result.kind === "unavailable") {
-    return <BackendUnavailableNotice />;
+    return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;
   }
   return <LiveGoalDetail initialDetail={result.detail} goalId={goalId} />;
 }

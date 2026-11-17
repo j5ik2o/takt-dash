@@ -333,6 +333,13 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* ゴール一覧のタスク件数は、項目どうしを余白で区切って並べる（issue #232）。 */
+.task-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
 .sec {
   font-size: 16px;
   margin-bottom: 12px;
@@ -399,6 +406,12 @@ a {
 
 .mini-runs li:first-child {
   border-top: none;
+}
+
+/* run のスラッグは長い識別子のため、行の中で折り返して全文を見せる（issue #153）。 */
+.mini-runs .view {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .goals li {
@@ -538,8 +551,10 @@ a {
   color: var(--muted);
 }
 
-.st.delayed {
-  color: var(--orange-d);
+/* run 行の状態列は 96px 固定のため、長いラベル（「ログが止まっています」など）は
+   列の中で折り返し、隣の本文へ重ならないようにする（issue #238）。 */
+.runs .st {
+  white-space: normal;
 }
 
 .run-main {
@@ -638,10 +653,6 @@ a {
   background: var(--idle);
 }
 
-.bar.delayed > i {
-  background: var(--warn);
-}
-
 .dot {
   display: inline-block;
   width: 10px;
@@ -680,11 +691,6 @@ a {
 
 .run-row .dot.idle {
   background: var(--down);
-}
-
-.dot.delayed,
-.run-row .dot.delayed {
-  background: var(--orange);
 }
 
 @keyframes pulse {
@@ -1053,11 +1059,6 @@ ol.log-tail li {
   font-weight: 600;
 }
 
-.run-note.delayed {
-  color: var(--orange-d);
-  font-weight: 600;
-}
-
 /* 判断待ちの操作 UI。ボタンと入力は折り返し、ダイアログは画面中央に重ねる。 */
 .actions {
   display: flex;
@@ -1300,6 +1301,8 @@ ol.log-tail li {
 
   .tray-item .proj {
     grid-column: 1;
+    /* 待ち時間の行が本文のすぐ下に来るよう、左の項目は2行分にまたがらせる（issue #233）。 */
+    grid-row: 1 / span 2;
   }
 
   .tray-item .desc {
@@ -1403,6 +1406,7 @@ ol.log-tail li {
   .tray-item .opts,
   .tray-item .wait {
     grid-column: auto;
+    grid-row: auto;
   }
 
   .tray-item .wait b {

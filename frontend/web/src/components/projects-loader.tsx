@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+import { backendUnavailableSituation } from "../grpc/client";
 import { loadServerState } from "../state/server-state";
 import { measurePage } from "../telemetry/timing";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
@@ -9,9 +10,9 @@ import { ProjectsContent } from "./projects-content";
 // 不通の旨を表示する（order.md:21）。
 export async function ProjectsLoader(): Promise<ReactElement> {
   return measurePage("/projects", async () => {
-    const { state, unavailable } = await loadServerState();
-    if (unavailable) {
-      return <BackendUnavailableNotice />;
+    const { state, error } = await loadServerState();
+    if (error !== undefined) {
+      return <BackendUnavailableNotice situation={backendUnavailableSituation(error)} />;
     }
     return <ProjectsContent state={state} now={new Date()} />;
   });

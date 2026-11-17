@@ -1,7 +1,8 @@
 // アクティビティの接続イベント集約（AC71-C7）の契約。
 //
-// 入力は backend が返す最新順の配列。隣接し、両方が接続種別で、同じサーバー・
-// プロジェクトのイベントだけを1つのまとまりにする。件数と期間（最古〜最新）を
+// 入力は backend が返す最新順の配列。隣接し、両方が同じ接続種別（切断同士、
+// 復帰同士）で、同じサーバー・プロジェクトのイベントだけを1つのまとまりにする。
+// 切断と復帰は種別が違うため、隣接してもまとめない。件数と期間（最古〜最新）を
 // 出せる形にし、非隣接・別プロジェクト・非接続種別はまとめない。
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -24,7 +25,61 @@ const connectionEvent = (
   body: "",
 });
 
-test("同じプロジェクトの隣接する接続イベントを件数と最古・最新の1件にまとめる", () => {
+test("同じプロジェクトの隣接する同種の接続イベントを件数と最古・最新の1件にまとめる", () => {
+  const events: ActivityEvent[] = [
+    connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_LOST, "esa", 5),
+    connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_LOST, "esa", 10),
+    connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_LOST, "esa", 15),
+  ];
+
+  const groups = groupActivityEvents(events);
+
+  assert.equal(groups.length, 1, "隣接する同一プロジェクトの同種の接続イベントは1行にまとまる");
+  assert.equal(groups[0]!.count, 3);
+  assert.deepEqual(groups[0]!.events, events);
+  assert.equal(groups[0]!.newest.occurredAt?.getTime(), minutesAgo(5).getTime());
+  assert.equal(groups[0]!.oldest.occurredAt?.getTime(), minutesAgo(15).getTime());
+});
+
+test("切断の直後に復帰が隣接すると2つのまとまりになる", () => {
+  const events: ActivityEvent[] = [
+    connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED, "esa", 5),
+    connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_LOST, "esa", 10),
+  ];
+
+  const groups = groupActivityEvents(events);
+
+  assert.equal(groups.length, 2, "切断と復帰は種別が違うためまとめない");
+  assert.deepEqual(groups.map((group) => group.count), [1, 1]);
+  assert.equal(groups[0]!.newest.kind, ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED);
+  assert.equal(groups[1]!.newest.kind, ActivityKind.ACTIVITY_KIND_CONNECTION_LOST);
+});
+
+test("切断が連続すると1つのまとまりになる", () => {
+  const events: ActivityEvent[] = [
+    connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_LOST, "esa", 5),
+    connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_LOST, "esa", 10),
+  ];
+
+  const groups = groupActivityEvents(events);
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]!.count, 2);
+});
+
+test("復帰が連続すると1つのまとまりになる", () => {
+  const events: ActivityEvent[] = [
+    connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED, "esa", 5),
+    connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED, "esa", 10),
+  ];
+
+  const groups = groupActivityEvents(events);
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]!.count, 2);
+});
+
+test("復帰の直後に切断が連続すると復帰だけが別のまとまりになる", () => {
   const events: ActivityEvent[] = [
     connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED, "esa", 5),
     connectionEvent(ActivityKind.ACTIVITY_KIND_CONNECTION_LOST, "esa", 10),
@@ -33,11 +88,11 @@ test("同じプロジェクトの隣接する接続イベントを件数と最�
 
   const groups = groupActivityEvents(events);
 
-  assert.equal(groups.length, 1, "隣接する同一プロジェクトの接続イベントは1行にまとまる");
-  assert.equal(groups[0]!.count, 3);
-  assert.deepEqual(groups[0]!.events, events);
-  assert.equal(groups[0]!.newest.occurredAt?.getTime(), minutesAgo(5).getTime());
-  assert.equal(groups[0]!.oldest.occurredAt?.getTime(), minutesAgo(15).getTime());
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups.map((group) => group.count), [1, 2]);
+  assert.deepEqual(groups[1]!.events, events.slice(1));
+  assert.equal(groups[1]!.newest.occurredAt?.getTime(), minutesAgo(10).getTime());
+  assert.equal(groups[1]!.oldest.occurredAt?.getTime(), minutesAgo(15).getTime());
 });
 
 test("別プロジェクトの接続イベントはまとめない", () => {

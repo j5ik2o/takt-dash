@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Sidebar } from "../../src/components/sidebar.tsx";
+import { dashboardStateFromProto, type DashboardRun } from "../../src/state/restore-state.ts";
+import { createDashboardState } from "../support/fixtures.ts";
 
 type BuildInfo = { commit: string; branch: string };
 
@@ -99,4 +101,53 @@ test("片方のコミットが unknown のときは不一致を示さない", ()
 
   assert.match(foot, /unknown/, "取得できない側は unknown を表示する");
   assert.doesNotMatch(foot, /不一致/, "差の有無を判定できないときは不一致を出さない");
+});
+
+// サーバー行（名前を含む li）の中から、状態の点のクラスと状態テキストを取り出す。
+const serverRow = (html: string, serverName: string): { dot: string; state: string } => {
+  const item = html.split("<li>").find((part) => part.includes(serverName));
+  assert.ok(item, `サーバー ${serverName} の行が描画されていません: ${html}`);
+  const dot = /<span class="dot ([^"]*)"/.exec(item)?.[1];
+  const state = /<span class="srv-state">([^<]*)<\/span>/.exec(item)?.[1];
+  assert.ok(dot !== undefined && state !== undefined, `状態の点とテキストが描画されていません: ${item}`);
+  return { dot, state };
+};
+
+const renderSidebarWithServers = (runs: readonly DashboardRun[]): string =>
+  renderToStaticMarkup(
+    createElement(Sidebar, {
+      servers: createDashboardState().servers,
+      pendingCount: 0,
+      runs,
+      frontendBuild: FRONTEND_BUILD,
+      backendBuild: BACKEND_BUILD,
+    }),
+  );
+
+test("サイドバーのサーバー状態は概要カードと同じ基準と文言で出す", () => {
+  const state = createDashboardState();
+
+  const withRuns = renderSidebarWithServers(dashboardStateFromProto(state).runs);
+  assert.deepEqual(
+    serverRow(withRuns, "Mac mini"),
+    { dot: "live", state: "動作中" },
+    "接続済みで run があるサーバーはカードと同じく動作中にする",
+  );
+  assert.deepEqual(
+    serverRow(withRuns, "Mac Studio"),
+    { dot: "down", state: "応答なし" },
+    "未接続のサーバーはカードと同じく応答なしにする",
+  );
+
+  const withoutRuns = renderSidebarWithServers([]);
+  assert.deepEqual(
+    serverRow(withoutRuns, "Mac mini"),
+    { dot: "idle", state: "接続中" },
+    "接続済みで run が無いサーバーは、カードと同じく接続中にし、動作中と食い違わせない",
+  );
+  assert.deepEqual(
+    serverRow(withoutRuns, "Mac Studio"),
+    { dot: "down", state: "応答なし" },
+    "未接続のサーバーの表示は run の有無によらず応答なしのままにする",
+  );
 });

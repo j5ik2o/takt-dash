@@ -810,3 +810,92 @@ async fn get_run_detail_resolves_a_completed_task_that_only_has_a_source_run_slu
     request_detail(&harness, "does-not-exist").await.expect_err("sourceRunSlug と異なる slug は解決しません");
   assert_eq!(status.code(), tonic::Code::NotFound, "未知の runSlug は Not Found です: {status:?}");
 }
+
+#[tokio::test]
+async fn get_run_detail_fills_goal_and_task_name_from_a_stored_task_that_only_has_a_source_run_slug() {
+  // 状態ストアの完了タスクが runSlug を持たず sourceRunSlug だけを持つ場合でも、
+  // 状態ストアの完了タスクからゴールとタスク名を補うことを観測します（grpc 側の完了タスク検索が
+  // sourceRunSlug も照合する）。
+  let harness =
+    GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
+  let fixture = RunFixture::new(harness.project_dir());
+  fixture.write_tasks(&[RunTaskLine { run_slug: None, source_run_slug: Some("run-1") }]);
+  let mut meta = running_meta("review", 1, WORKFLOW, "2026-11-13T09:00:00Z");
+  meta["status"] = json!("completed");
+  fixture.write_meta("run-1", &meta);
+  fixture.append_records("run-1", &[workflow_start_record(WORKFLOW)]);
+  let snapshot = ProjectSnapshot {
+    goals:         vec![],
+    tasks:         vec![TaskEntry {
+      name:            TaskName::try_from("implement").expect("テストのタスク名は有効です"),
+      goal_id:         Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
+      status:          TaskStatus::Completed,
+      started_at:      Some(time("2026-11-13T09:00:00Z")),
+      run_slug:        None,
+      source_run_slug: Some("run-1".to_owned()),
+      current_step:    Some("review".to_owned()),
+      merge_task:      false,
+    }],
+    inquiries:     vec![],
+    runs:          vec![],
+    notifications: vec![],
+    proposals:     vec![],
+  };
+  harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
+
+  let detail =
+    request_detail(&harness, "run-1").await.expect("sourceRunSlug だけを持つ完了タスクからも run 詳細を取得できます");
+
+  assert_eq!(detail.run_slug, "run-1");
+  assert_eq!(detail.project, "takt-dash", "sourceRunSlug からプロジェクトを解決します");
+  assert_eq!(detail.goal_id, "g1", "状態ストアの完了タスクからゴールを補います");
+  assert_eq!(detail.task_name, "implement", "状態ストアの完了タスクからタスク名を補います");
+  assert_eq!(detail.status, RunStatus::Completed as i32);
+}
+
+#[tokio::test]
+async fn get_run_detail_fills_goal_id_from_a_listed_task_that_only_has_a_source_run_slug() {
+  // takt_list_tasks の完了タスクが runSlug を持たず sourceRunSlug だけを持つ場合でも、
+  // そのタスクからゴールを補うことを観測します。GetRunDetail は takt-mcp を呼ばないため、
+  // takt_list_tasks のタスクは定期読み取りで状態ストアへ入り、そこから補われます。
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", project_dir()),
+      server_meta(),
+      json!({
+        "tasks": [
+          {
+            "name": "implement",
+            "goalId": "g1",
+            "status": "completed",
+            "startedAt": "2026-11-13T09:00:00Z",
+            "sourceRunSlug": "run-1"
+          }
+        ]
+      }),
+    )
+    .build();
+  let fixture = RunFixture::new(harness.project_dir());
+  fixture.write_tasks(&[RunTaskLine { run_slug: None, source_run_slug: Some("run-1") }]);
+  let mut meta = running_meta("review", 1, WORKFLOW, "2026-11-13T09:00:00Z");
+  meta["status"] = json!("completed");
+  fixture.write_meta("run-1", &meta);
+  fixture.append_records("run-1", &[workflow_start_record(WORKFLOW)]);
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+    harness.registry.clone(),
+  );
+  poller.read_cycle_once().await.expect("1サイクルを実行できます");
+  poller.shutdown().await;
+
+  let detail =
+    request_detail(&harness, "run-1").await.expect("sourceRunSlug だけを持つ完了タスクからも run 詳細を取得できます");
+
+  assert_eq!(detail.run_slug, "run-1");
+  assert_eq!(detail.goal_id, "g1", "takt_list_tasks の完了タスクからゴールを補います");
+  assert_eq!(detail.task_name, "implement", "タスク名を補います");
+  assert_eq!(detail.status, RunStatus::Completed as i32);
+}

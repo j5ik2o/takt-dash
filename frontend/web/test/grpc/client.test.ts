@@ -15,9 +15,13 @@ import {
 } from "../support/fixtures.ts";
 import { reserveClosedAddress, startTaktDashServer, type RunningServer } from "../support/grpc-server.ts";
 import {
+  BackendUnavailableError,
+  backendUnavailableSituation,
   closeBackendClient,
   createBackendClient,
   getBackendClient,
+  hasBackendResponded,
+  resetBackendResponded,
   resolveBackendAddress,
   type BackendClient,
 } from "../../src/grpc/client.ts";
@@ -534,6 +538,67 @@ test("deadline の超過は BackendUnavailableError として扱う", async () =
     const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
     try {
       await assert.rejects(client.getOverview(), (error: Error) => error.name === "BackendUnavailableError");
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("deadline の超過は接続不可と区別して応答なしとして扱う", async () => {
+  await withServer({ overview: { code: grpc.status.DEADLINE_EXCEEDED, details: "期限切れ" } }, async ({ address }) => {
+    const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+    try {
+      await assert.rejects(client.getOverview(), (error: unknown) => {
+        assert.ok(error instanceof BackendUnavailableError);
+        assert.equal(error.failure, "no-response");
+        return true;
+      });
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("応答を返さない backend は deadline の超過で応答なしとして扱う", async () => {
+  await withServer({ hangUnary: true }, async ({ address }) => {
+    const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address }, deadlineMs: 50 });
+    try {
+      await assert.rejects(client.getOverview(), (error: unknown) => {
+        assert.ok(error instanceof BackendUnavailableError);
+        assert.equal(error.failure, "no-response");
+        return true;
+      });
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+test("接続できない場合は応答なしと区別して接続不可として扱う", async () => {
+  const closedAddress = await reserveClosedAddress();
+  const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: closedAddress } });
+  try {
+    await assert.rejects(client.getOverview(), (error: unknown) => {
+      assert.ok(error instanceof BackendUnavailableError);
+      assert.equal(error.failure, "unreachable");
+      return true;
+    });
+  } finally {
+    await client.close();
+  }
+});
+
+test("backend の応答を受けると接続履歴が残り、表示用の状況に反映される", async () => {
+  resetBackendResponded();
+  assert.equal(hasBackendResponded(), false, "履歴を消した直後は応答を受けていない");
+  await withServer({ overview: createDashboardState() }, async ({ address }) => {
+    const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+    try {
+      await client.getOverview();
+      assert.equal(hasBackendResponded(), true, "応答を受けると履歴が残る");
+      const situation = backendUnavailableSituation(new BackendUnavailableError(new Error("切断")));
+      assert.equal(situation.respondedBefore, true, "状況には接続履歴が反映される");
+      assert.equal(situation.failure, "unreachable", "状況には失敗の種類が反映される");
     } finally {
       await client.close();
     }

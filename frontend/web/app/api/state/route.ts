@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { DashboardState } from "../../../src/proto/taktdash";
-import { getBackendClient } from "../../../src/grpc/client";
+import { getBackendClient, markBackendResponded } from "../../../src/grpc/client";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +43,7 @@ export async function GET(request: NextRequest): Promise<Response> {
 
       signal.addEventListener("abort", finish);
       stream.on("data", (state: DashboardState) => {
+        markBackendResponded();
         if (finished) {
           return;
         }

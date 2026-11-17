@@ -54,7 +54,7 @@ const assertPageLine = (lines: string[], expected: { page: string; rpcs: string 
 };
 
 test("layout は GetOverview の往復を page=layout の行に記録する", async () => {
-  const lines = await withClosedBackend(() => capturePageLines(async () => RootLayout({ children: null })));
+  const lines = await withClosedBackend(() => capturePageLines(async () => RootLayout({ children: null, params: Promise.resolve({}) })));
   assertPageLine(lines, { page: "layout", rpcs: "GetOverview" });
 });
 
