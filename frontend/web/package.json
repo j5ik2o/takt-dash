@@ -20,11 +20,13 @@
     "react-dom": "19.3.0"
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
+    "jsdom": "^31.0.1",
     "ts-proto": "2.20.0",
     "typescript": "^5"
   }
