@@ -4,6 +4,7 @@ import {
   BackendUnavailableError,
   createBackendClient,
   hasBackendResponded,
+  type BackendFailure,
 } from "@/src/grpc/client";
 import { DashboardState } from "@/src/proto/taktdash";
 import { resolveThresholds } from "@/src/state/dashboard";
@@ -33,22 +34,23 @@ let lastLoadedState: DashboardState | undefined;
 
 async function loadInitialState(): Promise<{
   state: DashboardState;
-  unavailable: boolean;
+  failure?: BackendFailure;
   respondedBefore: boolean;
 }> {
   const client = createBackendClient();
   try {
     const state = await client.getOverview();
     lastLoadedState = state;
-    return { state, unavailable: false, respondedBefore: hasBackendResponded() };
+    return { state, respondedBefore: hasBackendResponded() };
   } catch (error) {
     if (error instanceof BackendUnavailableError) {
       // 今回の読み込みは失敗しても、この Web プロセスが過去に応答を受けて
       // いれば接続履歴は応答ありのままにする（issue #152）。キャッシュを返す
-      // 経路でも履歴を落とさないよう、成否とは別に履歴を返す。
+      // 経路でも履歴を落とさないよう、成否とは別に履歴を返す。失敗理由は
+      // 画面側の通知の文面の振り分けに使うため、そのまま渡す（issue #92）。
       return {
         state: lastLoadedState ?? EMPTY_STATE,
-        unavailable: true,
+        failure: error.failure,
         respondedBefore: hasBackendResponded(),
       };
     }
@@ -59,13 +61,13 @@ async function loadInitialState(): Promise<{
 }
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
-  const { state, unavailable, respondedBefore } = await loadInitialState();
+  const { state, failure, respondedBefore } = await loadInitialState();
   return (
     <html lang="ja">
       <body>
         <StateStreamProviderWithRefresh
           initialState={state}
-          initialUnavailable={unavailable}
+          initialFailure={failure}
           initialRespondedBefore={respondedBefore}
         >
           <div className="shell">

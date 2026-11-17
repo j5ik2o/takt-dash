@@ -14,7 +14,7 @@ type LiveOverviewProps = {
 // 自動更新の状態を概要の表示用の形へ変換する。時刻は1秒ごとに進め、新しいログが届いた
 // run 行だけを1秒間光らせる。タイマーはこのコンポーネントが所有し、unmount 時に破棄する。
 export function LiveOverview({ initialNowMs }: LiveOverviewProps): ReactElement {
-  const { state, disconnected, disconnectedSince, respondedBefore } = useLiveState();
+  const { state, disconnected, failure, disconnectedSince, respondedBefore } = useLiveState();
   const [now, setNow] = useState(() => state.readAt ?? new Date(initialNowMs));
   const seenRef = useRef<LogSeen | null>(null);
   if (seenRef.current === null) {
@@ -70,9 +70,10 @@ export function LiveOverview({ initialNowMs }: LiveOverviewProps): ReactElement 
     [],
   );
 
-  // 切断の文面は、接続履歴と切断が続いている時間から決める（issue #152）。
+  // 切断の文面は、失敗理由と接続履歴と切断が続いている時間から決める
+  // （issue #152、#92）。失敗理由が無い切断は従来どおり接続不可として扱う。
   const unavailableSituation: BackendUnavailableSituation = {
-    failure: "unreachable",
+    failure: failure ?? "unreachable",
     respondedBefore: respondedBefore ?? true,
     ...(disconnectedSince !== undefined && disconnectedSince !== null
       ? { durationMs: Math.max(0, now.getTime() - disconnectedSince.getTime()) }
