@@ -324,6 +324,54 @@ def test_tiny_max_bytes_stays_within_bound_for_npm_failures() -> None:
         output.decode("utf-8")
 
 
+
+# --- 中間の上限（issue #205） -------------------------------------------------
+
+def test_mid_range_max_bytes_keeps_failed_names_via_short_form() -> None:
+    # issue #205: 210〜820 バイトでは、省略の行のための予約のために通常の形式が
+    # 失敗したテスト名を 1 件も入れられず、見出しと成功した末尾だけが出ていた。
+    # 短い形式へ切り替わり、失敗したテスト名と集計の行が残ることを確かめる。
+    failed = cargo_failed_block([("tests::early_fails", "表明のメッセージ", 4)])
+    data = (compile_log() + failed + cargo_ok_output(60000)).encode("utf-8")
+    for max_bytes in (300, 500, 820):
+        output = run_ok(data, max_bytes=max_bytes)
+        assert len(output) <= max_bytes, (max_bytes, len(output))
+        text = output.decode("utf-8")
+        assert "tests::early_fails" in text, (max_bytes, text)
+        assert "test result: FAILED. 1 passed; 1 failed;" in text, (max_bytes, text)
+        assert TAIL_HEADER not in text, (max_bytes, text)
+
+
+def test_mid_range_lower_bound_shows_failure_result_line() -> None:
+    # 範囲の下限の 210 バイトでも短い形式になり、失敗の集計の行が残る。
+    # 成功した末尾だけが出て、失敗が見えなくなることはない。
+    failed = cargo_failed_block([("tests::early_fails", "表明のメッセージ", 4)])
+    data = (compile_log() + failed + cargo_ok_output(60000)).encode("utf-8")
+    output = run_ok(data, max_bytes=210)
+    assert len(output) <= 210, len(output)
+    text = output.decode("utf-8")
+    assert "test result: FAILED. 1 passed; 1 failed;" in text, text
+    assert TAIL_HEADER not in text, text
+
+
+def test_mid_range_max_bytes_keeps_npm_failed_names() -> None:
+    body = (
+        npm_header()
+        + "✔ ok one (0.3ms)\n✖ bad one (0.39ms)\n"
+        + npm_counts(2, 1, 1)
+        + "\n✖ failing tests:\n\n"
+        + npm_failing_item("test/x.test.ts:4:1", "bad one", "一致しない")
+        + "✔ tail ok\n" * 300
+    )
+    data = body.encode("utf-8")
+    for max_bytes in (210, 500, 820):
+        output = run_ok(data, max_bytes=max_bytes)
+        assert len(output) <= max_bytes, (max_bytes, len(output))
+        text = output.decode("utf-8")
+        assert "✖ bad one" in text, (max_bytes, text)
+        assert "ℹ fail 1" in text, (max_bytes, text)
+
+
 # --- npm の失敗 -------------------------------------------------------------
 
 
@@ -408,6 +456,9 @@ def main() -> int:
         test_issue_repro_line_stays_within_bound,
         test_tiny_max_bytes_stays_within_bound_for_cargo_failures,
         test_tiny_max_bytes_stays_within_bound_for_npm_failures,
+        test_mid_range_max_bytes_keeps_failed_names_via_short_form,
+        test_mid_range_lower_bound_shows_failure_result_line,
+        test_mid_range_max_bytes_keeps_npm_failed_names,
         test_npm_failing_section_is_summarized_without_stack,
         test_first_npm_failure_survives_long_later_failures,
         test_pipefail_keeps_make_test_exit_code,
