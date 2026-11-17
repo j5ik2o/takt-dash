@@ -2,7 +2,7 @@ import type { ReactElement } from "react";
 import type { GetProjectsResponse, Goal } from "../proto/taktdash";
 import { projectAnchorId } from "../state/anchors";
 import { goalBadge } from "../state/goal-badge";
-import { goalHeading, goalTaskProgress } from "../state/goal-summary";
+import { goalDisplayName, goalListHeading, goalTaskProgress } from "../state/goal-summary";
 import { projectKey, resolveThresholds, sortPendingDecisions, toRunView } from "../state/dashboard";
 
 type ProjectsContentProps = {
@@ -22,14 +22,14 @@ function GoalRow({ goal }: { goal: Goal }): ReactElement {
   const pullRequest = goal.pullRequest;
   return (
     <li>
-      <h4 className="goal-head">{goalHeading(goal.name)}</h4>
+      <h4 className="goal-head">{goalListHeading(goal.name)}</h4>
       <span className={`goal-badge ${badge.tone}`}>{badge.label}</span>
       {badge.kind === "paused" && goal.pausedReason !== undefined ? (
         <p className="goal-why">一時停止の理由: {goal.pausedReason}</p>
       ) : null}
       <details className="goal-full">
         <summary>このゴールの目的の全文を表示します。</summary>
-        <p className="goal-text">{goal.name}</p>
+        <p className="goal-text">{goalDisplayName(goal.name)}</p>
       </details>
       {progress.total === 0 ? (
         <p className="goal-progress">タスクはまだ登録されていません。</p>

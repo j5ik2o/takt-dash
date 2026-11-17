@@ -1,11 +1,12 @@
 // ゴール表示の見出しとタスク進捗の契約（issue #78）。
+// 一覧の名前は takt-mcp の preview であり、切り詰めの見せ方もここで決める（issue #153）。
 //
 // 目的の全文をカードに出すと、引用や括弧の内側の句点でも切れてしまう。見出しは
 // 括弧・引用の外側の最初の文末記号までを1文として取り出し、タスクの進み具合は
 // 6種類の状態の合計と失敗の合計から作る。表示の判断を持つ関数だけを観測する。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { goalHeading, goalTaskProgress } from "../../src/state/goal-summary.ts";
+import { goalDisplayName, goalHeading, goalListHeading, goalTaskProgress } from "../../src/state/goal-summary.ts";
 import { type TaskStatusCounts } from "../../src/proto/taktdash.ts";
 
 test("括弧と引用の外側にある最初の句点で見出しを切る", () => {
@@ -86,4 +87,39 @@ test("失敗だけを数え、完了・待機・実行中を失敗に混ぜな�
 
 test("タスクの件数が無いゴールは全件0として扱う", () => {
   assert.deepEqual(goalTaskProgress({ taskCounts: undefined }), { completed: 0, total: 0, failed: 0, running: 0 });
+});
+
+// 2026-11-16 の本番で実際に表示された、256 バイトで切れた preview（issue #153）。
+const TRUNCATED_PREVIEW =
+  "taktDash の関門と道具の穴4件を解消する。対象は issue #132（https://github.com/j5ik2o/takt-dash/issues/132 、proto-check が index 依存で、proto を変更するタスクは machine_gate を通過できない）、issue #98（https://";
+
+test("切り詰められた preview の表示名には省略記号を付ける", () => {
+  assert.equal(goalDisplayName(TRUNCATED_PREVIEW), `${TRUNCATED_PREVIEW}…`);
+});
+
+test("文で完結する長い名前には省略記号を付けない", () => {
+  const complete = `${"あ".repeat(84)}。`;
+  assert.equal(goalDisplayName(complete), complete);
+});
+
+test("閉じ括弧で終わる長い名前には省略記号を付けない", () => {
+  const complete = `${"あ".repeat(83)}（補足）`;
+  assert.equal(goalDisplayName(complete), complete);
+});
+
+test("短い名前はそのまま表示する", () => {
+  assert.equal(goalDisplayName("採用ページのレイアウトを直す"), "採用ページのレイアウトを直す");
+});
+
+test("見出しが最初の文で完結する場合は省略記号を付けない", () => {
+  assert.equal(goalListHeading(TRUNCATED_PREVIEW), "taktDash の関門と道具の穴4件を解消する。");
+});
+
+test("最初の文自体が preview で切れている見出しには省略記号を付ける", () => {
+  const cut = `${"あ".repeat(84)}htt`;
+  assert.equal(goalListHeading(cut), `${cut}…`);
+});
+
+test("文末記号の無い短い名前の見出しには省略記号を付けない", () => {
+  assert.equal(goalListHeading("採用ページのレイアウトを直す"), "採用ページのレイアウトを直す");
 });

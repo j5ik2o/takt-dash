@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import type { DashboardGoal as Goal, DashboardState } from "../state/restore-state";
 import { isHumanMergeWaiting, taskStatusLabel } from "../state/dashboard";
 import { goalStateSentence } from "../state/goal-badge";
+import { goalDisplayName } from "../state/goal-summary";
 import { TASK_STATUS } from "../state/proto-values";
 
 type GoalsContentProps = {
@@ -45,7 +46,7 @@ export function GoalsContent({ state, project }: GoalsContentProps): ReactElemen
             <li className="card" key={goal.goalId}>
               <div className="card-head">
                 <h3>
-                  <a href={`/goals/${encodeURIComponent(goal.goalId)}`}>{goal.name}</a>
+                  <a href={`/goals/${encodeURIComponent(goal.goalId)}`}>{goalDisplayName(goal.name)}</a>
                 </h3>
                 <span className="about">{goal.project}</span>
               </div>
