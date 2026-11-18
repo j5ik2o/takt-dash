@@ -1,6 +1,16 @@
 import type { ActivityEvent } from "../proto/taktdash";
 import { ACTIVITY_KIND } from "./proto-values";
 
+// 通知の本文の改行の表れ方。元の文面では、改行が「\n」という文字の並び
+// （エスケープされた形）で入っている場合と、実際の改行で入っている場合がある。
+// どちらの形も改行として扱い、それ以外の文字列はそのまま残す。
+const BODY_LINE_BREAK = /\\r\\n|\\n|\r\n|\r|\n/;
+
+// 通知の本文を行に分ける。改行の生の「\n」と実際の改行のどちらも行の区切りになる。
+export function activityBodyLines(body: string): string[] {
+  return body.split(BODY_LINE_BREAK);
+}
+
 // 接続状態の変化を表す出来事。件数と期間を1行にまとめる対象です。
 const isConnectionKind = (kind: number): boolean =>
   kind === ACTIVITY_KIND.CONNECTION_LOST || kind === ACTIVITY_KIND.CONNECTION_RESTORED;

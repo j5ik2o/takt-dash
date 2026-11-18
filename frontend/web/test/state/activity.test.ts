@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ActivityKind, type ActivityEvent } from "../../src/proto/taktdash.ts";
-import { groupActivityEvents } from "../../src/state/activity.ts";
+import { activityBodyLines, groupActivityEvents } from "../../src/state/activity.ts";
 import { NOW } from "../support/fixtures.ts";
 
 const minutesAgo = (minutes: number): Date => new Date(NOW.getTime() - minutes * 60_000);
@@ -163,4 +163,40 @@ test("非接続のイベントは1件ずつのまとまりとして返す", () =
     assert.equal(group.count, 1);
     assert.equal(group.events.length, 1);
   }
+});
+
+// 通知本文の改行の扱い（issue #268）。元の文面では、改行が「\n」という文字の並び
+// （エスケープされた形）で入っている場合と、実際の改行で入っている場合がある。
+// どちらの形も行の区切りにし、改行以外の文字列は壊さない。
+
+test("本文の改行の生の「\\n\\n」は空行をはさんだ行に分かれる", () => {
+  const lines = activityBodyLines("ゴールブランチは無変更です。\\n\\n窓口で対応してください。");
+
+  assert.deepEqual(lines, ["ゴールブランチは無変更です。", "", "窓口で対応してください。"]);
+});
+
+test("本文の改行の生の「\\n」は行に分かれる", () => {
+  assert.deepEqual(activityBodyLines("1行目です。\\n2行目です。"), ["1行目です。", "2行目です。"]);
+});
+
+test("本文の改行の生の「\\r\\n」は行に分かれる", () => {
+  assert.deepEqual(activityBodyLines("1行目です。\\r\\n2行目です。"), ["1行目です。", "2行目です。"]);
+});
+
+test("本文の実際の改行は行に分かれる", () => {
+  assert.deepEqual(activityBodyLines("1行目です。\n2行目です。"), ["1行目です。", "2行目です。"]);
+});
+
+test("本文の実際の CRLF は行に分かれる", () => {
+  assert.deepEqual(activityBodyLines("1行目です。\r\n2行目です。"), ["1行目です。", "2行目です。"]);
+});
+
+test("改行の無い本文は1行のまま返る", () => {
+  assert.deepEqual(activityBodyLines("問い合わせが届きました。"), ["問い合わせが届きました。"]);
+});
+
+test("改行以外のエスケープや円記号を含む文字列は壊れない", () => {
+  assert.deepEqual(activityBodyLines("タブは \\t のまま、パスは C:\\work のままです。"), [
+    "タブは \\t のまま、パスは C:\\work のままです。",
+  ]);
 });
