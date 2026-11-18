@@ -108,13 +108,17 @@ fn spawn_backoff(consecutive_failures: u32) -> Duration {
 /// 次の呼び出しで新しい子プロセスを起動して再初期化します。起動と初期化に失敗した場合は、
 /// 次の起動を間隔を空けて行います（[`spawn_backoff`]）。
 pub struct McpClient {
-  config:                     McpClientConfig,
-  process:                    Option<McpProcess>,
-  next_id:                    u64,
+  config: McpClientConfig,
+  process: Option<McpProcess>,
+  next_id: u64,
   /// 起動と初期化の連続失敗の回数。再起動を抑える間隔を決めます。
   consecutive_spawn_failures: u32,
   /// この時刻までは子プロセスを起動しません。起動に失敗した間だけ設定します。
-  next_spawn_at:              Option<Instant>,
+  next_spawn_at: Option<Instant>,
+  /// このクライアントが担う接続レーンの名前（例: `poller`、`screen-0`、`write`）。
+  /// 起動とエラーのログで、どのレーンの子プロセスかを識別するために使います。
+  /// レジストリ経由で作るクライアントだけが持ち、直接作る場合は空です。
+  lane: String,
 }
 
 struct McpProcess {
@@ -126,7 +130,27 @@ struct McpProcess {
 impl McpClient {
   /// まだ子プロセスを起動しないクライアントを作る。最初の呼び出しで起動します。
   pub fn new(config: McpClientConfig) -> Self {
-    McpClient { config, process: None, next_id: 1, consecutive_spawn_failures: 0, next_spawn_at: None }
+    Self::with_lane(config, "")
+  }
+
+  /// レーン名つきでクライアントを作る。レジストリがレーンごとに作るときに使います。
+  pub(crate) fn with_lane(config: McpClientConfig, lane: &str) -> Self {
+    McpClient {
+      config,
+      process: None,
+      next_id: 1,
+      consecutive_spawn_failures: 0,
+      next_spawn_at: None,
+      lane: lane.to_owned(),
+    }
+  }
+
+  /// 子プロセスの起動と初期化だけを行い、道具は呼ばない。
+  ///
+  /// 書き込みレーンのように、最初の利用が利用者の操作で遅延がそのまま見えるレーンを
+  /// 起動時に温めるために使います。既に起動済みなら何もしません。
+  pub async fn warm_up(&mut self) -> Result<(), TransportError> {
+    self.ensure_started().await
   }
 
   /// 渡された順序で、指定した道具を1つずつ呼び出して応答の本文テキストを返す。
@@ -178,11 +202,13 @@ impl McpClient {
         self.consecutive_spawn_failures = 0;
         self.next_spawn_at = None;
         self.process = Some(process);
+        tracing::info!(lane = %self.lane, "takt-mcp の子プロセスを起動しました。");
         Ok(())
       },
       | Err(error) => {
         self.consecutive_spawn_failures = self.consecutive_spawn_failures.saturating_add(1);
         self.next_spawn_at = Some(Instant::now() + spawn_backoff(self.consecutive_spawn_failures));
+        tracing::warn!(lane = %self.lane, error = %error, "takt-mcp の子プロセスを起動できませんでした。");
         Err(error)
       },
     }
@@ -235,6 +261,7 @@ impl McpClient {
     match process.exchange(request, timeout_secs).await {
       | Ok(result) => Ok(result),
       | Err(error) => {
+        tracing::warn!(lane = %self.lane, error = %error, "takt-mcp との通信に失敗したため、子プロセスを破棄します。");
         self.process = None;
         Err(error)
       },

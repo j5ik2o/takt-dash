@@ -7,6 +7,7 @@ use std::path::Path;
 use takt_dash_backend::config::{
   load_config, parse_config, ConfigError, DEFAULT_CONNECTION_DELAY_SECONDS, DEFAULT_CONNECTION_FAILURE_COUNT,
   DEFAULT_INTERVAL_SECONDS, DEFAULT_LISTEN, DEFAULT_PENDING_DECISION_STALE_MINUTES, DEFAULT_RUN_LOG_SILENT_MINUTES,
+  DEFAULT_SCREEN_READ_LANES, MAX_SCREEN_READ_LANES,
 };
 
 fn repo_config_path() -> &'static Path {
@@ -446,4 +447,33 @@ fn project_concurrency_rejects_multi_line_plain_scalars() {
     1,
     "同行の値に継続行が続く場合も複数行の通常スカラーとして既定値1にする"
   );
+}
+
+#[test]
+fn omitted_screen_read_lanes_falls_back_to_default() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [ { "name": "p", "server": "mini", "cwd": "/abs/p" } ]
+  }"#;
+  let config = parse_config(text, Path::new("/base")).expect("既定値が適用されます");
+  assert_eq!(config.screen_read_lanes.get(), DEFAULT_SCREEN_READ_LANES, "画面読み取りレーンの既定は1本です");
+}
+
+#[test]
+fn screen_read_lanes_is_clamped_into_range() {
+  let base = |lanes: u32| {
+    format!(
+      r#"{{
+        "mcpServers": {{ "mini": {{ "command": "node", "args": [] }} }},
+        "projects": [ {{ "name": "p", "server": "mini", "cwd": "/abs/p" }} ],
+        "screenReadLanes": {lanes}
+      }}"#
+    )
+  };
+  let config = parse_config(&base(2), Path::new("/base")).expect("範囲内の値はそのまま使います");
+  assert_eq!(config.screen_read_lanes.get(), 2, "範囲内の値はそのまま使います");
+  let config = parse_config(&base(0), Path::new("/base")).expect("0は下限へ丸めます");
+  assert_eq!(config.screen_read_lanes.get(), 1, "0は下限の1へ丸めます");
+  let config = parse_config(&base(9), Path::new("/base")).expect("上限超は上限へ丸めます");
+  assert_eq!(config.screen_read_lanes.get(), MAX_SCREEN_READ_LANES, "上限を超える値は上限へ丸めます");
 }

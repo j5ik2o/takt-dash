@@ -12,7 +12,7 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::domain::{ProjectName, ServerId, SilentMinutes, StaleMinutes};
+use crate::domain::{ProjectName, ScreenReadLanes, ServerId, SilentMinutes, StaleMinutes};
 
 /// 読み取り間隔の既定値（秒）。
 pub const DEFAULT_INTERVAL_SECONDS: u64 = 30;
@@ -31,6 +31,11 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:50051";
 /// プロジェクトの同時実行上限の既定値。プロジェクトの .takt/config.yaml に
 /// concurrency キーが無い場合の takt 自身の既定値に合わせる。
 pub const DEFAULT_PROJECT_CONCURRENCY: i32 = 1;
+/// 画面読み取りレーンの本数の既定値（プロジェクトごと）。
+pub const DEFAULT_SCREEN_READ_LANES: u32 = 1;
+/// 画面読み取りレーンの本数の上限（プロジェクトごと）。子プロセスの増加を抑えるため、
+/// 設定値がこれを超える場合は上限へ丸めます。
+pub const MAX_SCREEN_READ_LANES: u32 = ScreenReadLanes::MAX;
 
 /// 設定ファイルの読み込みと検証で起きる失敗。
 #[derive(Debug, thiserror::Error)]
@@ -46,14 +51,16 @@ pub enum ConfigError {
 /// 検証済みの接続設定。相対パスは読み込み時に絶対パスへ解決済みです。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-  pub servers:          BTreeMap<String, McpServer>,
-  pub server_meta:      BTreeMap<String, ServerMeta>,
-  pub projects:         Vec<Project>,
-  pub interval_seconds: u64,
-  pub thresholds:       Thresholds,
-  pub sqlite_path:      PathBuf,
+  pub servers:           BTreeMap<String, McpServer>,
+  pub server_meta:       BTreeMap<String, ServerMeta>,
+  pub projects:          Vec<Project>,
+  pub interval_seconds:  u64,
+  /// 画面からの読み取りに使う takt-mcp 接続レーンの本数（プロジェクトごと、1〜3）。
+  pub screen_read_lanes: ScreenReadLanes,
+  pub thresholds:        Thresholds,
+  pub sqlite_path:       PathBuf,
   /// gRPC サーバーの待ち受けアドレス。設定の境界で SocketAddr へ解決済みです。
-  pub listen:           SocketAddr,
+  pub listen:            SocketAddr,
 }
 
 /// takt-mcp の起動方法。
@@ -96,18 +103,20 @@ pub struct Thresholds {
 #[derive(Debug, Deserialize)]
 struct RawConfig {
   #[serde(rename = "mcpServers", default)]
-  mcp_servers:      BTreeMap<String, RawMcpServer>,
+  mcp_servers:       BTreeMap<String, RawMcpServer>,
   #[serde(default)]
-  servers:          BTreeMap<String, RawServerMeta>,
+  servers:           BTreeMap<String, RawServerMeta>,
   #[serde(default)]
-  projects:         Vec<RawProject>,
+  projects:          Vec<RawProject>,
   #[serde(rename = "intervalSeconds")]
-  interval_seconds: Option<u64>,
+  interval_seconds:  Option<u64>,
+  #[serde(rename = "screenReadLanes")]
+  screen_read_lanes: Option<u32>,
   #[serde(default)]
-  thresholds:       RawThresholds,
+  thresholds:        RawThresholds,
   #[serde(default)]
-  sqlite:           RawSqlite,
-  listen:           Option<String>,
+  sqlite:            RawSqlite,
+  listen:            Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -453,6 +462,8 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   if interval_seconds == 0 {
     return Err(ConfigError::Invalid("intervalSeconds は1秒以上である必要があります。".to_owned()));
   }
+  // 画面読み取りレーンの本数は任意項目です。範囲外の値はエラーにせず、1〜上限へ丸めます。
+  let screen_read_lanes = ScreenReadLanes::clamped(raw.screen_read_lanes.unwrap_or(DEFAULT_SCREEN_READ_LANES));
   let pending_decision_stale_minutes =
     raw.thresholds.pending_decision_stale_minutes.unwrap_or(DEFAULT_PENDING_DECISION_STALE_MINUTES);
   let run_log_silent_minutes = raw.thresholds.run_log_silent_minutes.unwrap_or(DEFAULT_RUN_LOG_SILENT_MINUTES);
@@ -474,7 +485,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   let listen = listen_raw.parse::<SocketAddr>().map_err(|error| {
     ConfigError::Invalid(format!("listen {listen_raw} を待ち受けアドレスとして解釈できませんでした: {error}"))
   })?;
-  Ok(Config { servers, server_meta, projects, interval_seconds, thresholds, sqlite_path, listen })
+  Ok(Config { servers, server_meta, projects, interval_seconds, screen_read_lanes, thresholds, sqlite_path, listen })
 }
 
 fn validate_server_id(id: &str) -> Result<(), ConfigError> {

@@ -31,8 +31,8 @@ use crate::{
 mod goal;
 mod parse;
 mod run;
+mod sets;
 
-pub use self::run::RemoteRun;
 use self::{
   goal::{
     is_missing_goal_field, parse_goal, parse_goal_execution_status, parse_goal_question, parse_goal_status,
@@ -41,6 +41,10 @@ use self::{
   },
   parse::{domain_value, optional_string, required_i32, required_string, string_field, Page},
   run::{parse_remote_run, step_entries, step_log_entries, step_log_next_offset},
+};
+pub use self::{
+  run::RemoteRun,
+  sets::{ReadToolSet, WriteToolSet},
 };
 
 /// 一覧読み取り（ゴール・タスク）の期限。応答が大きく、2026-11-17 の本番実測では
@@ -104,11 +108,13 @@ fn degrades_to_previous(error: &ToolError) -> bool {
   matches!(error, ToolError::Tool(_)) || is_timeout(error)
 }
 
-/// 1プロジェクト分の状態を読み取るための道具のまとまり。
+/// 1プロジェクト分の道具のまとまりの実装本体。
 ///
 /// takt-mcp の読み取り道具は入力引数に絶対パスの `cwd` を必須とするため、この道具のまとまりは
 /// 対象プロジェクトの `cwd` を保持し、すべての tools/call の引数へ渡します。
-pub struct ToolSet<'a> {
+/// 外へは [`ReadToolSet`] と [`WriteToolSet`] だけを公開し、読み取り専用の接続からは
+/// 書き込みの道具を、書き込み専用の接続からは読み取りの道具を呼べない形にします。
+struct ToolSetCore<'a> {
   client:    &'a mut McpClient,
   cwd:       PathBuf,
   metrics:   ToolCallMetrics,
@@ -121,9 +127,9 @@ const MAX_PAGES: usize = 100;
 /// 仕様の有無を omissions で判定せず、既知の記法を順に読みます。
 const SPECIFICATION_NOTATIONS: [&str; 3] = ["gherkin", "quint", "alloy"];
 
-impl<'a> ToolSet<'a> {
+impl<'a> ToolSetCore<'a> {
   pub fn new(client: &'a mut McpClient, cwd: PathBuf) -> Self {
-    ToolSet { client, cwd, metrics: ToolCallMetrics::default(), workflows: HashMap::new() }
+    ToolSetCore { client, cwd, metrics: ToolCallMetrics::default(), workflows: HashMap::new() }
   }
 
   /// この道具のまとまりが記録した呼び出しの集計を取り出す。
@@ -613,7 +619,7 @@ fn inherit_previous_notifications(
   }
 }
 
-impl<'a> ToolSet<'a> {
+impl<'a> ToolSetCore<'a> {
   /// 指定した goalId の詳細を takt_get_goal と補助道具から読み取る。
   ///
   /// 目的・対象外・受け入れ条件・制約・仕様は takt_get_goal の path/textOffset を全ページ追従して
@@ -930,7 +936,7 @@ mod tests {
     time::{Duration, Instant},
   };
 
-  use super::{call_outcome, ToolError, ToolSet};
+  use super::{call_outcome, ReadToolSet, ToolError};
   use crate::{
     mcp::{
       client::{CallError, McpClient, McpClientConfig, ToolCallError, TransportError},
@@ -980,7 +986,7 @@ mod tests {
   async fn initial_call_duration_excludes_process_start_and_initialize() {
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
     let mut client = McpClient::new(delayed_config(directory.path(), "1.5"));
-    let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
+    let mut tools = ReadToolSet::new(&mut client, directory.path().to_path_buf());
 
     let started = Instant::now();
     tools
@@ -1003,7 +1009,7 @@ mod tests {
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
     let config = config(directory.path(), "this-command-does-not-exist", Vec::new(), 1);
     let mut client = McpClient::new(config);
-    let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
+    let mut tools = ReadToolSet::new(&mut client, directory.path().to_path_buf());
 
     let error = tools
       .read_snapshot(None, &run_log_handle(directory.path().to_path_buf()))
@@ -1026,7 +1032,7 @@ mod tests {
     // initialize の要求を読んだ後、応答せずに終了する子プロセスです。
     let config = config(directory.path(), "sh", vec!["-c".to_owned(), "read -r _line; exit 0".to_owned()], 1);
     let mut client = McpClient::new(config);
-    let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
+    let mut tools = ReadToolSet::new(&mut client, directory.path().to_path_buf());
 
     let error = tools
       .read_snapshot(None, &run_log_handle(directory.path().to_path_buf()))

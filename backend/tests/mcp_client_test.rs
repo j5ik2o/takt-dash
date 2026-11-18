@@ -171,7 +171,7 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
 
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
-    let error = tool_set(&mut client, cwd)
+    let error = write_tool_set(&mut client, cwd)
       .answer_goal_question(
         &goal_id("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11"),
         &inquiry_id("q1"),
@@ -195,7 +195,7 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
   }
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
-    let error = tool_set(&mut client, cwd)
+    let error = write_tool_set(&mut client, cwd)
       .approve_goal_registration(revision(3))
       .await
       .map(|_| ())
@@ -205,7 +205,7 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
   }
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
-    let error = tool_set(&mut client, cwd)
+    let error = write_tool_set(&mut client, cwd)
       .reject_goal_registration(revision(3))
       .await
       .map(|_| ())
@@ -215,7 +215,7 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
   }
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
-    let error = tool_set(&mut client, cwd)
+    let error = write_tool_set(&mut client, cwd)
       .merge_goal_pr(&goal_id("g1"), pull_request(42), MergeUntil::Merge)
       .await
       .map(|_| ())
@@ -683,12 +683,12 @@ async fn write_tool_responses_missing_required_fields_are_parse_errors() {
   // 応答の必須値が欠けていても既定値で補完せず、解析エラーにすることを、各書き込み道具で観測する。
   async fn expect_parse(
     tool_name: &str,
-    behavior: impl AsyncFnOnce(takt_dash_backend::mcp::ToolSet<'_>) -> Result<(), ToolError>,
+    behavior: impl AsyncFnOnce(takt_dash_backend::mcp::WriteToolSet<'_>) -> Result<(), ToolError>,
   ) -> Result<(), ToolError> {
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
     let state = write_state(directory.path(), json!({ "responses": { tool_name: {} } }));
     let mut client = mock_client(mock_config(directory.path(), &state, None));
-    let result = behavior(tool_set(&mut client, directory.path())).await;
+    let result = behavior(write_tool_set(&mut client, directory.path())).await;
     client.shutdown().await;
     result
   }
@@ -728,12 +728,16 @@ async fn write_tool_responses_missing_required_fields_are_parse_errors() {
   .expect_err("応答に questionId が無ければ解析エラーです");
   assert!(matches!(error, ToolError::Parse(_)), "takt_answer_goal_question の欠落は解析エラー: {error}");
 
-  let error = expect_parse("takt_list_goal_registration_proposals", async |mut tools| {
-    tools.list_goal_registration_proposals().await.map(|_| ())
-  })
-  .await
-  .expect_err("応答に proposals が無ければ解析エラーです");
+  // 登録案の一覧は読み取り専用の道具のため、読み取り側のまとまりで観測します。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "responses": { "takt_list_goal_registration_proposals": {} } }));
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let error = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect_err("応答に proposals が無ければ解析エラーです");
   assert!(matches!(error, ToolError::Parse(_)), "takt_list_goal_registration_proposals の欠落は解析エラー: {error}");
+  client.shutdown().await;
 }
 
 #[tokio::test]
@@ -742,12 +746,12 @@ async fn write_tool_responses_convert_task_name_and_inquiry_id() {
   // 空・空白のみ・ASCII 制御文字は解析エラーにすることを観測する。
   async fn with_responses(
     responses: Value,
-    behavior: impl AsyncFnOnce(takt_dash_backend::mcp::ToolSet<'_>) -> Result<(), ToolError>,
+    behavior: impl AsyncFnOnce(takt_dash_backend::mcp::WriteToolSet<'_>) -> Result<(), ToolError>,
   ) -> Result<(), ToolError> {
     let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
     let state = write_state(directory.path(), json!({ "responses": responses }));
     let mut client = mock_client(mock_config(directory.path(), &state, None));
-    let result = behavior(tool_set(&mut client, directory.path())).await;
+    let result = behavior(write_tool_set(&mut client, directory.path())).await;
     client.shutdown().await;
     result
   }
