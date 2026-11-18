@@ -74,6 +74,21 @@ const createSharedNameState = (
     thresholds: createThresholds(),
   });
 
+test("同名プロジェクトの集計は登録済みの実行中runだけを自サーバーへ数え、設定と履歴を保つ", () => {
+  const base = createSharedNameState(ConnectionState.CONNECTION_STATE_CONNECTED, ConnectionState.CONNECTION_STATE_CONNECTED);
+  const state = DashboardState.create({ ...base,
+    servers: base.servers.filter((server) => server.serverId === "a"),
+    projects: base.projects.map((project, index) => ({ ...project, concurrency: index + 2, completedTasks24h: index + 3 })),
+    runs: [...base.runs, { ...run("a"), runSlug: "completed", status: RunStatus.RUN_STATUS_COMPLETED }],
+  });
+  const view = buildOverviewView(state, NOW, true);
+  assert.equal(view.runningRuns, 1);
+  assert.deepEqual(view.projects.map(({ serverId, runningRuns }) => [serverId, runningRuns]), [["a", 1], ["b", 0]]);
+  assert.equal(view.runLimit, 5);
+  assert.equal(view.completedTasks24h, 7);
+  assert.equal(view.runs.length, 3, "未登録と完了済みのrunも詳細表示用に保持する");
+});
+
 test("同名プロジェクトでも遅延中のサーバーの run は遅延表示にならず、他サーバーへ波及しない", () => {
   const view = buildOverviewView(
     createSharedNameState(ConnectionState.CONNECTION_STATE_DELAYED, ConnectionState.CONNECTION_STATE_CONNECTED),

@@ -109,3 +109,25 @@ test("初回概要取得失敗の空配列は他のRPCの応答履歴があっ�
     assert.doesNotMatch(text(required(failed, "main")), /ゴールはありません/);
   }
 });
+
+test("概要ヘッダーは未取得の空snapshotと正常取得したサーバー0台を区別する", () => {
+  const state = DashboardState.create({});
+  for (const snapshotLoaded of [false, true]) {
+    const page = documentOf(createElement(OverviewContent, {
+      view: buildOverviewView(state, NOW, snapshotLoaded), disconnected: !snapshotLoaded,
+      unavailableSituation: { failure: "unreachable", respondedBefore: true },
+    }));
+    const head = text(required(page, ".page-head"));
+    const runs = text(required(page, '[aria-labelledby="h-runs"]'));
+    if (snapshotLoaded) {
+      assert.match(head, /0台のサーバーを集約/);
+      assert.equal(runs.match(/走っている run はありません/g)?.length, 1);
+      assert.doesNotMatch(head, /不明|0件の run/);
+    } else {
+      assert.match(head, /サーバーの台数は不明.*run は不明/);
+      assert.doesNotMatch(head, /0台|0件/);
+      assert.match(runs, /分かりません/);
+      assert.doesNotMatch(runs, /run はありません/);
+    }
+  }
+});
