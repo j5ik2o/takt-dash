@@ -56,6 +56,8 @@ pub struct Poller {
   deferred_lost:  BTreeMap<String, (DateTime<Utc>, ConnectionTransition)>,
   changes:        broadcast::Sender<()>,
   last_signature: Option<StoreSignature>,
+  #[cfg(test)]
+  read_barrier:   Option<rebuild_tests::ReadBarrier>,
   /// プロジェクトごとの run の集計と、その集計を作ったときの cwd。周期をまたいで持ち、
   /// run の本体ログを前回の続きから読むために使います。
   run_logs:       RunLogHandles<String>,
@@ -95,6 +97,8 @@ impl Poller {
       deferred_lost: BTreeMap::new(),
       changes,
       last_signature: None,
+      #[cfg(test)]
+      read_barrier: None,
       run_logs: RunLogHandles::default(),
     }
   }
@@ -142,24 +146,37 @@ impl Poller {
     let mut record_error: Option<crate::config::ConfigError> = None;
     let mut handles = Vec::with_capacity(config.projects.len());
     for project in &config.projects {
+      #[cfg(test)]
+      self.pause_read(rebuild_tests::ReadBoundary::BeforeAcquisition).await;
+      // 作り直したかの記録・読取ハンドル・読取先の cwd を一体で取り出す。取得したハンドルと
+      // cwd はこの周期の最後まで使うため、通知の消費・ハンドルの選択・読取先の選択が別の
+      // 世代になることはありません。登録が無い場合も記録は消費済みです。基準の準備は登録の
+      // 有無に関わらず進め、失敗の反映は結果の回収で行います。
+      let acquired = self.registry.take_for_read(&project.server, &project.name);
       // 設定変更（読み取り側・書き込み RPC 経由の双方）でクライアントを作り直した
       // プロジェクトは、旧接続先の差分基準を新接続先へ投影しないよう読み取り前にリセットします。
-      if self.registry.take_rebuilt_for(&project.server, &project.name) {
+      if acquired.as_ref().is_some_and(|read| read.rebuilt) {
         self.reset_project_baseline(&project.name);
       }
+      #[cfg(test)]
+      self.pause_read(rebuild_tests::ReadBoundary::AfterAcquisition).await;
       // 再起動や作り直しで比較基準が無いプロジェクトは、記録済みの接続の出来事から
       // 基準を作り、未対応の切断を取りこぼさないようにします。
       self.seed_connection_baseline(project);
       self.forget_answered_terminal_questions(&project.name);
       let prev = self.previous.get(&project.name).cloned();
-      let run_logs = self.run_logs.handle_for(&project.name, &project.cwd);
-      match self.registry.get(&project.server, &project.name) {
-        | Some(handle) => {
-          let project = project.clone();
+      match acquired {
+        | Some(read) => {
+          // 道具呼び出しとローカル run の集計は、取得したクライアントと同じ世代の cwd を
+          // 使います。周期冒頭に読み込んだ設定の cwd を使うと、取得の前後で RPC が
+          // 接続先を作り直したときに、新旧の世代を取り違えます。
+          let run_logs = self.run_logs.handle_for(&project.name, &read.cwd);
+          let cwd = read.cwd;
+          let handle = read.client;
           handles.push(Some(tokio::spawn(async move {
             let read_at = Utc::now();
             let mut client = handle.lock().await;
-            let mut tools = ToolSet::new(&mut client, project.cwd.clone());
+            let mut tools = ToolSet::new(&mut client, cwd);
             let result = tools.read_snapshot(prev.as_ref(), &run_logs).await;
             let metrics = tools.take_metrics();
             (read_at, result, metrics)
@@ -551,3 +568,7 @@ async fn sleep_until_next(started: DateTime<Utc>, interval: Duration) {
     tokio::time::sleep(Duration::from_millis(remaining as u64)).await;
   }
 }
+
+#[cfg(test)]
+#[path = "poller_rebuild_tests.rs"]
+mod rebuild_tests;

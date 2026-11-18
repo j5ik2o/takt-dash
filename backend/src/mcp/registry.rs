@@ -19,6 +19,18 @@ type ClientKey = (String, String);
 
 type ClientHandle = Arc<AsyncMutex<McpClient>>;
 
+/// 定期読み取りへ渡す、同じ世代のクライアントとその読取先。
+pub(crate) struct ClientRead {
+  /// 読み取りに使うクライアント。取得した世代のハンドルを、周期の最後まで使います。
+  pub(crate) client:  ClientHandle,
+  /// そのクライアントを作るときに使った起動設定の cwd。道具呼び出しとローカル run の
+  /// 集計の読取先に使います。
+  pub(crate) cwd:     std::path::PathBuf,
+  /// このクライアントが前回の読み取り以降に作り直されたか。初回作成・設定変更の双方で真に
+  /// なり、`take_for_read` が消費すると次に作り直すまで偽に戻ります。
+  pub(crate) rebuilt: bool,
+}
+
 /// 1 プロジェクト分のクライアントと、その起動設定。
 struct Entry {
   config: McpClientConfig,
@@ -34,8 +46,8 @@ struct RegistryInner {
 
 /// プロジェクトごとの takt-mcp クライアントを所有するレジストリ。
 ///
-/// map 自体の排他は [`std::sync::Mutex`] で行い、ガードは `client`・`get`・`retain`・
-/// `take_rebuilt_for` の式の中だけに閉じて `.await` を跨ぎません。クライアントごとの排他は
+/// map 自体の排他は [`std::sync::Mutex`] で行い、ガードは `client`・`take_for_read`・`retain`
+/// の式の中だけに閉じて `.await` を跨ぎません。クライアントごとの排他は
 /// [`tokio::sync::Mutex`] で行い、1 回の `ToolSet` 操作の間だけ保持します。ロックを
 /// 入れ子にしないため、書き込みが読み取りを待たせてもデッドロックしません。
 #[derive(Clone, Default)]
@@ -76,11 +88,25 @@ impl McpClientRegistry {
     handle
   }
 
-  /// 指定したプロジェクトのクライアントを返す。登録が無ければ `None` を返します。
-  pub fn get(&self, server_id: &str, project: &str) -> Option<ClientHandle> {
+  /// 定期読み取り用に、指定したプロジェクトのクライアントと、作り直したかの記録、
+  /// およびそのクライアントの起動設定の cwd を一体で取り出す。
+  ///
+  /// ハンドルの複製・`rebuilt` の消費・`cwd` の複製を同じロックで行うため、取得する
+  /// ハンドル・「作り直した」の記録・読取先の cwd は常に同じ世代に対応します。これがないと、
+  /// 通知の消費とハンドルの取得の間に書き込み RPC が作り直した場合、旧世代のハンドルを
+  /// 新世代の基準で読むか、新世代の通知を消費したまま旧世代の比較基準を使う取り違えが
+  /// 起きます。さらに、取得したハンドルの起動設定の cwd と、周期冒頭に読み込んだ設定の
+  /// cwd が食い違うと、道具呼び出しとローカル run の集計を旧接続先のディレクトリで
+  /// 行ってしまいます。
+  ///
+  /// 戻り値は、登録が無ければ `None`、あれば同じエントリから作った [`ClientRead`] です。
+  /// 作り直した記録は呼び出し時に消費され、次に作り直すまで再び真にはなりません。
+  pub(crate) fn take_for_read(&self, server_id: &str, project: &str) -> Option<ClientRead> {
     let key = (server_id.to_owned(), project.to_owned());
-    let inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-    inner.clients.get(&key).map(|entry| entry.client.clone())
+    let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+    let entry = inner.clients.get(&key).map(|entry| (entry.client.clone(), entry.config.cwd.clone()));
+    let rebuilt = inner.rebuilt.remove(&key);
+    entry.map(|(client, cwd)| ClientRead { client, cwd, rebuilt })
   }
 
   /// 指定したキー以外のクライアントをレジストリから外す。
@@ -92,16 +118,6 @@ impl McpClientRegistry {
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
     inner.clients.retain(|(server_id, project), _| wanted.iter().any(|key| &key.0 == server_id && &key.1 == project));
     inner.rebuilt.retain(|(server_id, project)| wanted.iter().any(|key| &key.0 == server_id && &key.1 == project));
-  }
-
-  /// 指定したプロジェクトが作り直されたかを返し、記録を消す。
-  ///
-  /// 定期読み取りは読み取りの前にこれを呼び、作り直したプロジェクトの差分基準を
-  /// リセットします。読み取り側の設定差分と、書き込み RPC 経由の作り直しの双方を拾えます。
-  pub fn take_rebuilt_for(&self, server_id: &str, project: &str) -> bool {
-    let key = (server_id.to_owned(), project.to_owned());
-    let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-    inner.rebuilt.remove(&key)
   }
 
   /// すべてのクライアントを map から取り出し、1 件ずつ排他取得して停止する。
