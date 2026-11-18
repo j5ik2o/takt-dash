@@ -66,6 +66,7 @@ test("サーバー行は配下なし、未読、既読ゼロを区別して接�
     [[{ ...unread, lastReadAt: NOW }], /run\s*0件/],
   ] satisfies Array<[Project[], RegExp]>) {
     const page = documentOf(createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: [server], projects, runs: [], pendingCount: 0, frontendBuild: build, backendBuild: build,
     }));
     const row = required(page, ".srv-list li");
@@ -74,6 +75,7 @@ test("サーバー行は配下なし、未読、既読ゼロを区別して接�
     assert.ok(row.querySelector('a[href="/#server-mini"]'));
   }
   const omitted = documentOf(createElement(Sidebar, {
+    snapshotLoaded: true,
     servers: [server], runs: [], pendingCount: 0, frontendBuild: build, backendBuild: build,
   }));
   assert.match(text(required(omitted, ".cnt")), /run\s*不明/);

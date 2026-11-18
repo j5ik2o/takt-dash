@@ -22,6 +22,7 @@ type NavLink = { href: string; tag: string; inner: string };
 const renderSidebar = (currentPath?: string): string =>
   renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: createDashboardState().servers,
       pendingCount: 0,
       frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
@@ -131,6 +132,7 @@ test("sidebar にゴール一覧の項目が既存項目と同じ並びで加わ
   const state = createDashboardState();
   const html = renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: state.servers,
       pendingCount: 2,
       frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },

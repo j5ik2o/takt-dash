@@ -52,11 +52,17 @@ export function OverviewContent({
   const partialReadTime = view.partialReadAt
     ? `${formatClock(view.partialReadAt)} 時点`
     : "最後に読めた時刻は不明";
-  const emptyRunTime = partialRead
-    ? partialReadTime
-    : disconnected && view.readAt !== undefined
-      ? `${formatClock(view.readAt)} 時点`
-      : undefined;
+  const firstProjectReadAt = view.projects[0]?.lastReadAt;
+  const commonProjectReadAt = firstProjectReadAt !== undefined && view.projects.every(
+    (project) => project.lastReadAt?.getTime() === firstProjectReadAt.getTime(),
+  ) ? firstProjectReadAt : undefined;
+  const emptyRunText = view.coverage !== "complete"
+    ? "まだ読めていないため、run があるかどうかは分かりません。"
+    : (partialRead || disconnected) && view.projects.length > 0
+      ? commonProjectReadAt !== undefined
+        ? `最後に読めた時点（${formatClock(commonProjectReadAt)} 時点）では、走っている run はありませんでした。`
+        : "各プロジェクトで最後に取得した結果には、走っている run はありませんでした。"
+      : "走っている run はありません。";
   const lastReadText = view.readAt
     ? `最終読み取り時刻 ${formatClock(view.readAt)}（${formatDateTime(view.readAt)}）時点の内容を表示しています。`
     : view.snapshotLoaded && view.projects.length === 0
@@ -74,9 +80,13 @@ export function OverviewContent({
         <div>
           <h1>概要</h1>
           <p>
-            {view.servers.length}台のサーバーを集約{knownEmptyRuns ? "しています。" : <>し、{view.coverage === "complete"
-              ? `${view.runningRuns}件の run が動いています。`
-              : `実行中の run は${readCountText(view.runningRuns, view.coverage)}です。`}</>}
+            {view.snapshotLoaded ? (
+              <>
+                {view.servers.length}台のサーバーを集約{knownEmptyRuns ? "しています。" : <>し、{view.coverage === "complete"
+                  ? `${view.runningRuns}件の run が動いています。`
+                  : `実行中の run は${readCountText(view.runningRuns, view.coverage)}です。`}</>}
+              </>
+            ) : "サーバーの台数は不明です。実行中の run は不明です。"}
           </p>
           {view.coverage !== "complete" ? (
             <p className="stale-note">まだ読めていないプロジェクトがあります。run・判断待ち・ゴールの件数には未読の分を含めていません。</p>
@@ -316,11 +326,7 @@ export function OverviewContent({
             </table>
           </div>
         ) : (
-          <p className="empty">{view.coverage === "complete"
-            ? emptyRunTime !== undefined
-              ? `最後に読めた時点（${emptyRunTime}）では、走っている run はありませんでした。`
-              : "走っている run はありません。"
-            : "まだ読めていないため、run があるかどうかは分かりません。"}</p>
+          <p className="empty">{emptyRunText}</p>
         )}
       </section>
 

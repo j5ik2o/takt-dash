@@ -15,6 +15,7 @@ import { toRunCount } from "../state/domain-primitives";
 import { readCountText, readCoverage } from "../state/read-coverage";
 
 type SidebarProps = {
+  snapshotLoaded: boolean;
   servers: Server[];
   pendingCount: number;
   currentPath?: string;
@@ -42,6 +43,7 @@ export const isCurrentPath = (currentPath: string | undefined, href: string): bo
   currentPath !== undefined && currentPath === href;
 
 export function Sidebar({
+  snapshotLoaded,
   servers,
   pendingCount,
   currentPath,
@@ -110,7 +112,9 @@ export function Sidebar({
       <div className="side-foot">
         <p>最終読み取り時刻 {readAt ? formatClock(readAt) : "不明"}</p>
         <p>
-          {servers.length}台中{connectedCount}台から読めています
+          {snapshotLoaded
+            ? `${servers.length}台中${connectedCount}台から読めています`
+            : "サーバーの総数・接続台数は不明です。"}
         </p>
         {notResponding.map((project) => (
           <p className="stale-note" key={`${project.serverId}:${project.name}`}>

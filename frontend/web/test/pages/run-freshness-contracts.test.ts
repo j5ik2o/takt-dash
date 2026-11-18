@@ -15,8 +15,8 @@ const required = (root: ParentNode, selector: string): Element => {
   return element;
 };
 const text = (element: Element): string => element.textContent?.replace(/\s+/g, " ").trim() ?? "";
-const render = (state: DashboardState): Document => new JSDOM(renderToStaticMarkup(
-  createElement(OverviewContent, { view: buildOverviewView(state, NOW, true), disconnected: false }),
+const render = (state: DashboardState, disconnected = false): Document => new JSDOM(renderToStaticMarkup(
+  createElement(OverviewContent, { view: buildOverviewView(state, NOW, true), disconnected }),
 )).window.document;
 const healthy = (populated = true): DashboardState => {
   const base = createHealthyDashboardState();
@@ -131,3 +131,43 @@ test("本番投影と同じサーバーと配下の同時停止でも空run一�
     assert.doesNotMatch(text(required(page, selector)), /run.*0\s*件|0\s*\/|走っている run はありません/);
   }
 });
+
+for (const failure of ["server", "project", "web"] as const) {
+  for (const timing of ["common", "different", "unread"] as const) {
+    test(`${failure}切断時の空一覧は${timing}のプロジェクト取得範囲だけを示す`, () => {
+      const base = healthy(false);
+      const first = new Date("2026-11-13T12:00:00Z");
+      const second = new Date("2026-11-13T12:05:00Z");
+      const state = DashboardState.create({ ...base, readAt: second,
+        servers: base.servers.map((server) => ({ ...server, connected: failure !== "server", lastReadAt: second })),
+        projects: base.projects.map((project, index) => ({ ...project,
+          lastReadAt: index === 0 ? first : timing === "common" ? new Date(first) : timing === "different" ? second : undefined,
+          connectionState: failure === "project" && index === 0
+            ? ConnectionState.CONNECTION_STATE_UNRESPONSIVE : project.connectionState,
+        })),
+      });
+      const page = render(state, failure === "web");
+      const list = text(required(page, '[aria-labelledby="h-runs"]'));
+      if (timing === "unread") {
+        assert.match(list, /あるかどうかは分かりません/);
+        assert.doesNotMatch(list, /ありません/);
+      } else {
+        assert.equal(list.match(/走っている run はありません/g)?.length, 1);
+        assert.match(list, /ありませんでした/);
+        if (timing === "common") {
+          assert.ok(list.includes(`${formatClock(first)} 時点`), list);
+        } else {
+          assert.match(list, /各プロジェクト.*最後に取得した結果/);
+          assert.doesNotMatch(list, /時点/);
+          for (const time of [first, second]) assert.ok(!list.includes(formatClock(time)), list);
+        }
+      }
+      for (const selector of [".page-head > div", ".tiles .tile"]) {
+        const content = text(required(page, selector));
+        if (timing === "unread") assert.match(content, /読めた分/);
+        else assert.doesNotMatch(content, /run.*0\s*件|0\s*\//);
+        assert.doesNotMatch(content, /走っている run はありません/);
+      }
+    });
+  }
+}

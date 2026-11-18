@@ -28,6 +28,7 @@ test("未登録先の run は無音の run として集計しない", () => {
   });
   const view = buildOverviewView(state, NOW, true);
   assert.equal(view.runs.length, 1);
-  assert.equal(view.runningRuns, 1);
+  assert.equal(view.runningRuns, 0);
+  assert.equal(view.projects.find((project) => project.name === "corporate-site")?.runningRuns, 0);
   assert.equal(view.silentRunCount, 0);
 });

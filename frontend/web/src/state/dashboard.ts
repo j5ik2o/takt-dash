@@ -288,7 +288,10 @@ export function buildOverviewView(state: OverviewStateInput, now: Date, snapshot
       ),
     };
   });
-  const runningRuns = state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length;
+  const registeredRunningRuns = runs.filter(
+    ({ server, run }) => server !== undefined && run.status === RUN_STATUS.RUNNING,
+  );
+  const runningRuns = registeredRunningRuns.length;
   const silentRunCount = runs.filter((run) => run.state === "warn").length;
   const failedTasks = failedTaskCount(state.goals);
   const abortedGoals = state.goals.filter((goal) => goalSection(goal) === "aborted").length;
@@ -314,10 +317,9 @@ export function buildOverviewView(state: OverviewStateInput, now: Date, snapshot
       ...project,
       concurrency: toRunLimit(project.concurrency),
       runningRuns: toRunCount(
-        state.runs.filter(
-          (run) =>
-            projectKey(run.serverId, run.project) === projectKey(project.serverId, project.name) &&
-            run.status === RUN_STATUS.RUNNING,
+        registeredRunningRuns.filter(
+          ({ run }) =>
+            projectKey(run.serverId, run.project) === projectKey(project.serverId, project.name),
         ).length,
       ),
     })),

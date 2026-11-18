@@ -80,11 +80,22 @@ test("概要が数えるゴールの ID 集合はプロジェクトの進行中�
 for (const registered of [true, false]) {
   test(registered ? "登録済みで接続済みの run は両画面で実行中になる" : "起動設定だけにある接続先の run は両画面で接続未確認と分かり、詳細を閲覧できる", () => {
     const base = createHealthyDashboardState();
-    const state = DashboardState.create({ ...base, servers: registered ? base.servers : [] });
+    const state = DashboardState.create({ ...base, servers: registered ? base.servers : [],
+      projects: base.projects.filter((project) => project.name === "corporate-site")
+        .map((project) => ({ ...project, concurrency: 5 })),
+    });
     const view = buildOverviewView(state, NOW, true).runs[0];
     assert.ok(view);
     const summary = overview(state);
     const detail = projects(state);
+    const count = registered ? 1 : 0;
+    assert.equal(view.run.status, RunStatus.RUN_STATUS_RUNNING);
+    assert.match(text(required(summary, ".page-head")), new RegExp(`${count}件の run`));
+    const usage = required(summary, '.tile [role="img"]');
+    assert.equal(usage.getAttribute("aria-label"), `実行上限 5 件に対して ${count} 件`);
+    assert.equal(required(usage, "i").getAttribute("style"), `width:${count * 20}%`);
+    assert.match(text(required(summary, 'a[href="/projects#project-corporate-site"]')),
+      new RegExp(`実行中の run は ${count} 件`));
     const row = required(summary, ".run-row");
     const projectRun = required(detail, "#project-corporate-site .mini-runs li");
     for (const element of [row, projectRun]) {
@@ -102,6 +113,28 @@ for (const registered of [true, false]) {
         assert.match(label, /未登録|未確認|確認でき|接続でき|不明/);
         assert.notEqual(label, "実行中");
       }
+    }
+  });
+}
+
+for (const condition of ["server", "project", "silent"] as const) {
+  test(`登録済みrunは${condition}の状態でも件数と詳細リンクを保つ`, () => {
+    const base = createHealthyDashboardState();
+    const state = DashboardState.create({ ...base,
+      servers: base.servers.map((server) => ({ ...server, connected: condition !== "server" })),
+      projects: base.projects.map((project) => ({ ...project,
+        connectionState: condition === "project"
+          ? ConnectionState.CONNECTION_STATE_UNRESPONSIVE : project.connectionState,
+      })),
+      runs: base.runs.map((run) => ({ ...run, logSilent: condition === "silent" })),
+    });
+    const view = buildOverviewView(state, NOW, true);
+    assert.equal(view.runningRuns, 1);
+    assert.equal(view.projects.find((project) => project.name === "corporate-site")?.runningRuns, 1);
+    for (const [page, selector] of [[overview(state), ".run-row"], [projects(state), "#project-corporate-site .mini-runs li"]] as const) {
+      const row = required(page, selector);
+      assert.ok(row.querySelector('a[href="/runs/run-aaa"]'));
+      assert.match(text(row), condition === "silent" ? /ログが止まっています/ : /実行中（.*時点）/);
     }
   });
 }
@@ -212,6 +245,7 @@ test("共通サイドバーは未読のサーバーをrun 0件とせず、既読
     const state = emptyState(read);
     const build = { commit: "test", branch: "test" };
     const document = new JSDOM(renderToStaticMarkup(createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: state.servers, projects: state.projects, runs: [], pendingCount: 0,
       frontendBuild: build, backendBuild: build,
     }))).window.document;

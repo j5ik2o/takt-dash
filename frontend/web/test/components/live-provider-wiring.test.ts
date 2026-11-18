@@ -475,6 +475,61 @@ const fireError = async (source: FakeEventSource): Promise<void> => {
   });
 };
 
+for (const respondedBefore of [false, true]) {
+  test(`概要未取得なら他RPCの応答履歴${respondedBefore}でも両画面のサーバー台数は不明`, () => {
+    const props: ComponentProps<typeof StateStreamProvider> = {
+      initialState: DashboardState.create({}), initialSnapshotLoaded: false,
+      initialFailure: "unreachable", initialRespondedBefore: respondedBefore,
+      children: [createElement(LiveOverview, { key: "overview", initialNowMs: NOW.getTime() }),
+        createElement(LiveSidebar, { key: "sidebar", frontendBuild: { commit: "test", branch: "test" } })],
+    };
+    const page = new JSDOM(renderToStaticMarkup(createElement(StateStreamProvider, props))).window.document;
+    for (const selector of [".page-head > div > p", ".side-foot > p:nth-child(2)"]) {
+      const count = page.querySelector(selector);
+      assert.ok(count);
+      assert.match(count.textContent ?? "", /サーバー.*不明/);
+      assert.doesNotMatch(count.textContent ?? "", /0\s*台/);
+    }
+  });
+}
+
+test("同じ概要とサイドバーは台数不明から取得、切断中の保持、正常な0台の再受信へ追従する", async () => {
+  const base = createDashboardState();
+  const loaded = DashboardState.create({ ...base,
+    servers: base.servers.filter((server) => server.connected),
+  });
+  const { container, unmount } = await mountLive({
+    initialState: DashboardState.create({}), initialSnapshotLoaded: false, initialFailure: "unreachable",
+  }, [createElement(LiveOverview, { key: "overview", initialNowMs: NOW.getTime() }),
+    createElement(LiveSidebar, { key: "sidebar", frontendBuild: { commit: "test", branch: "test" } })]);
+  const counts = (): string[] => [".page-head > div > p", ".side-foot > p:nth-child(2)"].map((selector) => {
+    const element = container.querySelector(selector);
+    assert.ok(element);
+    return element.textContent ?? "";
+  });
+  try {
+    for (const count of counts()) assert.match(count, /サーバー.*不明/);
+    const source = FakeEventSource.instances[0];
+    assert.ok(source);
+    await fireMessage(source, JSON.stringify(DashboardState.toJSON(loaded)));
+    assert.match(counts()[0] ?? "", /1台のサーバー/);
+    assert.match(counts()[1] ?? "", /1台中1台/);
+    await fireError(source);
+    assert.match(counts()[0] ?? "", /1台のサーバー/);
+    assert.match(counts()[1] ?? "", /1台中1台/);
+    await waitForConnections(2);
+    const reconnected = FakeEventSource.instances[1];
+    assert.ok(reconnected);
+    await fireMessage(reconnected, JSON.stringify(DashboardState.toJSON(DashboardState.create({}))));
+    assert.match(counts()[0] ?? "", /0台のサーバー/);
+    assert.match(counts()[1] ?? "", /0台中0台/);
+    assert.equal(container.querySelectorAll('[role="alert"]').length, 0);
+    assert.equal(FakeEventSource.instances.length, 2);
+  } finally {
+    await unmount();
+  }
+});
+
 test("同じライブ画面とサイドバーは未読から空、非空への読み取り結果を反映する", async () => {
   const populated = createDashboardState();
   const empty = DashboardState.create({

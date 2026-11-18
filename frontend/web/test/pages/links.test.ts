@@ -53,6 +53,7 @@ const renderProjectsWithState = (state = createDashboardState()): string =>
 const renderSidebarWithState = (state = createDashboardState()): string =>
   renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: state.servers,
       pendingCount: 0,
       frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },

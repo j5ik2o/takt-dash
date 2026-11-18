@@ -553,6 +553,7 @@ test("760px 以下でもサーバーの状態テキストを隠さない", async
   const state = createDashboardState();
   const html = renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: state.servers,
       pendingCount: 0,
       // 状態は run の件数でも決まるため、run があるサーバーが「動作中」になる
