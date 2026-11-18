@@ -1,7 +1,10 @@
 //! gRPC の GetRunContent が、指定したレポートまたは指示書の本文だけを返し、run のディレクトリ
 //! （レポートは `reports/` の下、指示書はプロジェクト側の
-//! `interventions.jsonl`）の外を読まないことを 検証する。本文の取得でも takt-mcp
-//! を起動も呼び出しもしない。
+//! `interventions.jsonl`）の外を読まないことを 検証する。ローカルで読める run では、本文の取得でも
+//! takt-mcp を起動も呼び出しもしない。
+//!
+//! ローカルで保存場所を解決できない run（tasks.yaml が無い、または対応表に載っていない）の
+//! レポート本文は takt_get_run の report 指定で返し、それでも読めなければ従来のステータスで返す。
 
 mod common;
 mod grpc_harness;
@@ -229,4 +232,162 @@ async fn get_run_content_neither_starts_nor_calls_takt_mcp() {
   let calls = harness.recorded_calls();
   assert!(processes.is_empty(), "GetRunContent は takt-mcp を起動しません: {processes:?}");
   assert!(calls.is_empty(), "GetRunContent は takt-mcp の道具を呼びません: {calls:?}");
+}
+
+/// 状態ストアに run-1 だけを持ち、ローカルに run の保存場所を作らない土台。`state` は mock
+/// の状態です。
+fn remote_harness(state: serde_json::Value) -> GrpcHarness {
+  let harness =
+    GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), state).build();
+  let snapshot = ProjectSnapshot {
+    goals: vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![run("run-1", "implement", time("2026-11-13T09:06:00Z"))],
+    notifications: vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
+  };
+  harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
+  harness
+}
+
+/// takt_get_run が run-1 のレポート `filename` の本文として `content` を返す mock の状態。
+fn remote_report_state(filename: &str, content: &str) -> serde_json::Value {
+  json!({
+    "runs": {
+      "run-1": {
+        "runSlug": "run-1",
+        "status": "running",
+        "reports": [ { "filename": filename, "sizeBytes": content.len(), "content": content } ]
+      }
+    }
+  })
+}
+
+/// 記録された takt_get_run の呼び出しの引数を返す。
+fn takt_get_run_calls(harness: &GrpcHarness) -> Vec<serde_json::Value> {
+  harness.recorded_calls().into_iter().filter(|call| call.name == "takt_get_run").map(|call| call.arguments).collect()
+}
+
+/// takt_get_run の report 指定でレポート本文を読んだことを確かめる。
+fn assert_read_through_takt_get_run(harness: &GrpcHarness, filename: &str) {
+  let calls = takt_get_run_calls(harness);
+  assert!(!calls.is_empty(), "ローカルで読めない run のレポートは takt_get_run で読みます: {calls:?}");
+  for call in &calls {
+    assert_eq!(call["runSlug"], json!("run-1"));
+    assert_eq!(call["view"], json!("report"), "本文は view report で読みます: {call:?}");
+    assert_eq!(call["report"], json!(filename), "対象のレポートを指定します: {call:?}");
+  }
+}
+
+#[tokio::test]
+async fn get_run_content_reads_a_report_of_a_run_without_a_local_task_table_from_takt_get_run() {
+  // リモートのサーバーのプロジェクトは、ローカルに tasks.yaml が無く保存場所を読めない。その run の
+  // レポート本文は takt_get_run の report 指定で返す。ローカルの読み取りだけに頼る実装は
+  // Unavailable で落ちる。
+  let harness = remote_harness(remote_report_state("remote-plan.md", "リモートの計画本文"));
+
+  let content = request_content(&harness, report_request("run-1", "remote-plan.md"))
+    .await
+    .expect("ローカルで読めない run のレポートも取得できます");
+
+  assert_eq!(content.run_slug, "run-1");
+  assert_eq!(content.content, "リモートの計画本文", "本文は takt_get_run の値です");
+  assert_eq!(content.size_bytes, "リモートの計画本文".len() as i64);
+  assert!(!content.truncated);
+  assert_read_through_takt_get_run(&harness, "remote-plan.md");
+}
+
+#[tokio::test]
+async fn get_run_content_reads_a_report_of_a_run_missing_from_the_task_table_from_takt_get_run() {
+  // ローカルの tasks.yaml に載っていない run のレポート本文も、takt_get_run の値で返す。
+  // ローカルの読み取りだけに頼る実装は Not Found で落ちる。
+  let harness = remote_harness(remote_report_state("remote-plan.md", "リモートの計画本文"));
+  let fixture = RunFixture::new(harness.project_dir());
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("other-run"), source_run_slug: None }]);
+
+  let content = request_content(&harness, report_request("run-1", "remote-plan.md"))
+    .await
+    .expect("対応表に無い run のレポートも取得できます");
+
+  assert_eq!(content.content, "リモートの計画本文", "本文は takt_get_run の値です");
+  assert!(!content.truncated);
+  assert_read_through_takt_get_run(&harness, "remote-plan.md");
+}
+
+#[tokio::test]
+async fn get_run_content_reads_a_remote_report_larger_than_one_page_in_full() {
+  // takt_get_run は1回の応答で最大 4096 バイトしか本文を返さない。それより大きいレポートも、
+  // nextOffset をたどって全体を返す。最初のページだけで止める実装はここで落ちる。
+  // 本文は3バイトの文字で作り、ページの境界が文字の途中に来ても本文を壊さないことも確かめる。
+  let large = "あ".repeat(3000);
+  let harness = remote_harness(remote_report_state("large.md", &large));
+
+  let content =
+    request_content(&harness, report_request("run-1", "large.md")).await.expect("大きなリモートのレポートも返します");
+
+  assert_eq!(content.content.len(), large.len(), "本文の全体を返します");
+  assert!(content.content == large, "本文をページの境界で壊さずにつなぎます");
+  assert_eq!(content.size_bytes, large.len() as i64, "size_bytes はレポート全体の大きさです");
+  assert!(!content.truncated, "全体を返した本文は truncated ではありません");
+  let calls = takt_get_run_calls(&harness);
+  assert!(calls.len() >= 3, "4096 バイトを超える本文はページをたどって読みます: {calls:?}");
+  assert_read_through_takt_get_run(&harness, "large.md");
+}
+
+#[tokio::test]
+async fn get_run_content_keeps_unavailable_when_neither_the_task_table_nor_takt_get_run_can_be_read() {
+  // ローカルの tasks.yaml を読めず、takt_get_run も失敗する run のレポートは、従来どおり
+  // Unavailable です。
+  let mut state = remote_report_state("remote-plan.md", "リモートの計画本文");
+  state["isError"] = json!(["takt_get_run"]);
+  let harness = remote_harness(state);
+
+  let status = request_content(&harness, report_request("run-1", "remote-plan.md"))
+    .await
+    .expect_err("どちらでも読めない run のレポートは返しません");
+
+  assert_eq!(status.code(), tonic::Code::Unavailable, "読めない run は Unavailable です: {status:?}");
+  assert!(!takt_get_run_calls(&harness).is_empty(), "ローカルで読めない run は takt_get_run を試します");
+}
+
+#[tokio::test]
+async fn get_run_content_keeps_not_found_when_the_run_is_neither_listed_nor_readable_from_takt_get_run() {
+  // ローカルの tasks.yaml に載っておらず、takt_get_run でも読めない run のレポートは Not Found
+  // です。
+  let mut state = remote_report_state("remote-plan.md", "リモートの計画本文");
+  state["isError"] = json!(["takt_get_run"]);
+  let harness = remote_harness(state);
+  let fixture = RunFixture::new(harness.project_dir());
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("other-run"), source_run_slug: None }]);
+
+  let status = request_content(&harness, report_request("run-1", "remote-plan.md"))
+    .await
+    .expect_err("対応表に無く takt_get_run でも読めない run のレポートは返しません");
+
+  assert_eq!(status.code(), tonic::Code::NotFound, "対応表に無い run は Not Found です: {status:?}");
+}
+
+#[tokio::test]
+async fn get_run_content_does_not_call_takt_mcp_for_a_report_of_a_cleaned_worktree() {
+  // 掃除済みの worktree の run は、takt_get_run が本文を返せる状態でも MCP を呼ばずに Not Found
+  // です。
+  let harness = remote_harness(remote_report_state("plan.md", "リモートの計画本文"));
+  let fixture = RunFixture::new(harness.project_dir());
+  let worktree =
+    harness.project_dir().parent().expect("プロジェクトの cwd には親があります").join("takt-worktrees").join("wt-gone");
+  fixture.write_worktree_tasks(&[WorktreeTaskLine {
+    run_slug:        Some("run-1"),
+    source_run_slug: None,
+    worktree_path:   &worktree,
+  }]);
+
+  let status = request_content(&harness, report_request("run-1", "plan.md"))
+    .await
+    .expect_err("掃除済みの worktree のレポートは返しません");
+
+  assert_eq!(status.code(), tonic::Code::NotFound, "掃除済みの run のレポートは Not Found です: {status:?}");
+  let calls = harness.recorded_calls();
+  assert!(calls.is_empty(), "保存場所が残っていない run では takt-mcp の道具を呼びません: {calls:?}");
 }

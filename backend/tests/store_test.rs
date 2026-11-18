@@ -621,3 +621,30 @@ fn project_view_returns_goal_and_event_kind_helpers_stay_consistent() {
   assert_eq!(view.goals[0].goal_id.as_str(), "g1");
   assert_eq!(EventKind::from_stored(EventKind::Inquiry.as_str()), Some(EventKind::Inquiry));
 }
+
+#[test]
+fn invalidated_goal_questions_are_taken_once_per_project() {
+  let store = store_with(30, 10);
+  store.invalidate_goal_questions("takt-dash", goal_id_named("g1"));
+  store.invalidate_goal_questions("takt-dash", goal_id_named("g2"));
+
+  let taken = store.take_invalidated_goal_questions("takt-dash");
+
+  assert_eq!(taken.into_iter().collect::<Vec<_>>(), vec![goal_id_named("g1"), goal_id_named("g2")]);
+  assert!(store.take_invalidated_goal_questions("takt-dash").is_empty(), "取り出した記録は消えます");
+  assert!(store.take_invalidated_goal_questions("other").is_empty(), "記録はプロジェクトごとです");
+}
+
+#[test]
+fn invalidated_goal_questions_of_a_removed_project_are_dropped() {
+  let store = store_with(30, 10);
+  store.invalidate_goal_questions("takt-dash", goal_id_named("g1"));
+
+  store.set_projects(vec![]);
+  store.set_projects(vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))]);
+
+  assert!(
+    store.take_invalidated_goal_questions("takt-dash").is_empty(),
+    "設定から外れたプロジェクトの記録は残しません"
+  );
+}

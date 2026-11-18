@@ -6,7 +6,7 @@
 //! 起点も更新しません。判断待ち・滞留・ログの無音は正規状態から都度計算します。
 
 use std::{
-  collections::BTreeMap,
+  collections::{BTreeMap, BTreeSet},
   sync::{Arc, Mutex},
 };
 
@@ -86,10 +86,13 @@ pub struct StateStore {
 
 #[derive(Debug)]
 struct StoreInner {
-  servers:    BTreeMap<String, ServerMeta>,
-  projects:   Vec<Project>,
-  thresholds: Thresholds,
-  slots:      BTreeMap<String, ProjectSlot>,
+  servers:             BTreeMap<String, ServerMeta>,
+  projects:            Vec<Project>,
+  thresholds:          Thresholds,
+  slots:               BTreeMap<String, ProjectSlot>,
+  /// 問い合わせへの回答が成功し、次の周期で質問を読み直すゴール（プロジェクトごと）。
+  /// 状態が変わらない終端のゴールでも、ここに載ったゴールは質問の読み取りを省きません。
+  questions_to_reread: BTreeMap<String, BTreeSet<GoalId>>,
 }
 
 impl StateStore {
@@ -99,7 +102,15 @@ impl StateStore {
     for project in &projects {
       slots.insert(project.name.clone(), ProjectSlot::unread());
     }
-    StateStore { inner: Arc::new(Mutex::new(StoreInner { servers, projects, thresholds, slots })) }
+    StateStore {
+      inner: Arc::new(Mutex::new(StoreInner {
+        servers,
+        projects,
+        thresholds,
+        slots,
+        questions_to_reread: BTreeMap::new(),
+      })),
+    }
   }
 
   /// 読み取りが成功したときの接続状態の遷移を、状態を変えずに返す。
@@ -146,10 +157,26 @@ impl StateStore {
     let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
     let wanted: Vec<&str> = projects.iter().map(|project| project.name.as_str()).collect();
     inner.slots.retain(|name, _| wanted.contains(&name.as_str()));
+    inner.questions_to_reread.retain(|name, _| wanted.contains(&name.as_str()));
     for project in &projects {
       inner.slots.entry(project.name.clone()).or_insert_with(ProjectSlot::unread);
     }
     inner.projects = projects;
+  }
+
+  /// 問い合わせへの回答が成功したゴールを、次の周期で質問を読み直すゴールとして記録する。
+  ///
+  /// 状態が変わらない終端のゴールは質問の読み取りを省き、前回の問い合わせを引き継ぎます。回答の後も
+  /// 省くと、回答済みになった問い合わせが判断待ちに残るため、回答したゴールだけを読み直させます。
+  pub fn invalidate_goal_questions(&self, project: &str, goal_id: GoalId) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    inner.questions_to_reread.entry(project.to_owned()).or_default().insert(goal_id);
+  }
+
+  /// 次の周期で質問を読み直すゴールを取り出し、記録から消す。
+  pub fn take_invalidated_goal_questions(&self, project: &str) -> BTreeSet<GoalId> {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    inner.questions_to_reread.remove(project).unwrap_or_default()
   }
 
   /// 稼働中に再読み込みした設定のサーバー表示情報を反映する。

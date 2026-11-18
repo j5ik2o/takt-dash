@@ -253,6 +253,7 @@ impl<'a> ToolSet<'a> {
   /// 引き継ぎます（初回観測時は空）。その他の輸送エラーと解析エラーは全体の失敗として伝播します。
   ///
   /// あわせて、終端状態で質問を読めたゴール（読み取りを省いたゴールを含む）を返します。
+  /// 問い合わせへの回答の後に poller が前回の記録から外したゴールは、終端でも読み直します。
   async fn list_all_inquiries(
     &mut self,
     goals: &[GoalEntry],
@@ -570,7 +571,8 @@ fn is_terminal(goal: &GoalEntry) -> bool {
 ///
 /// 前回の同じゴールが同じ終端状態で、かつ前回その状態でこの項目を読めていた場合だけ省けます。
 /// 初回観測、状態変化、`AwaitingMerge` などの非終端、前回の終端状態で読み取りに失敗した項目は
-/// 読み取り対象のままです。
+/// 読み取り対象のままです。問い合わせへの回答の後に前回の記録から外されたゴールも、
+/// 質問を読み直します。
 fn is_unchanged_terminal_goal(
   goal: &GoalEntry,
   prev: Option<&ProjectSnapshot>,

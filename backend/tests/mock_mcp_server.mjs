@@ -19,6 +19,7 @@
 //     "runs": { "<runSlug>": {"runSlug","currentStep","startedAt","currentStepStartedAt","stepLogs",
 //                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
 //                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
+//       reports は [ {"filename","sizeBytes","content"} ]。content は view "report" の本文になる。
 //     "workflows": { "<workflow名>": ["plan", "implement", ...] },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
 //     "goalDetails": {
@@ -225,16 +226,34 @@ const handleServerNotifications = () => {
   reply({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info", data: "起動しました" } });
 };
 
+// 実 takt-mcp の対象レポート不在（runSessionReader の throw）と同じ道具エラー。
+const runReportMissing = () => ({
+  content: [{ type: "text", text: "Selected report does not exist" }],
+  isError: true,
+});
+
+// takt_get_run の view "report" の応答。実 takt-mcp（runSessionReader の loadReports）と同じく、
+// reports[].content の UTF-8 バイト列を offset と maxBytes（既定 4096）で切り出し、
+// { runSlug, report: { filename, content, totalBytes, offset, returnedBytes, direction, truncated, nextOffset } }
+// を返す。対象のレポートが無ければ道具エラーにする。
+const runReportResponse = (state, args) => {
+  const run = (state.runs ?? {})[args.runSlug];
+  const report = (run?.reports ?? []).find((entry) => entry.filename === args.report);
+  if (args.report === undefined || report === undefined) {
+    return runReportMissing();
+  }
+  return asText({
+    runSlug: args.runSlug,
+    report: { filename: report.filename, ...textPage(report.content ?? "", args.offset, args.maxBytes) },
+  });
+};
+
 // takt_get_run の応答。stepLogs を PAGE_SIZE 件ずつ窓切りし、stepLogPage.nextOffset を返す。
-// report 引数と instructionId 引数が来たら、その本文だけを取り出して返す。
+// instructionId 引数が来たら、その本文だけを取り出して返す。
 const runResponse = (state, args) => {
   const run = (state.runs ?? {})[args.runSlug];
   if (run === undefined) {
     return {};
-  }
-  if (args.report !== undefined) {
-    const report = (run.reports ?? []).find((entry) => entry.filename === args.report);
-    return report === undefined ? {} : { filename: report.filename, content: report.content ?? "", sizeBytes: report.sizeBytes ?? 0 };
   }
   if (args.instructionId !== undefined) {
     const instruction = (run.instructions ?? []).find((entry) => entry.instructionId === Number(args.instructionId));
@@ -310,6 +329,9 @@ const handleToolCall = (name, args) => {
     case "takt_list_standalone_inquiries":
       return asText(paged(state.standaloneInquiries ?? [], "inquiries", args.offset));
     case "takt_get_run":
+      if (args.view === "report") {
+        return runReportResponse(state, args);
+      }
       return asText(runResponse(state, args));
     case "takt_get_goal": {
       if (args.path === "notifications") {
