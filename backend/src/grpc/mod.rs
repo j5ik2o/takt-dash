@@ -866,6 +866,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let project = ProjectName::try_from(request.project.as_str())
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
+    let _write_gate = self.write_gate(&resolved).await;
     let handle = self.write_handle(&resolved);
     let mut client = handle.lock().await;
     WriteToolSet::new(&mut client, resolved.cwd.clone())
@@ -909,6 +910,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let project = ProjectName::try_from(request.project.as_str())
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
+    let _write_gate = self.write_gate(&resolved).await;
     let handle = self.write_handle(&resolved);
     let mut client = handle.lock().await;
     let result = WriteToolSet::new(&mut client, resolved.cwd.clone())
@@ -943,6 +945,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let project = ProjectName::try_from(request.project.as_str())
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
+    let _write_gate = self.write_gate(&resolved).await;
     let handle = self.write_handle(&resolved);
     let mut client = handle.lock().await;
     let result = WriteToolSet::new(&mut client, resolved.cwd.clone())
@@ -977,6 +980,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let project = ProjectName::try_from(request.project.as_str())
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
+    let _write_gate = self.write_gate(&resolved).await;
     let handle = self.write_handle(&resolved);
     let mut client = handle.lock().await;
     let rejected = WriteToolSet::new(&mut client, resolved.cwd.clone())

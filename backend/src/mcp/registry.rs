@@ -10,6 +10,10 @@
 //! あわせて、プロジェクトごとの書き込みの通し番号を持ちます。書き込み RPC が成功する
 //! たびに進め、定期読み取りは読み取り開始時点の番号と比べることで、読み取りの途中で
 //! 書き込みが完了した場合に古い読み取り結果を捨てられます。
+//!
+//! 通し番号の判定と反映が書き込みと競合しないよう、プロジェクトごとの書き込みゲートも
+//! 持ちます。書き込み側は書き込み RPC の発行前から通し番号の記録まで、定期読み取りは
+//! 古さの確認から結果の反映の完了まで、同じゲートを保持して直列化します。
 
 use std::{
   collections::{BTreeMap, BTreeSet},
@@ -90,6 +94,10 @@ struct RegistryInner {
   screen_next:  BTreeMap<ProjectKey, u32>,
   /// プロジェクトごとの書き込みの通し番号。書き込みが成功するたびに1つ進めます。
   write_counts: BTreeMap<ProjectKey, u64>,
+  /// プロジェクトごとの書き込みゲート。書き込み経路と定期読み取りの反映の段が共有し、
+  /// 通し番号の前進と読み取り結果の反映を直列化します。通し番号そのものとは別の構造に
+  /// することで、ゲートを保持したまま通し番号を記録してもデッドロックしません。
+  write_gates:  BTreeMap<ProjectKey, Arc<AsyncMutex<()>>>,
 }
 
 /// プロジェクトごとの takt-mcp クライアントをレーン別に所有するレジストリ。
@@ -255,6 +263,7 @@ impl McpClientRegistry {
     inner.rebuilt.retain(|key| wanted.contains(key));
     inner.screen_next.retain(|key, _| wanted.contains(key));
     inner.write_counts.retain(|key, _| wanted.contains(key));
+    inner.write_gates.retain(|key, _| wanted.contains(key));
   }
 
   /// 指定したプロジェクトが作り直されたかを返し、記録を消す。
@@ -275,12 +284,29 @@ impl McpClientRegistry {
   }
 
   /// 書き込みの成功を記録し、通し番号を1つ進めて新しい番号を返す。
+  ///
+  /// この関数は書き込みゲートを取得しません。ゲートを保持したまま呼んでも
+  /// デッドロックしないため、書き込み経路はゲートの中でそのまま呼べます。
   pub fn record_write(&self, server_id: &str, project: &str) -> u64 {
     let key = (server_id.to_owned(), project.to_owned());
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
     let count = inner.write_counts.entry(key).or_insert(0);
     *count = count.saturating_add(1);
     *count
+  }
+
+  /// プロジェクトの書き込みゲートの取っ手を返す。登録が無ければ作ります。
+  ///
+  /// 書き込み経路は、書き込み RPC を発行する前から [`Self::record_write`] で通し番号を
+  /// 進め終わるまでこのゲートを保持します。定期読み取りは、読み取り結果の古さの確認の
+  /// 直前から、そのプロジェクトの出来事の記録と状態の反映が終わるまで同じゲートを
+  /// 保持します。これにより、確認と反映の間に書き込みが割り込むことも、書き込みの
+  /// 適用と番号の前進の間に読み取りが完了して古い結果が反映されることもありません。
+  /// ゲートはプロジェクトごとであり、別プロジェクト同士は待たせ合いません。
+  pub fn write_gate(&self, server_id: &str, project: &str) -> Arc<AsyncMutex<()>> {
+    let key = (server_id.to_owned(), project.to_owned());
+    let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+    inner.write_gates.entry(key).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
   }
 
   /// すべてのクライアントを map から取り出し、1 件ずつ排他取得して停止する。

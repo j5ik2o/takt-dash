@@ -1,4 +1,4 @@
-//! gRPC の各 RPC が使う接続レーンの取っ手と、書き込みの通し番号の記録。
+//! gRPC の各 RPC が使う接続レーンの取っ手と、書き込みゲートと通し番号の記録。
 //!
 //! 書き込み道具を呼ぶ RPC は書き込みレーン、純粋な読み取り RPC は画面読み取り
 //! レーンを使います。レーンごとに子プロセスが分かれるため、重い読み取りが
@@ -25,6 +25,15 @@ impl TaktDashServiceImpl {
       .registry
       .client(resolved.server_id.as_str(), resolved.project.as_str(), Lane::Write, || resolved.client_config.clone())
       .0
+  }
+
+  /// プロジェクトの書き込みゲートを取得する。
+  ///
+  /// 書き込み RPC を発行する前から、成功後の [`Self::record_write`] まで保持します。
+  /// 定期読み取りは結果の反映の段で同じゲートを保持するため、書き込みの適用と
+  /// 通し番号の前進が、読み取り結果の古さの確認と反映に対して原子的になります。
+  pub(super) async fn write_gate(&self, resolved: &ResolvedProject) -> tokio::sync::OwnedMutexGuard<()> {
+    self.registry.write_gate(resolved.server_id.as_str(), resolved.project.as_str()).lock_owned().await
   }
 
   /// 書き込みの成功を記録し、そのプロジェクトの書き込みの通し番号を進める。
