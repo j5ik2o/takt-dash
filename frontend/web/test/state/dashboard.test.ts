@@ -197,6 +197,44 @@ test("logSilent が偽でも経過時間が閾値を超えた run は警告に�
   assert.equal(overview.runs[0]?.note, "ログが 11分 出ていません。", "無音の分数を注記に出す");
 });
 
+test("run の無音判定は指定閾値と分単位の境界を保ち、警告件数と一致する", () => {
+  const base = createHealthyDashboardState();
+  const run = base.runs[0];
+  assert.ok(run);
+  const cases = [
+    { ageMs: 179_999, elapsedSeconds: 179, state: "live", label: "実行中", note: "", count: 0 },
+    { ageMs: 180_000, elapsedSeconds: 180, state: "live", label: "実行中", note: "", count: 0 },
+    { ageMs: 239_999, elapsedSeconds: 239, state: "live", label: "実行中", note: "", count: 0 },
+    {
+      ageMs: 240_000,
+      elapsedSeconds: 240,
+      state: "warn",
+      label: "ログが止まっています",
+      note: "ログが 4分 出ていません。",
+      count: 1,
+    },
+  ];
+
+  for (const expected of cases) {
+    const view = buildOverviewView(
+      {
+        ...base,
+        thresholds: { pendingDecisionStaleMinutes: 240, runLogSilentMinutes: 3 },
+        runs: [{ ...run, logSilent: false, lastLogAt: new Date(NOW.getTime() - expected.ageMs) }],
+      },
+      NOW,
+      true,
+    );
+    const row = view.runs[0];
+    assert.ok(row);
+    assert.equal(row.state, expected.state, `${expected.ageMs}ms 経過時の状態`);
+    assert.equal(row.label, expected.label);
+    assert.equal(row.note, expected.note);
+    assert.equal(row.elapsedSeconds, expected.elapsedSeconds);
+    assert.equal(view.silentRunCount, expected.count);
+  }
+});
+
 test("概要の集計は proto の閾値をそのまま表示用に運ぶ", () => {
   const overview = buildOverviewView(createDashboardState(), NOW, true);
   assert.equal(overview.thresholds.pendingDecisionStaleMinutes, 240);
