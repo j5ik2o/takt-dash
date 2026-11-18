@@ -383,6 +383,33 @@ test("応答していないプロジェクトはサーバーの1行にプロジ�
   assert.match(line, /takt-mcp から 16:29 に読みました/, "サーバーの読み取り時刻も残す");
 });
 
+test("同名のプロジェクトが複数のサーバーにあるときは run の表のプロジェクト欄にサーバー名を併記する", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    servers: base.servers.map((server) => ({ ...server, connected: true })),
+    projects: [...base.projects, { ...base.projects[0], serverId: "down" }],
+    runs: [
+      ...base.runs,
+      { ...base.runs[0], runSlug: "run-bbb", sessionId: "session-bbb", serverId: "down" },
+    ],
+  };
+  const html = renderOverview(state);
+  const rows = html
+    .split("<tr")
+    .slice(1)
+    .map((chunk) => `<tr${chunk}`);
+  const miniRow = rows.find((row) => row.includes("/runs/run-aaa"));
+  const studioRow = rows.find((row) => row.includes("/runs/run-bbb"));
+
+  assert.ok(miniRow !== undefined, "Mac mini 側の run の行がある");
+  assert.ok(studioRow !== undefined, "Mac Studio 側の run の行がある");
+  assert.match(miniRow, /corporate-site/, "プロジェクト名を出す");
+  assert.match(miniRow, /Mac mini/, "同じプロジェクト名でも Mac mini の run と分かる");
+  assert.match(studioRow, /corporate-site/, "プロジェクト名を出す");
+  assert.match(studioRow, /Mac Studio/, "同じプロジェクト名でも Mac Studio の run と分かる");
+});
+
 test("まだ読めていないプロジェクトはサーバーの1行に未読と出る", () => {
   const base = createHealthyDashboardState();
   const state = {

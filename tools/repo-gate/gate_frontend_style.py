@@ -77,15 +77,18 @@ TSX_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 # `https://` の // を残すため、行頭か空白の直後の // だけをコメントとみなす。
 TSX_LINE_COMMENT = re.compile(r"(?:^|(?<=\s))//.*$", re.MULTILINE)
 TSX_STRING = re.compile(r"\"[^\"\n]*\"|'[^'\n]*'|`[^`\n]*`")
-TSX_COLOR_STYLE = re.compile(
-    r"\b(?:color|background|backgroundColor|border\w*|outline\w*|fill|stroke|boxShadow|textShadow"
-    r"|caretColor|accentColor|textDecorationColor|columnRuleColor)\s*:\s*([\"'`])([^\"'`\n]*)\1"
+# style の宣言として読むキー。色を持つキーと、列数を持つキー（gridTemplateColumns など）と、
+# 列数のキー（columnCount と columns）を、キーと値の組として読む。
+TSX_COLOR_PROPERTY = (
+    r"color|background|backgroundColor|backgroundImage|border\w*|outline\w*|fill|stroke"
+    r"|boxShadow|textShadow|caretColor|accentColor|textDecorationColor|columnRuleColor"
 )
-TSX_COLUMN_PATTERNS = (
-    re.compile(r"repeat\(\s*(?:\d+|\$\{[^}]*\})"),
-    re.compile(r"\bcolumnCount\s*:\s*[^,}\n]*"),
-    re.compile(r"\bcolumns\s*:\s*[\"'`]?\s*\d[^,}\n]*"),
+TSX_GRID_PROPERTY = r"gridTemplateColumns|gridTemplate|grid"
+TSX_STYLE_DECLARATION = re.compile(
+    r"\b(?P<property>" + TSX_COLOR_PROPERTY + "|" + TSX_GRID_PROPERTY + r"|columnCount|columns)\s*:\s*"
 )
+TSX_GRID_PROPERTIES = {"gridTemplateColumns", "gridTemplate", "grid"}
+TSX_FIXED_REPEAT = re.compile(r"repeat\(\s*(?:\d+|\$\{[^}]*\})")
 
 
 def scan(root, exceptions):
@@ -225,25 +228,88 @@ def format_css_violation(relative, declaration, kind):
 def component_violations(relative, text):
     text = strip_keeping_lines(TSX_BLOCK_COMMENT, text)
     text = TSX_LINE_COMMENT.sub("", text)
-    violations = []
-    for number, line in enumerate(text.splitlines(), start=1):
-        for found in component_line_findings(line):
-            violations.append(f"{relative}:{number} {found}")
-    return violations
+    return [f"{relative}:{number} {found}" for number, found in component_findings(text)]
 
 
-def component_line_findings(line):
+def component_findings(text):
+    """コンポーネントの違反を (行番号, 文言) で返す。
+
+    16 進数の色は文字列リテラルから検出し、色の関数・色の名前・列数の固定は style の
+    宣言の値だけから検出する。宣言は改行をまたいで読み、行番号は違反の文字列がある行を
+    指す。JSX の本文や、文字列のメソッド呼び出しのような style 以外の式は調べない。
+    """
     findings = []
-    for literal in TSX_STRING.finditer(line):
-        findings.extend(f"{match.group(0)} [{COLOR}]" for match in HEX_COLOR.finditer(literal.group(0)))
-    for match in COLOR_FUNCTION.finditer(line):
-        call = re.match(r"[^)]*\)?", line[match.start():]).group(0)
-        findings.append(f"{call} [{COLOR}]")
-    for style in TSX_COLOR_STYLE.finditer(line):
-        findings.extend(f"{match.group(0)} [{COLOR}]" for match in COLOR_NAME.finditer(style.group(2)))
-    for pattern in TSX_COLUMN_PATTERNS:
-        findings.extend(f"{match.group(0).strip()} [{COLUMNS}]" for match in pattern.finditer(line))
+    for literal in TSX_STRING.finditer(text):
+        for match in HEX_COLOR.finditer(literal.group(0)):
+            findings.append((literal.start() + match.start(), f"{match.group(0)} [{COLOR}]"))
+    for declaration in TSX_STYLE_DECLARATION.finditer(text):
+        findings.extend(style_declaration_findings(text, declaration))
+    findings.sort(key=lambda finding: finding[0])
+    return [(line_number_at(text, offset), found) for offset, found in findings]
+
+
+def line_number_at(text, offset):
+    return text.count("\n", 0, offset) + 1
+
+
+def style_declaration_findings(text, declaration):
+    property_name = declaration.group("property")
+    value, is_string, value_offset = read_style_value(text, declaration.end())
+    if property_name in TSX_GRID_PROPERTIES:
+        return [
+            (value_offset + match.start(), f"{match.group(0).strip()} [{COLUMNS}]")
+            for match in TSX_FIXED_REPEAT.finditer(value)
+        ]
+    if property_name == "columnCount":
+        return [(declaration.start(), f"columnCount: {value.strip()} [{COLUMNS}]")]
+    if property_name == "columns":
+        if LEADING_INTEGER.match(value.strip().lstrip("\"'`").strip()):
+            return [(declaration.start(), f"columns: {value.strip()} [{COLUMNS}]")]
+        return []
+    findings = []
+    for match in COLOR_FUNCTION.finditer(value):
+        call = re.match(r"[^)]*\)?", value[match.start():]).group(0)
+        findings.append((value_offset + match.start(), f"{call} [{COLOR}]"))
+    if is_string:
+        findings.extend(
+            (value_offset + match.start(), f"{match.group(0)} [{COLOR}]")
+            for match in COLOR_NAME.finditer(value)
+        )
     return findings
+
+
+def read_style_value(text, start):
+    """style の宣言の値を読み、(値, 文字列リテラルかどうか, 値の開始位置) を返す。
+
+    文字列の値は引用符の中身を返し、開始位置は開き引用符の次の文字にする。それ以外の
+    値は、括弧の深さが 0 の位置にあるカンマ・閉じ括弧・改行までを読む。改行をまたぐ
+    宣言でも、キーと値を組として読める。
+    """
+    if start < len(text) and text[start] in "\"'`":
+        quote = text[start]
+        end = start + 1
+        while end < len(text):
+            if text[end] == "\\":
+                end += 2
+                continue
+            if text[end] == quote or (quote != "`" and text[end] == "\n"):
+                break
+            end += 1
+        return text[start + 1 : end], True, start + 1
+    depth = 0
+    end = start
+    while end < len(text):
+        char = text[end]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and char in ",\n":
+            break
+        end += 1
+    return text[start:end], False, start
 
 
 def check_frontend_style(root, error_type, exceptions=EXISTING_EXCEPTIONS):

@@ -136,11 +136,11 @@ CSS では、コメントを除いたすべての宣言の値を調べます。
 - 色の関数（`rgb()`、`rgba()`、`hsl()`、`hsla()`、`hwb()`、`lab()`、`lch()`、`oklab()`、`oklch()`、`color()`）
 - CSS の色の名前（`red`、`white`、`orange` など 148 色）
 
-コンポーネントでは、コメントを除いた各行を調べます。
+コンポーネントでは、コメントを除き、style の宣言（キーと値の組）を改行をまたいでも読み、宣言の値だけを調べます。JSX の本文や、文字列のメソッド呼び出しのような style 以外の式は調べません。
 
 - 引用符または backtick で囲んだ文字列の中にある 16 進数の色
-- 色の関数
-- 色を持つ style のキー（`color`、`background`、`backgroundColor`、`border*`、`outline*`、`fill`、`stroke`、`boxShadow`、`textShadow`、`caretColor`、`accentColor`、`textDecorationColor`、`columnRuleColor`）の文字列の値にある色の名前
+- 色を持つ style のキーの値にある色の関数（文字列の値と、そのまま書いた値のどちらも）
+- 色を持つ style のキー（`color`、`background`、`backgroundColor`、`backgroundImage`、`border*`、`outline*`、`fill`、`stroke`、`boxShadow`、`textShadow`、`caretColor`、`accentColor`、`textDecorationColor`、`columnRuleColor`）の文字列の値にある色の名前
 
 次は検出しません。
 
@@ -154,7 +154,7 @@ CSS では、コメントを除いたすべての宣言の値を調べます。
 
 - CSS の `grid-template-columns`、`grid-template`、`grid` の値にある `repeat(数, …)`（`@media` の中も含みます）
 - CSS の `columns` と `column-count` の値が数で始まるもの
-- コンポーネントの `repeat(` の直後が数か `${…}`（式の値で列数を決めるもの）、`columnCount:`、数で始まる `columns:`
+- コンポーネントの style の列数を持つキー（`gridTemplateColumns`、`gridTemplate`、`grid`）の値にある `repeat(` の直後が数か `${…}`（式の値で列数を決めるもの）、`columnCount:`、数で始まる `columns:`
 
 次は検出しません。
 

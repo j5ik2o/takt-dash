@@ -249,6 +249,10 @@ export function OverviewContent({
                     <tr className={`run-row${flashing ? " flash" : ""}`} key={runView.run.runSlug}>
                       <td className="run-project">
                         <span className="p">{runView.run.project}</span>
+                        {/* 同名のプロジェクトが複数のサーバーにあると、プロジェクト名だけでは
+                            どのサーバーの run か分からない。サーバーの表示名を併記し、サーバーが
+                            引けないときはサーバー ID で代える（アクティビティと同じ代え方）。 */}
+                        <span className="srv">{runView.server?.name ?? runView.run.serverId}</span>
                         <a className="view" href={`/runs/${encodeURIComponent(runView.run.runSlug)}`}>
                           run の詳細を見る
                         </a>

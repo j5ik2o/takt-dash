@@ -2369,6 +2369,70 @@ def test_frontend_style_reports_component_fixed_columns() -> None:
             )
 
 
+def test_frontend_style_reports_component_multiline_style_declarations() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            "  return (\n"
+            "    <p\n"
+            "      style={{\n"
+            "        color:\n"
+            '          "red",\n'
+            "      }}\n"
+            "    />\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "改行をまたぐ style の色の名前",
+            ["src/components/x.tsx:6", "red", "[色]"],
+        )
+
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            "  return (\n"
+            "    <div\n"
+            "      style={{\n"
+            "        gridTemplateColumns:\n"
+            '          "repeat(3, 1fr)",\n'
+            "      }}\n"
+            "    />\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "改行をまたぐ style の列数",
+            ["src/components/x.tsx:6", "repeat(3", "[列数]"],
+        )
+
+
+def test_frontend_style_ignores_component_body_text_and_expressions() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            "  return (\n"
+            "    <div>\n"
+            '      <p>{"-".repeat(3)}</p>\n'
+            "      <p>rgb(1, 2, 3)</p>\n"
+            "    </div>\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_success(sandbox, "JSX の本文と文字列のメソッド呼び出し")
+
+
 def test_frontend_style_skips_auto_columns_and_excluded_files() -> None:
     with Sandbox() as sandbox:
         repository(sandbox)
@@ -2534,6 +2598,8 @@ def main() -> int:
         test_frontend_style_reports_component_colors,
         test_frontend_style_ignores_component_text_comments_and_class_names,
         test_frontend_style_reports_component_fixed_columns,
+        test_frontend_style_reports_component_multiline_style_declarations,
+        test_frontend_style_ignores_component_body_text_and_expressions,
         test_frontend_style_skips_auto_columns_and_excluded_files,
         test_frontend_style_existing_exceptions_match_exact_values,
         test_frontend_style_reports_css_variables_outside_root,

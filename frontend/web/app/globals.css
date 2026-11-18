@@ -581,6 +581,13 @@ a {
   overflow-wrap: anywhere;
 }
 
+/* 同名のプロジェクトが複数のサーバーにあるとき所属を示す、サーバー名の併記。 */
+.run-project .srv {
+  display: block;
+  color: var(--muted);
+  font-size: var(--font-size-13);
+}
+
 .run-project .view {
   font-size: var(--font-size-13);
 }
