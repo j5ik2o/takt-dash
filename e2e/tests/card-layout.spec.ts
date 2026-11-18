@@ -1,7 +1,8 @@
 import { expect, test } from "../support/test";
 
-// issue #147 の再発防止。`.cards > li` は flex-direction: column で子を縦に積み、
-// 概要のプロジェクト欄では .card-link を伸ばしてカード高さを揃え、.view をカードの下へ置く。
+// issue #147 の再発防止。カードの li は flex-direction: column で子を縦に積み、
+// 概要のプロジェクト欄（issue #120 からは概要専用の .overview-cards）では .card-link を伸ばして
+// カード高さを揃え、.view をカードの下へ置く。
 // 実 Chrome の描画を通し、boundingBox() の座標・高さで観測する。
 test("ゴール一覧のカードで段落が縦に並ぶ", async ({ page, stack }) => {
   await page.goto(`${stack.webUrl}/goals`);
@@ -25,7 +26,7 @@ test("概要のプロジェクト欄で「ゴール一覧を見る」がカー�
   await page.goto(stack.webUrl);
   await expect(page.getByRole("heading", { name: "概要", level: 1 })).toBeVisible();
 
-  const viewLinks = page.locator(".cards > li > a.view");
+  const viewLinks = page.locator(".overview-cards > li > a.view");
   await expect(viewLinks.first()).toBeVisible();
   const count = await viewLinks.count();
   expect(count).toBeGreaterThan(0);
@@ -49,7 +50,7 @@ test("概要のリンクカードの高さが同じ行で揃う", async ({ page,
 
   // 内容高さの異なる2プロジェクトを同一行に描画する専用スタックを使い、
   // 同一 top に並ぶリンクカードの高さを boundingBox() で直接比較する。
-  const links = page.locator(".cards > li > a.card-link");
+  const links = page.locator(".overview-cards > li > a.card-link");
   await expect(links.nth(1)).toBeVisible();
   const count = await links.count();
   expect(count).toBeGreaterThanOrEqual(2);

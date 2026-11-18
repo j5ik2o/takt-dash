@@ -35,6 +35,7 @@ export type Stack = {
   readCalls: () => Promise<ToolCall[]>;
   updateState: (mutate: (state: Record<string, unknown>) => Record<string, unknown>) => Promise<void>;
   // 実行中の run（RUN_SLUG）の本体ログの末尾へ、レコードを1行ずつ追記する。
+  // run のファイルを書く既定の状態（mockState を渡さない起動）でだけ使える。
   appendRunLog: (records: readonly Record<string, unknown>[]) => Promise<void>;
   setMockDelay: (ms: number) => Promise<void>;
   stopMock: () => Promise<void>;
@@ -247,8 +248,10 @@ export type StackProject = {
 
 // 開始するスタックの構成。プロジェクトを渡すとその件数・内容で起動し、
 // 省略すると既定の1プロジェクト（PROJECT_NAME / PROJECT_ABOUT）で起動する。
+// mockState を渡すと起動時のモックの状態をその関数で作り、省略すると既定の buildMockState を使う。
 export type StartStackOptions = {
   projects?: readonly StackProject[];
+  mockState?: (now: Date) => Record<string, unknown>;
 };
 
 type StackConfigInput = {
@@ -440,8 +443,13 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
 
   try {
     const startedAt = new Date();
-    await writeFile(statePath, JSON.stringify(buildMockState(startedAt)), "utf8");
-    await writeRunFiles(startedAt);
+    await writeFile(statePath, JSON.stringify((options.mockState ?? buildMockState)(startedAt)), "utf8");
+    // run のファイル（buildRunFiles）は既定の状態（buildMockState）の run を表すため、既定の状態のときだけ書く。
+    // mockState を渡した状態（撮影の states.ts）では書かない。backend は対応表を読めない run を
+    // takt_get_run から組み立てるため、run は同じモックの状態から読まれ、既定の run も混ざらない。
+    if (options.mockState === undefined) {
+      await writeRunFiles(startedAt);
+    }
     // backend がモックを起動する前に遅延 0（透過）を用意し、ラッパーが初回から同じ契約で読めるようにする。
     await writeFile(delayPath, JSON.stringify({ stdoutDelayMs: 0 }), "utf8");
     await mkdir(homeDir, { recursive: true });

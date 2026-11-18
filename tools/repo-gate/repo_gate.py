@@ -54,6 +54,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.11 未満は対象外
     tomllib = None
 
+from gate_frontend_style import check_frontend_style
+
 WORKSPACE_MEMBERS = ["backend", "frontend/cli"]
 GATE_TARGETS = ["fmt", "clippy", "test", "typecheck", "lint", "proto_check"]
 # machine_gate の system_input の as 名と、Makefile のターゲット名の対応。
@@ -1395,6 +1397,7 @@ def run_checks(root, make_timeout_seconds, skip_make):
         ("workflow-machine-gate", lambda: check_workflow_machine_gate(root)),
         ("gitignore-rules", lambda: check_gitignore(root)),
         ("stable-toolchain", lambda: check_toolchain(root)),
+        ("frontend-style", lambda: check_frontend_style(root, GateError)),
     ]
     if skip_make:
         checks.append(("machine-gate", lambda: {"make_done": "skipped"}))
