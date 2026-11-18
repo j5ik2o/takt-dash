@@ -77,7 +77,7 @@ const createSharedNameState = (
 test("同名プロジェクトでも遅延中のサーバーの run は遅延表示にならず、他サーバーへ波及しない", () => {
   const view = buildOverviewView(
     createSharedNameState(ConnectionState.CONNECTION_STATE_DELAYED, ConnectionState.CONNECTION_STATE_CONNECTED),
-    NOW,
+    NOW, true,
   );
   const delayed = view.runs.find((item) => item.run.serverId === "a");
   const healthy = view.runs.find((item) => item.run.serverId === "b");
@@ -97,7 +97,7 @@ test("同名プロジェクトでも応答なしのサーバーの run だけが
       ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
       ConnectionState.CONNECTION_STATE_CONNECTED,
     ),
-    NOW,
+    NOW, true,
   );
   const unresponsive = view.runs.find((item) => item.run.serverId === "a");
   const healthy = view.runs.find((item) => item.run.serverId === "b");

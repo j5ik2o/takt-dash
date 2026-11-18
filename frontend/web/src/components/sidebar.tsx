@@ -12,6 +12,7 @@ import {
   serverStateLabel,
 } from "../state/dashboard";
 import { toRunCount } from "../state/domain-primitives";
+import { readCountText, readCoverage } from "../state/read-coverage";
 
 type SidebarProps = {
   servers: Server[];
@@ -69,13 +70,17 @@ export function Sidebar({
             // 配下のプロジェクトが応答していないサーバーは、接続できていても正常に
             // 見えないようにカードと同じく warn の側へ倒す（issue #264）。
             const state = serverDisplayState(server, runCount, projects ?? []);
+            const ownProjects = projects?.filter((project) => project.serverId === server.serverId);
+            const countText = ownProjects?.length === 0
+              ? "対象なし"
+              : readCountText(runCount, readCoverage(ownProjects ?? [server]));
             return (
               <li key={server.serverId}>
                 <span className={`dot ${state}`} aria-hidden="true" />
                 <Link className="nm" href={serverHref(server.serverId)}>
                   {server.name}
                 </Link>
-                <span className="cnt">run {runCount}件</span>
+                <span className="cnt">run {countText}</span>
                 <span className="srv-state">{serverStateLabel(state)}</span>
               </li>
             );

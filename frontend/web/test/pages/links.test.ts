@@ -45,7 +45,7 @@ const openingTagWithAttribute = (html: string, attribute: string, value: string)
 };
 
 const renderOverviewWithState = (state = createDashboardState()): string =>
-  renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
 
 const renderProjectsWithState = (state = createDashboardState()): string =>
   renderPage(ProjectsPage, { state, now: NOW });

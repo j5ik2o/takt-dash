@@ -18,7 +18,7 @@ import GoalsPage from "../../app/goals/page.tsx";
 // 切断時の通知の契約は live-disconnected.test.ts と live-provider-wiring.test.ts が担う。
 const renderGoals = (state = createDashboardState(), project?: string): string =>
   renderToStaticMarkup(
-    createElement(GoalsContent, { state: dashboardStateFromProto(state), project, disconnected: false }),
+    createElement(GoalsContent, { snapshotLoaded: true, state: dashboardStateFromProto(state), project, disconnected: false }),
   );
 
 // ページは RSC で searchParams を受け取り、SSE の state を配る Provider の内側で一覧を描く。
@@ -29,7 +29,7 @@ const renderGoalsPage = async (project?: string): Promise<string> => {
     searchParams: Promise.resolve(project === undefined ? {} : { project }),
   });
   // children は Provider の props の必須項目のため、型付けした props ごと渡す。
-  const props: ComponentProps<typeof StateStreamProvider> = {
+  const props: ComponentProps<typeof StateStreamProvider> = { initialSnapshotLoaded: true,
     initialState: createDashboardState(),
     children: page,
   };

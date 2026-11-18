@@ -18,18 +18,18 @@ import { BACKEND_UNAVAILABLE_MESSAGE } from "../../src/components/backend-unavai
 
 const renderOverview = (disconnected: boolean): string =>
   renderToStaticMarkup(
-    createElement(OverviewContent, { view: buildOverviewView(createDashboardState(), NOW), disconnected }),
+    createElement(OverviewContent, { view: buildOverviewView(createDashboardState(), NOW, true), disconnected }),
   );
 
 const renderDecisions = (disconnected: boolean): string =>
   renderToStaticMarkup(
-    createElement(DecisionsContent, { state: createDashboardState(), now: NOW, disconnected }),
+    createElement(DecisionsContent, { snapshotLoaded: true, state: createDashboardState(), now: NOW, disconnected }),
   );
 
 // GoalsContent は内部型の状態を受けるため、proto のフィクスチャを変換して渡す。
 const renderGoals = (disconnected: boolean): string =>
   renderToStaticMarkup(
-    createElement(GoalsContent, { state: dashboardStateFromProto(createDashboardState()), disconnected }),
+    createElement(GoalsContent, { snapshotLoaded: true, state: dashboardStateFromProto(createDashboardState()), disconnected }),
   );
 
 test("概要は SSE の切断中に backend 不通の通知を描画する", () => {
@@ -72,7 +72,7 @@ test("判断待ちは切断中も最後に読めた状態の表示を残す", ()
 test("概要は一度接続できた後の切断では設定の確認を促さない", () => {
   const html = renderToStaticMarkup(
     createElement(OverviewContent, {
-      view: buildOverviewView(createDashboardState(), NOW),
+      view: buildOverviewView(createDashboardState(), NOW, true),
       disconnected: true,
       unavailableSituation: { failure: "unreachable", respondedBefore: true, durationMs: 5_000 },
     }),
@@ -84,7 +84,7 @@ test("概要は一度接続できた後の切断では設定の確認を促さ�
 test("概要は切断が60秒を超えたら起動の確認を促す", () => {
   const html = renderToStaticMarkup(
     createElement(OverviewContent, {
-      view: buildOverviewView(createDashboardState(), NOW),
+      view: buildOverviewView(createDashboardState(), NOW, true),
       disconnected: true,
       unavailableSituation: { failure: "unreachable", respondedBefore: true, durationMs: 120_000 },
     }),
@@ -96,7 +96,7 @@ test("概要は切断が60秒を超えたら起動の確認を促す", () => {
 test("判断待ちは切断中に取得した時刻つきで最後の内容を残す", () => {
   const state = createDashboardState();
   const html = renderToStaticMarkup(
-    createElement(DecisionsContent, {
+    createElement(DecisionsContent, { snapshotLoaded: true,
       state,
       now: NOW,
       disconnected: true,
@@ -113,7 +113,7 @@ test("概要は1件も読めていない切断中に、現在時刻を最終読�
   const state = { ...createDashboardState(), readAt: undefined };
   const html = renderToStaticMarkup(
     createElement(OverviewContent, {
-      view: buildOverviewView(state, NOW),
+      view: buildOverviewView(state, NOW, true),
       disconnected: true,
       unavailableSituation: { failure: "unreachable", respondedBefore: true, durationMs: 5_000 },
     }),

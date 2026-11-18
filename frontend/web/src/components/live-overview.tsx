@@ -14,7 +14,7 @@ type LiveOverviewProps = {
 // 自動更新の状態を概要の表示用の形へ変換する。時刻は1秒ごとに進め、新しいログが届いた
 // run 行だけを1秒間光らせる。タイマーはこのコンポーネントが所有し、unmount 時に破棄する。
 export function LiveOverview({ initialNowMs }: LiveOverviewProps): ReactElement {
-  const { state, disconnected, failure, disconnectedSince, respondedBefore } = useLiveState();
+  const { state, snapshotLoaded, disconnected, failure, disconnectedSince, respondedBefore } = useLiveState();
   const [now, setNow] = useState(() => state.readAt ?? new Date(initialNowMs));
   const seenRef = useRef<LogSeen | null>(null);
   if (seenRef.current === null) {
@@ -82,7 +82,7 @@ export function LiveOverview({ initialNowMs }: LiveOverviewProps): ReactElement 
 
   return (
     <OverviewContent
-      view={buildOverviewView(state, now)}
+      view={buildOverviewView(state, now, snapshotLoaded)}
       flashingRunSlugs={flashing}
       disconnected={disconnected}
       unavailableSituation={unavailableSituation}

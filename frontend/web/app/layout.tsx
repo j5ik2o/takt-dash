@@ -23,7 +23,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   // layout は全ページで実行されるため、ここで各ページのサーバー側 RPC（GetOverview）と
   // ページ応答の内訳を page=layout の1行として記録する。状態は要求内で共有し、
   // ページ側はこれを再利用する。
-  const { state, error } = await measurePage("layout", async (timing) => {
+  const { state, error, snapshotLoaded } = await measurePage("layout", async (timing) => {
     const loaded = await loadServerState();
     timing.recordRpc({ rpc: "GetOverview", durationMs: loaded.rpcMs });
     return loaded;
@@ -39,6 +39,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
       <body>
         <StateStreamProviderWithRefresh
           initialState={state}
+          initialSnapshotLoaded={snapshotLoaded}
           initialFailure={failure}
           initialRespondedBefore={respondedBefore}
         >

@@ -9,6 +9,8 @@ import { createStateHandlers, openStateStream, type EventSourceLike } from "./st
 
 export type StateStreamContextValue = {
   state: DashboardState;
+  /** GetOverview または WatchState の概要を取得済みか。切断時も state とともに保持する。 */
+  snapshotLoaded: boolean;
   disconnected: boolean;
   /**
    * 現在の切断の失敗理由。初期読み込みの失敗理由を引き継ぎ、状態を受けてから
@@ -63,10 +65,11 @@ export function stateStreamHandlers(update: (event: LiveStateEvent) => void): {
 export function reduceLiveState(current: StateStreamContextValue, event: LiveStateEvent): StateStreamContextValue {
   switch (event.type) {
     case "state":
-      return { state: event.state, disconnected: false, disconnectedSince: null, respondedBefore: true };
+      return { state: event.state, snapshotLoaded: true, disconnected: false, disconnectedSince: null, respondedBefore: true };
     case "error":
       return {
         state: current.state,
+        snapshotLoaded: current.snapshotLoaded,
         disconnected: true,
         // 初期読み込みの失敗理由は、切断が続く間は引き継ぐ。状態を受けて
         // 失敗理由が消えてからの切断は、SSE の切断として unreachable にする。
@@ -81,6 +84,8 @@ export function reduceLiveState(current: StateStreamContextValue, event: LiveSta
 
 type StateStreamProviderProps = {
   initialState: ProtoDashboardState;
+  /** 初回未取得の代替値と、正常取得した空の概要を区別する。 */
+  initialSnapshotLoaded: boolean;
   /**
    * 初回の読み込みで backend を利用できなかった場合の失敗理由（今回の読み込みの
    * 成否と理由）。渡された場合は切断状態で始める。initialRespondedBefore が
@@ -104,6 +109,7 @@ type StateStreamProviderProps = {
 // 状態の受信ごとに RSC で取得している画面の再取得を促します。
 export function StateStreamProvider({
   initialState,
+  initialSnapshotLoaded,
   initialFailure,
   initialRespondedBefore,
   revalidate,
@@ -111,6 +117,7 @@ export function StateStreamProvider({
 }: StateStreamProviderProps) {
   const [value, setValue] = useState<StateStreamContextValue>(() => ({
     state: dashboardStateFromProto(initialState),
+    snapshotLoaded: initialSnapshotLoaded,
     // 初期読み込みが失敗した場合は、その失敗理由を持って切断状態で始める。
     // レイアウトは通知を描画せず、概要と判断待ちの内容が disconnected で通知を
     // 描画するため、起動時の不通でも通知は画面側の1回だけになる（issue #92）。
@@ -166,6 +173,7 @@ function toEventSourceLike(source: EventSource): EventSourceLike {
 // 直接描画できるよう、useRouter の呼び出しはこのラッパーに閉じます。
 export function StateStreamProviderWithRefresh({
   initialState,
+  initialSnapshotLoaded,
   initialFailure,
   initialRespondedBefore,
   children,
@@ -175,6 +183,7 @@ export function StateStreamProviderWithRefresh({
   return (
     <StateStreamProvider
       initialState={initialState}
+      initialSnapshotLoaded={initialSnapshotLoaded}
       initialFailure={initialFailure}
       initialRespondedBefore={initialRespondedBefore}
       revalidate={revalidate}

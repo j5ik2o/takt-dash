@@ -12,6 +12,7 @@ import type {
 } from "../proto/taktdash";
 import { formatClock } from "./format";
 import { goalSection } from "./goal-badge";
+import { readCoverage, type ReadCoverage } from "./read-coverage";
 import {
   toRunCount,
   toRunLimit,
@@ -104,6 +105,9 @@ export type OverviewProjectView = Omit<Project, "concurrency"> & {
 };
 
 export type OverviewView = {
+  snapshotLoaded: boolean;
+  coverage: ReadCoverage;
+  inProgressGoalCount: number;
   // 最後に実際に読めた時刻。1件も読めていない場合は実在しない時刻を作らず undefined にする。
   readAt?: Date;
   servers: OverviewServerView[];
@@ -118,6 +122,7 @@ export type OverviewView = {
   silentRunCount: number;
   unresponsiveServers: Server[];
   unresponsiveProjects: Project[];
+  partialReadSubject?: "サーバー" | "プロジェクト" | "サーバーとプロジェクト";
   partialReadAt?: Date;
   hasAnomalies: boolean;
   pendingCounts: PendingCounts;
@@ -203,8 +208,17 @@ export function toRunView(
     iteration: run.currentIteration,
     elapsedSeconds,
   };
+  if (server === undefined) {
+    return {
+      ...derived,
+      connected: false,
+      state: "idle",
+      label: "接続未確認（サーバー未登録）",
+      note: "接続先のサーバーが登録されていないため、接続を確認できません。",
+    };
+  }
   const project = projectByKey?.get(projectKey(run.serverId, run.project));
-  if (server !== undefined && (!server.connected || project?.connectionState === CONNECTION_STATE.UNRESPONSIVE)) {
+  if (!server.connected || project?.connectionState === CONNECTION_STATE.UNRESPONSIVE) {
     const lastReadAt = project?.lastReadAt ?? server.lastReadAt;
     const at = lastReadAt ? formatClock(lastReadAt) : "不明";
     return {
@@ -307,17 +321,6 @@ const failedTaskCount = (goals: readonly Goal[]): number =>
 const isUnresponsiveProject = (project: Project): boolean =>
   project.connectionState === CONNECTION_STATE.UNRESPONSIVE;
 
-// まだ一度も読めていないサーバーとプロジェクト。最後に読めた時刻が無い対象は、
-// 配下の一覧が空でも「無い」とは断定できない。一覧の件数を表示する画面は、
-// 未読の対象があるとき件数へ注記を付け、空の断定を避ける（issue #259）。
-export function neverReadServers(servers: readonly Server[]): Server[] {
-  return servers.filter((server) => server.lastReadAt === undefined);
-}
-
-export function neverReadProjects(projects: readonly Project[]): Project[] {
-  return projects.filter((project) => project.lastReadAt === undefined);
-}
-
 // 応答していないプロジェクト。読み取りが失敗し続けている（応答なし）プロジェクトと、
 // まだ一度も読めていないプロジェクトは、どちらも正常とは言えない。サーバー単位の
 // 表示（サーバーカードとサイドバー）が全体が正常であるかのように見える問題
@@ -347,7 +350,7 @@ const earliestReadAt = (sources: ReadonlyArray<Date | undefined>): Date | undefi
   return times.length === 0 ? undefined : new Date(Math.min(...times));
 };
 
-export function buildOverviewView(state: OverviewStateInput, now: Date): OverviewView {
+export function buildOverviewView(state: OverviewStateInput, now: Date, snapshotLoaded: boolean): OverviewView {
   const thresholds = resolveThresholds(state.thresholds);
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
   const goalsById = new Map(state.goals.map((goal) => [goal.goalId, goal]));
@@ -380,10 +383,20 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
   const abortedGoals = state.goals.filter((goal) => goalSection(goal) === "aborted").length;
   const pendingCounts = summarizePendingDecisions(pendingDecisions);
   const readAt = state.readAt;
+  const supplyingServerIds = new Set(state.projects.map((project) => project.serverId));
+  const unresponsiveSuppliers = unresponsiveServers.filter((server) =>
+    supplyingServerIds.has(server.serverId),
+  );
+  const partialReadSubject = unresponsiveSuppliers.length > 0
+    ? unresponsiveProjects.length > 0 ? "サーバーとプロジェクト" : "サーバー"
+    : unresponsiveProjects.length > 0 ? "プロジェクト" : undefined;
   const partialReadAt = earliestReadAt(
-    [...unresponsiveServers, ...unresponsiveProjects].map((item) => item.lastReadAt),
+    [...unresponsiveSuppliers, ...unresponsiveProjects].map((item) => item.lastReadAt),
   );
   return {
+    snapshotLoaded,
+    coverage: readCoverage(state.projects, snapshotLoaded),
+    inProgressGoalCount: state.goals.filter((goal) => goalSection(goal) === "inProgress").length,
     readAt,
     servers,
     projects: state.projects.map((project) => ({
@@ -410,6 +423,7 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
     silentRunCount,
     unresponsiveServers,
     unresponsiveProjects,
+    partialReadSubject,
     partialReadAt,
     hasAnomalies:
       pendingCounts.total > 0 ||
