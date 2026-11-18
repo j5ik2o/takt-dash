@@ -4,7 +4,8 @@
 //! で行が初期化された）は、 全体を置き換える指示（reset）と、GetRunDetail の log_tail
 //! と同じ範囲の行を返す。 セッションログ（`logs/phase1-execution/*.
 //! jsonl`）からの活動の印（直近の道具名、道具の呼び出しの 件数、更新時刻）も同じ応答で返す。
-//! takt-mcp は起動も呼び出しもしない。
+//! ローカルで読める run では takt-mcp は起動も呼び出しもしない。ローカルで続きを読めない
+//! run は、takt_get_run の stepLogs から行を組み立てて返す。
 
 mod common;
 mod grpc_harness;
@@ -483,4 +484,89 @@ async fn get_run_updates_rejects_an_invalid_run_slug_and_an_invalid_cursor() {
   for (label, code) in statuses {
     assert_eq!(code, tonic::Code::InvalidArgument, "{label} は入力の誤りとして拒否します");
   }
+}
+
+/// takt_get_run が run-1 をリモートのサーバーの値で返す mock の状態。stepLogs は2件で、
+/// ローカルの保存場所の値と区別できる固有のステップ名にする。
+fn remote_run_state() -> Value {
+  let mut state = mcp_state();
+  state["runs"] = json!({
+    "run-1": {
+      "runSlug": "run-1",
+      "status": "running",
+      "workflow": "remote-workflow",
+      "currentStep": "remote-implement",
+      "currentIteration": 4,
+      "phase": 2,
+      "startedAt": "2026-11-13T09:00:00Z",
+      "currentStepStartedAt": "2026-11-13T09:20:00Z",
+      "currentStepExecutionCount": 2,
+      "stepLogs": [
+        { "step": "remote-plan", "persona": "architect", "status": "done", "timestamp": "2026-11-13T09:10:00Z", "iteration": 1 },
+        { "step": "remote-implement", "persona": "coder", "status": "done", "timestamp": "2026-11-13T09:30:00Z", "iteration": 1 }
+      ],
+      "reports": [ { "filename": "remote-plan.md", "sizeBytes": 12 } ]
+    }
+  });
+  state
+}
+
+/// 状態ストアに run-1 を持ち、ローカルに run の保存場所が無い 1 プロジェクト分の土台を作る。
+fn seeded_remote_harness() -> GrpcHarness {
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", project_dir()), server_meta(), remote_run_state())
+    .build();
+  let mut stored_run = run("run-1", "implement", time("2026-11-13T09:06:00Z"));
+  stored_run.goal_id = Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です"));
+  let snapshot = ProjectSnapshot {
+    goals: vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![stored_run],
+    notifications: vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
+  };
+  harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
+  harness
+}
+
+#[tokio::test]
+async fn get_run_updates_reads_a_run_without_a_local_task_table_from_takt_get_run() {
+  // リモートのサーバーのプロジェクトは、ローカルに保存場所が無く本体ログの続きを読めない。
+  // その run の追記分は takt_get_run の stepLogs から組み立てて返し、エラーにしない。
+  // ローカルの読み取りだけに頼る実装は Unavailable で落ちて、画面に取得の警告が残り続ける。
+  let harness = seeded_remote_harness();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+    .await
+    .expect("run 詳細を取得できます")
+    .into_inner();
+  let first = updates(&mut client, "run-1", None).await;
+  let cursor = next_cursor(&first, None);
+  let second = updates(&mut client, "run-1", Some(cursor)).await;
+  server.stop().await;
+
+  assert!(first.reset, "リモートの run の最初の追記分は全体を置き換える指示です");
+  assert!(!first.logs_removed);
+  assert_eq!(texts(&first), vec![
+    "2026-11-13T09:10:00Z step_complete remote-plan".to_owned(),
+    "2026-11-13T09:30:00Z step_complete remote-implement".to_owned(),
+  ]);
+  assert_eq!(
+    texts(&first),
+    detail.log_tail.lines().map(str::to_owned).collect::<Vec<_>>(),
+    "reset の行は GetRunDetail の log_tail と同じ範囲です"
+  );
+  assert!(!second.reset, "同じ世代で末尾まで受け取り済みなら追記分は差分です");
+  assert_eq!(second.epoch, first.epoch, "行が変わらなければ世代は変わりません");
+  assert!(second.lines.is_empty(), "追記が無ければ行を返しません: {:?}", texts(&second));
+  let calls = harness.recorded_calls();
+  assert!(
+    calls.iter().any(|call| call.name == "takt_get_run" && call.arguments["runSlug"] == "run-1"),
+    "ローカルで読めない run の追記分は takt_get_run で読みます: {calls:?}"
+  );
 }

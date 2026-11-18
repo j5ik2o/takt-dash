@@ -535,6 +535,7 @@ fn remote_run_state() -> Value {
     "run-1": {
       "runSlug": "run-1",
       "status": "running",
+      "taskText": "リモートのタスク本文",
       "workflow": "remote-workflow",
       "currentStep": "remote-implement",
       "currentIteration": 4,
@@ -545,7 +546,11 @@ fn remote_run_state() -> Value {
       "stepLogs": [
         { "step": "remote-plan", "persona": "architect", "status": "done", "timestamp": "2026-11-13T09:10:00Z", "iteration": 1 }
       ],
-      "reports": [ { "filename": "remote-plan.md", "sizeBytes": 12 } ]
+      "reports": [ { "filename": "remote-plan.md", "sizeBytes": 12 } ],
+      "instructions": [
+        { "instructionId": 1, "issuedAt": "2026-11-13T09:15:00Z", "state": "deliveredNextStep" },
+        { "instructionId": 2, "issuedAt": "2026-11-13T09:25:00Z", "state": "pending" }
+      ]
     }
   });
   state
@@ -566,11 +571,33 @@ fn assert_detail_from_takt_get_run(detail: &GetRunDetailResponse, harness: &Grpc
     detail.reports.iter().map(|report| (report.filename.as_str(), report.size_bytes)).collect();
   assert_eq!(reports, vec![("remote-plan.md", 12)]);
   assert_eq!(detail.summary, "実装の run", "summary は従来どおり状態ストアの run の値です");
+  assert_eq!(detail.task_text, "リモートのタスク本文", "task_text は takt_get_run の view task の値です");
+  assert_eq!(
+    detail.log_tail, "2026-11-13T09:10:00Z step_complete remote-plan",
+    "log_tail は takt_get_run の stepLogs から組み立てた末尾です"
+  );
+  let instructions: Vec<(i32, &str)> =
+    detail.instructions.iter().map(|instruction| (instruction.instruction_id, instruction.state.as_str())).collect();
+  assert_eq!(
+    instructions,
+    vec![(1, "deliveredNextStep"), (2, "pending")],
+    "instructions は takt_get_run の view instructions の値です"
+  );
+  assert_eq!(detail.instructions[0].issued_at, Some(timestamp("2026-11-13T09:15:00Z")));
+  assert_eq!(detail.instructions[1].issued_at, Some(timestamp("2026-11-13T09:25:00Z")));
   assert!(!detail.logs_removed);
   let calls = harness.recorded_calls();
   assert!(
     calls.iter().any(|call| call.name == "takt_get_run" && call.arguments["runSlug"] == "run-1"),
     "ローカルで読めない run は takt_get_run で読みます: {calls:?}"
+  );
+  assert!(
+    calls.iter().any(|call| call.name == "takt_get_run" && call.arguments["view"] == "instructions"),
+    "指示書の一覧は view instructions で読みます: {calls:?}"
+  );
+  assert!(
+    calls.iter().any(|call| call.name == "takt_get_run" && call.arguments["view"] == "task"),
+    "タスク本文は view task で読みます: {calls:?}"
   );
 }
 

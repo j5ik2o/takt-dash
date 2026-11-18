@@ -1,14 +1,15 @@
 //! GetRunUpdates の要求の検証と応答の組み立て。
 //!
 //! 本体ログの追記分の読み取りは [`crate::run_progress`] が行い、ここでは proto の要求値を
-//! 続きの位置に変換し、読み取り結果を proto の応答の形にする純粋な変換だけを置きます。
+//! 続きの位置に変換し、読み取り結果を proto の応答の形にします。ローカルで続きを読めない
+//! run は、[`super::run_detail`] の takt_get_run 経路へ委ねます。
 
 use tonic::Status;
 
-use super::mapping::optional_timestamp;
+use super::{mapping::optional_timestamp, run_detail::remote_run_updates, run_read_failure_status, ResolvedProject};
 use crate::{
   domain::RunSlug,
-  run_progress::{LogCursor, RunUpdates},
+  run_progress::{read_run_updates, LogCursor, RunLogHandle, RunReadFailure, RunUpdates},
   takt_dash::v1::{GetRunUpdatesResponse, RunLogLine, RunSessionActivity},
 };
 
@@ -23,6 +24,32 @@ pub(super) fn parse_log_cursor(epoch: Option<i64>, after_sequence: Option<i64>) 
       Ok(Some(LogCursor { epoch, sequence }))
     },
     | _ => Err(Status::invalid_argument("epoch と after_sequence は両方を指定するか、両方を省いてください。")),
+  }
+}
+
+/// GetRunUpdates の応答を作る。
+///
+/// ローカルの保存場所から続きを読むのが基本です。保存場所が残っていない run はエラーにせず、
+/// ログが残っていないことを返します。保存場所の対応表に無い run と、対応表を読めない run
+/// （SSH 越しに扱うリモートのサーバーのプロジェクトなど）は、GetRunDetail と同じく
+/// takt_get_run から行を組み立てます。takt_get_run でも読めなければ、保存場所の読み取りの
+/// 失敗を返します。
+pub(super) async fn read_updates_response(
+  run_logs: &RunLogHandle,
+  resolved: &ResolvedProject,
+  run_slug: RunSlug,
+  after: Option<LogCursor>,
+) -> Result<GetRunUpdatesResponse, Status> {
+  match read_run_updates(run_logs, run_slug.clone(), after).await {
+    | Ok(updates) => Ok(run_updates_response(&run_slug, updates)),
+    | Err(RunReadFailure::Missing) => {
+      Ok(GetRunUpdatesResponse { run_slug: run_slug.as_str().to_owned(), logs_removed: true, ..Default::default() })
+    },
+    | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
+      let updates = remote_run_updates(resolved, &run_slug, after, failure).await?;
+      Ok(run_updates_response(&run_slug, updates))
+    },
+    | Err(failure) => Err(run_read_failure_status(failure)),
   }
 }
 

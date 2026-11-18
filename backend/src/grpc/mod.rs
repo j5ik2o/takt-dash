@@ -31,7 +31,7 @@ use mapping::{
   execution_status, goal_question, goal_status, goal_task, goal_work_log, optional_timestamp, run_status, task_status,
   timestamp,
 };
-use run_updates::{parse_log_cursor, run_updates_response};
+use run_updates::{parse_log_cursor, read_updates_response};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -47,10 +47,7 @@ use crate::{
   mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
   model::{self},
   run_log::{ContentRead, InitialRead, Instruction},
-  run_progress::{
-    read_instruction_body, read_run, read_run_instructions, read_run_updates, RunLogHandle, RunLogHandles,
-    RunReadFailure,
-  },
+  run_progress::{read_instruction_body, read_run, read_run_instructions, RunLogHandle, RunLogHandles, RunReadFailure},
   store::StateStore,
   takt_dash::v1::{
     self, get_run_content_request, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
@@ -529,14 +526,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let target = self.resolve_run_target(&run_slug)?;
     // GetRunDetail と同じ取っ手を使い、本体ログを前回の読み位置の続きから読む。
     let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
-    let response = match read_run_updates(&run_logs, run_slug.clone(), after).await {
-      | Ok(updates) => run_updates_response(&run_slug, updates),
-      // 保存場所が残っていない run はエラーにせず、ログが残っていないことを返します。
-      | Err(RunReadFailure::Missing) => {
-        GetRunUpdatesResponse { run_slug: run_slug.as_str().to_owned(), logs_removed: true, ..Default::default() }
-      },
-      | Err(failure) => return Err(run_read_failure_status(failure)),
-    };
+    let response = read_updates_response(&run_logs, &target.resolved, run_slug, after).await?;
     Ok(Response::new(response))
   }
 

@@ -248,6 +248,43 @@ const runReportResponse = (state, args) => {
   });
 };
 
+// takt_get_run の view "instructions" の応答。実 takt-mcp（runSessionReader）と同じく、
+// { runSlug, instructions: [{instructionId, issuedAt, state}], collection, totalCount,
+// returnedCount, omittedCount, offset, nextOffset, truncated } を返す。limit の既定は 50。
+const runInstructionsResponse = (state, args) => {
+  const run = (state.runs ?? {})[args.runSlug];
+  if (run === undefined) {
+    return {};
+  }
+  const instructions = run.instructions ?? [];
+  const offset = Number(args.offset ?? 0);
+  const limit = Number(args.limit ?? 50);
+  const window = instructions.slice(offset, offset + limit);
+  const nextOffset = offset + window.length < instructions.length ? offset + window.length : null;
+  return asText({
+    runSlug: args.runSlug,
+    instructions: window,
+    collection: "instructions",
+    totalCount: instructions.length,
+    returnedCount: window.length,
+    omittedCount: instructions.length - window.length,
+    offset,
+    nextOffset,
+    truncated: nextOffset !== null,
+  });
+};
+
+// takt_get_run の view "task" の応答。実 takt-mcp（runSessionReader）と同じく、
+// { runSlug, task: { content, totalBytes, offset, returnedBytes, direction, truncated,
+// nextOffset } } を返す。本文は state の taskText を使う。
+const runTaskResponse = (state, args) => {
+  const run = (state.runs ?? {})[args.runSlug];
+  if (run === undefined) {
+    return {};
+  }
+  return asText({ runSlug: args.runSlug, task: textPage(run.taskText ?? "", args.offset, args.maxBytes) });
+};
+
 // takt_get_run の応答。stepLogs を PAGE_SIZE 件ずつ窓切りし、stepLogPage.nextOffset を返す。
 // instructionId 引数が来たら、その本文だけを取り出して返す。
 const runResponse = (state, args) => {
@@ -263,8 +300,10 @@ const runResponse = (state, args) => {
   const offset = Number(args.offset ?? 0);
   const window = stepLogs.slice(offset, offset + PAGE_SIZE);
   const nextOffset = offset + window.length < stepLogs.length ? offset + window.length : null;
+  // 実 takt-mcp の要約は、指示書の一覧とタスク本文を含まない（どちらも view で読む）。
+  const { instructions: _instructions, taskText: _taskText, ...summary } = run;
   return {
-    ...run,
+    ...summary,
     stepLogs: window,
     stepLogPage: {
       collection: "stepLogs",
@@ -331,6 +370,12 @@ const handleToolCall = (name, args) => {
     case "takt_get_run":
       if (args.view === "report") {
         return runReportResponse(state, args);
+      }
+      if (args.view === "instructions") {
+        return runInstructionsResponse(state, args);
+      }
+      if (args.view === "task") {
+        return runTaskResponse(state, args);
       }
       return asText(runResponse(state, args));
     case "takt_get_goal": {

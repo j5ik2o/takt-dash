@@ -3,21 +3,25 @@
 //! run は通常、run の保存場所（[`crate::run_progress`]）から読みます。ローカルに保存場所を読めない
 //! プロジェクト（SSH 越しに扱うリモートのサーバーのプロジェクトなど）の run だけ、takt-mcp の
 //! takt_get_run の応答から作ります。同じプロジェクトの run のレポート本文も、takt_get_run の
-//! view report から読みます。
+//! view report から読みます。run 詳細では、指示書の一覧（view instructions）と、要約には
+//! 含まれないタスク本文（view task）も同じ道具から読みます。
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 
 use super::{
-  parse::{domain_value, optional_string, parse_time, string_field},
+  parse::{checked_i32, domain_value, optional_string, parse_time, string_field},
   ToolError, ToolSet,
 };
 use crate::{
-  domain::{ReportFilename, RunSlug},
+  domain::{InstructionId, ReportFilename, RunSlug},
   model::{ReportEntry, RunEntry, RunStatus, RunStepEntry, StepLogEntry, TaskEntry},
-  run_log::RunContent,
+  run_log::{Instruction, InstructionState, RunContent},
   run_progress::task_summary,
 };
+
+/// ログの末尾に残す行数。ローカルの集計（run_progress の LOG_TAIL_RECORDS）と同じです。
+const LOG_TAIL_RECORDS: usize = 20;
 
 /// takt_get_run から読んだ run。stepLogs は全ページを集めたものです。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,9 @@ pub struct RemoteRun {
   pub steps: Vec<RunStepEntry>,
   pub step_logs: Vec<StepLogEntry>,
   pub reports: Vec<ReportEntry>,
+  /// view instructions から読んだ指示書の一覧（要約だけ。本文は含みません）。
+  /// 詳細の読み取りだけが埋め、一覧の読み取りでは空です。
+  pub instructions: Vec<Instruction>,
   /// 応答の lastLogAt。
   last_log_at: Option<DateTime<Utc>>,
 }
@@ -83,6 +90,36 @@ impl RemoteRun {
       .max();
     self.last_log_at.or(latest_step.into_iter().chain(self.current_step_started_at).max()).or(started_at)
   }
+
+  /// ステップの記録から、本体ログの行と同じ形（「時刻 種類 ステップ」）の行を作る。
+  ///
+  /// ローカルの集計が本体ログの記録から作る行のうち、takt_get_run の stepLogs から再現できる
+  /// のは step_complete の行だけです。時刻は RFC 3339（UTC は Z）で、時刻が無い記録は時刻を
+  /// 省き、ステップ名が無い記録はステップ名を省きます（ローカルの行の作り方と同じです）。
+  pub fn log_lines(&self) -> Vec<String> {
+    self
+      .step_logs
+      .iter()
+      .map(|log| {
+        let timestamp = (log.timestamp != DateTime::<Utc>::UNIX_EPOCH)
+          .then(|| log.timestamp.to_rfc3339_opts(SecondsFormat::AutoSi, true));
+        let step = (!log.step_name.is_empty()).then(|| log.step_name.clone());
+        [timestamp, Some("step_complete".to_owned()), step].into_iter().flatten().collect::<Vec<_>>().join(" ")
+      })
+      .collect()
+  }
+
+  /// ログの末尾の行。ローカルの集計と同じく、最後の20行です。
+  pub fn log_tail_lines(&self) -> Vec<String> {
+    let lines = self.log_lines();
+    lines.iter().skip(lines.len().saturating_sub(LOG_TAIL_RECORDS)).cloned().collect()
+  }
+
+  /// ログの末尾。ローカルの集計（RunLogView::log_tail）と同じく、末尾の行を改行でつないだ
+  /// ものです。
+  pub fn log_tail(&self) -> String {
+    self.log_tail_lines().join("\n")
+  }
 }
 
 /// takt_get_run の応答（先頭ページ）と、全ページから集めたステップの記録から run を作る。
@@ -114,6 +151,7 @@ pub(super) fn parse_remote_run(
     steps,
     step_logs,
     reports: report_summaries(value),
+    instructions: Vec::new(),
     last_log_at: parse_time(value.get("lastLogAt"))?,
   })
 }
@@ -298,4 +336,156 @@ fn truncate_at_char_boundary(content: &mut String, max_bytes: u64) {
     end -= 1;
   }
   content.truncate(end);
+}
+
+/// takt_get_run の view instructions に渡す limit。takt の入力契約で limit は 1〜50 です。
+const INSTRUCTIONS_PAGE_LIMIT: u64 = 50;
+/// takt_get_run の view task に渡す maxBytes。view report と同じく、takt の入力契約の
+/// 上限 4096 に合わせます。
+const TASK_PAGE_MAX_BYTES: u64 = 4096;
+
+impl ToolSet<'_> {
+  /// takt_get_run の view instructions から、run の指示書の一覧（要約）を全ページ読む。
+  ///
+  /// 応答は `{ instructions: [{instructionId, issuedAt, state}], nextOffset }` で、nextOffset を
+  /// たどって連結します。nextOffset が進まない場合と、追従がページ数の上限に達した場合は
+  /// 解析エラーにします。本文は含みません。本文は GetRunContent が扱います。
+  pub async fn read_remote_instructions(&mut self, run_slug: &RunSlug) -> Result<Vec<Instruction>, ToolError> {
+    let mut instructions = Vec::new();
+    let mut offset = 0_u64;
+    let mut pages_taken = 0_usize;
+    loop {
+      let value = self
+        .call_json(
+          "takt_get_run",
+          json!({
+            "runSlug": run_slug.as_str(),
+            "view": "instructions",
+            "offset": offset,
+            "limit": INSTRUCTIONS_PAGE_LIMIT,
+          }),
+        )
+        .await?;
+      instructions.extend(instruction_summaries(&value)?);
+      match instructions_next_offset(&value)? {
+        | Some(next) if next > offset => {
+          pages_taken += 1;
+          if pages_taken >= super::MAX_PAGES {
+            return Err(ToolError::Parse("takt_get_run の instructions 追従が上限に達しました".to_owned()));
+          }
+          offset = next;
+        },
+        | Some(_) => {
+          return Err(ToolError::Parse("takt_get_run の instructions の nextOffset が進みません".to_owned()));
+        },
+        | None => return Ok(instructions),
+      }
+    }
+  }
+
+  /// takt_get_run の view task から、run のタスク本文を全ページ読む。
+  ///
+  /// 要約の応答はタスク本文を含まない（taskOmission だけを返す）ため、詳細の読み取りは
+  /// この view で本文を取り直します。応答は `{ task: {content, nextOffset} }` で、nextOffset を
+  /// たどって連結します。nextOffset が進まない場合は解析エラーにし、追従がページ数の上限に
+  /// 達したら、そこまでの本文を返します。
+  pub async fn read_remote_task_text(&mut self, run_slug: &RunSlug) -> Result<String, ToolError> {
+    let mut content = String::new();
+    let mut offset = 0_u64;
+    let mut pages_taken = 0_usize;
+    loop {
+      let value = self
+        .call_json(
+          "takt_get_run",
+          json!({ "runSlug": run_slug.as_str(), "view": "task", "offset": offset, "maxBytes": TASK_PAGE_MAX_BYTES }),
+        )
+        .await?;
+      let page = parse_task_page(&value)?;
+      content.push_str(&page.content);
+      match page.next_offset {
+        | Some(next) if next > offset => {
+          pages_taken += 1;
+          if pages_taken >= super::MAX_PAGES {
+            return Ok(content);
+          }
+          offset = next;
+        },
+        | Some(_) => {
+          return Err(ToolError::Parse("takt_get_run の task の nextOffset が進みません".to_owned()));
+        },
+        | None => return Ok(content),
+      }
+    }
+  }
+}
+
+/// 応答の instructions 配列から、指示書の要約を出現順に取り出す。応答に配列が無ければ
+/// 空の一覧です。
+fn instruction_summaries(value: &Value) -> Result<Vec<Instruction>, ToolError> {
+  let Some(entries) = value.get("instructions").and_then(Value::as_array) else {
+    return Ok(Vec::new());
+  };
+  entries.iter().map(parse_instruction_summary).collect()
+}
+
+/// 指示書の要約の1件を読む。ID は検証つきの値オブジェクトへ変換し、状態は既知の名前だけを
+/// 受け付けます。発行時刻が無い・解釈できない場合はステップの記録と同じく UNIX_EPOCH に
+/// 落とします。
+fn parse_instruction_summary(entry: &Value) -> Result<Instruction, ToolError> {
+  let instruction_id =
+    domain_value("指示書の ID", InstructionId::try_from(checked_i32(entry.get("instructionId"), "instructionId")?))?;
+  let issued_at = parse_time(entry.get("issuedAt"))?.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+  let state = parse_instruction_state(entry.get("state"))?;
+  Ok(Instruction { instruction_id, issued_at, state, content: String::new() })
+}
+
+/// takt の live intervention の状態の名前を、指示書の状態へ変換する。欠落と未知の名前は
+/// 解析エラーにします（run の status と同じ規則）。
+fn parse_instruction_state(value: Option<&Value>) -> Result<InstructionState, ToolError> {
+  let text = value
+    .and_then(Value::as_str)
+    .ok_or_else(|| ToolError::Parse("指示書の state が文字列ではありません".to_owned()))?;
+  match text {
+    | "pending" => Ok(InstructionState::Pending),
+    | "deliveredSameSession" => Ok(InstructionState::DeliveredSameSession),
+    | "deliveredNextStep" => Ok(InstructionState::DeliveredNextStep),
+    | "unconsumedWarned" => Ok(InstructionState::UnconsumedWarned),
+    | _ => Err(ToolError::Parse(format!("指示書の state が未知の値です: {text}"))),
+  }
+}
+
+/// view instructions の応答の nextOffset を取り出す。null または欠落なら None（追従の
+/// 終わり）です。
+fn instructions_next_offset(value: &Value) -> Result<Option<u64>, ToolError> {
+  match value.get("nextOffset") {
+    | None | Some(Value::Null) => Ok(None),
+    | Some(next) => Ok(Some(
+      next.as_u64().ok_or_else(|| ToolError::Parse("instructions の nextOffset が数値ではありません".to_owned()))?,
+    )),
+  }
+}
+
+/// takt_get_run の view task が返す、タスク本文の1ページ。
+struct TaskPage {
+  content:     String,
+  /// 続きの読み位置。最後のページでは `None` です。
+  next_offset: Option<u64>,
+}
+
+/// takt_get_run の view task の応答から `task.{content,nextOffset}` を読む。
+///
+/// `task` が無い、または各項目の型が違う場合は解析エラーにします（view report と同じ規則）。
+fn parse_task_page(value: &Value) -> Result<TaskPage, ToolError> {
+  let task = value
+    .get("task")
+    .filter(|task| task.is_object())
+    .ok_or_else(|| ToolError::Parse("takt_get_run の応答に task がありません".to_owned()))?;
+  let content = string_field(task, "content")?;
+  let next_offset = match task.get("nextOffset") {
+    | None | Some(Value::Null) => None,
+    | Some(next) => {
+      Some(next.as_u64().ok_or_else(|| ToolError::Parse("task の nextOffset が数値ではありません".to_owned()))?)
+    },
+  };
+  Ok(TaskPage { content, next_offset })
 }
