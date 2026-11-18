@@ -2,18 +2,20 @@
 //!
 //! run は通常、run の保存場所（[`crate::run_progress`]）から読みます。ローカルに保存場所を読めない
 //! プロジェクト（SSH 越しに扱うリモートのサーバーのプロジェクトなど）の run だけ、takt-mcp の
-//! takt_get_run の応答から作ります。
+//! takt_get_run の応答から作ります。同じプロジェクトの run のレポート本文も、takt_get_run の
+//! view report から読みます。
 
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::{
   parse::{domain_value, optional_string, parse_time, string_field},
-  ToolError,
+  ToolError, ToolSet,
 };
 use crate::{
-  domain::RunSlug,
+  domain::{ReportFilename, RunSlug},
   model::{ReportEntry, RunEntry, RunStatus, RunStepEntry, StepLogEntry, TaskEntry},
+  run_log::RunContent,
   run_progress::task_summary,
 };
 
@@ -199,4 +201,101 @@ pub(super) fn step_log_next_offset(value: &Value) -> Option<usize> {
     .and_then(|page| page.get("nextOffset"))
     .and_then(Value::as_u64)
     .and_then(|offset| usize::try_from(offset).ok())
+}
+
+/// takt_get_run の view report が1回で返す本文の上限（バイト）。takt-mcp の入力契約で
+/// maxBytes は 4〜4096 です。
+const REPORT_PAGE_MAX_BYTES: u64 = 4096;
+/// takt_get_run の view report に渡せる maxBytes の下限（バイト）。
+const REPORT_PAGE_MIN_BYTES: u64 = 4;
+
+impl ToolSet<'_> {
+  /// takt_get_run の view report から、run のレポート `filename` の本文を先頭から `max_bytes`
+  /// まで読む。
+  ///
+  /// takt_get_run は1回の応答で最大 [`REPORT_PAGE_MAX_BYTES`] バイトの本文を
+  /// `report.{content,totalBytes,nextOffset}` で返すため、nextOffset をたどって連結します。
+  /// 対象のレポートが無いと takt-mcp は道具エラーを返します。応答に `report` が無い、型が違う、
+  /// または nextOffset が進まない場合は解析エラーにします。
+  pub async fn read_remote_report(
+    &mut self,
+    run_slug: &RunSlug,
+    filename: &ReportFilename,
+    max_bytes: u64,
+  ) -> Result<RunContent, ToolError> {
+    let mut content = String::new();
+    let mut offset = 0_u64;
+    loop {
+      let remaining = max_bytes.saturating_sub(content.len() as u64);
+      let value = self
+        .call_json(
+          "takt_get_run",
+          json!({
+            "runSlug": run_slug.as_str(),
+            "view": "report",
+            "report": filename.as_str(),
+            "offset": offset,
+            "maxBytes": remaining.clamp(REPORT_PAGE_MIN_BYTES, REPORT_PAGE_MAX_BYTES),
+          }),
+        )
+        .await?;
+      let page = parse_report_page(&value)?;
+      content.push_str(&page.content);
+      let next = match page.next_offset {
+        | Some(next) if next <= offset || page.content.is_empty() => {
+          return Err(ToolError::Parse("takt_get_run の report の nextOffset が進みません".to_owned()));
+        },
+        | next => next,
+      };
+      let collected = content.len() as u64;
+      match next {
+        | Some(next) if collected + REPORT_PAGE_MIN_BYTES <= max_bytes => offset = next,
+        | _ => {
+          truncate_at_char_boundary(&mut content, max_bytes);
+          let truncated = (content.len() as u64) < page.total_bytes;
+          return Ok(RunContent { content, size_bytes: page.total_bytes, truncated });
+        },
+      }
+    }
+  }
+}
+
+/// takt_get_run の view report が返す、レポート本文の1ページ。
+struct ReportPage {
+  content:     String,
+  /// レポート全体の大きさ（バイト）。
+  total_bytes: u64,
+  /// 続きの読み位置。最後のページでは `None` です。
+  next_offset: Option<u64>,
+}
+
+/// takt_get_run の view report の応答から `report.{content,totalBytes,nextOffset}` を読む。
+///
+/// `report` が無い、または各項目の型が違う場合は解析エラーにします。
+fn parse_report_page(value: &Value) -> Result<ReportPage, ToolError> {
+  let report = value
+    .get("report")
+    .filter(|report| report.is_object())
+    .ok_or_else(|| ToolError::Parse("takt_get_run の応答に report がありません".to_owned()))?;
+  let content = string_field(report, "content")?;
+  let total_bytes = report
+    .get("totalBytes")
+    .and_then(Value::as_u64)
+    .ok_or_else(|| ToolError::Parse("report の totalBytes が数値ではありません".to_owned()))?;
+  let next_offset = match report.get("nextOffset") {
+    | None | Some(Value::Null) => None,
+    | Some(next) => {
+      Some(next.as_u64().ok_or_else(|| ToolError::Parse("report の nextOffset が数値ではありません".to_owned()))?)
+    },
+  };
+  Ok(ReportPage { content, total_bytes, next_offset })
+}
+
+/// 本文を `max_bytes` 以内の文字の境界で切り詰める。
+fn truncate_at_char_boundary(content: &mut String, max_bytes: u64) {
+  let mut end = usize::try_from(max_bytes).unwrap_or(usize::MAX).min(content.len());
+  while !content.is_char_boundary(end) {
+    end -= 1;
+  }
+  content.truncate(end);
 }

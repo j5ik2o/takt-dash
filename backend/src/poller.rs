@@ -150,6 +150,7 @@ impl Poller {
       // 再起動や作り直しで比較基準が無いプロジェクトは、記録済みの接続の出来事から
       // 基準を作り、未対応の切断を取りこぼさないようにします。
       self.seed_connection_baseline(project);
+      self.forget_answered_terminal_questions(&project.name);
       let prev = self.previous.get(&project.name).cloned();
       let run_logs = self.run_logs.handle_for(&project.name, &project.cwd);
       match self.registry.get(&project.server, &project.name) {
@@ -405,6 +406,20 @@ impl Poller {
         continue;
       };
       self.registry.client(&project.server, &project.name, || client_config(server, &project.cwd));
+    }
+  }
+
+  /// 問い合わせへの回答が成功したゴールを、前回の snapshot の「終端で質問を読めた」ゴールから外す。
+  ///
+  /// 外したゴールは、状態が変わらない終端のゴールでもこの周期で質問を読み直します。読み直せれば
+  /// 再び載り、次の周期からは従来どおり読み取りを省きます。
+  fn forget_answered_terminal_questions(&mut self, project: &str) {
+    let answered = self.store.take_invalidated_goal_questions(project);
+    if answered.is_empty() {
+      return;
+    }
+    if let Some(previous) = self.previous.get_mut(project) {
+      previous.terminal_reads.questions.retain(|goal_id| !answered.contains(goal_id));
     }
   }
 
