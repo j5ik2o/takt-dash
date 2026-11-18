@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use super::{
   parse::{checked_i32, domain_value, optional_string, parse_time, string_field},
-  ToolError, ToolSet,
+  ToolError, ToolSetCore,
 };
 use crate::{
   domain::{InstructionId, ReportFilename, RunSlug},
@@ -248,7 +248,7 @@ const REPORT_PAGE_MAX_BYTES: u64 = 4096;
 /// takt_get_run の view report に渡せる maxBytes の下限（バイト）。
 const REPORT_PAGE_MIN_BYTES: u64 = 4;
 
-impl ToolSet<'_> {
+impl ToolSetCore<'_> {
   /// takt_get_run の view report から、run のレポート `filename` の本文を先頭から `max_bytes`
   /// まで読む。
   ///
@@ -345,7 +345,7 @@ const INSTRUCTIONS_PAGE_LIMIT: u64 = 50;
 /// 上限 4096 に合わせます。
 const TASK_PAGE_MAX_BYTES: u64 = 4096;
 
-impl ToolSet<'_> {
+impl ToolSetCore<'_> {
   /// takt_get_run の view instructions から、run の指示書の一覧（要約）を全ページ読む。
   ///
   /// 応答は `{ instructions: [{instructionId, issuedAt, state}], nextOffset }` で、nextOffset を
@@ -427,7 +427,7 @@ const INSTRUCTION_PAGE_MAX_BYTES: u64 = 4096;
 /// （バイト）。
 const INSTRUCTION_PAGE_MIN_BYTES: u64 = 4;
 
-impl ToolSet<'_> {
+impl ToolSetCore<'_> {
   /// takt_get_run の view instructions から、run の指示書 `instruction_id` の本文を
   /// 先頭から `max_bytes` まで読む。
   ///

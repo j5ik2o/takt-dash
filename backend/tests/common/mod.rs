@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use takt_dash_backend::{
   config::{McpServer, Project, ServerMeta, Thresholds},
   domain::{GoalId, InquiryId, PullRequestNumber, SilentMinutes, StaleMinutes, TaskName},
-  mcp::{McpClient, McpClientConfig, ToolSet},
+  mcp::{McpClient, McpClientConfig, ReadToolSet, WriteToolSet},
   model::{
     ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, RunEntry,
     TaskEntry, TaskStatus,
@@ -81,10 +81,15 @@ pub fn mock_config_with_calls(cwd: &Path, state: &Path, calls: &Path) -> McpClie
   config.args.push(calls.display().to_string());
   config
 }
-/// プロジェクトの cwd を持つ道具のまとまりを作る。mock は実契約と同じく cwd 必須なので、
-/// テストはプロジェクトの cwd（通常は mock を起動したディレクトリ）を渡します。
-pub fn tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> ToolSet<'a> {
-  ToolSet::new(client, cwd.to_path_buf())
+/// プロジェクトの cwd を持つ読み取り専用の道具のまとまりを作る。mock は実契約と同じく cwd
+/// 必須なので、テストはプロジェクトの cwd（通常は mock を起動したディレクトリ）を渡します。
+pub fn tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> ReadToolSet<'a> {
+  ReadToolSet::new(client, cwd.to_path_buf())
+}
+
+/// 書き込み専用の道具のまとまりを作る。書き込みレーンのテストが使う。
+pub fn write_tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> WriteToolSet<'a> {
+  WriteToolSet::new(client, cwd.to_path_buf())
 }
 
 /// プロジェクトの cwd の run

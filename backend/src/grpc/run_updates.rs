@@ -9,6 +9,7 @@ use tonic::Status;
 use super::{mapping::optional_timestamp, run_detail::remote_run_updates, run_read_failure_status, ResolvedProject};
 use crate::{
   domain::RunSlug,
+  mcp::McpClientRegistry,
   run_progress::{read_run_updates, LogCursor, RunLogHandle, RunReadFailure, RunUpdates},
   takt_dash::v1::{GetRunUpdatesResponse, RunLogLine, RunSessionActivity},
 };
@@ -36,6 +37,7 @@ pub(super) fn parse_log_cursor(epoch: Option<i64>, after_sequence: Option<i64>) 
 /// 失敗を返します。
 pub(super) async fn read_updates_response(
   run_logs: &RunLogHandle,
+  registry: &McpClientRegistry,
   resolved: &ResolvedProject,
   run_slug: RunSlug,
   after: Option<LogCursor>,
@@ -46,7 +48,7 @@ pub(super) async fn read_updates_response(
       Ok(GetRunUpdatesResponse { run_slug: run_slug.as_str().to_owned(), logs_removed: true, ..Default::default() })
     },
     | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
-      let updates = remote_run_updates(resolved, &run_slug, after, failure).await?;
+      let updates = remote_run_updates(registry, resolved, &run_slug, after, failure).await?;
       Ok(run_updates_response(&run_slug, updates))
     },
     | Err(failure) => Err(run_read_failure_status(failure)),

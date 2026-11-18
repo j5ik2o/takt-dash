@@ -41,6 +41,7 @@
     }
   ],
   "intervalSeconds": 30,
+  "screenReadLanes": 1,
   "thresholds": {
     "pendingDecisionStaleMinutes": 240,
     "runLogSilentMinutes": 10

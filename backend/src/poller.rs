@@ -21,7 +21,7 @@ use crate::{
   activity::ActivityStore,
   config::{load_config, Config, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
-  mcp::{client_config, McpClientRegistry, ToolCallMetrics, ToolError, ToolSet},
+  mcp::{client_config, Lane, McpClientRegistry, ReadToolSet, ToolCallMetrics, ToolError},
   model::{
     ConnectionState, ConnectionTransition, EventKind, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot,
     TerminalReads,
@@ -141,6 +141,10 @@ impl Poller {
     // 続けるため、最初の記録エラーだけを保持してサイクルの末尾で返します。
     let mut record_error: Option<crate::config::ConfigError> = None;
     let mut handles = Vec::with_capacity(config.projects.len());
+    // 読み取り開始時点の書き込みの通し番号。読み取りの途中で書き込みが成功した
+    // プロジェクトは、読み取り結果が書き込み前の状態を映している可能性があるため、
+    // 結果を反映せずに捨てます（`read_result_is_stale`）。
+    let mut write_sequences = Vec::with_capacity(config.projects.len());
     for project in &config.projects {
       // 設定変更（読み取り側・書き込み RPC 経由の双方）でクライアントを作り直した
       // プロジェクトは、旧接続先の差分基準を新接続先へ投影しないよう読み取り前にリセットします。
@@ -153,13 +157,14 @@ impl Poller {
       self.forget_answered_terminal_questions(&project.name);
       let prev = self.previous.get(&project.name).cloned();
       let run_logs = self.run_logs.handle_for(&project.name, &project.cwd);
-      match self.registry.get(&project.server, &project.name) {
+      write_sequences.push(self.registry.write_sequence(&project.server, &project.name));
+      match self.registry.get(&project.server, &project.name, Lane::Poller) {
         | Some(handle) => {
           let project = project.clone();
           handles.push(Some(tokio::spawn(async move {
             let read_at = Utc::now();
             let mut client = handle.lock().await;
-            let mut tools = ToolSet::new(&mut client, project.cwd.clone());
+            let mut tools = ReadToolSet::new(&mut client, project.cwd.clone());
             let result = tools.read_snapshot(prev.as_ref(), &run_logs).await;
             let metrics = tools.take_metrics();
             (read_at, result, metrics)
@@ -168,7 +173,7 @@ impl Poller {
         | None => handles.push(None),
       }
     }
-    for (project, handle) in config.projects.iter().zip(handles) {
+    for ((project, handle), write_sequence_at_start) in config.projects.iter().zip(handles).zip(write_sequences) {
       let prev = self.previous.get(&project.name).cloned();
       let Some(handle) = handle else {
         let error = ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name));
@@ -180,6 +185,20 @@ impl Poller {
           metrics.merge(project_metrics);
           match result {
             | Ok(snapshot) => {
+              // 読み取りの開始後に書き込みが成功していたら、この結果は書き込み前の状態を
+              // 映している可能性があるため、store へ反映せず、差分基準（previous）も進めず、
+              // 出来事の検出も行わずに捨てます。出来事の検出は、書き込み後の状態を読む
+              // 次のサイクルで行われます。接続状態もこの結果では進めません。
+              let write_sequence = self.registry.write_sequence(&project.server, &project.name);
+              if read_result_is_stale(write_sequence_at_start, write_sequence) {
+                tracing::info!(
+                  project = %project.name,
+                  write_sequence_at_start,
+                  write_sequence,
+                  "読み取りの開始後に書き込みがあったため、この読み取り結果を捨てます。"
+                );
+                continue;
+              }
               // 接続断・復帰の比較基準は、最後に記録へ成功した状態（`notified`）に置きます。
               // 記録に失敗したサイクルでは基準を進めず、次サイクルで同じ差分を再検出します。
               let mut outage =
@@ -405,7 +424,27 @@ impl Poller {
       let Some(server) = config.servers.get(&project.server) else {
         continue;
       };
-      self.registry.client(&project.server, &project.name, || client_config(server, &project.cwd));
+      let (write_handle, write_created) =
+        self.registry.ensure_lanes(&project.server, &project.name, config.screen_read_lanes, || {
+          client_config(server, &project.cwd)
+        });
+      if write_created {
+        // 書き込みレーンは起動時に温めます。最初の書き込みが利用者の操作の裏で
+        // 子プロセスの起動と初期化を待たないようにするためです。温めは裏で進め、
+        // サイクルの進行は止めません。失敗した場合は、最初の書き込みのときに
+        // 通常の再試行の経路で扱います。
+        let project_name = project.name.clone();
+        tokio::spawn(async move {
+          let mut client = write_handle.lock().await;
+          if let Err(error) = client.warm_up().await {
+            tracing::warn!(
+              project = %project_name,
+              error = %error,
+              "書き込みレーンの子プロセスを温められませんでした。最初の書き込みで再試行します。"
+            );
+          }
+        });
+      }
     }
   }
 
@@ -549,5 +588,32 @@ async fn sleep_until_next(started: DateTime<Utc>, interval: Duration) {
   let remaining = interval.as_millis().saturating_sub(elapsed.num_milliseconds().max(0) as u128);
   if remaining > 0 {
     tokio::time::sleep(Duration::from_millis(remaining as u64)).await;
+  }
+}
+
+/// 読み取り結果が古いかどうかを、書き込みの通し番号で判定する。
+///
+/// 読み取り開始時点の番号より現在の番号が進んでいたら、読み取りの途中で書き込みが
+/// 成功しており、結果は書き込み前の状態を映している可能性があるため古いと判定します。
+fn read_result_is_stale(write_sequence_at_start: u64, write_sequence_now: u64) -> bool {
+  write_sequence_now > write_sequence_at_start
+}
+
+#[cfg(test)]
+mod tests {
+  //! 書き込みの通し番号による古い読み取り結果の判定を固定する。
+
+  use super::read_result_is_stale;
+
+  #[test]
+  fn read_result_is_fresh_without_writes() {
+    assert!(!read_result_is_stale(0, 0), "書き込みが無ければ結果は新しい");
+    assert!(!read_result_is_stale(3, 3), "番号が同じなら結果は新しい");
+  }
+
+  #[test]
+  fn read_result_is_stale_after_a_write() {
+    assert!(read_result_is_stale(0, 1), "読み取り開始後に書き込みがあれば結果は古い");
+    assert!(read_result_is_stale(3, 4), "番号が1つでも進んでいれば結果は古い");
   }
 }

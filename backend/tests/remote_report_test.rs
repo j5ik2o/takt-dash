@@ -1,4 +1,4 @@
-//! takt_get_run の view report からレポート本文を読む `ToolSet::read_remote_report` が、
+//! takt_get_run の view report からレポート本文を読む `ReadToolSet::read_remote_report` が、
 //! ページをたどって本文を連結し、上限で文字の境界に切り詰め、不正な応答を解析エラーにすることを
 //! 検証する。
 

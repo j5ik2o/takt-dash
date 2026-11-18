@@ -1,9 +1,15 @@
 //! プロジェクト単位の takt-mcp 子プロセスの共有レジストリ。
 //!
-//! 定期読み取り（[`crate::poller::Poller`]）と gRPC の書き込み RPC が同じ
-//! `(server_id, project)` のクライアントを共有し、読み取りと操作を同じ接続で行います。
+//! 接続は用途別のレーンに分けます。定期読み取り（[`crate::poller::Poller`]）は
+//! [`Lane::Poller`]、画面からの読み取りは [`Lane::Screen`]、書き込み RPC は
+//! [`Lane::Write`] を使い、レーンごとに別の子プロセスを持ちます。重い読み取りが
+//! 走っても、書き込みと画面の読み取りは別の子プロセスで進みます。
 //! 起動設定が変わったプロジェクトは旧ハンドルを外して作り直し、作り直したことを記録して
 //! 定期読み取り側が差分基準をリセットできるようにします。
+//!
+//! あわせて、プロジェクトごとの書き込みの通し番号を持ちます。書き込み RPC が成功する
+//! たびに進め、定期読み取りは読み取り開始時点の番号と比べることで、読み取りの途中で
+//! 書き込みが完了した場合に古い読み取り結果を捨てられます。
 
 use std::{
   collections::{BTreeMap, BTreeSet},
@@ -14,30 +20,82 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use super::{McpClient, McpClientConfig};
 
+/// takt-mcp への接続の用途を表すレーン。
+///
+/// レーンごとに子プロセスが分かれるため、1つのレーンの重い呼び出しが他のレーンを
+/// 待たせることはありません。画面読み取りレーンだけが複数本にでき、本数は設定で決まります。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+  /// poller の定期読み取り。プロジェクトごとに1本で固定します。
+  Poller,
+  /// 画面からの読み取り。プロジェクトごとに設定値（1〜3本）だけ持ちます。
+  Screen,
+  /// 書き込み RPC。プロジェクトごとに1本で固定します。
+  Write,
+}
+
+impl Lane {
+  /// ログと識別に使うレーンの名前。
+  pub fn name(self) -> &'static str {
+    match self {
+      | Lane::Poller => "poller",
+      | Lane::Screen => "screen",
+      | Lane::Write => "write",
+    }
+  }
+}
+
+/// レジストリの内部キー。画面読み取りレーンは本数分の番号で区別します。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum LaneKey {
+  Poller,
+  Screen(u32),
+  Write,
+}
+
+impl LaneKey {
+  /// 子プロセスのログへ出すレーン名。画面読み取りは番号つきで区別します。
+  fn label(&self) -> String {
+    match self {
+      | LaneKey::Poller => "poller".to_owned(),
+      | LaneKey::Screen(index) => format!("screen-{index}"),
+      | LaneKey::Write => "write".to_owned(),
+    }
+  }
+}
+
 /// レジストリのキー。設定上、プロジェクト名はサーバー内で一意です。
-type ClientKey = (String, String);
+type ClientKey = (String, String, LaneKey);
 
-type ClientHandle = Arc<AsyncMutex<McpClient>>;
+/// プロジェクトを指すキー。レーンをまたぐ記録（作り直し・書き込みの通し番号）に使います。
+type ProjectKey = (String, String);
 
-/// 1 プロジェクト分のクライアントと、その起動設定。
+/// レジストリが貸し出すクライアントの取っ手。クライアントごとの排他はこの中の
+/// [`tokio::sync::Mutex`] で行います。
+pub type ClientHandle = Arc<AsyncMutex<McpClient>>;
+
+/// 1 レーン分のクライアントと、その起動設定。
 struct Entry {
   config: McpClientConfig,
   client: ClientHandle,
 }
 
-/// レジストリの内部状態。map と「作り直した」集合を同じロックで保護します。
+/// レジストリの内部状態。map と「作り直した」集合と書き込みの通し番号を同じロックで保護します。
 #[derive(Default)]
 struct RegistryInner {
-  clients: BTreeMap<ClientKey, Entry>,
-  rebuilt: BTreeSet<ClientKey>,
+  clients:      BTreeMap<ClientKey, Entry>,
+  rebuilt:      BTreeSet<ProjectKey>,
+  /// 画面読み取りレーンの次回割り当て位置。プロジェクトごとにラウンドロビンで進めます。
+  screen_next:  BTreeMap<ProjectKey, u32>,
+  /// プロジェクトごとの書き込みの通し番号。書き込みが成功するたびに1つ進めます。
+  write_counts: BTreeMap<ProjectKey, u64>,
 }
 
-/// プロジェクトごとの takt-mcp クライアントを所有するレジストリ。
+/// プロジェクトごとの takt-mcp クライアントをレーン別に所有するレジストリ。
 ///
-/// map 自体の排他は [`std::sync::Mutex`] で行い、ガードは `client`・`get`・`retain`・
-/// `take_rebuilt_for` の式の中だけに閉じて `.await` を跨ぎません。クライアントごとの排他は
-/// [`tokio::sync::Mutex`] で行い、1 回の `ToolSet` 操作の間だけ保持します。ロックを
-/// 入れ子にしないため、書き込みが読み取りを待たせてもデッドロックしません。
+/// map 自体の排他は [`std::sync::Mutex`] で行い、ガードは各メソッドの式の中だけに閉じて
+/// `.await` を跨ぎません。クライアントごとの排他は [`tokio::sync::Mutex`] で行い、1 回の
+/// 道具操作の間だけ保持します。
 #[derive(Clone, Default)]
 pub struct McpClientRegistry {
   inner: Arc<Mutex<RegistryInner>>,
@@ -48,50 +106,123 @@ impl McpClientRegistry {
     Self::default()
   }
 
-  /// 指定したプロジェクトのクライアントを返す。
+  /// 指定したプロジェクト・レーンのクライアントを返す。
   ///
   /// 登録が無ければ `make` で起動設定を作って登録します。登録済みのクライアントの起動設定が
   /// `make` の返す設定と異なる場合は、旧ハンドルをレジストリから外して新しい設定で作り直し、
-  /// 作り直したことを記録します。設定が同じなら子プロセスを保ったまま同じハンドルを返します。
+  /// 作り直したことをプロジェクト単位で記録します。戻り値の2つ目は、クライアントを新規に
+  /// 作った（作り直しを含む）かどうかで、呼び出し側が起動時の温めを行う判断に使います。
   ///
-  /// 子プロセスの起動は最初の道具呼び出しまで遅延します。
-  pub fn client(&self, server_id: &str, project: &str, make: impl FnOnce() -> McpClientConfig) -> ClientHandle {
-    let key = (server_id.to_owned(), project.to_owned());
-    let wanted = make();
-    let (handle, replaced) = {
+  /// 子プロセスの起動は最初の道具呼び出しまで遅延します（温めは呼び出し側が行います）。
+  pub fn client(
+    &self,
+    server_id: &str,
+    project: &str,
+    lane: Lane,
+    make: impl FnOnce() -> McpClientConfig,
+  ) -> (ClientHandle, bool) {
+    let lane_key = match lane {
+      | Lane::Poller => LaneKey::Poller,
+      | Lane::Write => LaneKey::Write,
+      // 画面読み取りを本数で選ぶ場合は screen_client を使います。ここでは1本目を返します。
+      | Lane::Screen => LaneKey::Screen(0),
+    };
+    self.client_for_key(server_id, project, lane_key, make())
+  }
+
+  /// 画面読み取りレーンのクライアントを、要求ごとにラウンドロビンで1本選んで返す。
+  ///
+  /// `lanes` 本の中から前回の次の位置を選びます。全本が使用中でも、選んだ1本のロックが
+  /// 空くのを待つ形で構いません（呼び出し側がロック取得で待ちます）。
+  pub fn screen_client(
+    &self,
+    server_id: &str,
+    project: &str,
+    lanes: u32,
+    make: impl FnOnce() -> McpClientConfig,
+  ) -> ClientHandle {
+    let lanes = lanes.max(1);
+    let index = {
+      let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+      let project_key = (server_id.to_owned(), project.to_owned());
+      let next = inner.screen_next.entry(project_key).or_insert(0);
+      let index = *next % lanes;
+      *next = next.wrapping_add(1);
+      index
+    };
+    self.client_for_key(server_id, project, LaneKey::Screen(index), make()).0
+  }
+
+  /// プロジェクトの全レーンのクライアントをそろえる。poller のセットアップが使います。
+  ///
+  /// 定期読み取り・画面読み取り（`screen_lanes` 本）・書き込みの各レーンを作り、書き込み
+  /// レーンのハンドルと、書き込みレーンを新規に作ったかどうかを返します。呼び出し側は、
+  /// 新規に作った書き込みレーンだけを温めます。
+  pub fn ensure_lanes(
+    &self,
+    server_id: &str,
+    project: &str,
+    screen_lanes: u32,
+    make: impl Fn() -> McpClientConfig,
+  ) -> (ClientHandle, bool) {
+    self.client_for_key(server_id, project, LaneKey::Poller, make());
+    for index in 0..screen_lanes.max(1) {
+      self.client_for_key(server_id, project, LaneKey::Screen(index), make());
+    }
+    self.client_for_key(server_id, project, LaneKey::Write, make())
+  }
+
+  /// キーで指定したレーンのクライアントを取得または作成する共通処理。
+  fn client_for_key(
+    &self,
+    server_id: &str,
+    project: &str,
+    lane_key: LaneKey,
+    wanted: McpClientConfig,
+  ) -> (ClientHandle, bool) {
+    let key = (server_id.to_owned(), project.to_owned(), lane_key.clone());
+    let (handle, created, replaced) = {
       let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
       if let Some(entry) = inner.clients.get(&key) {
         if entry.config == wanted {
-          return entry.client.clone();
+          return (entry.client.clone(), false);
         }
       }
-      inner.rebuilt.insert(key.clone());
-      let handle = Arc::new(AsyncMutex::new(McpClient::new(wanted.clone())));
+      inner.rebuilt.insert((server_id.to_owned(), project.to_owned()));
+      let handle = Arc::new(AsyncMutex::new(McpClient::with_lane(wanted.clone(), &lane_key.label())));
       let replaced = inner.clients.insert(key, Entry { config: wanted, client: handle.clone() });
-      (handle, replaced)
+      (handle, true, replaced)
     };
-    // 旧ハンドルは map のロックを解放してから破棄する。書き込みがまだ保持している場合は、
+    // 旧ハンドルは map のロックを解放してから破棄する。利用者がまだ保持している場合は、
     // その操作が終わって最後のハンドルが消えた時点で子プロセスが停止します。
     drop(replaced);
-    handle
+    (handle, created)
   }
 
-  /// 指定したプロジェクトのクライアントを返す。登録が無ければ `None` を返します。
-  pub fn get(&self, server_id: &str, project: &str) -> Option<ClientHandle> {
-    let key = (server_id.to_owned(), project.to_owned());
+  /// 指定したプロジェクト・レーンのクライアントを返す。登録が無ければ `None` を返します。
+  pub fn get(&self, server_id: &str, project: &str, lane: Lane) -> Option<ClientHandle> {
+    let lane_key = match lane {
+      | Lane::Poller => LaneKey::Poller,
+      | Lane::Write => LaneKey::Write,
+      | Lane::Screen => LaneKey::Screen(0),
+    };
+    let key = (server_id.to_owned(), project.to_owned(), lane_key);
     let inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
     inner.clients.get(&key).map(|entry| entry.client.clone())
   }
 
-  /// 指定したキー以外のクライアントをレジストリから外す。
+  /// 指定したプロジェクト以外のクライアントをレジストリから外す。
   ///
   /// 誰も保持していないクライアントはここで破棄され、子プロセスは
-  /// [`McpClient`] の `kill_on_drop` で停止します。書き込みがまだ同じハンドルを
+  /// [`McpClient`] の `kill_on_drop` で停止します。利用者がまだ同じハンドルを
   /// 保持している場合は、その操作が終わってハンドルが消えた時点で停止します。
   pub fn retain(&self, wanted: &[(String, String)]) {
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-    inner.clients.retain(|(server_id, project), _| wanted.iter().any(|key| &key.0 == server_id && &key.1 == project));
-    inner.rebuilt.retain(|(server_id, project)| wanted.iter().any(|key| &key.0 == server_id && &key.1 == project));
+    let wanted: BTreeSet<&ProjectKey> = wanted.iter().collect();
+    inner.clients.retain(|(server_id, project, _), _| wanted.contains(&(server_id.clone(), project.clone())));
+    inner.rebuilt.retain(|key| wanted.contains(key));
+    inner.screen_next.retain(|key, _| wanted.contains(key));
+    inner.write_counts.retain(|key, _| wanted.contains(key));
   }
 
   /// 指定したプロジェクトが作り直されたかを返し、記録を消す。
@@ -102,6 +233,22 @@ impl McpClientRegistry {
     let key = (server_id.to_owned(), project.to_owned());
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
     inner.rebuilt.remove(&key)
+  }
+
+  /// プロジェクトの現在の書き込みの通し番号を返す。書き込みがまだ無ければ0です。
+  pub fn write_sequence(&self, server_id: &str, project: &str) -> u64 {
+    let key = (server_id.to_owned(), project.to_owned());
+    let inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+    inner.write_counts.get(&key).copied().unwrap_or(0)
+  }
+
+  /// 書き込みの成功を記録し、通し番号を1つ進めて新しい番号を返す。
+  pub fn record_write(&self, server_id: &str, project: &str) -> u64 {
+    let key = (server_id.to_owned(), project.to_owned());
+    let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+    let count = inner.write_counts.entry(key).or_insert(0);
+    *count = count.saturating_add(1);
+    *count
   }
 
   /// すべてのクライアントを map から取り出し、1 件ずつ排他取得して停止する。
@@ -117,5 +264,63 @@ impl McpClientRegistry {
     for client in clients {
       client.lock().await.shutdown().await;
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  //! レーンの分離とラウンドロビンと書き込みの通し番号を固定する。
+  //!
+  //! クライアントは子プロセスを起動しないまま作れるため、ハンドルの同一性だけで
+  //! レーンの割り当てを観測します。
+
+  use std::{path::PathBuf, sync::Arc, time::Duration};
+
+  use super::{Lane, McpClientRegistry};
+  use crate::mcp::McpClientConfig;
+
+  fn config() -> McpClientConfig {
+    McpClientConfig {
+      command:         "node".to_owned(),
+      args:            Vec::new(),
+      env:             Default::default(),
+      cwd:             PathBuf::from("/tmp"),
+      request_timeout: Duration::from_secs(5),
+      tool_timeouts:   Default::default(),
+    }
+  }
+
+  #[test]
+  fn lanes_have_distinct_clients() {
+    let registry = McpClientRegistry::new();
+    let (poller, _) = registry.client("local", "proj", Lane::Poller, config);
+    let (write, _) = registry.client("local", "proj", Lane::Write, config);
+    let screen = registry.screen_client("local", "proj", 1, config);
+    assert!(!Arc::ptr_eq(&poller, &write), "定期読み取りと書き込みは別のクライアントです");
+    assert!(!Arc::ptr_eq(&poller, &screen), "定期読み取りと画面読み取りは別のクライアントです");
+    assert!(!Arc::ptr_eq(&write, &screen), "書き込みと画面読み取りは別のクライアントです");
+    let (poller_again, created) = registry.client("local", "proj", Lane::Poller, config);
+    assert!(Arc::ptr_eq(&poller, &poller_again), "同じレーンは同じクライアントを返します");
+    assert!(!created, "既存のクライアントは新規作成ではありません");
+  }
+
+  #[test]
+  fn screen_clients_rotate_round_robin() {
+    let registry = McpClientRegistry::new();
+    let first = registry.screen_client("local", "proj", 2, config);
+    let second = registry.screen_client("local", "proj", 2, config);
+    let third = registry.screen_client("local", "proj", 2, config);
+    assert!(!Arc::ptr_eq(&first, &second), "2本の画面読み取りは別のクライアントです");
+    assert!(Arc::ptr_eq(&first, &third), "3回目は1本目へ戻ります");
+  }
+
+  #[test]
+  fn write_sequence_advances_per_project() {
+    let registry = McpClientRegistry::new();
+    assert_eq!(registry.write_sequence("local", "proj"), 0);
+    assert_eq!(registry.record_write("local", "proj"), 1);
+    assert_eq!(registry.record_write("local", "proj"), 2);
+    assert_eq!(registry.write_sequence("local", "proj"), 2);
+    assert_eq!(registry.write_sequence("local", "other"), 0, "通し番号はプロジェクトごとに独立です");
   }
 }
