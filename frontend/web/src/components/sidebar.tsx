@@ -1,10 +1,17 @@
 import type { ReactElement } from "react";
 import Link from "next/link";
-import type { Server } from "../proto/taktdash";
+import type { Project, Server } from "../proto/taktdash";
 import type { DashboardRun } from "../state/restore-state";
 import { serverHref } from "../state/anchors";
 import { commitsDiffer, type BuildInfo } from "../state/build-info";
 import { formatClock } from "../state/format";
+import {
+  notRespondingProjectText,
+  notRespondingProjects,
+  serverDisplayState,
+  serverStateLabel,
+} from "../state/dashboard";
+import { toRunCount } from "../state/domain-primitives";
 
 type SidebarProps = {
   servers: Server[];
@@ -12,6 +19,9 @@ type SidebarProps = {
   currentPath?: string;
   readAt?: Date;
   runs?: readonly DashboardRun[];
+  // サーバー配下のプロジェクト。サーバーが応答していても配下のプロジェクトが
+  // 応答していないことがあるため、状態と下端の注記に使う（issue #264）。
+  projects?: readonly Project[];
   frontendBuild: BuildInfo;
   backendBuild: BuildInfo;
 };
@@ -36,10 +46,12 @@ export function Sidebar({
   currentPath,
   readAt,
   runs,
+  projects,
   frontendBuild,
   backendBuild,
 }: SidebarProps): ReactElement {
   const connectedCount = servers.filter((server) => server.connected).length;
+  const notResponding = notRespondingProjects(projects ?? []);
   return (
     <nav className="sidebar" aria-label="画面と集約対象のサーバー">
       <Link className="brand" href="/">
@@ -49,15 +61,22 @@ export function Sidebar({
         <p className="side-title">サーバー</p>
         <ul className="srv-list">
           {servers.map((server) => {
-            const runCount = runs?.filter((run) => run.serverId === server.serverId).length ?? 0;
+            const runCount = toRunCount(
+              runs?.filter((run) => run.serverId === server.serverId).length ?? 0,
+            );
+            // 状態の決め方と文言は概要のサーバーカードと共通の関数を使う。
+            // 接続だけで決めると、run が無いサーバーがカードの表示と食い違う（issue #188）。
+            // 配下のプロジェクトが応答していないサーバーは、接続できていても正常に
+            // 見えないようにカードと同じく warn の側へ倒す（issue #264）。
+            const state = serverDisplayState(server, runCount, projects ?? []);
             return (
               <li key={server.serverId}>
-                <span className={`dot ${server.connected ? "live" : "down"}`} aria-hidden="true" />
+                <span className={`dot ${state}`} aria-hidden="true" />
                 <Link className="nm" href={serverHref(server.serverId)}>
                   {server.name}
                 </Link>
                 <span className="cnt">run {runCount}件</span>
-                <span className="srv-state">{server.connected ? "動作中" : "応答なし"}</span>
+                <span className="srv-state">{serverStateLabel(state)}</span>
               </li>
             );
           })}
@@ -88,6 +107,11 @@ export function Sidebar({
         <p>
           {servers.length}台中{connectedCount}台から読めています
         </p>
+        {notResponding.map((project) => (
+          <p className="stale-note" key={`${project.serverId}:${project.name}`}>
+            {notRespondingProjectText(project)}
+          </p>
+        ))}
         <p style={{ overflowWrap: "anywhere" }}>
           frontend {frontendBuild.commit} ({frontendBuild.branch})
         </p>

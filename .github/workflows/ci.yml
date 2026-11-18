@@ -25,6 +25,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: "36.2"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: python3 -m pip install pyyaml
       - run: make done
       - run: npm ci
@@ -44,6 +45,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: "36.2"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: make e2e
 
   coverage:
@@ -63,6 +65,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: "36.2"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: rustup component add llvm-tools-preview
       - run: cargo llvm-cov --version > /dev/null 2>&1 || cargo install cargo-llvm-cov --locked
       - run: python3 -m pip install pyyaml coverage

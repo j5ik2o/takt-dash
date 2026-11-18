@@ -37,7 +37,7 @@ const renderProjects = (goals: Goal[], state: Partial<DashboardState> = {}): str
   const base = createDashboardState();
   const next = DashboardState.create({ ...base, goals, ...state });
   return renderToStaticMarkup(
-    createElement(ProjectsPage, { response: { state: next, recentEvents: [] }, now: NOW }),
+    createElement(ProjectsPage, { state: next, now: NOW }),
   );
 };
 
@@ -121,11 +121,11 @@ const progressText = (html: string): string => {
   return (match[1] ?? "").replace(/<[^>]+>/g, "").trim();
 };
 
-// 進行中一覧は run 区画の後、完了の折りたたみの前にある。
+// 進行中一覧は run 区画の後、区画ごとの折りたたみ（goal-done 系のクラス）の前にある。
 const inProgressSection = (card: string): string => {
   const start = card.indexOf("進行中のゴール");
   assert.ok(start >= 0, "進行中のゴールの区画が描画されていない");
-  const end = card.indexOf('class="goal-done"');
+  const end = card.indexOf('class="goal-done');
   return card.slice(start, end < 0 ? card.length : end);
 };
 
@@ -298,7 +298,7 @@ test("質問のある進行中のゴールも既定の一覧に残す", () => {
   assert.match(inProgressSection(card), /質問待ちの目的です。/);
 });
 
-test("完了と中止は件数付きの折りたたみにまとめ、完了と中止をバッジで区別する", () => {
+test("完了と中止は別の折りたたみに分け、完了の件数に中止を含めない（issue #243）", () => {
   const completedA = goal({
     goalId: "goal-completed-a",
     name: "完了した目的Aです。",
@@ -323,11 +323,16 @@ test("完了と中止は件数付きの折りたたみにまとめ、完了と�
   assert.ok(doneBlock !== undefined, "完了したゴールの折りたたみが描画されていない");
   const doneSummary = summaryText(doneBlock);
   assert.match(doneSummary, /完了したゴール/, "完了したゴールの折りたたみは見出しを持つ");
-  assert.match(doneSummary, /3件/, "完了2件と中止1件を合わせた件数を出す");
+  assert.match(doneSummary, /2件/, "完了したゴールだけの件数を出す");
+  assert.equal(doneBlock.includes("中止した目的です。"), false, "中止したゴールを完了の折りたたみへ入れない");
+  assert.equal(badgeTexts(goalRowFor(doneBlock, "完了した目的Aです。"))[0], "完了");
 
-  const completed = completedSection(card);
-  assert.equal(badgeTexts(goalRowFor(completed, "完了した目的Aです。"))[0], "完了");
-  assert.equal(badgeTexts(goalRowFor(completed, "中止した目的です。"))[0], "中止");
+  const abortedBlock = detailsBlock(card, "goal-aborted");
+  assert.ok(abortedBlock !== undefined, "中止したゴールの折りたたみが描画されていない");
+  const abortedSummary = summaryText(abortedBlock);
+  assert.match(abortedSummary, /中止したゴール/, "中止したゴールの折りたたみは見出しを持つ");
+  assert.match(abortedSummary, /1件/, "中止したゴールだけの件数を出す");
+  assert.equal(badgeTexts(goalRowFor(abortedBlock, "中止した目的です。"))[0], "中止");
 });
 
 test("完了と中止が0件なら折りたたみを描画しない", () => {
@@ -380,10 +385,58 @@ test("タスクの進み具合は完了 n / 全体 m で出し、失敗がある
   assert.equal(healthyRow.includes('class="goal-failed warn"'), false, "失敗が無ければ警告を出さない");
 });
 
-test("タスクの件数が無いゴールは完了 0 / 全体 0 として出す", () => {
+test("タスクの件数が無いゴールは、タスクがまだ登録されていないと出す", () => {
   const card = cardFor(renderProjects([goal({ name: "件数の無い目的です。", taskCounts: undefined })]));
 
-  assert.match(progressText(goalRowFor(card, "件数の無い目的です。")), /完了\s*0\s*\/\s*全体\s*0/);
+  const row = goalRowFor(card, "件数の無い目的です。");
+  assert.equal(progressText(row), "タスクはまだ登録されていません。");
+  assert.doesNotMatch(row, /全体\s*0/, "全体 0 という意味の取れない進捗を出さない");
+});
+
+test("タスクが0件のゴールは、タスクがまだ登録されていないと出す", () => {
+  const empty = { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 };
+  const card = cardFor(renderProjects([goal({ name: "タスクの無い目的です。", taskCounts: empty })]));
+
+  assert.equal(progressText(goalRowFor(card, "タスクの無い目的です。")), "タスクはまだ登録されていません。");
+});
+
+test("ゴールのバッジは、タスクの登録と実行中の有無で未着手・実行中・進行中を区別する", () => {
+  const untouched = goal({ goalId: "goal-untouched", name: "未着手の目的です。", taskCounts: undefined });
+  const running = goal({
+    goalId: "goal-running",
+    name: "実行中の目的です。",
+    taskCounts: { pending: 0, running: 1, completed: 2, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const active = goal({
+    goalId: "goal-active",
+    name: "進行中の目的です。",
+    taskCounts: { pending: 1, running: 0, completed: 2, failed: 0, exceeded: 0, prFailed: 0 },
+  });
+  const card = cardFor(renderProjects([untouched, running, active]));
+  const visible = inProgressSection(card);
+
+  assert.deepEqual(badgeTexts(goalRowFor(visible, "実行中の目的です。")), ["実行中"]);
+  assert.deepEqual(badgeTexts(goalRowFor(visible, "進行中の目的です。")), ["進行中"]);
+  assert.equal(visible.includes("未着手の目的です。"), false, "未着手のゴールは進行中の一覧に出さない");
+
+  const untouchedBlock = detailsBlock(card, "goal-untouched");
+  assert.ok(untouchedBlock !== undefined, "未着手のゴールの折りたたみが描画されていない");
+  assert.deepEqual(badgeTexts(goalRowFor(untouchedBlock, "未着手の目的です。")), ["未着手"]);
+});
+
+test("未着手のゴールは進行中の件数へ入れず、未着手の折りたたみに分ける（issue #242）", () => {
+  const active = goal({ goalId: "goal-active", name: "進行中の目的です。" });
+  const untouched = goal({ goalId: "goal-untouched", name: "未着手の目的です。", taskCounts: undefined });
+  const card = cardFor(renderProjects([active, untouched]));
+
+  const text = card.replace(/<!-- -->/g, "");
+  assert.match(text, /進行中のゴール（1件）/, "進行中の件数に未着手を含めない");
+
+  const untouchedBlock = detailsBlock(card, "goal-untouched");
+  assert.ok(untouchedBlock !== undefined, "未着手のゴールの折りたたみが描画されていない");
+  const untouchedSummary = summaryText(untouchedBlock);
+  assert.match(untouchedSummary, /未着手のゴール/, "未着手のゴールの折りたたみは見出しを持つ");
+  assert.match(untouchedSummary, /1件/, "未着手だけの件数を出す");
 });
 
 test("プルリクエストの URL があるゴールだけリンクを出す", () => {

@@ -18,7 +18,11 @@ import {
   type GetGoalDetailRequest,
   type GetGoalDetailResponse,
   type GetProjectsResponse,
+  type GetRunContentRequest,
+  type GetRunContentResponse,
   type GetRunDetailResponse,
+  type GetRunUpdatesRequest,
+  type GetRunUpdatesResponse,
   type GetTaskDetailRequest,
   type GetTaskDetailResponse,
   type RejectGoalRegistrationRequest,
@@ -45,6 +49,10 @@ export type ServerBehavior = {
   pendingDecisions?: { state: DashboardState };
   activity?: GetActivityResponse;
   runDetail?: GetRunDetailResponse | ServerError;
+  runContent?: GetRunContentResponse | ServerError;
+  onGetRunContent?: (request: GetRunContentRequest) => void;
+  runUpdates?: GetRunUpdatesResponse | ServerError;
+  onGetRunUpdates?: (request: GetRunUpdatesRequest) => void;
   goalDetail?: GetGoalDetailResponse | ServerError;
   taskDetail?: GetTaskDetailResponse | ServerError;
   onGetGoalDetail?: (request: GetGoalDetailRequest) => void;
@@ -55,6 +63,8 @@ export type ServerBehavior = {
   rejectGoalRegistration?: RejectGoalRegistrationResponse | ServerError;
   conversation?: GetConversationResponse | ServerError;
   watch?: DashboardState[];
+  // 呼ばれた RPC の名前を、呼び出し順に記録する。
+  calls?: string[];
   // 読み取り系 RPC の応答を遅らせるミリ秒。読み取りに期限が付かないことの検証に使う。
   readDelayMs?: number;
   // 書き込み系 RPC の応答を遅らせるミリ秒。要求期限の検証に使う。
@@ -131,6 +141,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
   const conversationRequests: GetConversationRequest[] = [];
   server.addService(TaktDashServiceService, {
     getOverview: (call: grpc.ServerUnaryCall<unknown, unknown>, callback: grpc.sendUnaryData<DashboardState>) => {
+      behavior.calls?.push("GetOverview");
       behavior.onOverviewDeadline?.(call.getDeadline());
       if (behavior.hangUnary) {
         hangUntilCancelled(call, callback);
@@ -153,6 +164,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<GetProjectsResponse>,
     ) => {
+      behavior.calls?.push("GetProjects");
       if (behavior.hangUnary) {
         hangUntilCancelled(call, callback);
         return;
@@ -167,6 +179,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<{ state: DashboardState }>,
     ) => {
+      behavior.calls?.push("GetPendingDecisions");
       if (behavior.hangUnary) {
         hangUntilCancelled(call, callback);
         return;
@@ -181,6 +194,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<GetActivityResponse>,
     ) => {
+      behavior.calls?.push("GetActivity");
       if (behavior.hangUnary) {
         hangUntilCancelled(call, callback);
         return;
@@ -195,11 +209,46 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<GetRunDetailResponse>,
     ) => {
+      behavior.calls?.push("GetRunDetail");
       if (behavior.hangUnary) {
         hangUntilCancelled(call, callback);
         return;
       }
       const result = behavior.runDetail;
+      if (!result) {
+        callback(notFound("run が見つかりません"));
+        return;
+      }
+      if ("code" in result) {
+        callback(result);
+        return;
+      }
+      callback(null, result);
+    },
+    getRunContent: (
+      call: grpc.ServerUnaryCall<GetRunContentRequest, unknown>,
+      callback: grpc.sendUnaryData<GetRunContentResponse>,
+    ) => {
+      behavior.calls?.push("GetRunContent");
+      behavior.onGetRunContent?.(call.request);
+      const result = behavior.runContent;
+      if (!result) {
+        callback(notFound("本文が見つかりません"));
+        return;
+      }
+      if ("code" in result) {
+        callback(result);
+        return;
+      }
+      callback(null, result);
+    },
+    getRunUpdates: (
+      call: grpc.ServerUnaryCall<GetRunUpdatesRequest, unknown>,
+      callback: grpc.sendUnaryData<GetRunUpdatesResponse>,
+    ) => {
+      behavior.calls?.push("GetRunUpdates");
+      behavior.onGetRunUpdates?.(call.request);
+      const result = behavior.runUpdates;
       if (!result) {
         callback(notFound("run が見つかりません"));
         return;
@@ -259,6 +308,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       callback(null, result);
     },
     watchState: (call: grpc.ServerWritableStream<unknown, DashboardState>) => {
+      behavior.calls?.push("WatchState");
       let cancelled = false;
       call.on("cancelled", () => {
         cancelled = true;

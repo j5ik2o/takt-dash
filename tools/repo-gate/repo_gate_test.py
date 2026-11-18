@@ -42,11 +42,15 @@ make は呼ばない。
      セットアップしない、のそれぞれで失敗する。
   10. .gitignore に生成物の除外が無い、rust-toolchain.toml のチャネルが stable でない、
      のそれぞれで失敗する。
-  11. aislop の受け入れ一覧（scripts/aislop-accepted.json）の各エントリが、reason に
-     解消 issue の URL（https://github.com/j5ik2o/takt-dash/issues/<番号>）を含み、
-     各 finding が受け入れ時点の行数の上限（maxLines）を持つ。リンクが無い、上限の欄が
-     無い、対象ファイルの実測行数が上限を超える、のそれぞれで失敗し、上限以内と空の一覧
-     （missingToolsAllowed だけを持つ）は通る。実リポジトリの一覧もこの検査に通る。
+  11. frontend-style 検査（gate_frontend_style.py）が、frontend/web の CSS とコンポーネント
+     （.tsx）にある色の直書き（16 進、色の関数、色の名前）と列数の固定（repeat に数や式を
+     書く、column-count など）を違反として報告する。:root 以外の規則の --* に書いた色も
+     違反にする。:root の変数定義、コメント、var() の参照、transparent、auto-fit と
+     auto-fill、トラック指定、テスト・node_modules・public・src/proto の中のファイルは
+     違反にしない。既存の例外は値ごとに一致するときだけ通し、値の変更、同じセレクタへの
+     新しい違反、例外に一致する宣言の削除は失敗させる（照合はテスト専用の CSS と例外一覧
+     で確かめる）。実リポジトリの frontend/web もこの検査に通る（make done → make test →
+     このファイルの経路で実行される）。
 """
 import importlib.util
 import io
@@ -59,7 +63,13 @@ import tempfile
 import traceback
 from pathlib import Path
 
+import gate_frontend_style
+
 GATE = Path(__file__).resolve().parent / "repo_gate.py"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+# 既存の例外一覧は実際の globals.css の宣言と値ごと一致させるため、一時リポジトリにも
+# 同じ CSS を置き、例外が「見つからない」と判定されないようにする。
+REAL_GLOBALS_CSS = REPO_ROOT / "frontend/web/app/globals.css"
 
 # make や npm を誤って本物のまま呼ぶ実装の欠陥で、テスト自体が固まらないよう、
 # 1 テストの上限を置く。
@@ -496,6 +506,13 @@ next-env.d.ts
 TOOLCHAIN = '[toolchain]\nchannel = "stable"\n'
 
 
+ACCEPTED_PATH = "scripts/aislop-accepted.json"
+
+ISSUE_REASON = "一時的な受け入れ。解消は https://github.com/j5ik2o/takt-dash/issues/104 で追跡し、issue が閉じたら削除する"
+
+ACCEPTED_FILE = "tools/big.py"
+
+
 def accepted_json(entries):
     """実リポジトリの scripts/aislop-accepted.json と同じ形の受け入れ一覧を作る。"""
     return json.dumps(
@@ -507,13 +524,6 @@ def accepted_json(entries):
         ensure_ascii=False,
         indent=2,
     )
-
-
-ACCEPTED = accepted_json([])
-
-ISSUE_REASON = "一時的な受け入れ。解消は https://github.com/j5ik2o/takt-dash/issues/104 で追跡し、issue が閉じたら削除する"
-
-ACCEPTED_FILE = "tools/big.py"
 
 
 def accepted_finding(**overrides):
@@ -534,18 +544,16 @@ def accepted_entry(reason=ISSUE_REASON, findings=None):
         entry["reason"] = reason
     return entry
 
+
+ACCEPTED = accepted_json([])
+
+
 # 関門のコマンドは外部へ何も出力しない小さな脚本に置き換える。make done の成否は
 # rest に置いた検査の記録から決め、env.toml の fail_targets に並べた検査だけ失敗させる。
 
 
 def repository(
-    sandbox,
-    makefile=MAKEFILE,
-    ci=CI,
-    workflow=WORKFLOW,
-    gitignore=GITIGNORE,
-    toolchain=TOOLCHAIN,
-    accepted=ACCEPTED,
+    sandbox, makefile=MAKEFILE, ci=CI, workflow=WORKFLOW, gitignore=GITIGNORE, toolchain=TOOLCHAIN, accepted=None
 ):
     sandbox.write("Cargo.toml", CARGO_WORKSPACE)
     sandbox.write("backend/Cargo.toml", BACKEND_MANIFEST)
@@ -553,7 +561,12 @@ def repository(
     sandbox.write("frontend/cli/Cargo.toml", CLI_MANIFEST)
     sandbox.write("frontend/cli/src/main.rs", "fn main() {}\n")
     sandbox.write("frontend/web/package.json", WEB_MANIFEST)
+    sandbox.write("frontend/web/app/globals.css", REAL_GLOBALS_CSS.read_text(encoding="utf-8"))
     sandbox.write("proto/README.md", "protobuf\n")
+    sandbox.write(
+        ACCEPTED_PATH,
+        json.dumps({"engines": [], "missingToolsAllowed": {}, "accepted": []}, ensure_ascii=False),
+    )
     if makefile is not None:
         sandbox.write("Makefile", makefile)
     if ci is not None:
@@ -565,7 +578,7 @@ def repository(
     if toolchain is not None:
         sandbox.write("rust-toolchain.toml", toolchain)
     if accepted is not None:
-        sandbox.write("scripts/aislop-accepted.json", accepted)
+        sandbox.write(ACCEPTED_PATH, accepted)
 
 
 def stub_external_tools(sandbox, make_failure=False):
@@ -661,6 +674,7 @@ def assert_success(sandbox, label):
         "workflow-machine-gate",
         "gitignore-rules",
         "stable-toolchain",
+        "frontend-style",
     }, f"{label}: 検査の内訳が違います: {names}"
     return payload
 
@@ -1387,6 +1401,232 @@ def test_status_only_step_is_not_a_publish_step() -> None:
         assert_success(sandbox, "status だけを実行する開始ステップ")
 
 
+def test_publish_stage_detection() -> None:
+    """publish.py の段階検出は、正規形のコマンドだけを受理する。
+
+    正規形は `python3 tools/project-status/publish.py <段階>` の1行であり、
+    段階の後ろには publish.py 自身のオプション（--status と
+    --require-published）だけを置ける。publish.py への言及があるのに正規形に
+    一致しないコマンドは、正規形を示す理由つきで拒否する。echo の引数・
+    コメント・引用符内の文字列・ラッパー越し・複数行など、記法を問わない。
+    オプションの値に後続コマンドやコマンド置換を付けた入力も受理しない。
+    publish.py への言及が無いコマンドは公開と無関係であり、そのまま通す。
+    """
+    with Sandbox() as sandbox:
+        module = sandbox.module
+
+        def step(command, as_name="commit"):
+            return {
+                "name": "create_pr",
+                "mode": "system",
+                "system_inputs": [{"type": "command", "as": as_name, "command": command}],
+            }
+
+        for stage in ("commit", "push", "pr"):
+            assert module.publish_stages(
+                step(f"python3 tools/project-status/publish.py {stage}", stage)
+            ) == {stage: stage}, f"正規形の {stage} を拾う"
+        assert module.publish_stages(
+            step('python3 tools/project-status/publish.py status --status "In Review"', "status")
+        ) == {"status": "status"}, "status の --status（引用符付き）を受理する"
+        assert module.publish_stages(
+            step("python3 tools/project-status/publish.py status --status 'In Review'", "status")
+        ) == {"status": "status"}, "status の --status（単一引用符）を受理する"
+        assert module.publish_stages(
+            step("python3 tools/project-status/publish.py status --status InReview", "status")
+        ) == {"status": "status"}, "status の --status（引用符なし）を受理する"
+        assert module.publish_stages(
+            step(
+                'python3 tools/project-status/publish.py status --status "In Review"'
+                " --require-published",
+                "status",
+            )
+        ) == {"status": "status"}, "--require-published を受理する"
+        assert module.publish_stages(
+            step(
+                'python3 tools/project-status/publish.py status --require-published'
+                ' --status "In Review"',
+                "status",
+            )
+        ) == {"status": "status"}, "オプションの順序は問わない"
+        assert module.publish_stages(step("make done")) == {}, (
+            "publish.py への言及が無いコマンドはそのまま通す"
+        )
+        assert module.publish_stages(
+            {
+                "name": "create_pr",
+                "mode": "system",
+                "system_inputs": [
+                    {"type": "command", "as": "note", "command": "echo 公開の準備"},
+                    {
+                        "type": "command",
+                        "as": "commit",
+                        "command": "python3 tools/project-status/publish.py commit",
+                    },
+                ],
+            }
+        ) == {"commit": "commit"}, "言及の無いコマンドと正規形が混ざっても正規形だけを拾う"
+
+        rejected = {
+            "echo の引数": "echo python3 tools/project-status/publish.py commit",
+            "引用符内の文字列": 'echo "python3 tools/project-status/publish.py commit"',
+            "コメント": "# python3 tools/project-status/publish.py commit",
+            "bash -c の内側": "bash -c 'python3 tools/project-status/publish.py commit'",
+            "前段との連結": "cd frontend && python3 tools/project-status/publish.py commit",
+            "python のオプション付き": "python3 -u tools/project-status/publish.py commit",
+            "環境変数代入付き": "FOO=1 python3 tools/project-status/publish.py commit",
+            "ラッパー越し": "env FOO=1 python3 tools/project-status/publish.py commit",
+            "バージョン付きインタプリタ": "python3.11 tools/project-status/publish.py commit",
+            "パス付きインタプリタ": "/usr/bin/python3 tools/project-status/publish.py commit",
+            "直接実行": "tools/project-status/publish.py commit",
+            "複数行": "cat <<'EOF'\nready\nEOF\npython3 tools/project-status/publish.py commit",
+            "段階が無い": "python3 tools/project-status/publish.py",
+            "段階が違う": "python3 tools/project-status/publish.py deploy",
+            "publish.py に無いオプション": "python3 tools/project-status/publish.py commit --verbose",
+            "後段との連結": "python3 tools/project-status/publish.py commit; echo done",
+            "オプション値への後続コマンドの付加": (
+                "python3 tools/project-status/publish.py commit --status x;true"
+            ),
+            "オプション値の連結": "python3 tools/project-status/publish.py status --status x&&true",
+            "オプション値のパイプ": "python3 tools/project-status/publish.py status --status x|true",
+            "オプション値のリダイレクト": (
+                "python3 tools/project-status/publish.py status --status x>/dev/null"
+            ),
+            "オプション値のコマンド置換": (
+                "python3 tools/project-status/publish.py status --status $(true)"
+            ),
+            "引用符内のコマンド置換": (
+                'python3 tools/project-status/publish.py status --status "$(true)"'
+            ),
+            "オプション値のバッククォート": (
+                "python3 tools/project-status/publish.py status --status `true`"
+            ),
+        }
+        for label, command in rejected.items():
+            try:
+                module.publish_stages(step(command))
+            except module.GateError as error:
+                assert "正規形" in str(error), (
+                    f"{label}: 拒否の理由に正規形が含まれません: {error}"
+                )
+            else:
+                raise AssertionError(f"{label}: 正規形でないコマンドが受理されました")
+
+
+def test_publish_workflow_passes() -> None:
+    """公開ステップを置く正しい構成は、関門を通る。"""
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=PUBLISH_WORKFLOW)
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "公開ステップを置く構成")
+
+
+def test_publish_workflow_rejects_noncanonical_forms() -> None:
+    """公開コマンドの正規形でない記法は、正規形を示す理由つきで拒否する。
+
+    python のオプション・環境変数代入・ラッパー・バージョン付きインタプリタ・
+    ヒアドキュメントの前置き・行継続・前段との連結は、シェルでは公開スクリプトを
+    起動する有効な記法だが、正規形に一致しないため公開コマンドとして受理しない。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "python のオプション付き": lambda line: line.replace("python3 ", "python3 -u ", 1),
+        "環境変数代入付き": lambda line: line.replace(
+            "          python3 ", "          PYTHONUNBUFFERED=1 python3 ", 1
+        ),
+        "ラッパー越し": lambda line: line.replace(
+            "python3 ", "env PYTHONUNBUFFERED=1 python3 ", 1
+        ),
+        "バージョン付きインタプリタ": lambda line: line.replace("python3 ", "python3.11 ", 1),
+        "ヒアドキュメントの前置き": lambda line: (
+            "          cat <<'EOF'\n          It's a publish step\n          EOF\n" + line
+        ),
+        "行継続で折り返す": lambda line: line.replace(
+            "python3 ", "python3 \\\n            ", 1
+        ),
+        "前段との連結": lambda line: line.replace("python3 ", "true && python3 ", 1),
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "正規形")
+
+
+def test_publish_commands_must_use_canonical_form() -> None:
+    """publish.py への言及だけでは、公開ステップとして受理しない。
+
+    echo の引数・引用符内の文字列・コメント・ヒアドキュメントの本文・構文確認
+    だけのシェル・場所の表示だけを行う command -v など、publish.py に言及する
+    だけのコマンドは、正規形を示す理由つきで拒否する。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "echo で表示するだけ": lambda line: "          echo " + line.strip() + "\n",
+        "引用符内の文字列で表示するだけ": lambda line: "          echo \"" + line.strip() + "\"\n",
+        "コメントに書くだけ": lambda line: "          # " + line.strip() + "\n",
+        "構文確認だけのシェルで表示するだけ": lambda line: "          bash -n -c '"
+        + line.strip()
+        + "'\n",
+        "ヒアドキュメントで表示するだけ": lambda line: "          cat <<'EOF'\n"
+        + line
+        + "          EOF\n",
+        "command -v で場所を表示するだけ": lambda line: "          command -v "
+        + line.strip()
+        + "\n",
+        "ラッパー越しの構文確認だけのシェルで表示するだけ": lambda line: (
+            "          env FOO=1 bash -n -c '" + line.strip() + "'\n"
+        ),
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "正規形")
+
+
+def test_publish_success_rule_must_precede_unconditional_rule() -> None:
+    """公開の成功規則は、when(true) の無条件規則より前に置かなければならない。
+
+    規則は先に一致したものから順に評価されるため、無条件規則が先にあると、公開が
+    成功してもそちらが選ばれて aislop_gate へ進まない。
+    """
+    success_rule = (
+        "      - condition: when(context.create_pr.commit.exit_code == 0 && "
+        "context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)\n"
+        "        next: aislop_gate\n"
+    )
+    fallback_rule = "      - condition: when(true)\n        next: fix_publish\n"
+    assert success_rule + fallback_rule in PUBLISH_WORKFLOW, "公開ステップの規則列が見つかりません"
+    workflow = PUBLISH_WORKFLOW.replace(success_rule + fallback_rule, fallback_rule + success_rule)
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=workflow)
+        stub_external_tools(sandbox)
+        assert_failure(
+            sandbox, "無条件規則が成功規則より前にある", "workflow-machine-gate", "無条件規則より後"
+        )
+
+
 def test_workflow_requires_aislop_gate_step() -> None:
     """aislop の機械ゲートが無い、順序が違う、失敗時に戻らない、のそれぞれで失敗する。"""
     machine_success_complete = MACHINE_GATE_STEP.replace(
@@ -1996,14 +2236,376 @@ def test_makefile_recipe_parsing() -> None:
         assert targets["done"][0] == "$(MAKE) fmt", targets
 
 
+GLOBALS_CSS = "frontend/web/app/globals.css"
+
+
+def append_css(sandbox, text):
+    """一時リポジトリの globals.css の末尾へ text を足し、text の 1 行目の行番号を返す。"""
+    path = sandbox.root / GLOBALS_CSS
+    original = path.read_text(encoding="utf-8")
+    if not original.endswith("\n"):
+        original += "\n"
+    path.write_text(original + text, encoding="utf-8")
+    return original.count("\n") + 1
+
+
+def assert_style_failure(sandbox, label, snippets):
+    code, out, err = sandbox.run([])
+    assert code != 0, f"{label}: 違反があるのに成功しました。stdout={out!r}"
+    lines = [line for line in err.splitlines() if line.startswith("frontend-style:")]
+    assert len(lines) == 1, f"{label}: frontend-style の違反が 1 行で報告されません: {err!r}"
+    for snippet in snippets:
+        assert snippet in lines[0], f"{label}: 違反の報告に {snippet!r} が含まれません: {lines[0]!r}"
+    return lines[0]
+
+
+def test_frontend_style_reports_css_colors() -> None:
+    for label, value in {
+        "16 進": "#fff",
+        "rgb()": "rgb(1, 2, 3)",
+        "hsl()": "hsl(10, 20%, 30%)",
+        "色の名前": "red",
+    }.items():
+        with Sandbox() as sandbox:
+            repository(sandbox)
+            stub_external_tools(sandbox)
+            start = append_css(sandbox, f".foo {{\n  color: {value};\n}}\n")
+            assert_style_failure(
+                sandbox,
+                f"CSS の色（{label}）",
+                [f"app/globals.css:{start + 1}", ".foo", "color", value, "[色]"],
+            )
+
+
+def test_frontend_style_allows_css_variables_comments_and_keywords() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        append_css(
+            sandbox,
+            ":root {\n  --x-surface: #fff;\n}\n"
+            "/* issue #119 の #fff と rgb(0, 0, 0) と red */\n"
+            ".foo {\n  color: var(--teal);\n  background: transparent;\n  border-color: currentcolor;\n}\n",
+        )
+        assert_success(sandbox, "変数の定義・コメント・変数の参照・transparent")
+
+
+def test_frontend_style_reports_css_fixed_columns() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        start = append_css(
+            sandbox,
+            "@media (max-width: 760px) {\n  .grid {\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n  }\n}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "@media の中の repeat(3, …)",
+            [
+                f"app/globals.css:{start + 2}",
+                "@media (max-width: 760px)",
+                ".grid",
+                "grid-template-columns",
+                "repeat(3, minmax(0, 1fr))",
+                "[列数]",
+            ],
+        )
+
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        start = append_css(sandbox, ".text {\n  column-count: 3;\n}\n")
+        assert_style_failure(
+            sandbox,
+            "column-count: 3",
+            [f"app/globals.css:{start + 1}", ".text", "column-count", "[列数]"],
+        )
+
+
+def test_frontend_style_allows_auto_columns_and_track_lists() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        append_css(
+            sandbox,
+            ".grid {\n  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));\n}\n"
+            ".grid2 {\n  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));\n}\n"
+            ".row {\n  grid-template-columns: 96px minmax(0, 1fr) 200px;\n}\n",
+        )
+        assert_success(sandbox, "auto-fit・auto-fill・トラック指定")
+
+
+COMPONENT = "frontend/web/src/components/x.tsx"
+
+
+def test_frontend_style_reports_component_colors() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            '  return <p style={{ color: "#f00", background: "red" }} />;\n'
+            "}\n",
+        )
+        line = assert_style_failure(
+            sandbox,
+            "コンポーネントの style の色",
+            ["src/components/x.tsx:2", "#f00", "red", "[色]"],
+        )
+        assert line.count("src/components/x.tsx:2") == 2, f"色の違反が 2 件報告されません: {line!r}"
+
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            '  return <p style={{ borderColor: "rgba(0, 0, 0, 0.5)" }} />;\n'
+            "}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "コンポーネントの色の関数",
+            ["src/components/x.tsx:2", "rgba(0, 0, 0, 0.5)", "[色]"],
+        )
+
+
+def test_frontend_style_ignores_component_text_comments_and_class_names() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "// see #abc\n"
+            "/* #fff と rgb(0, 0, 0)\n   repeat(3, 1fr) */\n"
+            "export function X() {\n"
+            "  return (\n"
+            '    <a href="https://example.com" className="orange">\n'
+            "      <p>issue #119</p>\n"
+            '      <span className="red">赤</span>\n'
+            "    </a>\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_success(sandbox, "JSX の本文・コメント・クラス名・URL")
+
+
+def test_frontend_style_reports_component_fixed_columns() -> None:
+    for label, (statement, snippet) in {
+        "件数で決める repeat": (
+            "  return <div style={{ gridTemplateColumns: `repeat(${servers.length}, 1fr)` }} />;\n",
+            "repeat(",
+        ),
+        "数で固定する repeat": (
+            '  return <div style={{ gridTemplateColumns: "repeat(3, 1fr)" }} />;\n',
+            "repeat(3",
+        ),
+        "columnCount": (
+            "  return <div style={{ columnCount: 3 }} />;\n",
+            "columnCount",
+        ),
+    }.items():
+        with Sandbox() as sandbox:
+            repository(sandbox)
+            stub_external_tools(sandbox)
+            sandbox.write(
+                COMPONENT,
+                "export function X({ servers }: { servers: string[] }) {\n" + statement + "}\n",
+            )
+            assert_style_failure(
+                sandbox,
+                f"コンポーネントの列数（{label}）",
+                ["src/components/x.tsx:2", snippet, "[列数]"],
+            )
+
+
+def test_frontend_style_reports_component_multiline_style_declarations() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            "  return (\n"
+            "    <p\n"
+            "      style={{\n"
+            "        color:\n"
+            '          "red",\n'
+            "      }}\n"
+            "    />\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "改行をまたぐ style の色の名前",
+            ["src/components/x.tsx:6", "red", "[色]"],
+        )
+
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            "  return (\n"
+            "    <div\n"
+            "      style={{\n"
+            "        gridTemplateColumns:\n"
+            '          "repeat(3, 1fr)",\n'
+            "      }}\n"
+            "    />\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "改行をまたぐ style の列数",
+            ["src/components/x.tsx:6", "repeat(3", "[列数]"],
+        )
+
+
+def test_frontend_style_ignores_component_body_text_and_expressions() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            "  return (\n"
+            "    <div>\n"
+            '      <p>{"-".repeat(3)}</p>\n'
+            "      <p>rgb(1, 2, 3)</p>\n"
+            "    </div>\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_success(sandbox, "JSX の本文と文字列のメソッド呼び出し")
+
+
+def test_frontend_style_skips_auto_columns_and_excluded_files() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            '  return <div style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }} />;\n'
+            "}\n",
+        )
+        fixed = 'export const A = () => <div style={{ gridTemplateColumns: "repeat(3, 1fr)", color: "#f00" }} />;\n'
+        sandbox.write("frontend/web/test/a.test.tsx", fixed)
+        sandbox.write("frontend/web/src/components/a.test.tsx", fixed)
+        sandbox.write("frontend/web/node_modules/p/b.tsx", fixed)
+        sandbox.write("frontend/web/src/proto/gen.tsx", fixed)
+        sandbox.write("frontend/web/node_modules/p/b.css", ".b { color: #f00; grid-template-columns: repeat(3, 1fr); }\n")
+        sandbox.write("frontend/web/.next/c.css", ".c { color: #f00; }\n")
+        sandbox.write("frontend/web/public/p.css", ".p { color: #f00; grid-template-columns: repeat(3, 1fr); }\n")
+        sandbox.write("frontend/web/public/q.tsx", fixed)
+        assert_success(sandbox, "auto-fill と対象外のファイル")
+
+
+LEGACY_DECLARATION = ".legacy {\n  grid-template-columns: repeat(3, minmax(0, 1fr));\n}\n"
+LEGACY_EXCEPTIONS = [
+    ("app/globals.css", (".legacy",), "grid-template-columns", "repeat(3, minmax(0, 1fr))"),
+]
+
+
+def frontend_style_error(sandbox, css, exceptions):
+    """globals.css を css だけにして検査し、違反の文言（違反が無ければ None）を返す。"""
+    sandbox.write(GLOBALS_CSS, css)
+    try:
+        gate_frontend_style.check_frontend_style(sandbox.root, sandbox.module.GateError, exceptions)
+    except sandbox.module.GateError as error:
+        return str(error)
+    return None
+
+
+def test_frontend_style_existing_exceptions_match_exact_values() -> None:
+    # 照合の規則はテスト専用の CSS と例外一覧で確かめ、実際の globals.css の宣言には頼らない
+    # （部品を適用して既存の宣言を一覧ごと外しても、このテストは成り立つ）。
+    with Sandbox() as sandbox:
+        error = frontend_style_error(sandbox, LEGACY_DECLARATION, LEGACY_EXCEPTIONS)
+        assert error is None, f"例外一覧と一致する宣言が通りません: {error!r}"
+
+    cases = {
+        "例外の値を変える": (
+            ".legacy {\n  grid-template-columns: repeat(5, minmax(0, 1fr));\n}\n",
+            [
+                "app/globals.css:2",
+                "repeat(5, minmax(0, 1fr))",
+                # 一致しなくなった例外の項目も、同じ報告に含める。
+                "例外一覧の宣言が見つかりません",
+                "repeat(3, minmax(0, 1fr))",
+            ],
+            [],
+        ),
+        "例外のセレクタに色を足す": (
+            ".legacy {\n  grid-template-columns: repeat(3, minmax(0, 1fr));\n  color: #000;\n}\n",
+            ["app/globals.css:3", ".legacy", "color: #000", "[色]"],
+            # 一致したままの例外を、見つからないと報告しない。
+            ["見つかりません"],
+        ),
+        "例外に一致する宣言を消す": (
+            ".legacy {\n  gap: var(--space-18);\n}\n",
+            ["例外一覧の宣言が見つかりません", ".legacy", "grid-template-columns", "repeat(3, minmax(0, 1fr))"],
+            [],
+        ),
+    }
+    for label, (css, snippets, absent) in cases.items():
+        with Sandbox() as sandbox:
+            error = frontend_style_error(sandbox, css, LEGACY_EXCEPTIONS)
+            assert error is not None, f"{label}: 違反があるのに成功しました"
+            for snippet in snippets:
+                assert snippet in error, f"{label}: 違反の報告に {snippet!r} が含まれません: {error!r}"
+            for snippet in absent:
+                assert snippet not in error, f"{label}: 違反の報告に {snippet!r} が含まれます: {error!r}"
+
+
+def test_frontend_style_reports_css_variables_outside_root() -> None:
+    # 判定から外すのは :root の中の変数の定義だけで、ほかの規則の --* に書いた色は検出する。
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        start = append_css(sandbox, ".foo {\n  --c: #f00;\n}\n")
+        assert_style_failure(
+            sandbox,
+            ":root 以外の規則の変数の色",
+            [f"app/globals.css:{start + 1}", ".foo", "--c", "#f00", "[色]"],
+        )
+
+
+def test_frontend_style_requires_css_files() -> None:
+    # 探索先を誤って何も見ずに通る状態を防ぐ。例外が見つからないことより先に報告する。
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        (sandbox.root / GLOBALS_CSS).unlink()
+        assert_style_failure(sandbox, "CSS が無い", ["frontend/web に検査する CSS がありません"])
+
+
+def test_repository_frontend_passes_frontend_style() -> None:
+    # make done → make test → このテストの経路で実リポジトリを検査する。repo_gate.main を
+    # --skip-make なしで呼ぶと make done を再び起動して再帰するため、検査関数を直接呼ぶ。
+    gate = load_gate()
+    try:
+        detail = gate_frontend_style.check_frontend_style(
+            REPO_ROOT, gate.GateError, gate_frontend_style.EXISTING_EXCEPTIONS
+        )
+    except gate.GateError as error:
+        raise AssertionError(f"実リポジトリの frontend/web が frontend-style に違反しています: {error}")
+    assert "app/globals.css" in detail["css_files"], f"globals.css を走査していません: {detail!r}"
+
+
 def numbered_lines(count, trailing_newline=True):
     text = "\n".join(f"line {index}" for index in range(1, count + 1))
     return text + "\n" if trailing_newline and count else text
 
 
-def accepted_repository(sandbox, entries, files=None):
+def accepted_repository(sandbox, entries=None, files=None):
     """受け入れ一覧と、そこが参照するファイルを置いたリポジトリを作る。"""
-    repository(sandbox, accepted=accepted_json(entries))
+    repository(sandbox, accepted=None if entries is None else accepted_json(entries))
     if files is None:
         files = {ACCEPTED_FILE: numbered_lines(10)}
     for relative, text in files.items():
@@ -2143,17 +2745,24 @@ def test_aislop_accepted_within_max_lines_passes() -> None:
 
 
 def test_aislop_accepted_empty_list_passes() -> None:
-    # 既定の一覧は accepted が空で、missingToolsAllowed の理由には issue の URL が無い。
+    # order.md が求める元の入力条件: accepted は空配列、missingToolsAllowed の ruff 理由には
+    # issue の URL が無い。理由は一覧検査の対象外（README の検査仕様）なので、理由に URL が
+    # 無くても空一覧は通る。`repository` の既定では一覧を置かないため、明示的に渡す。
     with Sandbox() as sandbox:
-        repository(sandbox)
+        repository(sandbox, accepted=ACCEPTED)
         stub_external_tools(sandbox)
         payload = assert_success(sandbox, "空の一覧")
         assert accepted_detail(payload) == {"entries": 0, "findings": 0}, accepted_detail(payload)
 
 
 def test_aislop_accepted_list_must_be_readable() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        (sandbox.root / ACCEPTED_PATH).unlink()
+        stub_external_tools(sandbox)
+        assert_gate_rejects(sandbox, "一覧のファイルが無い")
+
     for label, accepted in {
-        "一覧のファイルが無い": None,
         "JSON として読めない": "{",
         "accepted が配列でない": json.dumps({"missingToolsAllowed": {}, "accepted": {}}),
         "accepted が無い": json.dumps({"missingToolsAllowed": {}}),
@@ -2186,6 +2795,12 @@ def main() -> int:
         test_clippy_must_reject_warnings,
         test_done_must_install_node_dependencies_when_missing,
         test_machine_gate_develop_complete_and_mode,
+        test_status_only_step_is_not_a_publish_step,
+        test_publish_stage_detection,
+        test_publish_workflow_passes,
+        test_publish_workflow_rejects_noncanonical_forms,
+        test_publish_commands_must_use_canonical_form,
+        test_publish_success_rule_must_precede_unconditional_rule,
         test_machine_gate_requires_six_system_inputs,
         test_machine_gate_commands_invoke_their_make_targets,
         test_machine_gate_success_requires_all_six_exit_codes,
@@ -2212,6 +2827,20 @@ def main() -> int:
         test_skip_make_omits_the_command_run,
         test_install_guard_detection,
         test_makefile_recipe_parsing,
+        test_frontend_style_reports_css_colors,
+        test_frontend_style_allows_css_variables_comments_and_keywords,
+        test_frontend_style_reports_css_fixed_columns,
+        test_frontend_style_allows_auto_columns_and_track_lists,
+        test_frontend_style_reports_component_colors,
+        test_frontend_style_ignores_component_text_comments_and_class_names,
+        test_frontend_style_reports_component_fixed_columns,
+        test_frontend_style_reports_component_multiline_style_declarations,
+        test_frontend_style_ignores_component_body_text_and_expressions,
+        test_frontend_style_skips_auto_columns_and_excluded_files,
+        test_frontend_style_existing_exceptions_match_exact_values,
+        test_frontend_style_reports_css_variables_outside_root,
+        test_frontend_style_requires_css_files,
+        test_repository_frontend_passes_frontend_style,
         test_aislop_accepted_entry_requires_issue_link,
         test_aislop_accepted_finding_requires_max_lines,
         test_aislop_accepted_file_over_max_lines_fails,

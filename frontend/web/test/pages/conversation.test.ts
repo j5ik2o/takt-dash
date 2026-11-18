@@ -12,13 +12,16 @@ import {
 } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
 import { ConversationsLoader } from "../../src/components/conversations-loader.tsx";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 
 const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {

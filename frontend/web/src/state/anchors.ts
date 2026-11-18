@@ -1,8 +1,10 @@
 // 概要・プロジェクト・サイドバーの間で共有するアンカー id と href の規則。
 //
 // リンクを生成する側と、リンク先の id を付ける側が同じ規則を使うように集約する。
-// Next.js は hash を decode して getElementById で要素を探すため、id は生の名前から作り、
-// href でも同じ値を使う。
+// Next.js は遷移時にフラグメントへ decodeURIComponent を適用してから要素を探すため、
+// id は生の名前から作り、href のフラグメントは encodeURIComponent で符号化する。
+// 符号化しないと、名前に %20 を含む場合は復号で名前が変わって要素を見つけられず、
+// 100% のような名前では復号が URIError になって遷移が失敗する（issue #51）。
 const PROJECT_PREFIX = "project-";
 const SERVER_PREFIX = "server-";
 const DECISION_PREFIX = "decision-";
@@ -12,7 +14,7 @@ export function projectAnchorId(name: string): string {
 }
 
 export function projectHref(name: string): string {
-  return `/projects#${projectAnchorId(name)}`;
+  return `/projects#${encodeURIComponent(projectAnchorId(name))}`;
 }
 
 export function serverAnchorId(serverId: string): string {
@@ -20,7 +22,7 @@ export function serverAnchorId(serverId: string): string {
 }
 
 export function serverHref(serverId: string): string {
-  return `/#${serverAnchorId(serverId)}`;
+  return `/#${encodeURIComponent(serverAnchorId(serverId))}`;
 }
 
 // 判断待ちの1項目を指す id。key は同じ項目を再描画後も識別する鍵（decision-actions の

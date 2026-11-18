@@ -3,7 +3,7 @@
 // 入力の形だけを検証し、値はそのまま gRPC の書き込み API へ渡す。業務的な検証
 // （ゴールの所属、pull_request の有無など）は backend に任せ、ここでは重複しない。
 import * as grpc from "@grpc/grpc-js";
-import { BackendUnavailableError, createBackendClient, type BackendClient } from "../../../src/grpc/client";
+import { BackendUnavailableError, getBackendClient, type BackendClient } from "../../../src/grpc/client";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" } as const;
 
@@ -29,6 +29,85 @@ const contentTypeIsJson = (request: Request): boolean => {
   return mediaType.trim().toLowerCase() === "application/json";
 };
 
+const ALLOWED_HOSTS_ENV = "TAKTDASH_ALLOWED_HOSTS";
+
+// 環境変数が未設定のときに許可するホスト（LAN、Tailscale、ローカル）。
+const DEFAULT_ALLOWED_HOSTS: readonly string[] = [
+  "10.0.1.143:3000",
+  "100.106.166.1:3000",
+  "127.0.0.1:3000",
+  "localhost:3000",
+];
+
+// スキームの既定ポート。http と https 以外のスキームでは、ポートの省略と明示を
+// 同一視しない。
+const defaultPortForScheme = (protocol: string): string | undefined =>
+  protocol === "http:" ? "80" : protocol === "https:" ? "443" : undefined;
+
+// Origin のスキームの既定ポートだけは、明示しても省略しても同じホストとみなす。
+// 別のスキームの既定ポートは通常のポートとして扱い、ポートの境界を保つ。
+// 設定値・Host ヘッダ・Origin のすべてを、Origin のスキームを基準にこの形へ
+// そろえてから比べる。
+const canonicalHost = (hostname: string, port: string, defaultPort: string | undefined): string =>
+  port === "" || port === defaultPort ? hostname : `${hostname}:${port}`;
+
+// host:port の形の値から、書かれたとおりのホスト名とポートを取り出す。
+// URL の解釈はそのスキームの既定ポートを落とすため、http で解釈してポートが
+// 取れなければ https で解釈し直し、明示されたポートを失わないようにする。
+// パスや userinfo 等が付く値は無効とする。
+const parseHostPort = (value: string): { hostname: string; port: string } | undefined => {
+  let url: URL;
+  try {
+    url = new URL(`http://${value}`);
+  } catch {
+    return undefined;
+  }
+  if (url.username !== "" || url.password !== "") {
+    return undefined;
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    return undefined;
+  }
+  let port = url.port;
+  if (port === "") {
+    try {
+      port = new URL(`https://${value}`).port;
+    } catch {
+      return undefined;
+    }
+  }
+  return { hostname: url.hostname, port };
+};
+
+// host:port の形の値だけを、Origin のスキームで正規化した host:port へそろえる。
+// URL への解釈で表記が変わる値（空白の除去や符号化が起きる値）は無効とする。
+const normalizeHost = (value: string, defaultPort: string | undefined): string | undefined => {
+  const parsed = parseHostPort(value);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  const hostPart = parsed.hostname.includes(":") ? `[${parsed.hostname}]` : parsed.hostname;
+  const spelled = parsed.port === "" ? hostPart : `${hostPart}:${parsed.port}`;
+  if (value.toLowerCase() !== spelled) {
+    return undefined;
+  }
+  return canonicalHost(parsed.hostname, parsed.port, defaultPort);
+};
+
+// 起動設定で一覧を差し替えられるよう、リクエストのたびに環境変数から読む。
+// 設定値は、Origin のスキームを基準に正規化してから比べる。
+const resolveAllowedHosts = (
+  env: Record<string, string | undefined>,
+  defaultPort: string | undefined,
+): readonly string[] => {
+  const configured = env[ALLOWED_HOSTS_ENV];
+  const entries =
+    configured === undefined || configured.trim() === "" ? DEFAULT_ALLOWED_HOSTS : configured.split(",");
+  return entries
+    .map((entry) => normalizeHost(entry.trim(), defaultPort))
+    .filter((host): host is string => host !== undefined);
+};
+
 const requestOriginIsAllowed = (request: Request): boolean => {
   if (request.headers.get("sec-fetch-site") === "cross-site") {
     return false;
@@ -37,11 +116,25 @@ const requestOriginIsAllowed = (request: Request): boolean => {
   if (origin === null) {
     return true;
   }
+  let originHost: string;
+  let defaultPort: string | undefined;
   try {
-    return new URL(origin).origin === new URL(request.url).origin;
+    const originUrl = new URL(origin);
+    defaultPort = defaultPortForScheme(originUrl.protocol);
+    originHost = canonicalHost(originUrl.hostname, originUrl.port, defaultPort);
   } catch {
     return false;
   }
+  // Web は 0.0.0.0 で待ち受けるため request.url は利用者の開いた URL と一致しない。
+  // ブラウザが開いた URL を表す Host ヘッダと比べる。x-forwarded-host は利用者が
+  // 自由に付けられ、間に信頼できるプロキシも無いので判定に使わない。
+  const hostHeader = request.headers.get("host");
+  const host = hostHeader === null ? undefined : normalizeHost(hostHeader, defaultPort);
+  if (host === undefined || originHost !== host) {
+    return false;
+  }
+  // Host と Origin を同時に偽れる DNS リバインディングを防ぐため、既知のホストに限る。
+  return resolveAllowedHosts(process.env, defaultPort).includes(host);
 };
 
 export type ReadJsonObjectResult =
@@ -80,7 +173,7 @@ export const isPositiveInteger = (value: unknown): value is number =>
 
 // 書き込みを実行し、成功・入力不正・接続不能を HTTP の応答へ一度だけ変換する。
 export async function runWrite(call: (client: BackendClient) => Promise<unknown>): Promise<Response> {
-  const client = createBackendClient();
+  const client = getBackendClient();
   try {
     await call(client);
     return jsonResponse(200, { ok: true });
@@ -101,7 +194,5 @@ export async function runWrite(call: (client: BackendClient) => Promise<unknown>
       return jsonResponse(400, { ok: false, error: serviceError.details || "入力が正しくありません。" });
     }
     return jsonResponse(500, { ok: false, error: "操作に失敗しました。" });
-  } finally {
-    await client.close();
   }
 }

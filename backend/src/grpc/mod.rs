@@ -2,20 +2,36 @@
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
-//! GetRunDetail は要求時に takt-mcp の takt_get_run を呼びます。GetConversation は保存領域の
-//! manager の会話を読みます。GetGoals・GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
+//! GetRunDetail は状態ストアと run の保存場所から組み立て、ローカルで保存場所を読めた run では
+//! takt-mcp を起動しません。保存場所の対応表に無い run と対応表を読めない run（SSH 越しに扱う
+//! リモートのサーバーのプロジェクトなど）だけ、要求時に takt-mcp の takt_get_run を呼びます。
+//! GetRunContent はレポートか指示書の本文を1件だけ読みます。本文は、GetRunDetail と同じ
+//! 条件の run だけ takt_get_run から読みます。GetConversation は保存領域の manager
+//! の会話を読みます。GetGoals・ GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
 //! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
 //! 全件を返し、定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
+//! GetRunUpdates は本体ログの追記分を返し、要求の検証と応答の組み立ては [`run_updates`]
+//! に置きます。
 
+pub mod assembly;
 pub mod mapping;
+mod run_content;
+mod run_detail;
+mod run_updates;
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+  path::PathBuf,
+  sync::{Arc, Mutex},
+  time::Instant,
+};
 
+use assembly::{activity_event, assemble_goals, assemble_state_for, conversation_response};
 use chrono::{DateTime, Utc};
 use mapping::{
-  activity_kind, connection_state, conversation_speaker, execution_status, goal_question, goal_status, goal_task,
-  goal_work_log, inquiry_kind, optional_timestamp, pending_decision_type, run_status, step_log, task_status, timestamp,
+  execution_status, goal_question, goal_status, goal_task, goal_work_log, optional_timestamp, run_status, task_status,
+  timestamp,
 };
+use run_updates::{parse_log_cursor, read_updates_response};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -23,24 +39,26 @@ use tonic::{Request, Response, Status};
 use crate::{
   activity::ActivityStore,
   config::{load_config, Config},
-  conversation::{ConversationPage, ConversationQuery, ConversationReader},
+  conversation::{ConversationQuery, ConversationReader},
   domain::{
-    GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, ServerId, TaskCount,
-    TaskName,
+    GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ReportFilename,
+    RunSlug, ServerId, TaskName,
   },
   mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
-  model::{self, TaskEntry},
+  model::{self},
+  run_log::{ContentRead, InitialRead, Instruction},
+  run_progress::{read_run, read_run_instructions, RunLogHandle, RunLogHandles, RunReadFailure},
   store::StateStore,
   takt_dash::v1::{
-    self, ActivityEvent, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
+    self, get_run_content_request, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
     ApproveGoalMergeResponse, ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse, DashboardState,
     GetActivityRequest, GetActivityResponse, GetConversationRequest, GetConversationResponse, GetGoalDetailRequest,
     GetGoalDetailResponse, GetGoalsRequest, GetGoalsResponse, GetOverviewRequest, GetPendingDecisionsRequest,
-    GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse, GetRunDetailRequest, GetRunDetailResponse,
-    GetTaskDetailRequest, GetTaskDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
-    ListGoalRegistrationProposalsResponse, OperationAnswerReport, PendingDecision, Project,
-    RejectGoalRegistrationRequest, RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, Server,
-    TaskStatusCounts, WatchStateRequest,
+    GetPendingDecisionsResponse, GetProjectsRequest, GetProjectsResponse, GetRunContentRequest, GetRunContentResponse,
+    GetRunDetailRequest, GetRunDetailResponse, GetRunUpdatesRequest, GetRunUpdatesResponse, GetTaskDetailRequest,
+    GetTaskDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
+    ListGoalRegistrationProposalsResponse, OperationAnswerReport, RejectGoalRegistrationRequest,
+    RejectGoalRegistrationResponse, Run, RunInstruction, WatchStateRequest,
   },
 };
 
@@ -54,6 +72,44 @@ const WATCH_CHANNEL_CAPACITY: usize = 16;
 ///
 /// 開いている画面が自動更新を確認できるよう、読み取り間隔（既定30秒）より短い15秒で再送します。
 const WATCH_RESEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+/// run 詳細が、読み位置を持たない本体ログを初めて読むときに読む末尾の大きさ（1 MiB）。
+///
+/// 実行中の run の詳細を2秒以内に返すため、大きな本体ログの全体を読みません。代わりに、この大きさを
+/// 超える本体ログの run
+/// を初めて開いたときは、ステップの記録が末尾の範囲に含まれる分だけになります。
+const DETAIL_INITIAL_TAIL_BYTES: u64 = 1024 * 1024;
+/// GetRunContent が返す本文の上限（1 MiB）。gRPC の既定の受信上限（4MB）を超える応答を作りません。
+const RUN_CONTENT_MAX_BYTES: u64 = 1024 * 1024;
+
+/// unary ハンドラの処理時間と、その間に接続ロックを待った時間を記録する。
+///
+/// `Drop` で記録するため、成功・失敗・早期 return のどの終端でも1行が残ります。
+/// `lock_wait_us` はハンドラ開始時と終了時の累積値の差で、SQLite のクエリ実行時間は含みません。
+struct RpcTimingGuard {
+  rpc:                   &'static str,
+  activity:              Arc<ActivityStore>,
+  started_at:            Instant,
+  lock_wait_us_at_start: u64,
+}
+
+impl RpcTimingGuard {
+  fn start(rpc: &'static str, activity: &Arc<ActivityStore>) -> Self {
+    RpcTimingGuard {
+      rpc,
+      activity: activity.clone(),
+      started_at: Instant::now(),
+      lock_wait_us_at_start: activity.lock_wait_total_us(),
+    }
+  }
+}
+
+impl Drop for RpcTimingGuard {
+  fn drop(&mut self) {
+    let elapsed_us = self.started_at.elapsed().as_micros() as u64;
+    let lock_wait_us = self.activity.lock_wait_total_us().saturating_sub(self.lock_wait_us_at_start);
+    tracing::info!(rpc = %self.rpc, elapsed_us, lock_wait_us, "unary RPC を処理しました。");
+  }
+}
 
 /// 読み取り系 API のサービス。
 pub struct TaktDashServiceImpl {
@@ -65,6 +121,11 @@ pub struct TaktDashServiceImpl {
   shutdown:     watch::Receiver<bool>,
   registry:     McpClientRegistry,
   clock:        Clock,
+  /// プロジェクトごとの run の集計と、その集計を作ったときの cwd。GetRunDetail が要求をまたいで
+  /// 持ち、同じ run の本体ログを前回の続きから読むために使います。読み位置を持たない本体ログは
+  /// 末尾の [`DETAIL_INITIAL_TAIL_BYTES`] だけを読みます。lock は取っ手の受け渡しの間だけ持ち、
+  /// 読み取りの間は持ちません。
+  run_logs:     Mutex<RunLogHandles<ProjectName>>,
 }
 
 /// サービスの現在時刻を返す関数。テストは固定時計を注入します。
@@ -97,8 +158,8 @@ impl TaktDashServiceImpl {
   /// `registry` は Poller と共有する takt-mcp のクライアントのレジストリです。書き込み RPC は
   /// 同じレジストリから同じプロジェクトの子プロセスを取得します。
   ///
-  /// GetRunDetail は要求のたびに設定のパスから対象サーバーの起動方法と cwd を解決し、
-  /// takt-mcp の子プロセスを起動して takt_get_run を呼びます。
+  /// GetRunDetail と GetRunContent は要求のたびに設定のパスからプロジェクトの cwd を解決し、
+  /// run の保存場所だけを読みます。takt-mcp の子プロセスは起動しません。
   pub fn new(deps: ServiceDeps) -> Self {
     Self::with_clock(deps, Arc::new(Utc::now))
   }
@@ -106,125 +167,43 @@ impl TaktDashServiceImpl {
   /// 現在時刻を返す関数を注入してサービスを作る。既定は実時計です。
   pub fn with_clock(deps: ServiceDeps, clock: Clock) -> Self {
     let ServiceDeps { store, activity, config_path, conversation, changes, shutdown, registry } = deps;
-    TaktDashServiceImpl { store, activity, config_path, conversation, changes, shutdown, registry, clock }
+    TaktDashServiceImpl {
+      store,
+      activity,
+      config_path,
+      conversation,
+      changes,
+      shutdown,
+      registry,
+      clock,
+      run_logs: Mutex::new(RunLogHandles::with_initial_read(InitialRead::Tail(DETAIL_INITIAL_TAIL_BYTES))),
+    }
+  }
+
+  /// プロジェクトの run の集計の取っ手を返す。cwd が変わったときの作り直しは [`RunLogHandles`]
+  /// が決めます。
+  fn run_log_handle(&self, project: &ProjectName, cwd: &std::path::Path) -> Result<RunLogHandle, Status> {
+    let mut run_logs =
+      self.run_logs.lock().map_err(|error| Status::internal(format!("run の集計を取得できませんでした: {error}")))?;
+    Ok(run_logs.handle_for(project, cwd))
   }
 
   /// サービスが今回の要求で使う現在時刻を返す。
   fn now(&self) -> DateTime<Utc> {
     (self.clock)()
   }
-
-  /// 状態ストアから DashboardState を組み立てる。
-  fn assemble_state(&self, now: DateTime<Utc>) -> DashboardState {
-    assemble_state_for(self.store.as_ref(), self.activity.as_ref(), now)
-  }
 }
 
-/// サーバーの接続状態と読めた時刻を、そのサーバーのプロジェクト群から組み立てる。
-fn assemble_servers(
-  servers: &BTreeMap<String, crate::config::ServerMeta>,
-  views: &[model::ProjectView],
-) -> Vec<Server> {
-  servers
-    .iter()
-    .map(|(server_id, meta)| {
-      let server_projects: Vec<&model::ProjectView> =
-        views.iter().filter(|view| &view.server_id == server_id).collect();
-      let connected = server_projects.iter().any(|view| view.connected);
-      let last_read_at = server_projects.iter().filter_map(|view| view.last_read_at).max();
-      Server {
-        server_id: server_id.clone(),
-        name: meta.name.clone(),
-        kind: meta.kind.clone(),
-        connected,
-        last_read_at: optional_timestamp(last_read_at),
-        concurrency: meta.concurrency,
-      }
-    })
-    .collect()
+/// 同期の SQLite 処理を `spawn_blocking` で実行し、待ち合わせの失敗を gRPC のステータスへ変換する。
+async fn blocking<T, F>(task: F) -> Result<T, Status>
+where
+  F: FnOnce() -> T + Send + 'static,
+  T: Send + 'static, {
+  tokio::task::spawn_blocking(task)
+    .await
+    .map_err(|error| Status::internal(format!("ブロッキング処理を完了できませんでした: {error}")))
 }
 
-/// プロジェクトの一覧を、直近24時間の完了タスクの件数つきで組み立てる。
-fn assemble_projects(views: &[model::ProjectView], activity: &ActivityStore, now: DateTime<Utc>) -> Vec<Project> {
-  let since = now - chrono::Duration::hours(24);
-  views
-    .iter()
-    .map(|view| {
-      let completed_tasks_24h =
-        activity.completed_tasks_since(&view.name, since).map(TaskCount::get).unwrap_or_default();
-      Project {
-        name: view.name.clone(),
-        about: view.about.clone(),
-        server_id: view.server_id.clone(),
-        completed_tasks_24h,
-        connected: view.connected,
-        last_read_at: optional_timestamp(view.last_read_at),
-        connection_state: connection_state(view.connection_state) as i32,
-      }
-    })
-    .collect()
-}
-
-/// ゴールの一覧を、タスクの件数と仕上げタスクの最後の状態つきで組み立てる。
-fn assemble_goals(views: &[model::ProjectView]) -> Vec<v1::Goal> {
-  let mut goals = Vec::new();
-  for view in views {
-    let merge_tasks: Vec<&TaskEntry> = view.tasks.iter().filter(|task| task.merge_task).collect();
-    for goal in &view.goals {
-      let goal_tasks: Vec<&TaskEntry> =
-        view.tasks.iter().filter(|task| task.goal_id.as_ref() == Some(&goal.goal_id)).collect();
-      let merge_task_last = merge_tasks
-        .iter()
-        .rev()
-        .find(|task| task.goal_id.as_ref() == Some(&goal.goal_id))
-        .map(|task| task_status(task.status) as i32);
-      goals.push(v1::Goal {
-        goal_id: goal.goal_id.as_str().to_owned(),
-        server_id: view.server_id.clone(),
-        project: view.name.clone(),
-        name: goal.objective.clone(),
-        status: goal_status(goal.status) as i32,
-        execution_status: execution_status(goal.execution_status) as i32,
-        task_counts: Some(task_status_counts(&goal_tasks)),
-        paused_reason: goal.paused_reason.clone(),
-        pull_request: pull_request(
-          goal.pull_request_number.map(PullRequestNumber::get),
-          goal.pull_request_url.as_deref(),
-        ),
-        awaiting_merge_at: optional_timestamp(goal.awaiting_merge_at),
-        merge_task_last,
-      });
-    }
-  }
-  goals
-}
-
-fn task_status_counts(tasks: &[&TaskEntry]) -> TaskStatusCounts {
-  // 状態ごとの件数も `TaskCount` を通し、`i32` の上限を超える件数は proto の表現に合わせて
-  // 飽和させます。実運用の件数は上限に届きませんが、集計の型を迂回しません。
-  let count = |status: model::TaskStatus| {
-    let total = tasks.iter().filter(|task| task.status == status).count();
-    let total = i64::try_from(total).unwrap_or(i64::MAX);
-    TaskCount::try_from(total).map(TaskCount::get).unwrap_or(i32::MAX)
-  };
-  TaskStatusCounts {
-    pending:   count(model::TaskStatus::Pending),
-    running:   count(model::TaskStatus::Running),
-    completed: count(model::TaskStatus::Completed),
-    failed:    count(model::TaskStatus::Failed),
-    exceeded:  count(model::TaskStatus::Exceeded),
-    pr_failed: count(model::TaskStatus::PrFailed),
-  }
-}
-
-fn pull_request(number: Option<i64>, url: Option<&str>) -> Option<v1::PullRequest> {
-  match (number, url) {
-    | (Some(number), Some(url)) => Some(v1::PullRequest { number, url: url.to_owned() }),
-    | _ => None,
-  }
-}
-
-/// run の一覧を組み立てる。ログの無音の判定は状態ストアの閾値に従います。
 fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime<Utc>) -> Vec<Run> {
   let mut runs = Vec::new();
   for view in views {
@@ -267,43 +246,6 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
   runs
 }
 
-/// 判断待ちの一覧を、状態ストアの投影（未回答の問い合わせ・人のマージ待ち・
-/// ゴール登録の承認待ち）から組み立てる。
-fn assemble_pending_decisions(store: &StateStore, now: DateTime<Utc>) -> Vec<PendingDecision> {
-  store
-    .pending_decisions(now, model::PendingDecisionFilter::All)
-    .into_iter()
-    .map(|decision| PendingDecision {
-      r#type:       pending_decision_type(decision.decision_type) as i32,
-      server_id:    decision.server_id,
-      project:      decision.project,
-      goal_id:      decision.goal_id,
-      inquiry_kind: inquiry_kind(decision.inquiry_kind) as i32,
-      created_at:   Some(timestamp(decision.created_at)),
-      body:         decision.body,
-      options:      decision.options,
-      pull_request: pull_request(
-        decision.pull_request_number.map(PullRequestNumber::get),
-        decision.pull_request_url.as_deref(),
-      ),
-      stale:        decision.stale,
-      inquiry_id:   decision.inquiry_id.as_ref().map(|inquiry_id| inquiry_id.as_str().to_owned()).unwrap_or_default(),
-      revision:     decision.revision.map(RegistrationRevision::get),
-    })
-    .collect()
-}
-
-fn activity_event(event: model::ActivityEvent) -> ActivityEvent {
-  ActivityEvent {
-    occurred_at: Some(timestamp(event.occurred_at)),
-    server_id:   event.server_id,
-    project:     event.project,
-    kind:        activity_kind(event.kind) as i32,
-    body:        event.body,
-    run_slug:    event.run_slug.map(|run_slug| run_slug.as_str().to_owned()),
-  }
-}
-
 /// takt-mcp の道具エラーを gRPC のステータスへ変換する境界。
 fn tool_error_status(error: ToolError) -> Status {
   match error {
@@ -311,6 +253,44 @@ fn tool_error_status(error: ToolError) -> Status {
     | ToolError::Tool(error) => Status::unavailable(format!("takt-mcp の道具が失敗しました: {error}")),
     | ToolError::Transport(error) => Status::unavailable(format!("takt-mcp へ接続できませんでした: {error}")),
   }
+}
+
+/// run の保存場所の読み取り失敗を gRPC のステータスへ変換する。
+fn run_read_failure_status(failure: RunReadFailure) -> Status {
+  match failure {
+    | RunReadFailure::NotListed | RunReadFailure::Missing => Status::not_found(failure.to_string()),
+    | RunReadFailure::Unreadable(_) | RunReadFailure::Rejected(_) => Status::unavailable(failure.to_string()),
+    | RunReadFailure::InvalidMeta(_) => Status::internal(failure.to_string()),
+  }
+}
+
+/// 要求の runSlug を検証する。空と、run のディレクトリ名にならない値は入力の誤りです。
+fn parse_run_slug(run_slug: String) -> Result<RunSlug, Status> {
+  if run_slug.trim().is_empty() {
+    return Err(Status::invalid_argument("runSlug が空です。"));
+  }
+  RunSlug::try_from(run_slug.as_str()).map_err(|error| Status::invalid_argument(format!("runSlug が不正です: {error}")))
+}
+
+/// 指示書を一覧の項目にする。本文は GetRunContent で返します。
+fn run_instruction(instruction: &Instruction) -> RunInstruction {
+  RunInstruction {
+    instruction_id: instruction.instruction_id.get(),
+    issued_at:      Some(timestamp(instruction.issued_at)),
+    state:          instruction.state.as_str().to_owned(),
+  }
+}
+
+/// GetRunContent が本文を返す対象。
+enum ContentTarget {
+  Report(ReportFilename),
+  Instruction(InstructionId),
+}
+
+/// 状態ストアから解決した run のプロジェクトと、設定から解決したその cwd。
+struct RunTarget {
+  view:     model::ProjectView,
+  resolved: ResolvedProject,
 }
 
 /// 設定から解決した、対象サーバーの起動方法とプロジェクトの cwd。
@@ -354,39 +334,23 @@ impl TaktDashServiceImpl {
     resolve_project_in(&config, server_id, project)
   }
 
+  /// 状態ストアで run のプロジェクトを探し、設定からその cwd を解決する。takt-mcp は起動しません。
+  fn resolve_run_target(&self, run_slug: &RunSlug) -> Result<RunTarget, Status> {
+    let view = self
+      .store
+      .find_run_project(run_slug)
+      .ok_or_else(|| Status::not_found(format!("runSlug {} は状態ストアにありません。", run_slug.as_str())))?;
+    let server_id = ServerId::try_from(view.server_id.as_str())
+      .map_err(|error| Status::internal(format!("状態ストアの server_id が不正です: {error}")))?;
+    let project = ProjectName::try_from(view.name.as_str())
+      .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
+    let resolved = self.resolve_project(&server_id, &project)?;
+    Ok(RunTarget { view, resolved })
+  }
+
   /// 書き込み RPC の共通の入口。型で検証済みの対象を解決する。
   fn resolve_write_target(&self, server_id: &ServerId, project: &ProjectName) -> Result<ResolvedProject, Status> {
     self.resolve_project(server_id, project)
-  }
-}
-
-/// 会話のページを proto の応答へ写す。
-fn conversation_response(page: ConversationPage) -> GetConversationResponse {
-  GetConversationResponse {
-    project:            page.project.as_str().to_owned(),
-    session_id:         page.session_id,
-    provider:           page.provider,
-    messages:           page
-      .messages
-      .into_iter()
-      .map(|message| v1::ConversationMessage {
-        seq:         message.seq,
-        occurred_at: Some(timestamp(message.occurred_at)),
-        speaker:     conversation_speaker(message.speaker) as i32,
-        text:        message.text,
-      })
-      .collect(),
-    next_after_seq:     page.next_after_seq,
-    has_more:           page.has_more,
-    skipped:            page
-      .skipped
-      .into_iter()
-      .map(|summary| v1::ConversationSkipped {
-        reason: summary.reason,
-        count:  i32::try_from(summary.count).unwrap_or(i32::MAX),
-      })
-      .collect(),
-    unavailable_reason: page.unavailable_reason,
   }
 }
 
@@ -395,156 +359,216 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
   type WatchStateStream = ReceiverStream<Result<DashboardState, Status>>;
 
   async fn get_overview(&self, _request: Request<GetOverviewRequest>) -> Result<Response<DashboardState>, Status> {
-    Ok(Response::new(self.assemble_state(self.now())))
+    let _timing = RpcTimingGuard::start("GetOverview", &self.activity);
+    let store = self.store.clone();
+    let activity = self.activity.clone();
+    let now = self.now();
+    let state = blocking(move || assemble_state_for(&store, &activity, now, assemble_runs)).await?;
+    Ok(Response::new(state))
   }
 
   async fn get_projects(&self, _request: Request<GetProjectsRequest>) -> Result<Response<GetProjectsResponse>, Status> {
-    let state = self.assemble_state(self.now());
-    let recent_events = self
-      .activity
-      .recent_events(RECENT_EVENTS_LIMIT)
-      .map_err(|error| Status::internal(format!("出来事の一覧を取得できませんでした: {error}")))?
-      .into_iter()
-      .map(activity_event)
-      .collect();
-    Ok(Response::new(GetProjectsResponse { state: Some(state), recent_events }))
+    let _timing = RpcTimingGuard::start("GetProjects", &self.activity);
+    let activity = self.activity.clone();
+    let response = blocking(move || -> Result<GetProjectsResponse, Status> {
+      let recent_events = activity
+        .recent_events(RECENT_EVENTS_LIMIT)
+        .map_err(|error| Status::internal(format!("出来事の一覧を取得できませんでした: {error}")))?
+        .into_iter()
+        .map(activity_event)
+        .collect();
+      Ok(GetProjectsResponse { state: None, recent_events })
+    })
+    .await??;
+    Ok(Response::new(response))
   }
 
   async fn get_pending_decisions(
     &self,
     _request: Request<GetPendingDecisionsRequest>,
   ) -> Result<Response<GetPendingDecisionsResponse>, Status> {
-    Ok(Response::new(GetPendingDecisionsResponse { state: Some(self.assemble_state(self.now())) }))
+    let _timing = RpcTimingGuard::start("GetPendingDecisions", &self.activity);
+    let store = self.store.clone();
+    let activity = self.activity.clone();
+    let now = self.now();
+    let state = blocking(move || assemble_state_for(&store, &activity, now, assemble_runs)).await?;
+    Ok(Response::new(GetPendingDecisionsResponse { state: Some(state) }))
   }
 
   async fn get_activity(&self, _request: Request<GetActivityRequest>) -> Result<Response<GetActivityResponse>, Status> {
+    let _timing = RpcTimingGuard::start("GetActivity", &self.activity);
+    let activity = self.activity.clone();
     let now = self.now();
-    let state = self.assemble_state(now);
-    let events = self
-      .activity
-      .recent_events(ACTIVITY_EVENTS_LIMIT)
-      .map_err(|error| Status::internal(format!("出来事の一覧を取得できませんでした: {error}")))?
-      .into_iter()
-      .map(activity_event)
-      .collect();
-    let daily_summaries = self
-      .activity
-      .daily_summaries(now)
-      .map_err(|error| Status::internal(format!("日次集計を取得できませんでした: {error}")))?
-      .into_iter()
-      .map(|summary| v1::DailySummary {
-        date:      summary.date.as_str().to_owned(),
-        total:     summary.total,
-        attention: summary.attention,
-      })
-      .collect();
-    let today_counts_by_server = self
-      .activity
-      .today_counts_by_server(now)
-      .map_err(|error| Status::internal(format!("サーバーごとの件数を取得できませんでした: {error}")))?
-      .into_iter()
-      .map(|count| v1::ServerEventCount { server_id: count.server_id.as_str().to_owned(), count: count.count })
-      .collect();
-    Ok(Response::new(GetActivityResponse { state: Some(state), events, daily_summaries, today_counts_by_server }))
+    let response = blocking(move || -> Result<GetActivityResponse, Status> {
+      let events = activity
+        .recent_events(ACTIVITY_EVENTS_LIMIT)
+        .map_err(|error| Status::internal(format!("出来事の一覧を取得できませんでした: {error}")))?
+        .into_iter()
+        .map(activity_event)
+        .collect();
+      let daily_summaries = activity
+        .daily_summaries(now)
+        .map_err(|error| Status::internal(format!("日次集計を取得できませんでした: {error}")))?
+        .into_iter()
+        .map(|summary| v1::DailySummary {
+          date:      summary.date.as_str().to_owned(),
+          total:     summary.total,
+          attention: summary.attention,
+        })
+        .collect();
+      let today_counts_by_server = activity
+        .today_counts_by_server(now)
+        .map_err(|error| Status::internal(format!("サーバーごとの件数を取得できませんでした: {error}")))?
+        .into_iter()
+        .map(|count| v1::ServerEventCount { server_id: count.server_id.as_str().to_owned(), count: count.count })
+        .collect();
+      Ok(GetActivityResponse { state: None, events, daily_summaries, today_counts_by_server })
+    })
+    .await??;
+    Ok(Response::new(response))
   }
 
   async fn get_run_detail(
     &self,
     request: Request<GetRunDetailRequest>,
   ) -> Result<Response<GetRunDetailResponse>, Status> {
-    let run_slug_text = request.into_inner().run_slug;
-    if run_slug_text.trim().is_empty() {
-      return Err(Status::invalid_argument("runSlug が空です。"));
-    }
-    let run_slug = RunSlug::try_from(run_slug_text.as_str())
-      .map_err(|error| Status::invalid_argument(format!("runSlug が不正です: {error}")))?;
-    let view = self
-      .store
-      .find_run_project(&run_slug)
-      .ok_or_else(|| Status::not_found(format!("runSlug {} は状態ストアにありません。", run_slug.as_str())))?;
-    let stored_run = view.runs.iter().find(|run| run.run_slug == run_slug.as_str()).cloned();
-    // 完了した run は実行中一覧から消えるため、状態ストアの完了タスクからゴールと
-    // タスク名を補います。run の詳細 URL は完了後も同じまま取得できます。
-    let stored_task = view.tasks.iter().find(|task| task.run_slug.as_ref() == Some(&run_slug));
-    let view_server_id = ServerId::try_from(view.server_id.as_str())
-      .map_err(|error| Status::internal(format!("状態ストアの server_id が不正です: {error}")))?;
-    let view_project = ProjectName::try_from(view.name.as_str())
-      .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
-    let resolved = self.resolve_project(&view_server_id, &view_project)?;
-    let mut client = McpClient::new(resolved.client_config);
-    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_run_detail(&run_slug).await {
-      | Ok(detail) => detail,
-      | Err(error) => {
-        client.shutdown().await;
-        return Err(tool_error_status(error));
-      },
-    };
-    client.shutdown().await;
-    let server_id = resolved.server_id.as_str().to_owned();
-    // 対象 run のゴールとタスク名は、状態ストアの run（定期読み取りで task
-    // から解決済み）を正とする。 takt_get_run の応答に無い場合だけ、ストアの値で補う。
-    // run が完了して一覧から消えている場合は、完了タスクの値で補う。
-    let goal_id = detail
-      .goal_id
-      .clone()
-      .or_else(|| stored_run.as_ref().and_then(|run| run.goal_id.clone()))
-      .or_else(|| stored_task.and_then(|task| task.goal_id.clone()));
-    let fallback_task_name =
-      stored_run.as_ref().map(|run| run.task_name.clone()).or_else(|| stored_task.map(|task| task.name.clone()));
-    let task_name = detail
-      .task_name
-      .clone()
-      .or(fallback_task_name)
+    let _timing = RpcTimingGuard::start("GetRunDetail", &self.activity);
+    let run_slug = parse_run_slug(request.into_inner().run_slug)?;
+    let target = self.resolve_run_target(&run_slug)?;
+    let stored_run = target.view.runs.iter().find(|run| run.run_slug == run_slug.as_str()).cloned();
+    // 完了した run は実行中一覧から消えるため、状態ストアのタスクからゴールとタスク名を補います。
+    // 再開した run は、タスクの sourceRunSlug が元 run の runSlug と一致します。
+    let stored_task = target
+      .view
+      .tasks
+      .iter()
+      .find(|task| task.run_slug.as_ref() == Some(&run_slug))
+      .or_else(|| target.view.tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())))
+      .cloned();
+    let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
+    let read = read_run(&run_logs, run_slug.clone()).await;
+    let instructions =
+      read_run_instructions(target.resolved.cwd.clone(), run_slug.clone()).await.map_err(run_read_failure_status)?;
+    let goal_id = stored_run
+      .as_ref()
+      .and_then(|run| run.goal_id.clone())
+      .or_else(|| stored_task.as_ref().and_then(|task| task.goal_id.clone()));
+    let task_name = stored_run
+      .as_ref()
+      .map(|run| run.task_name.clone())
+      .or_else(|| stored_task.as_ref().map(|task| task.name.clone()))
       .map(|task_name| task_name.as_str().to_owned())
       .unwrap_or_default();
-    let session_id = if detail.session_id.is_empty() {
-      stored_run.as_ref().map(|run| run.session_id.clone()).unwrap_or_default()
-    } else {
-      detail.session_id.clone()
-    };
-    let log_silent = self.store.is_log_silent_at(detail.last_log_at, self.now());
-    Ok(Response::new(GetRunDetailResponse {
+    let mut response = GetRunDetailResponse {
       run_slug: run_slug.as_str().to_owned(),
-      session_id,
-      server_id,
-      project: view.name.clone(),
+      session_id: stored_run.as_ref().map(|run| run.session_id.clone()).unwrap_or_default(),
+      server_id: target.resolved.server_id.as_str().to_owned(),
+      project: target.view.name.clone(),
       goal_id: goal_id.map(|goal_id| goal_id.as_str().to_owned()).unwrap_or_default(),
       task_name,
-      task_text: detail.task_text,
-      summary: detail.summary,
-      workflow: detail.workflow,
-      status: run_status(detail.status) as i32,
-      started_at: optional_timestamp(detail.started_at),
-      current_step: detail.current_step,
-      current_iteration: detail.current_iteration,
-      current_step_started_at: optional_timestamp(detail.current_step_started_at),
-      current_step_execution_count: detail.current_step_execution_count,
-      phase: detail.phase,
-      step_logs: detail.step_logs.iter().map(step_log).collect(),
-      log_tail: detail.log_tail,
-      reports: detail
-        .reports
-        .into_iter()
-        .map(|report| RunReport {
-          filename:   report.filename,
-          content:    report.content,
-          size_bytes: report.size_bytes,
-        })
-        .collect(),
-      instructions: detail
-        .instructions
-        .into_iter()
-        .map(|instruction| RunInstruction {
-          instruction_id: instruction.instruction_id,
-          issued_at:      Some(timestamp(instruction.issued_at)),
-          state:          instruction.state,
-          content:        instruction.content,
-        })
-        .collect(),
-      last_log_at: optional_timestamp(detail.last_log_at),
-      log_silent,
-      server_connected: view.connected,
-      server_last_read_at: optional_timestamp(view.last_read_at),
+      summary: stored_run.as_ref().map(|run| run.summary.clone()).unwrap_or_default(),
+      instructions: instructions.iter().map(run_instruction).collect(),
+      server_connected: target.view.connected,
+      server_last_read_at: optional_timestamp(target.view.last_read_at),
+      ..Default::default()
+    };
+    match read {
+      | Ok(view) => {
+        tracing::info!(
+          run_slug = %run_slug.as_str(),
+          body_log_bytes_read = view.body_log_bytes_read,
+          "run 詳細のために本体ログを読みました。"
+        );
+        let last_log_at = run_detail::fill_from_run_log(&mut response, &view, stored_task.as_ref());
+        response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
+      },
+      // 掃除済みの worktree など、run の保存場所が残っていない run はエラーにせず、状態ストアの値と
+      // ログが残っていないことを返します。
+      | Err(RunReadFailure::Missing) => {
+        let started_at = stored_run
+          .as_ref()
+          .and_then(|run| run.started_at)
+          .or_else(|| stored_task.as_ref().and_then(|task| task.started_at));
+        let last_log_at = stored_run.as_ref().and_then(|run| run.last_log_at);
+        response.logs_removed = true;
+        response.status =
+          stored_run.as_ref().map_or(v1::RunStatus::Unspecified as i32, |run| run_status(run.status) as i32);
+        response.started_at = optional_timestamp(started_at);
+        response.current_step = stored_run.as_ref().and_then(|run| run.current_step.clone());
+        response.current_iteration = stored_run.as_ref().and_then(|run| run.current_iteration);
+        response.current_step_started_at =
+          optional_timestamp(stored_run.as_ref().and_then(|run| run.current_step_started_at));
+        response.last_log_at = optional_timestamp(last_log_at);
+        response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
+      },
+      // 保存場所の対応表に無い run と、対応表を読めない run（SSH 越しに扱うリモートのサーバーの
+      // プロジェクトなど）は takt_get_run から読みます。takt_get_run でも読めなければ、保存場所の
+      // 読み取りの失敗を返します。
+      | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
+        let last_log_at =
+          run_detail::fill_from_takt_get_run(&mut response, &target.resolved, &run_slug, stored_task.as_ref(), failure)
+            .await?;
+        response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
+      },
+      | Err(failure) => return Err(run_read_failure_status(failure)),
+    }
+    Ok(Response::new(response))
+  }
+
+  async fn get_run_updates(
+    &self,
+    request: Request<GetRunUpdatesRequest>,
+  ) -> Result<Response<GetRunUpdatesResponse>, Status> {
+    let _timing = RpcTimingGuard::start("GetRunUpdates", &self.activity);
+    let request = request.into_inner();
+    let run_slug = parse_run_slug(request.run_slug)?;
+    let after = parse_log_cursor(request.epoch, request.after_sequence)?;
+    let target = self.resolve_run_target(&run_slug)?;
+    // GetRunDetail と同じ取っ手を使い、本体ログを前回の読み位置の続きから読む。
+    let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
+    let response = read_updates_response(&run_logs, &target.resolved, run_slug, after).await?;
+    Ok(Response::new(response))
+  }
+
+  async fn get_run_content(
+    &self,
+    request: Request<GetRunContentRequest>,
+  ) -> Result<Response<GetRunContentResponse>, Status> {
+    let _timing = RpcTimingGuard::start("GetRunContent", &self.activity);
+    let request = request.into_inner();
+    let run_slug = parse_run_slug(request.run_slug)?;
+    let target = match request.target {
+      | Some(get_run_content_request::Target::ReportFilename(filename)) => ContentTarget::Report(
+        ReportFilename::try_from(filename.as_str())
+          .map_err(|error| Status::invalid_argument(format!("レポートの名前が不正です: {error}")))?,
+      ),
+      | Some(get_run_content_request::Target::InstructionId(instruction_id)) => ContentTarget::Instruction(
+        InstructionId::try_from(instruction_id)
+          .map_err(|error| Status::invalid_argument(format!("指示書の ID が不正です: {error}")))?,
+      ),
+      | None => return Err(Status::invalid_argument("レポートの名前か指示書の ID のどちらかを指定してください。")),
+    };
+    let resolved = self.resolve_run_target(&run_slug)?.resolved;
+    let (read, missing) = match target {
+      | ContentTarget::Report(filename) => (
+        run_content::read_report_body(&resolved, &run_slug, &filename, RUN_CONTENT_MAX_BYTES).await,
+        format!("run {} にレポート {} はありません。", run_slug.as_str(), filename.as_str()),
+      ),
+      | ContentTarget::Instruction(instruction_id) => (
+        run_content::read_instruction_body(&resolved, &run_slug, instruction_id, RUN_CONTENT_MAX_BYTES).await,
+        format!("run {} に指示書 #{} はありません。", run_slug.as_str(), instruction_id.get()),
+      ),
+    };
+    let content = match read.map_err(run_read_failure_status)? {
+      | ContentRead::Found(content) => content,
+      | ContentRead::Missing => return Err(Status::not_found(missing)),
+      | ContentRead::Unreadable(reason) => return Err(Status::unavailable(reason)),
+    };
+    Ok(Response::new(GetRunContentResponse {
+      run_slug:   run_slug.as_str().to_owned(),
+      content:    content.content,
+      size_bytes: i64::try_from(content.size_bytes).unwrap_or(i64::MAX),
+      truncated:  content.truncated,
     }))
   }
 
@@ -573,7 +597,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
     let resolved = self.resolve_project(&view_server_id, &view_project)?;
     let mut client = McpClient::new(resolved.client_config);
-    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_goal_detail(goal_id.as_str()).await {
+    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_goal_detail(&goal_id).await {
       | Ok(detail) => detail,
       | Err(error) => {
         client.shutdown().await;
@@ -582,7 +606,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     };
     client.shutdown().await;
     Ok(Response::new(GetGoalDetailResponse {
-      goal_id:             detail.goal_id,
+      goal_id:             detail.goal_id.as_str().to_owned(),
       server_id:           view.server_id.clone(),
       project:             view.name.clone(),
       status:              goal_status(detail.status) as i32,
@@ -634,7 +658,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let resolved = resolve_project_in(&config, &configured_server_id, &project)?;
     let mut client = McpClient::new(resolved.client_config);
     let detail = match ToolSet::new(&mut client, resolved.cwd.clone())
-      .read_task_detail(project.as_str(), task_name.as_str(), goal_id.as_ref().map(|goal_id| goal_id.as_str()))
+      .read_task_detail(&project, &task_name, goal_id.as_ref())
       .await
     {
       | Ok(Some(detail)) => detail,
@@ -652,17 +676,17 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     };
     client.shutdown().await;
     Ok(Response::new(GetTaskDetailResponse {
-      project:             detail.project,
-      task_name:           detail.task_name,
-      goal_id:             detail.goal_id,
+      project:             detail.project.as_str().to_owned(),
+      task_name:           detail.task_name.as_str().to_owned(),
+      goal_id:             detail.goal_id.map(|goal_id| goal_id.as_str().to_owned()),
       status:              task_status(detail.status) as i32,
       summary:             detail.summary,
       created_at:          optional_timestamp(detail.created_at),
       started_at:          optional_timestamp(detail.started_at),
       completed_at:        optional_timestamp(detail.completed_at),
-      run_slug:            detail.run_slug,
-      pull_request_number: detail.pull_request_number,
-      linked_run_slugs:    detail.linked_run_slugs,
+      run_slug:            detail.run_slug.map(|run_slug| run_slug.as_str().to_owned()),
+      pull_request_number: detail.pull_request_number.map(|number| number.get()),
+      linked_run_slugs:    detail.linked_run_slugs.into_iter().map(|slug| slug.as_str().to_owned()).collect(),
       branch:              detail.branch,
       pull_request_url:    detail.pull_request_url,
     }))
@@ -708,7 +732,20 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     // 購読を初回の組み立てより先に取り、初回送信と変化通知の間に取りこぼしを作りません。
     let mut changes = self.changes.subscribe();
     let (tx, rx) = mpsc::channel(WATCH_CHANNEL_CAPACITY);
-    let _ = tx.send(Ok(self.assemble_state(self.now()))).await;
+    let initial = {
+      let store = self.store.clone();
+      let activity = self.activity.clone();
+      let now = self.now();
+      blocking(move || assemble_state_for(&store, &activity, now, assemble_runs)).await
+    };
+    match initial {
+      | Ok(state) => {
+        let _ = tx.send(Ok(state)).await;
+      },
+      | Err(status) => {
+        let _ = tx.send(Err(status)).await;
+      },
+    }
     let sender = tx.clone();
     let store = self.store.clone();
     let activity = self.activity.clone();
@@ -732,10 +769,19 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
             | Err(broadcast::error::RecvError::Closed) => return,
           },
         }
-        let state = assemble_state_for(&store, &activity, (clock)());
+        let assembled = {
+          let store = store.clone();
+          let activity = activity.clone();
+          let now = (clock)();
+          blocking(move || assemble_state_for(&store, &activity, now, assemble_runs)).await
+        };
+        let message = match assembled {
+          | Ok(state) => Ok(state),
+          | Err(status) => Err(status),
+        };
         // 送信の待機中も停止通知とクライアント切断を監視し、待たずに終了します。
         tokio::select! {
-          result = sender.send(Ok(state)) => {
+          result = sender.send(message) => {
             if result.is_err() {
               return;
             }
@@ -823,6 +869,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .answer_goal_question(&goal_id, &question_id, answer)
       .await
       .map_err(tool_error_status)?;
+    // 回答したゴールは、終端でも次の周期で質問を読み直させて判断待ちから外します。
+    self.store.invalidate_goal_questions(resolved.project.as_str(), goal_id);
     Ok(Response::new(AnswerInquiryResponse { inquiry_id: question_id.as_str().to_owned() }))
   }
 
@@ -1016,29 +1064,6 @@ fn report_payload(report: Option<i32>) -> Result<serde_json::Value, Status> {
     },
   };
   Ok(serde_json::json!({ "report": report }))
-}
-
-/// 状態ストアと activity のクエリから DashboardState を組み立てる。
-///
-/// サーバーの表示情報と閾値は呼び出しのたびに状態ストアから読むため、稼働中の設定変更が
-/// 次の組み立て（WatchState の変化通知後の再組み立てを含む）へ反映されます。
-fn assemble_state_for(store: &StateStore, activity: &ActivityStore, now: DateTime<Utc>) -> DashboardState {
-  let views = store.project_views();
-  let servers = store.servers();
-  let thresholds = store.thresholds();
-  DashboardState {
-    read_at:           optional_timestamp(views.iter().filter_map(|view| view.last_read_at).max()),
-    servers:           assemble_servers(&servers, &views),
-    projects:          assemble_projects(&views, activity, now),
-    goals:             assemble_goals(&views),
-    runs:              assemble_runs(&views, store, now),
-    pending_decisions: assemble_pending_decisions(store, now),
-    thresholds:        Some(v1::AnomalyThresholds {
-      pending_decision_stale_minutes: thresholds.pending_decision_stale_minutes.get(),
-      run_log_silent_minutes:         thresholds.run_log_silent_minutes.get(),
-    }),
-    build_info:        Some(crate::build_info::current()),
-  }
 }
 
 /// `listener` で待ち受け、`stop` が真になったら終了する gRPC サーバを起動する。

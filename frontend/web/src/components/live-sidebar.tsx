@@ -24,6 +24,7 @@ export function LiveSidebar({ frontendBuild }: LiveSidebarProps): ReactElement {
       currentPath={pathname ?? undefined}
       readAt={state.readAt}
       runs={state.runs}
+      projects={state.projects}
       frontendBuild={frontendBuild}
       backendBuild={normalizeBuildInfo(state.buildInfo)}
     />

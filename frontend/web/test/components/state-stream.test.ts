@@ -14,7 +14,7 @@ import { buildOverviewView } from "../../src/state/dashboard.ts";
 import {
   dashboardStateFromProto,
   restoreDashboardState,
-  type DashboardState as LiveDashboardState,
+  type DashboardState as RestoredDashboardState,
 } from "../../src/state/restore-state.ts";
 import { DomainPrimitiveError } from "../../src/state/domain-primitives.ts";
 import { DecisionsContent } from "../../src/components/decisions-content.tsx";
@@ -38,8 +38,10 @@ const freshFakes = (): typeof FakeEventSource => {
   return FakeEventSource;
 };
 
+// 受信した状態は復元後の内部型で届く。proto の DashboardState は送信側の
+// JSON 化（DashboardState.toJSON）にだけ使う。
 type StreamHandlers = {
-  onState?: (state: LiveDashboardState) => void;
+  onState?: (state: RestoredDashboardState) => void;
   onError?: () => void;
 };
 
@@ -85,7 +87,7 @@ const open = (Ctor: typeof FakeEventSource, handlers: StreamHandlers, scheduler?
 
 test("受信した状態で画面の状態を置き換える", () => {
   const Ctor = freshFakes();
-  const received: LiveDashboardState[] = [];
+  const received: RestoredDashboardState[] = [];
   const stream = open(Ctor, { onState: (state) => received.push(state) });
   const source = Ctor.instances[0]!;
   assert.equal(source.url, "/api/state");
@@ -99,7 +101,7 @@ test("受信した状態で画面の状態を置き換える", () => {
 
 test("proto の JSON（時刻は ISO 文字列、列挙型は名称文字列）を受信すると内部型へ復元され、描画の件数と表示が送信値に対応する", () => {
   const Ctor = freshFakes();
-  const received: LiveDashboardState[] = [];
+  const received: RestoredDashboardState[] = [];
   const stream = open(Ctor, { onState: (state) => received.push(state) });
 
   // 実際の送信形式で観測するため、送信側と同じ DashboardState.toJSON を使う。
@@ -205,9 +207,34 @@ test("close は予約済みの再接続を取り消す", () => {
   assert.equal(Ctor.instances.length, 1);
 });
 
+test("同じ接続でエラーが複数回発火しても、再接続の予約は1つだけ残り、接続は増えない", () => {
+  const Ctor = freshFakes();
+  const scheduler = new FakeScheduler();
+  const stream = open(Ctor, {}, scheduler);
+  const first = Ctor.instances[0]!;
+
+  first.onerror?.({});
+  first.onerror?.({});
+  first.onerror?.({});
+
+  assert.equal(scheduler.scheduled.length, 3, "エラーごとに再接続を予約する");
+  const pending = scheduler.scheduled.filter((entry) => !entry.cancelled);
+  assert.equal(pending.length, 1, "新しい予約の前に既存の予約を解除し、有効な予約は1つだけにする");
+  assert.equal(pending[0], scheduler.latest(), "残るのは最後の予約");
+
+  // 予約したタイマーが発火しても、再接続で作る新しい接続は1つだけにする。
+  for (const entry of [...scheduler.scheduled]) {
+    if (!entry.cancelled) {
+      entry.run();
+    }
+  }
+  assert.equal(Ctor.instances.length, 2, "再接続で作る新しい接続は1つだけ");
+  stream.close();
+});
+
 test("受信前の状態は上書きされず、受信後に置き換わる", () => {
   const Ctor = freshFakes();
-  let current: LiveDashboardState = dashboardStateFromProto(createDashboardState());
+  let current: RestoredDashboardState = dashboardStateFromProto(createDashboardState());
   const stream = open(Ctor, {
     onState: (state) => {
       current = state;
@@ -289,7 +316,7 @@ test("受信したプロジェクトの最後に読めた時刻を復元する",
 
 test("不正な値を受信したときは状態を置き換えず、onState を呼ばない", () => {
   const Ctor = freshFakes();
-  const received: LiveDashboardState[] = [];
+  const received: RestoredDashboardState[] = [];
   const stream = open(Ctor, { onState: (state) => received.push(state) });
 
   assert.throws(
@@ -305,6 +332,7 @@ test("SSE を受信して状態が置き換わっても backend のビルド情�
   const Ctor = freshFakes();
   const before = createDashboardState();
   // 受信前は切断中としておき、受信で接続中へ戻ることも同じ実体で観測する。
+  // Context 値は内部型の状態を持つため、初期値も proto から変換してそろえる。
   let live: StateStreamContextValue = { state: dashboardStateFromProto(before), disconnected: true };
   const stream = open(Ctor, {
     onState: (next) => {

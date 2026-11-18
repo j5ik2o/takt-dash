@@ -63,18 +63,19 @@ fn overview_command_prints_fetched_summary_to_stdout() {
 fn overview_rendering_distinguishes_operation_request_inquiry() {
   let mut state = sample_overview();
   state.pending_decisions = vec![PendingDecision {
-    r#type:       PendingDecisionType::Inquiry as i32,
-    server_id:    "mini".to_owned(),
-    project:      "taktdash-cli".to_owned(),
-    goal_id:      None,
-    inquiry_kind: INQUIRY_KIND_OPERATION_REQUEST,
-    created_at:   Some(ts(1_731_300_000)),
-    body:         "ログを取得してください。".to_owned(),
-    options:      Vec::new(),
-    pull_request: None,
-    stale:        false,
-    inquiry_id:   String::new(),
-    revision:     None,
+    r#type:          PendingDecisionType::Inquiry as i32,
+    server_id:       "mini".to_owned(),
+    project:         "taktdash-cli".to_owned(),
+    goal_id:         None,
+    inquiry_kind:    INQUIRY_KIND_OPERATION_REQUEST,
+    created_at:      Some(ts(1_731_300_000)),
+    body:            "ログを取得してください。".to_owned(),
+    options:         Vec::new(),
+    pull_request:    None,
+    stale:           false,
+    inquiry_id:      String::new(),
+    revision:        None,
+    merge_task_last: None,
   }];
 
   let rendered = render_overview(&state).expect("有効です");
