@@ -204,7 +204,7 @@ pub fn snapshot(
   runs: Vec<RunEntry>,
   notifications: Vec<NotificationEntry>,
 ) -> ProjectSnapshot {
-  ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals: Vec::new() }
+  ProjectSnapshot { goals, tasks, inquiries, runs, notifications, ..ProjectSnapshot::empty() }
 }
 
 pub fn server_meta() -> ServerMeta {

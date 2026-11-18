@@ -115,7 +115,13 @@ impl ReaderPool {
 
 impl ActivityStore {
   /// 指定したパスの SQLite を開き、スキーマを用意する。
+  ///
+  /// `:memory:` と空のパスは、接続ごとに別のデータベースになる。読み取り用の接続から書き込み側の
+  /// スキーマと記録が見えないため、メモリ上の store として開きます。
   pub fn open(path: &Path) -> rusqlite::Result<Self> {
+    if path == Path::new(":memory:") || path.as_os_str().is_empty() {
+      return Self::open_in_memory();
+    }
     let writer = Connection::open(path)?;
     configure(&writer)?;
     migrate(&writer)?;

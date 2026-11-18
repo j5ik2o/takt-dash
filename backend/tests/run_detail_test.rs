@@ -1,8 +1,13 @@
 //! gRPC の GetRunDetail が、状態ストアと run の保存場所（`meta.json`、本体ログ、`reports/`、
-//! プロジェクト側の `interventions.jsonl`）だけから GetRunDetailResponse を組み立て、takt-mcp を
-//! 起動も呼び出しもしないことを検証する。本体ログは末尾の一定量だけを読み、同じサーバーへの2回目の
-//! 要求は続きだけを読む。worktree の run、再開した run（source_run_slug）、掃除済みの worktree の
-//! run も扱う。状態ストアにない runSlug は Not Found 相当のステータスで返す。
+//! プロジェクト側の `interventions.jsonl`）から GetRunDetailResponse を組み立て、ローカルで読めた
+//! run では takt-mcp を起動も呼び出しもしないことを検証する。本体ログは末尾の一定量だけを読み、
+//! 同じサーバーへの2回目の要求は続きだけを読む。worktree の run、再開した run（source_run_slug）、
+//! 掃除済みの worktree の run も扱う。
+//!
+//! 状態ストアにない runSlug は Not Found 相当のステータスで返す。
+//!
+//! ローカルで保存場所を読めない run は takt_get_run の値で返し、それでも読めなければ従来の
+//! ステータスで返す。
 
 mod common;
 mod grpc_harness;
@@ -47,12 +52,13 @@ fn seeded_harness(state: Value) -> GrpcHarness {
   stored_run.summary = "実装の run".to_owned();
   stored_run.goal_id = Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です"));
   let snapshot = ProjectSnapshot {
-    goals:         vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
-    tasks:         vec![],
-    inquiries:     vec![],
-    runs:          vec![stored_run],
+    goals: vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![stored_run],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   harness
@@ -307,8 +313,8 @@ async fn get_run_detail_reads_a_resumed_run_from_its_source_run_slug() {
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
   let snapshot = ProjectSnapshot {
-    goals:         vec![],
-    tasks:         vec![TaskEntry {
+    goals: vec![],
+    tasks: vec![TaskEntry {
       name:            TaskName::try_from("resume-task").expect("テストのタスク名は有効です"),
       goal_id:         Some(GoalId::try_from("g-resume").expect("テストのゴール ID は有効です")),
       status:          TaskStatus::Running,
@@ -318,10 +324,11 @@ async fn get_run_detail_reads_a_resumed_run_from_its_source_run_slug() {
       current_step:    Some("review".to_owned()),
       merge_task:      false,
     }],
-    inquiries:     vec![],
-    runs:          vec![],
+    inquiries: vec![],
+    runs: vec![],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   let worktree = worktree_path(&harness, "wt-resume");
@@ -507,14 +514,119 @@ async fn get_run_detail_returns_not_found_for_an_unknown_run_slug() {
 
 #[tokio::test]
 async fn get_run_detail_returns_not_found_for_a_run_missing_from_the_task_table() {
-  // 状態ストアにはあるが、tasks.yaml の対応表に載っていない run は Not Found です。
-  let harness = seeded_harness(mcp_state());
+  // 状態ストアにはあるが、tasks.yaml の対応表に載っておらず、takt_get_run でも読めない run は
+  // Not Found です。
+  let mut state = mcp_state();
+  state["isError"] = json!(["takt_get_run"]);
+  let harness = seeded_harness(state);
   let fixture = RunFixture::new(harness.project_dir());
   fixture.write_tasks(&[RunTaskLine { run_slug: Some("other-run"), source_run_slug: None }]);
 
   let status = request_detail(&harness, "run-1").await.expect_err("対応表に無い run は詳細を返しません");
 
   assert_eq!(status.code(), tonic::Code::NotFound, "対応表に無い run は Not Found です: {status:?}");
+}
+
+/// takt_get_run が run-1 をリモートのサーバーの値で返す mock の状態。ローカルの保存場所の値と
+/// 区別できるよう、workflow・現在ステップ・ステップの記録を固有の値にする。
+fn remote_run_state() -> Value {
+  let mut state = mcp_state();
+  state["runs"] = json!({
+    "run-1": {
+      "runSlug": "run-1",
+      "status": "running",
+      "workflow": "remote-workflow",
+      "currentStep": "remote-implement",
+      "currentIteration": 4,
+      "phase": 2,
+      "startedAt": "2026-11-13T09:00:00Z",
+      "currentStepStartedAt": "2026-11-13T09:20:00Z",
+      "currentStepExecutionCount": 2,
+      "stepLogs": [
+        { "step": "remote-plan", "persona": "architect", "status": "done", "timestamp": "2026-11-13T09:10:00Z", "iteration": 1 }
+      ],
+      "reports": [ { "filename": "remote-plan.md", "sizeBytes": 12 } ]
+    }
+  });
+  state
+}
+
+/// takt_get_run の値で組み立てた詳細であることを確かめる。
+fn assert_detail_from_takt_get_run(detail: &GetRunDetailResponse, harness: &GrpcHarness) {
+  assert_eq!(detail.status, RunStatus::Running as i32);
+  assert_eq!(detail.workflow, "remote-workflow", "workflow は takt_get_run の値です");
+  assert_eq!(detail.current_step.as_deref(), Some("remote-implement"));
+  assert_eq!(detail.current_iteration, Some(4));
+  assert_eq!(detail.phase, Some(2));
+  assert_eq!(detail.started_at, Some(timestamp("2026-11-13T09:00:00Z")));
+  assert_eq!(detail.current_step_started_at, Some(timestamp("2026-11-13T09:20:00Z")));
+  assert_eq!(detail.current_step_execution_count, Some(2));
+  assert_eq!(step_log_names(detail), vec!["remote-plan".to_owned()], "step_logs は takt_get_run の stepLogs です");
+  let reports: Vec<(&str, i64)> =
+    detail.reports.iter().map(|report| (report.filename.as_str(), report.size_bytes)).collect();
+  assert_eq!(reports, vec![("remote-plan.md", 12)]);
+  assert_eq!(detail.summary, "実装の run", "summary は従来どおり状態ストアの run の値です");
+  assert!(!detail.logs_removed);
+  let calls = harness.recorded_calls();
+  assert!(
+    calls.iter().any(|call| call.name == "takt_get_run" && call.arguments["runSlug"] == "run-1"),
+    "ローカルで読めない run は takt_get_run で読みます: {calls:?}"
+  );
+}
+
+#[tokio::test]
+async fn get_run_detail_reads_a_run_without_a_local_task_table_from_takt_get_run() {
+  // リモートのサーバーのプロジェクトは、ローカルに tasks.yaml が無く保存場所を読めない。その run の
+  // 詳細は takt_get_run の値で返す。ローカルの読み取りだけに頼る実装は Unavailable で落ちる。
+  let harness = seeded_harness(remote_run_state());
+
+  let detail = request_detail(&harness, "run-1").await.expect("ローカルで読めない run の詳細も取得できます");
+
+  assert_detail_from_takt_get_run(&detail, &harness);
+}
+
+#[tokio::test]
+async fn get_run_detail_reads_a_run_missing_from_the_task_table_from_takt_get_run() {
+  // ローカルの tasks.yaml に載っていない run の詳細も、takt_get_run の値で返す。
+  let harness = seeded_harness(remote_run_state());
+  let fixture = RunFixture::new(harness.project_dir());
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("other-run"), source_run_slug: None }]);
+
+  let detail = request_detail(&harness, "run-1").await.expect("対応表に無い run の詳細も取得できます");
+
+  assert_detail_from_takt_get_run(&detail, &harness);
+}
+
+#[tokio::test]
+async fn get_run_detail_keeps_unavailable_when_neither_the_task_table_nor_takt_get_run_can_be_read() {
+  // ローカルの tasks.yaml を読めず、takt_get_run も失敗する run は、従来どおり Unavailable です。
+  let mut state = remote_run_state();
+  state["isError"] = json!(["takt_get_run"]);
+  let harness = seeded_harness(state);
+
+  let status = request_detail(&harness, "run-1").await.expect_err("どちらでも読めない run は詳細を返しません");
+
+  assert_eq!(status.code(), tonic::Code::Unavailable, "読めない run は Unavailable です: {status:?}");
+}
+
+#[tokio::test]
+async fn get_run_detail_succeeds_with_a_partial_last_instruction_line() {
+  // takt が interventions.jsonl へ追記している途中の、改行で終わらない最後の行があっても、run
+  // 詳細は 読めて、完成した行の指示書を返す。
+  let harness = seeded_harness(mcp_state());
+  running_run_files(&harness);
+  let interventions = harness.project_dir().join(".takt").join("runs").join("run-1").join("interventions.jsonl");
+  std::fs::write(
+    &interventions,
+    format!("{}\n{}", issued_event(1, "2026-11-13T08:50:00Z", "指示の本文"), r#"{"type":"delivered","instr"#),
+  )
+  .expect("interventions.jsonl を書けます");
+
+  let detail = request_detail(&harness, "run-1").await.expect("書きかけの行があっても run 詳細を取得できます");
+
+  let instructions: Vec<(i32, &str)> =
+    detail.instructions.iter().map(|instruction| (instruction.instruction_id, instruction.state.as_str())).collect();
+  assert_eq!(instructions, vec![(1, "pending")]);
 }
 
 #[tokio::test]
@@ -735,8 +847,8 @@ async fn 完了した実行の詳細は実行中一覧になくても取得で�
   fixture.write_meta("run-1", &meta);
   fixture.append_records("run-1", &[workflow_start_record(WORKFLOW)]);
   let snapshot = ProjectSnapshot {
-    goals:         vec![],
-    tasks:         vec![TaskEntry {
+    goals: vec![],
+    tasks: vec![TaskEntry {
       name:            TaskName::try_from("implement").expect("テストのタスク名は有効です"),
       goal_id:         Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
       status:          TaskStatus::Completed,
@@ -746,10 +858,11 @@ async fn 完了した実行の詳細は実行中一覧になくても取得で�
       current_step:    Some("review".to_owned()),
       merge_task:      false,
     }],
-    inquiries:     vec![],
-    runs:          vec![],
+    inquiries: vec![],
+    runs: vec![],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
 
@@ -825,8 +938,8 @@ async fn get_run_detail_fills_goal_and_task_name_from_a_stored_task_that_only_ha
   fixture.write_meta("run-1", &meta);
   fixture.append_records("run-1", &[workflow_start_record(WORKFLOW)]);
   let snapshot = ProjectSnapshot {
-    goals:         vec![],
-    tasks:         vec![TaskEntry {
+    goals: vec![],
+    tasks: vec![TaskEntry {
       name:            TaskName::try_from("implement").expect("テストのタスク名は有効です"),
       goal_id:         Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
       status:          TaskStatus::Completed,
@@ -836,10 +949,11 @@ async fn get_run_detail_fills_goal_and_task_name_from_a_stored_task_that_only_ha
       current_step:    Some("review".to_owned()),
       merge_task:      false,
     }],
-    inquiries:     vec![],
-    runs:          vec![],
+    inquiries: vec![],
+    runs: vec![],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
 
@@ -856,7 +970,8 @@ async fn get_run_detail_fills_goal_and_task_name_from_a_stored_task_that_only_ha
 #[tokio::test]
 async fn get_run_detail_fills_goal_id_from_a_listed_task_that_only_has_a_source_run_slug() {
   // takt_list_tasks の完了タスクが runSlug を持たず sourceRunSlug だけを持つ場合でも、
-  // そのタスクからゴールを補うことを観測します。GetRunDetail は takt-mcp を呼ばないため、
+  // そのタスクからゴールを補うことを観測します。ローカルで読める run の GetRunDetail は takt-mcp を
+  // 呼ばないため、
   // takt_list_tasks のタスクは定期読み取りで状態ストアへ入り、そこから補われます。
   let harness = GrpcHarness::builder()
     .single_project(

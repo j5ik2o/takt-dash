@@ -334,6 +334,17 @@ impl RunLogReader {
     BodyLogRead { records, skipped, missing, bytes_read, skipped_head, restarted }
   }
 
+  /// 本体ログの読み位置を1つでも持っているか。
+  pub fn has_body_log_positions(&self) -> bool {
+    !self.cursors.is_empty()
+  }
+
+  /// 本体ログの読み位置をすべて捨てる。次の [`RunLogReader::read_body_log`] は、全ファイルを
+  /// [`InitialRead`] に従って読み直します。
+  pub fn forget_body_log_positions(&mut self) {
+    self.cursors.clear();
+  }
+
   /// 本体ログと `logs/phase1-execution/` のファイル更新時刻の最大値を返す。
   pub fn latest_log_update(&self, run_dir: &Path) -> Option<DateTime<Utc>> {
     let body_logs =
@@ -626,12 +637,18 @@ enum InterventionEvent {
 
 fn fold_interventions(text: &str) -> Result<Vec<Instruction>, String> {
   let mut instructions: Vec<Instruction> = Vec::new();
+  // 改行で終わらない最後の行は、takt が追記している途中の行かもしれない。解釈できなければ
+  // 書きかけとして飛ばす。改行で終わる行は書き終えた行なので、解釈できなければ失敗にする。
+  let partial_last_line = if text.ends_with('\n') { None } else { text.lines().count().checked_sub(1) };
   for (index, line) in text.lines().enumerate() {
     if line.trim().is_empty() {
       continue;
     }
-    let event: InterventionEvent =
-      serde_json::from_str(line).map_err(|error| format!("{} 行目: {error}", index + 1))?;
+    let event: InterventionEvent = match serde_json::from_str(line) {
+      | Ok(event) => event,
+      | Err(_) if Some(index) == partial_last_line => continue,
+      | Err(error) => return Err(format!("{} 行目: {error}", index + 1)),
+    };
     match event {
       | InterventionEvent::Issued { instruction_id, issued_at, content } => {
         let instruction_id = InstructionId::try_from(instruction_id)

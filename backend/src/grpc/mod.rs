@@ -2,7 +2,9 @@
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
-//! GetRunDetail は状態ストアと run の保存場所だけから組み立て、takt-mcp を起動しません。
+//! GetRunDetail は状態ストアと run の保存場所から組み立て、ローカルで保存場所を読めた run では
+//! takt-mcp を起動しません。保存場所の対応表に無い run と対応表を読めない run（SSH 越しに扱う
+//! リモートのサーバーのプロジェクトなど）だけ、要求時に takt-mcp の takt_get_run を呼びます。
 //! GetRunContent はレポートか指示書の本文を1件だけ読みます。GetConversation は保存領域の manager
 //! の会話を読みます。GetGoals・ GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
 //! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
@@ -12,6 +14,7 @@
 
 pub mod assembly;
 pub mod mapping;
+mod run_detail;
 mod run_updates;
 
 use std::{
@@ -23,8 +26,8 @@ use std::{
 use assembly::{activity_event, assemble_goals, assemble_state_for, conversation_response};
 use chrono::{DateTime, Utc};
 use mapping::{
-  execution_status, goal_question, goal_status, goal_task, goal_work_log, optional_timestamp, run_status, step_log,
-  task_status, timestamp,
+  execution_status, goal_question, goal_status, goal_task, goal_work_log, optional_timestamp, run_status, task_status,
+  timestamp,
 };
 use run_updates::{parse_log_cursor, run_updates_response};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -56,7 +59,7 @@ use crate::{
     GetRunDetailRequest, GetRunDetailResponse, GetRunUpdatesRequest, GetRunUpdatesResponse, GetTaskDetailRequest,
     GetTaskDetailResponse, GoalRegistrationProposal, ListGoalRegistrationProposalsRequest,
     ListGoalRegistrationProposalsResponse, OperationAnswerReport, RejectGoalRegistrationRequest,
-    RejectGoalRegistrationResponse, Run, RunInstruction, RunReport, WatchStateRequest,
+    RejectGoalRegistrationResponse, Run, RunInstruction, WatchStateRequest,
   },
 };
 
@@ -477,25 +480,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
           body_log_bytes_read = view.body_log_bytes_read,
           "run 詳細のために本体ログを読みました。"
         );
-        let started_at = view.started_at(stored_task.as_ref());
-        let last_log_at = view.resolve_last_log_at(started_at);
-        response.task_text = view.task_text.clone().unwrap_or_default();
-        response.workflow = view.workflow.clone().unwrap_or_default();
-        response.status = run_status(view.status) as i32;
-        response.started_at = optional_timestamp(started_at);
-        response.current_step = view.current_step.clone();
-        response.current_iteration = view.current_iteration;
-        response.current_step_started_at = optional_timestamp(view.current_step_started_at);
-        response.current_step_execution_count = view.current_step_execution_count;
-        response.phase = view.phase;
-        response.step_logs = view.step_logs().iter().map(step_log).collect();
-        response.log_tail = view.log_tail();
-        response.reports = view
-          .reports()
-          .iter()
-          .map(|report| RunReport { filename: report.filename.clone(), size_bytes: report.size_bytes })
-          .collect();
-        response.last_log_at = optional_timestamp(last_log_at);
+        let last_log_at = run_detail::fill_from_run_log(&mut response, &view, stored_task.as_ref());
         response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
       },
       // 掃除済みの worktree など、run の保存場所が残っていない run はエラーにせず、状態ストアの値と
@@ -515,6 +500,15 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
         response.current_step_started_at =
           optional_timestamp(stored_run.as_ref().and_then(|run| run.current_step_started_at));
         response.last_log_at = optional_timestamp(last_log_at);
+        response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
+      },
+      // 保存場所の対応表に無い run と、対応表を読めない run（SSH 越しに扱うリモートのサーバーの
+      // プロジェクトなど）は takt_get_run から読みます。takt_get_run でも読めなければ、保存場所の
+      // 読み取りの失敗を返します。
+      | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
+        let last_log_at =
+          run_detail::fill_from_takt_get_run(&mut response, &target.resolved, &run_slug, stored_task.as_ref(), failure)
+            .await?;
         response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
       },
       | Err(failure) => return Err(run_read_failure_status(failure)),

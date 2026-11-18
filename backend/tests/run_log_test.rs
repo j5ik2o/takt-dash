@@ -1112,6 +1112,61 @@ fn read_instructions_rejects_out_of_range_ids_and_unknown_references() {
   }
 }
 
+/// 完成した行に続けて、改行で終わらない書きかけの行を `interventions.jsonl` へ書く。
+fn write_interventions_with_partial_last_line(fixture: &Fixture, slug: &str, complete: &[Value], partial: &str) {
+  let run_dir = fixture.project_cwd.join(".takt").join("runs").join(slug);
+  fs::create_dir_all(&run_dir).expect("run のディレクトリを作れます");
+  let mut text: String = complete.iter().map(|line| format!("{line}\n")).collect();
+  text.push_str(partial);
+  fs::write(run_dir.join("interventions.jsonl"), text).expect("interventions.jsonl を書けます");
+}
+
+#[test]
+fn read_instructions_skips_a_partial_last_line_without_a_newline() {
+  // takt が追記している途中の最後の行（改行で終わらず、JSON として未完成）は読み飛ばし、
+  // それまでの完成した行から指示書を作る。run 詳細全体を読めなくしない。
+  let fixture = Fixture::new();
+  write_interventions_with_partial_last_line(
+    &fixture,
+    "run-partial",
+    &[json!({ "type": "issued", "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "content": "一つ目" })],
+    r#"{"type":"delivered","instr"#,
+  );
+
+  let read = read_instructions(&fixture.project_cwd, &run_slug("run-partial"));
+
+  let InstructionsRead::Found(instructions) = read else {
+    panic!("書きかけの最後の行があっても指示書を読めるはずです: {read:?}");
+  };
+  let states: Vec<(InstructionId, InstructionState)> =
+    instructions.iter().map(|instruction| (instruction.instruction_id, instruction.state)).collect();
+  assert_eq!(states, vec![(instruction_id(1), InstructionState::Pending)], "書きかけの配達は反映しません");
+}
+
+#[test]
+fn read_instructions_still_rejects_a_malformed_line_that_ends_with_a_newline() {
+  // 改行で終わる行は書き終えた行なので、解釈できなければ従来どおり Unreadable です。
+  // 最後の行でも、途中の行でも同じです。
+  let fixture = Fixture::new();
+  write_interventions_with_partial_last_line(
+    &fixture,
+    "run-broken-last",
+    &[json!({ "type": "issued", "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "content": "一つ目" })],
+    "{\"type\":\"delivered\",\"instr\n",
+  );
+  write_interventions_with_partial_last_line(
+    &fixture,
+    "run-broken-middle",
+    &[],
+    "{\"type\":\"delivered\",\"instr\n{\"type\":\"issued\",\"instructionId\":1,\"issuedAt\":\"2026-11-13T08:50:00Z\",\"content\":\"一つ目\"}",
+  );
+
+  for slug in ["run-broken-last", "run-broken-middle"] {
+    let read = read_instructions(&fixture.project_cwd, &run_slug(slug));
+    assert!(matches!(read, InstructionsRead::Unreadable(_)), "{slug} の改行付きの不正な行は拒否します: {read:?}");
+  }
+}
+
 #[test]
 fn read_instruction_content_truncates_the_body_at_a_character_boundary_like_a_report() {
   // 指示書の本文もレポートと同じ規則で切り詰める。「あいう」は 9 バイトで、上限 4 バイトは「い」の

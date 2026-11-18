@@ -418,3 +418,159 @@ fn a_tail_handle_drops_the_old_steps_when_the_body_log_shrinks() {
     "ログ末尾に縮める前の記録を残しません: {log_tail:?}"
   );
 }
+
+/// 末尾読みの取っ手で、小さな本体ログ（session.jsonl）を持つ実行中の run r1 を作る。
+fn small_run(project: &Project) -> RunFixture {
+  let fixture = project.fixture(&["r1"]);
+  fixture.write_meta("r1", &running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    workflow_start_record(WORKFLOW),
+    step_complete_record("plan", "architect", 1, "2026-11-13T09:02:00Z"),
+  ]);
+  fixture
+}
+
+#[test]
+fn a_tail_handle_keeps_the_steps_when_a_new_body_log_file_appears() {
+  // 末尾読みの取っ手で session.jsonl を読み終えた後、logs/ に新しい本体ログが現れる。同じ取っ手で
+  // 読み直した集計は、新しく作った取っ手が読む結果と一致し、session.jsonl の plan とその行を
+  // 失わない。新しいファイルの記録だけを残す実装は plan を失って落ちる。
+  let project = Project::new();
+  let fixture = small_run(&project);
+  let mut handles = RunLogHandles::with_initial_read(InitialRead::Tail(TAIL_BYTES));
+  let (before, _) = tail_names_after(&mut handles, &project);
+  assert_eq!(before, vec!["plan".to_owned()]);
+  std::fs::write(fixture.run_dir("r1").join("logs").join("usage-events.jsonl"), format!("{}\n", filler_record(0, 16)))
+    .expect("新しい本体ログを書けます");
+
+  let view = read_with(&mut handles, &project);
+  let fresh = read_with(&mut RunLogHandles::with_initial_read(InitialRead::Tail(TAIL_BYTES)), &project);
+
+  assert_eq!(names(&view), vec!["plan".to_owned()], "新しいファイルが現れても既読の step を残します");
+  assert!(
+    view.log_tail().lines().any(|line| line.split(' ').any(|part| part == "plan")),
+    "ログ末尾に session.jsonl の行を残します: {:?}",
+    view.log_tail()
+  );
+  assert_eq!(view.step_logs(), fresh.step_logs(), "集計は新しく作った取っ手の結果と一致します");
+  assert_eq!(view.log_tail(), fresh.log_tail(), "ログ末尾は新しく作った取っ手の結果と一致します");
+}
+
+#[test]
+fn a_tail_handle_does_not_read_again_without_any_new_body_log_file() {
+  // 変化の無い本体ログを同じ取っ手でもう一度読んでも、読み直さず、集計も変わらない。
+  let project = Project::new();
+  small_run(&project);
+  let mut handles = RunLogHandles::with_initial_read(InitialRead::Tail(TAIL_BYTES));
+  let first = read_with(&mut handles, &project);
+
+  let second = read_with(&mut handles, &project);
+
+  assert_eq!(second.body_log_bytes_read, 0, "変化が無ければ本体ログを読みません");
+  assert_eq!(second.step_logs(), first.step_logs());
+  assert_eq!(second.log_tail(), first.log_tail());
+}
+
+#[test]
+fn run_entry_summary_is_the_first_line_of_the_meta_task() {
+  // 一覧の run の要約は、meta.json の task を takt のタスク要約と同じ規則（前後の空白を除き、
+  // 1行目の先頭 80 文字）で縮めたもの。空のままにする実装も、全文を入れる実装も落ちる。
+  let project = Project::new();
+  let fixture = project.fixture(&["r1"]);
+  let mut meta = running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z");
+  meta["task"] = json!("\n  認証処理を実装する\n詳細: トークンの検証を加える\n");
+  fixture.write_meta("r1", &meta);
+  let mut logs = project.logs();
+
+  let entry = logs.read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
+
+  assert_eq!(entry.summary, "認証処理を実装する");
+}
+
+#[test]
+fn run_entry_summary_is_cut_at_eighty_characters() {
+  // 1行目が 80 文字を超えるときは、先頭 80 文字（バイトではなく文字）で切る。
+  let project = Project::new();
+  let fixture = project.fixture(&["r1"]);
+  let mut meta = running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z");
+  let long_line = "あ".repeat(79) + "いう";
+  meta["task"] = json!(long_line);
+  fixture.write_meta("r1", &meta);
+  let mut logs = project.logs();
+
+  let entry = logs.read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
+
+  assert_eq!(entry.summary, "あ".repeat(79) + "い");
+}
+
+#[test]
+fn run_entry_summary_is_empty_without_a_meta_task() {
+  let project = Project::new();
+  let fixture = project.fixture(&["r1"]);
+  fixture.write_meta("r1", &running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z"));
+  let mut logs = project.logs();
+
+  let entry = logs.read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
+
+  assert_eq!(entry.summary, "");
+}
+
+#[test]
+fn run_entry_step_model_is_the_model_of_the_matching_step_start() {
+  // 各ステップの model は、その step_complete より前で最も新しい同名・同 iteration の step_start の
+  // model。最後の step_start の model を全ステップへ入れる実装は plan が sonnet になって落ちる。
+  // model を持たない step_start のステップは空です。
+  let project = Project::new();
+  let fixture = project.fixture(&["r1"]);
+  fixture.write_meta("r1", &running_meta("review", 1, WORKFLOW, "2026-11-13T09:00:00Z"));
+  let mut plan_start = step_start_record("plan", WORKFLOW, 1, "2026-11-13T09:01:00Z", &["plan"]);
+  plan_start["model"] = json!("opus");
+  let mut implement_start = step_start_record("implement", WORKFLOW, 1, "2026-11-13T09:03:00Z", &["implement"]);
+  implement_start["model"] = json!("sonnet");
+  fixture.append_records("r1", &[
+    workflow_start_record(WORKFLOW),
+    plan_start,
+    step_complete_record("plan", "architect", 1, "2026-11-13T09:02:00Z"),
+    implement_start,
+    step_complete_record("implement", "coder", 1, "2026-11-13T09:04:00Z"),
+    step_start_record("review", WORKFLOW, 1, "2026-11-13T09:05:00Z", &["review"]),
+    step_complete_record("review", "reviewer", 1, "2026-11-13T09:06:00Z"),
+  ]);
+  let mut logs = project.logs();
+
+  let entry = logs.read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
+
+  let models: Vec<(String, String)> =
+    entry.steps.iter().map(|step| (step.step_name.clone(), step.model.clone())).collect();
+  assert_eq!(models, vec![
+    ("plan".to_owned(), "opus".to_owned()),
+    ("implement".to_owned(), "sonnet".to_owned()),
+    ("review".to_owned(), String::new()),
+  ]);
+}
+
+#[test]
+fn run_entry_step_model_uses_the_start_of_the_same_iteration() {
+  // 同じ step が iteration を変えて2回動いたとき、各 step_complete の model はその iteration の
+  // step_start のもの。run の最後の step_start を採る実装は iteration 1 が haiku になって落ちる。
+  let project = Project::new();
+  let fixture = project.fixture(&["r1"]);
+  fixture.write_meta("r1", &running_meta("implement", 2, WORKFLOW, "2026-11-13T09:00:00Z"));
+  let mut first_start = step_start_record("implement", WORKFLOW, 1, "2026-11-13T09:01:00Z", &["implement"]);
+  first_start["model"] = json!("opus");
+  let mut second_start = step_start_record("implement", WORKFLOW, 2, "2026-11-13T09:03:00Z", &["implement"]);
+  second_start["model"] = json!("haiku");
+  fixture.append_records("r1", &[
+    workflow_start_record(WORKFLOW),
+    first_start,
+    step_complete_record("implement", "coder", 1, "2026-11-13T09:02:00Z"),
+    second_start,
+    step_complete_record("implement", "coder", 2, "2026-11-13T09:04:00Z"),
+  ]);
+  let mut logs = project.logs();
+
+  let entry = logs.read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
+
+  let models: Vec<String> = entry.steps.iter().map(|step| step.model.clone()).collect();
+  assert_eq!(models, vec!["opus".to_owned(), "haiku".to_owned()]);
+}

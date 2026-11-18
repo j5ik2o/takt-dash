@@ -45,12 +45,13 @@ fn seeded_harness() -> GrpcHarness {
   let mut stored_run = run("run-1", "implement", time("2026-11-13T09:06:00Z"));
   stored_run.goal_id = Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です"));
   let snapshot = ProjectSnapshot {
-    goals:         vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
-    tasks:         vec![],
-    inquiries:     vec![],
-    runs:          vec![stored_run],
+    goals: vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![stored_run],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   harness
