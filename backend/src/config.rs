@@ -12,7 +12,7 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::domain::{ProjectName, ServerId, SilentMinutes, StaleMinutes};
+use crate::domain::{ProjectName, ScreenReadLanes, ServerId, SilentMinutes, StaleMinutes};
 
 /// 読み取り間隔の既定値（秒）。
 pub const DEFAULT_INTERVAL_SECONDS: u64 = 30;
@@ -35,7 +35,7 @@ pub const DEFAULT_PROJECT_CONCURRENCY: i32 = 1;
 pub const DEFAULT_SCREEN_READ_LANES: u32 = 1;
 /// 画面読み取りレーンの本数の上限（プロジェクトごと）。子プロセスの増加を抑えるため、
 /// 設定値がこれを超える場合は上限へ丸めます。
-pub const MAX_SCREEN_READ_LANES: u32 = 3;
+pub const MAX_SCREEN_READ_LANES: u32 = ScreenReadLanes::MAX;
 
 /// 設定ファイルの読み込みと検証で起きる失敗。
 #[derive(Debug, thiserror::Error)]
@@ -56,7 +56,7 @@ pub struct Config {
   pub projects:          Vec<Project>,
   pub interval_seconds:  u64,
   /// 画面からの読み取りに使う takt-mcp 接続レーンの本数（プロジェクトごと、1〜3）。
-  pub screen_read_lanes: u32,
+  pub screen_read_lanes: ScreenReadLanes,
   pub thresholds:        Thresholds,
   pub sqlite_path:       PathBuf,
   /// gRPC サーバーの待ち受けアドレス。設定の境界で SocketAddr へ解決済みです。
@@ -463,7 +463,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
     return Err(ConfigError::Invalid("intervalSeconds は1秒以上である必要があります。".to_owned()));
   }
   // 画面読み取りレーンの本数は任意項目です。範囲外の値はエラーにせず、1〜上限へ丸めます。
-  let screen_read_lanes = raw.screen_read_lanes.unwrap_or(DEFAULT_SCREEN_READ_LANES).clamp(1, MAX_SCREEN_READ_LANES);
+  let screen_read_lanes = ScreenReadLanes::clamped(raw.screen_read_lanes.unwrap_or(DEFAULT_SCREEN_READ_LANES));
   let pending_decision_stale_minutes =
     raw.thresholds.pending_decision_stale_minutes.unwrap_or(DEFAULT_PENDING_DECISION_STALE_MINUTES);
   let run_log_silent_minutes = raw.thresholds.run_log_silent_minutes.unwrap_or(DEFAULT_RUN_LOG_SILENT_MINUTES);

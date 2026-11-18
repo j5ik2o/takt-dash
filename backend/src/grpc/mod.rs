@@ -43,7 +43,7 @@ use crate::{
   conversation::{ConversationQuery, ConversationReader},
   domain::{
     GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ReportFilename,
-    RunSlug, ServerId, TaskName,
+    RunSlug, ScreenReadLanes, ServerId, TaskName,
   },
   mcp::{client_config, McpClientRegistry, ReadToolSet, ToolError, WriteToolSet},
   model::{self},
@@ -301,7 +301,7 @@ struct ResolvedProject {
   client_config:     crate::mcp::McpClientConfig,
   cwd:               PathBuf,
   /// 画面読み取りレーンの本数。設定から解決します。
-  screen_read_lanes: u32,
+  screen_read_lanes: ScreenReadLanes,
 }
 
 /// 読み込み済みの設定から、`server_id` と `project` の起動方法と cwd を解決する。

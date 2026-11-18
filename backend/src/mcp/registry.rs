@@ -19,6 +19,7 @@ use std::{
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::{McpClient, McpClientConfig};
+use crate::domain::ScreenReadLanes;
 
 /// takt-mcp への接続の用途を表すレーン。
 ///
@@ -138,10 +139,10 @@ impl McpClientRegistry {
     &self,
     server_id: &str,
     project: &str,
-    lanes: u32,
+    lanes: ScreenReadLanes,
     make: impl FnOnce() -> McpClientConfig,
   ) -> ClientHandle {
-    let lanes = lanes.max(1);
+    let lanes = lanes.get();
     let index = {
       let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
       let project_key = (server_id.to_owned(), project.to_owned());
@@ -162,14 +163,40 @@ impl McpClientRegistry {
     &self,
     server_id: &str,
     project: &str,
-    screen_lanes: u32,
+    screen_lanes: ScreenReadLanes,
     make: impl Fn() -> McpClientConfig,
   ) -> (ClientHandle, bool) {
     self.client_for_key(server_id, project, LaneKey::Poller, make());
-    for index in 0..screen_lanes.max(1) {
+    for index in 0..screen_lanes.get() {
       self.client_for_key(server_id, project, LaneKey::Screen(index), make());
     }
-    self.client_for_key(server_id, project, LaneKey::Write, make())
+    let write = self.client_for_key(server_id, project, LaneKey::Write, make());
+    self.prune_surplus_screen_lanes(server_id, project, screen_lanes);
+    write
+  }
+
+  /// 本数を超えた画面読み取りレーンのクライアントをレジストリから外す。
+  ///
+  /// 設定で本数が減った場合に、余ったレーンのクライアントと子プロセスが残り続けない
+  /// ようにします。外したハンドルは map のロックを解放してから破棄します。利用者が
+  /// まだ保持している場合は、その操作が終わって最後のハンドルが消えた時点で
+  /// 子プロセスが停止します。
+  fn prune_surplus_screen_lanes(&self, server_id: &str, project: &str, screen_lanes: ScreenReadLanes) {
+    let removed: Vec<Entry> = {
+      let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+      let surplus: Vec<ClientKey> = inner
+        .clients
+        .keys()
+        .filter(|(owner_server, owner_project, lane_key)| {
+          owner_server.as_str() == server_id
+            && owner_project.as_str() == project
+            && matches!(lane_key, LaneKey::Screen(index) if *index >= screen_lanes.get())
+        })
+        .cloned()
+        .collect();
+      surplus.iter().filter_map(|key| inner.clients.remove(key)).collect()
+    };
+    drop(removed);
   }
 
   /// キーで指定したレーンのクライアントを取得または作成する共通処理。
@@ -188,9 +215,14 @@ impl McpClientRegistry {
           return (entry.client.clone(), false);
         }
       }
-      inner.rebuilt.insert((server_id.to_owned(), project.to_owned()));
       let handle = Arc::new(AsyncMutex::new(McpClient::with_lane(wanted.clone(), &lane_key.label())));
       let replaced = inner.clients.insert(key, Entry { config: wanted, client: handle.clone() });
+      // 作り直しの記録は、既存のクライアントを設定の違いで置き換えた場合だけに残します。
+      // 新しいレーンの追加（画面読み取りレーンの増設など）では定期読み取りの接続先は
+      // 変わっていないため、差分基準をリセットしません。
+      if replaced.is_some() {
+        inner.rebuilt.insert((server_id.to_owned(), project.to_owned()));
+      }
       (handle, true, replaced)
     };
     // 旧ハンドルは map のロックを解放してから破棄する。利用者がまだ保持している場合は、
@@ -276,8 +308,8 @@ mod tests {
 
   use std::{path::PathBuf, sync::Arc, time::Duration};
 
-  use super::{Lane, McpClientRegistry};
-  use crate::mcp::McpClientConfig;
+  use super::{Lane, LaneKey, McpClientRegistry};
+  use crate::{domain::ScreenReadLanes, mcp::McpClientConfig};
 
   fn config() -> McpClientConfig {
     McpClientConfig {
@@ -295,7 +327,7 @@ mod tests {
     let registry = McpClientRegistry::new();
     let (poller, _) = registry.client("local", "proj", Lane::Poller, config);
     let (write, _) = registry.client("local", "proj", Lane::Write, config);
-    let screen = registry.screen_client("local", "proj", 1, config);
+    let screen = registry.screen_client("local", "proj", ScreenReadLanes::clamped(1), config);
     assert!(!Arc::ptr_eq(&poller, &write), "定期読み取りと書き込みは別のクライアントです");
     assert!(!Arc::ptr_eq(&poller, &screen), "定期読み取りと画面読み取りは別のクライアントです");
     assert!(!Arc::ptr_eq(&write, &screen), "書き込みと画面読み取りは別のクライアントです");
@@ -307,9 +339,9 @@ mod tests {
   #[test]
   fn screen_clients_rotate_round_robin() {
     let registry = McpClientRegistry::new();
-    let first = registry.screen_client("local", "proj", 2, config);
-    let second = registry.screen_client("local", "proj", 2, config);
-    let third = registry.screen_client("local", "proj", 2, config);
+    let first = registry.screen_client("local", "proj", ScreenReadLanes::clamped(2), config);
+    let second = registry.screen_client("local", "proj", ScreenReadLanes::clamped(2), config);
+    let third = registry.screen_client("local", "proj", ScreenReadLanes::clamped(2), config);
     assert!(!Arc::ptr_eq(&first, &second), "2本の画面読み取りは別のクライアントです");
     assert!(Arc::ptr_eq(&first, &third), "3回目は1本目へ戻ります");
   }
@@ -322,5 +354,49 @@ mod tests {
     assert_eq!(registry.record_write("local", "proj"), 2);
     assert_eq!(registry.write_sequence("local", "proj"), 2);
     assert_eq!(registry.write_sequence("local", "other"), 0, "通し番号はプロジェクトごとに独立です");
+  }
+
+  /// プロジェクトの画面読み取りレーンの番号の一覧。レジストリの中身を直接観測します。
+  fn screen_lane_indexes(registry: &McpClientRegistry, server_id: &str, project: &str) -> Vec<u32> {
+    let inner = registry.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+    inner
+      .clients
+      .keys()
+      .filter_map(|(owner_server, owner_project, lane_key)| match lane_key {
+        | LaneKey::Screen(index) if owner_server.as_str() == server_id && owner_project.as_str() == project => {
+          Some(*index)
+        },
+        | _ => None,
+      })
+      .collect()
+  }
+
+  #[test]
+  fn adding_a_screen_lane_does_not_mark_the_project_rebuilt() {
+    let registry = McpClientRegistry::new();
+    registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), config);
+    assert!(!registry.take_rebuilt_for("local", "proj"), "初回のそろえでは作り直しとして記録しません");
+    registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(2), config);
+    assert!(!registry.take_rebuilt_for("local", "proj"), "画面レーンの増設だけでは差分基準をリセットしません");
+  }
+
+  #[test]
+  fn replacing_clients_with_a_different_config_marks_the_project_rebuilt() {
+    let registry = McpClientRegistry::new();
+    registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), config);
+    assert!(!registry.take_rebuilt_for("local", "proj"), "同じ設定のそろえでは作り直しとして記録しません");
+    let mut changed = config();
+    changed.command = "node-changed".to_owned();
+    registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), move || changed.clone());
+    assert!(registry.take_rebuilt_for("local", "proj"), "設定が変わって置き換えた場合は作り直しとして記録します");
+  }
+
+  #[test]
+  fn reducing_screen_lanes_removes_surplus_clients() {
+    let registry = McpClientRegistry::new();
+    registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(3), config);
+    assert_eq!(screen_lane_indexes(&registry, "local", "proj"), vec![0, 1, 2], "3本の画面レーンがそろいます");
+    registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), config);
+    assert_eq!(screen_lane_indexes(&registry, "local", "proj"), vec![0], "本数を超えた画面レーンは外します");
   }
 }
