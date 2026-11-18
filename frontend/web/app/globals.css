@@ -1370,6 +1370,10 @@ pre {
     gap: 6px;
   }
 
+  .callout li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .tray {
     padding: 14px 16px;
   }
