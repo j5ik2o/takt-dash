@@ -81,17 +81,6 @@
           "message": "Hardcoded environment URL in production code"
         }
       ]
-    },
-    {
-      "reason": "dashboard.ts は概要ビューの集計（サーバー・プロジェクト・run の導出）が1か所に集まっており、issue #170 のプロジェクト単位の同時実行上限の導出も同じ集計の一部としてここに置く。ファイルの分割は issue #170 の範囲を超えるため、行数超過を理由付きで受け入れる。",
-      "findings": [
-        {
-          "engine": "code-quality",
-          "rule": "complexity/file-too-large",
-          "file": "frontend/web/src/state/dashboard.ts",
-          "message": "File too large (limit: 400, flagged above 441 lines)"
-        }
-      ]
     }
   ]
 }
