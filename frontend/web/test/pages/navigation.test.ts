@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createDashboardState, createProjectsResponse, NOW } from "../support/fixtures.ts";
+import { createDashboardState, NOW } from "../support/fixtures.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import { OverviewContent } from "../../src/components/overview-content.tsx";
 import { ProjectsContent } from "../../src/components/projects-content.tsx";
@@ -109,7 +109,7 @@ test("現在ページのリンクは淡い緑の背景で強調される", async
 
 test("プロジェクト画面にプロジェクトごとの進行中ゴールが並ぶ", () => {
   const html = renderToStaticMarkup(
-    createElement(ProjectsContent, { response: createProjectsResponse(), now: NOW }),
+    createElement(ProjectsContent, { state: createDashboardState(), now: NOW }),
   );
   assert.match(html, /進行中のゴール/);
   assert.match(html, /採用ページのレイアウトを直す/);

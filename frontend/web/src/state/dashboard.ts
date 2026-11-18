@@ -1,25 +1,24 @@
 import type {
   AnomalyThresholds,
   DashboardState,
-  ExecutionStatus,
   Goal,
-  GoalStatus,
   PendingDecision,
   Project,
   Run,
   Server,
-  TaskStatus,
 } from "../proto/taktdash";
 import { formatClock } from "./format";
-import { toSilentMinutes, toStaleMinutes, type ValidatedAnomalyThresholds } from "./domain-primitives";
+import { goalSection } from "./goal-badge";
 import {
-  CONNECTION_STATE,
-  EXECUTION_STATUS,
-  GOAL_STATUS,
-  PENDING_DECISION_TYPE,
-  RUN_STATUS,
-  TASK_STATUS,
-} from "./proto-values";
+  toRunCount,
+  toRunLimit,
+  toSilentMinutes,
+  toStaleMinutes,
+  type RunCount,
+  type RunLimit,
+  type ValidatedAnomalyThresholds,
+} from "./domain-primitives";
+import { CONNECTION_STATE, PENDING_DECISION_TYPE, RUN_STATUS } from "./proto-values";
 
 // 判断待ちの滞留とログの無音の既定値。要件定義 2.7 節の値で、backend が proto の
 // AnomalyThresholds を返さないときだけ使う。値を決める場所はここ1か所に閉じる。
@@ -59,7 +58,7 @@ type RunView = {
   run: RunInput;
   server: Server | undefined;
   connected: boolean;
-  state: "live" | "warn" | "delayed" | "idle";
+  state: "live" | "warn" | "idle";
   label: string;
   note: string;
   goalName?: string;
@@ -80,24 +79,29 @@ type PendingCounts = {
 
 type OverviewServerView = {
   server: Server;
-  state: "live" | "idle" | "down";
+  state: "live" | "idle" | "down" | "warn";
   stateLabel: string;
-  runs: RunView[];
-  runLimit: number;
-  runningRuns: number;
-  inProgressGoals: number;
-  pendingCount: number;
-  waitingTasks: number;
+  // 配下で応答していないプロジェクト。サーバー単位の読み取り時刻（配下の最新）だけでは
+  // 正常に見えてしまうため、サーバーの1行にプロジェクトごとの状態を併記する（issue #264）。
+  notRespondingProjects: Project[];
+};
+
+// 概要のプロジェクト行。プロジェクト自身の同時実行上限と、そのプロジェクトで
+// 実行中の run の件数を対比できる形にする。
+export type OverviewProjectView = Omit<Project, "concurrency"> & {
+  concurrency: RunLimit;
+  runningRuns: RunCount;
 };
 
 export type OverviewView = {
-  readAt: Date;
+  // 最後に実際に読めた時刻。1件も読めていない場合は実在しない時刻を作らず undefined にする。
+  readAt?: Date;
   servers: OverviewServerView[];
-  projects: Project[];
+  projects: OverviewProjectView[];
   runs: RunView[];
   thresholds: ValidatedAnomalyThresholds;
   runningRuns: number;
-  runLimit: number;
+  runLimit: RunLimit;
   completedTasks24h: number;
   failedTaskCount: number;
   abortedGoalCount: number;
@@ -125,6 +129,7 @@ export type DecisionsStateInput = {
   thresholds: AnomalyThresholds | undefined;
   pendingDecisions: readonly PendingDecisionInput[];
   servers: readonly Server[];
+  projects: readonly Project[];
 };
 
 const minutesSince = (from: Date, now: Date): number => Math.max(0, (now.getTime() - from.getTime()) / 60_000);
@@ -200,20 +205,10 @@ export function toRunView(
       note: "サーバーから応答がないため、最後に読めた時点の状態です。",
     };
   }
-  if (project?.connectionState === CONNECTION_STATE.DELAYED) {
-    const lastReadAt = project.lastReadAt ?? server?.lastReadAt;
-    const seconds = lastReadAt ? Math.max(0, Math.floor((now.getTime() - lastReadAt.getTime()) / 1_000)) : undefined;
-    return {
-      ...derived,
-      connected: true,
-      state: "delayed",
-      label: "実行中（読み取り遅延）",
-      note:
-        seconds !== undefined
-          ? `読み取りが遅れています（最後に読めたのは ${seconds} 秒前）`
-          : "読み取りが遅れています（最後に読めた時刻は不明です）",
-    };
-  }
+  // run の表示は、プロジェクトの読み取り状態ではなく run 自身のログの鮮度で決める。
+  // 読み取りが遅れている（DELAYED）だけでは run の表示を変えず、読み取り時刻を注記に
+  // 使わない。「遅れているのに最後に読めたのは 0 秒前」のような自己矛盾が起きるため、
+  // 遅延の注記は最後のログの時刻で書く（issue #194）。
   const silentMinutes = run.lastLogAt
     ? Math.max(0, Math.floor((now.getTime() - run.lastLogAt.getTime()) / 60_000))
     : undefined;
@@ -233,45 +228,61 @@ export function toRunView(
   return { ...derived, connected: true, state: "live", label: "実行中", note: "" };
 }
 
-const serverState = (server: Server, runs: readonly RunInput[]): OverviewServerView["state"] => {
-  if (!server.connected) {
+// サーバーの状態は接続の有無と run の件数だけで決め、概要のサーバーカードと
+// サイドバーで同じ関数と同じ文言を使う。別々の基準で決めると、同じサーバーが
+// 「動作中」と「待機中」のように食い違って見える（issue #188）。run の件数は
+// 検証済みの専用型 RunCount で受け取り、生の数値を流通させない。
+export const serverStateFrom = (
+  connected: boolean,
+  runCount: RunCount,
+): OverviewServerView["state"] => {
+  if (!connected) {
     return "down";
   }
-  return runs.length > 0 ? "live" : "idle";
+  return runCount > 0 ? "live" : "idle";
 };
 
-const serverStateLabel = (state: OverviewServerView["state"]): string => {
+// サーバーの表示状態。基本状態（serverStateFrom）に、配下プロジェクトの応答状態を
+// 重ねる。サーバー自体が応答なし（down）のときは down を優先し、それ以外では
+// 応答していないプロジェクトが1件でもあれば warn にする。サーバーは応答していても
+// 配下のプロジェクトが応答していないと、サーバー単位の表示が全体が正常であるかの
+// ように見えてしまう（issue #264）。概要のサーバーカードとサイドバーはこの関数で
+// 同じ状態を使い、表示を食い違わせない（issue #188）。
+export function serverDisplayState(
+  server: Server,
+  runCount: RunCount,
+  projects: readonly Project[],
+): OverviewServerView["state"] {
+  const base = serverStateFrom(server.connected, runCount);
+  if (base === "down") {
+    return base;
+  }
+  const own = projects.filter((project) => project.serverId === server.serverId);
+  return notRespondingProjects(own).length > 0 ? "warn" : base;
+}
+
+// idle は「接続できているが run が無い」状態であり、接続そのものができていない
+// down（応答なし）と区別できる文言にする。文言は「接続中」と短くし、run が無いことは
+// サイドバーの「run 0件」とカードの件数表示で別途分かるため文言には含めない。
+// 長い文言は幅の狭いサイドバーの行にはみ出すおそれがある（issue #188）。
+export const serverStateLabel = (state: OverviewServerView["state"]): string => {
   switch (state) {
     case "down":
       return "応答なし";
     case "live":
       return "動作中";
     case "idle":
-      return "待機中";
+      return "接続中";
+    case "warn":
+      return "一部応答なし";
   }
 };
 
-// 仕上げタスクが pending/running/failed などでまだ終わっていなければ、人のマージ待ちではなく
-// 進行中のゴールとして数える。merge_task_last が未設定または完了なら人の判断待ちになる。
-const MERGE_TASK_IN_PROGRESS: ReadonlySet<number> = new Set([
-  TASK_STATUS.PENDING,
-  TASK_STATUS.RUNNING,
-  TASK_STATUS.FAILED,
-  TASK_STATUS.EXCEEDED,
-  TASK_STATUS.PR_FAILED,
-]);
-
-const isHumanMerge = (goal: Goal): boolean =>
-  goal.status === GOAL_STATUS.AWAITING_MERGE &&
-  !(goal.mergeTaskLast !== undefined && MERGE_TASK_IN_PROGRESS.has(goal.mergeTaskLast));
-
-const isInProgressGoal = (goal: Goal): boolean =>
-  goal.executionStatus !== EXECUTION_STATUS.ABORTED &&
-  goal.status !== GOAL_STATUS.COMPLETED &&
-  !isHumanMerge(goal);
-
-const waitingTaskCount = (goals: readonly Goal[]): number =>
-  goals.reduce((total, goal) => total + (goal.taskCounts?.pending ?? 0), 0);
+// 失敗系の合計の表示名。failedTaskCount が数える「失敗」は、失敗・上限超過・PR 失敗の
+// 3状態の合計である。ゴールページの状態別の欄と同じ文言（taskStatusLabel の「失敗」、
+// 「上限超過」、「PR 失敗」）で内訳を示し、概要の合計をゴールページの欄の合計と
+// 照合できるようにする（issue #260）。
+export const FAILED_TASK_KINDS_LABEL = "失敗・上限超過・PR 失敗";
 
 const failedTaskCount = (goals: readonly Goal[]): number =>
   goals.reduce(
@@ -285,6 +296,37 @@ const failedTaskCount = (goals: readonly Goal[]): number =>
 
 const isUnresponsiveProject = (project: Project): boolean =>
   project.connectionState === CONNECTION_STATE.UNRESPONSIVE;
+
+// まだ一度も読めていないサーバーとプロジェクト。最後に読めた時刻が無い対象は、
+// 配下の一覧が空でも「無い」とは断定できない。一覧の件数を表示する画面は、
+// 未読の対象があるとき件数へ注記を付け、空の断定を避ける（issue #259）。
+export function neverReadServers(servers: readonly Server[]): Server[] {
+  return servers.filter((server) => server.lastReadAt === undefined);
+}
+
+export function neverReadProjects(projects: readonly Project[]): Project[] {
+  return projects.filter((project) => project.lastReadAt === undefined);
+}
+
+// 応答していないプロジェクト。読み取りが失敗し続けている（応答なし）プロジェクトと、
+// まだ一度も読めていないプロジェクトは、どちらも正常とは言えない。サーバー単位の
+// 表示（サーバーカードとサイドバー）が全体が正常であるかのように見える問題
+// （issue #264）を避けるため、この両方を応答していないものとして扱う。
+// 概要バナーの unresponsiveProjects は応答なしだけを数えるため、名前を分ける。
+export function notRespondingProjects(projects: readonly Project[]): Project[] {
+  return projects.filter(
+    (project) => isUnresponsiveProject(project) || project.lastReadAt === undefined,
+  );
+}
+
+// 応答していないプロジェクトの文言。応答なしと未読では言い方を分ける。
+// サーバーカードとサイドバーで同じ文言を使う。
+export function notRespondingProjectText(project: Project): string {
+  if (isUnresponsiveProject(project)) {
+    return `${project.name} から応答がありません。`;
+  }
+  return `${project.name} はまだ一度も読めていません。`;
+}
 
 // 応答のないサーバー・プロジェクトから最後に読めた時刻のうち、最も古いものを集計の基準にする。
 // 1件も読めた時刻が無ければ undefined のままにし、実在しない時刻を補わない。
@@ -312,41 +354,43 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
   const unresponsiveProjects = state.projects.filter(isUnresponsiveProject);
   const servers = state.servers.map((server) => {
     const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);
-    const serverGoals = state.goals.filter((goal) => goal.serverId === server.serverId);
-    const status = serverState(server, serverRuns);
+    const status = serverDisplayState(server, toRunCount(serverRuns.length), state.projects);
     return {
       server,
       state: status,
       stateLabel: serverStateLabel(status),
-      runs: serverRuns.map((run) =>
-        toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
+      notRespondingProjects: notRespondingProjects(
+        state.projects.filter((project) => project.serverId === server.serverId),
       ),
-      runLimit: server.concurrency,
-      runningRuns: serverRuns.filter((run) => run.status === RUN_STATUS.RUNNING).length,
-      inProgressGoals: serverGoals.filter(isInProgressGoal).length,
-      pendingCount: pendingDecisions.filter((decision) => decision.serverId === server.serverId).length,
-      waitingTasks: waitingTaskCount(serverGoals),
     };
   });
   const runningRuns = state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length;
   const silentRunCount = runs.filter((run) => run.state === "warn").length;
   const failedTasks = failedTaskCount(state.goals);
-  const abortedGoals = state.goals.filter(
-    (goal) => goal.executionStatus === EXECUTION_STATUS.ABORTED,
-  ).length;
+  const abortedGoals = state.goals.filter((goal) => goalSection(goal) === "aborted").length;
   const pendingCounts = summarizePendingDecisions(pendingDecisions);
-  const readAt = state.readAt ?? now;
+  const readAt = state.readAt;
   const partialReadAt = earliestReadAt(
     [...unresponsiveServers, ...unresponsiveProjects].map((item) => item.lastReadAt),
   );
   return {
     readAt,
     servers,
-    projects: state.projects,
+    projects: state.projects.map((project) => ({
+      ...project,
+      concurrency: toRunLimit(project.concurrency),
+      runningRuns: toRunCount(
+        state.runs.filter(
+          (run) =>
+            projectKey(run.serverId, run.project) === projectKey(project.serverId, project.name) &&
+            run.status === RUN_STATUS.RUNNING,
+        ).length,
+      ),
+    })),
     runs,
     thresholds,
     runningRuns,
-    runLimit: state.servers.reduce((total, server) => total + server.concurrency, 0),
+    runLimit: toRunLimit(state.projects.reduce((total, project) => total + project.concurrency, 0)),
     completedTasks24h: state.projects.reduce(
       (total, project) => total + project.completedTasks24h,
       0,
@@ -369,63 +413,13 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
   };
 }
 
-export const goalStatusLabel = (status: GoalStatus): string => {
-  switch (status) {
-    case GOAL_STATUS.CREATED:
-      return "作成済み";
-    case GOAL_STATUS.AWAITING_MERGE:
-      return "人のマージ待ち";
-    case GOAL_STATUS.COMPLETED:
-      return "完了";
-    default:
-      return "不明";
-  }
-};
-
-export const executionStatusLabel = (status: ExecutionStatus): string => {
-  switch (status) {
-    case EXECUTION_STATUS.ACTIVE:
-      return "稼働中";
-    case EXECUTION_STATUS.PAUSED:
-      return "一時停止中";
-    case EXECUTION_STATUS.ABORTED:
-      return "中止";
-    default:
-      return "不明";
-  }
-};
-
-export const taskStatusLabel = (status: TaskStatus): string => {
-  switch (status) {
-    case TASK_STATUS.PENDING:
-      return "未着手";
-    case TASK_STATUS.RUNNING:
-      return "実行中";
-    case TASK_STATUS.COMPLETED:
-      return "完了";
-    case TASK_STATUS.FAILED:
-      return "失敗";
-    case TASK_STATUS.EXCEEDED:
-      return "上限超過";
-    case TASK_STATUS.PR_FAILED:
-      return "PR 失敗";
-    default:
-      return "不明";
-  }
-};
-
-// 仕上げタスクの末尾状態だけで人のマージ待ちかどうかを判定する。通常タスクの pending/running は
-// 判定に影響しない。awaiting_merge で、末尾が pending/running/failed/exceeded/pr_failed で
-// なければ人のマージ待ちになる。
-export function isHumanMergeWaiting(goal: Goal): boolean {
-  if (goal.status !== GOAL_STATUS.AWAITING_MERGE) {
-    return false;
-  }
-  return (
-    goal.mergeTaskLast !== TASK_STATUS.PENDING &&
-    goal.mergeTaskLast !== TASK_STATUS.RUNNING &&
-    goal.mergeTaskLast !== TASK_STATUS.FAILED &&
-    goal.mergeTaskLast !== TASK_STATUS.EXCEEDED &&
-    goal.mergeTaskLast !== TASK_STATUS.PR_FAILED
-  );
-}
+// ゴールとタスクの状態表示は goal-status が持つ。既存の利用元が同じ import 元を使えるよう
+// ここから名前付きで re-export する。
+export {
+  executionStatusLabel,
+  goalStatusLabel,
+  isHumanMergeWaiting,
+  mergeTaskFailureNote,
+  pendingDecisionMergeFailureNote,
+  taskStatusLabel,
+} from "./goal-status";

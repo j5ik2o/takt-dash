@@ -57,6 +57,46 @@ fn store_opens_a_file_and_creates_parent_schema() {
   assert_eq!(reopened.recent_events(10).expect("一覧を取得できます").len(), 1);
 }
 
+/// `path` で開いた store に記録した出来事を、同じ store の読み取りで取得できることを確かめる。
+fn assert_recorded_event_is_readable(path: &Path) {
+  let store = ActivityStore::open(path).unwrap_or_else(|error| panic!("{path:?} の SQLite を開けます: {error}"));
+  let recorded = event("2026-11-13T10:00:00Z", "mac-mini", Some("p"), EventKind::GoalCreated, "登録");
+  store.record(&recorded).unwrap_or_else(|error| panic!("{path:?} へ出来事を記録できます: {error}"));
+
+  let events = store.recent_events(10).unwrap_or_else(|error| panic!("{path:?} から一覧を取得できます: {error}"));
+
+  assert_eq!(events, vec![recorded], "{path:?} で記録した出来事を同じ store から読めます");
+}
+
+#[test]
+fn memory_path_reads_the_events_recorded_by_the_writer() {
+  // ":memory:" は接続ごとに別のデータベースになるため、読み取り用の接続にも書き込み側の
+  // スキーマと記録が見えるよう、メモリ上の store と同じ扱いにする。
+  assert_recorded_event_is_readable(Path::new(":memory:"));
+}
+
+#[test]
+fn empty_path_reads_the_events_recorded_by_the_writer() {
+  // 空のパスも接続ごとに別の一時データベースになるため、":memory:" と同じ扱いにする。
+  assert_recorded_event_is_readable(Path::new(""));
+}
+
+#[test]
+fn file_backed_reads_see_events_recorded_by_the_writer() {
+  // 読み取り接続を writer と分けても、書き込み済みの出来事を同じストアから読める。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let path = directory.path().join("taktdash.sqlite");
+  let store = ActivityStore::open(Path::new(&path)).expect("ファイルの SQLite を開けます");
+  store
+    .record(&event("2026-11-13T10:00:00Z", "mac-mini", Some("p"), EventKind::GoalCreated, "登録"))
+    .expect("出来事を記録できます");
+
+  let events = store.recent_events(10).expect("同じストアから一覧を取得できます");
+
+  assert_eq!(events.len(), 1);
+  assert_eq!(events[0].body, "登録");
+}
+
 #[test]
 fn recent_events_are_newest_first_and_limited() {
   let store = ActivityStore::open_in_memory().expect("SQLite を開けます");
@@ -266,4 +306,38 @@ fn today_counts_by_server_reports_a_stored_server_id_that_cannot_be_a_domain_val
     matches!(error, rusqlite::Error::FromSqlConversionFailure(..)),
     "不正なサーバー ID は SQL の復元エラーになります: {error}"
   );
+}
+
+#[test]
+fn last_connection_event_returns_the_newest_connection_event_for_the_project() {
+  let store = ActivityStore::open_in_memory().expect("SQLite を開けます");
+  assert_eq!(
+    store.last_connection_event("mac-mini", "takt-dash").expect("接続の出来事を引けます"),
+    None,
+    "接続の出来事が無ければ None です"
+  );
+
+  store
+    .record(&event("2026-11-13T10:00:00Z", "mac-mini", Some("takt-dash"), EventKind::ConnectionLost, "切断"))
+    .unwrap();
+  store.record(&event("2026-11-13T10:05:00Z", "mac-mini", Some("takt-dash"), EventKind::GoalCreated, "登録")).unwrap();
+  store
+    .record(&event("2026-11-13T10:06:00Z", "mac-mini", Some("other"), EventKind::ConnectionRestored, "復帰"))
+    .unwrap();
+
+  let (kind, at) = store
+    .last_connection_event("mac-mini", "takt-dash")
+    .expect("接続の出来事を引けます")
+    .expect("切断が最後の接続の出来事です");
+  assert_eq!(kind, EventKind::ConnectionLost, "接続以外の出来事と他プロジェクトの出来事は数えません");
+  assert_eq!(at, DateTime::parse_from_rfc3339("2026-11-13T10:00:00Z").unwrap().with_timezone(&Utc));
+
+  store
+    .record(&event("2026-11-13T10:10:00Z", "mac-mini", Some("takt-dash"), EventKind::ConnectionRestored, "復帰"))
+    .unwrap();
+  let (kind, _) = store
+    .last_connection_event("mac-mini", "takt-dash")
+    .expect("接続の出来事を引けます")
+    .expect("復帰が最後の接続の出来事です");
+  assert_eq!(kind, EventKind::ConnectionRestored, "復帰を記録したら最後の接続の出来事は復帰です");
 }

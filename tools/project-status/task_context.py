@@ -42,8 +42,10 @@ ISSUE_URL = re.compile(
     r"https://github\.com/[^/\s]+/[^/\s]+/issues/\d+",
     re.IGNORECASE,
 )
+# 番号の直後が数字、または数字が続くピリオド（小数・バージョン表記の続き）のときは
+# issue 番号として扱わない。文末・文中の句読点（ピリオド・読点・閉じ括弧）は許す。
 ISSUE_NUMBER = re.compile(
-    r"issue\s*#?\s*(\d+)(?![.\d])",
+    r"issue\s*#?\s*(\d+)(?!\d|\.\d)",
     re.IGNORECASE,
 )
 

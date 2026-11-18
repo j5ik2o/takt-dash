@@ -19,7 +19,7 @@ use takt_dash_backend::{
 };
 
 fn studio_meta() -> ServerMeta {
-  ServerMeta { name: "j5ik2o-mac-studio".to_owned(), kind: "Mac Studio".to_owned(), concurrency: 8 }
+  ServerMeta { name: "j5ik2o-mac-studio".to_owned(), kind: "Mac Studio".to_owned() }
 }
 
 fn two_project_harness() -> GrpcHarness {

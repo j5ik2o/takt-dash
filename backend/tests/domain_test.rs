@@ -6,8 +6,8 @@
 
 use takt_dash_backend::{
   domain::{
-    DailyDate, DomainError, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision,
-    RunSlug, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
+    DailyDate, DomainError, GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber,
+    RegistrationRevision, ReportFilename, RunSlug, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
   },
   model::RunStatus,
 };
@@ -179,4 +179,36 @@ fn run_status_accepts_only_the_known_values() {
   assert!(RunStatus::try_from("").is_err(), "空の run の状態は拒否します");
   assert!(RunStatus::try_from("Running").is_err(), "大文字を含む run の状態は拒否します");
   assert!(RunStatus::try_from("queued").is_err(), "未知の run の状態は拒否します");
+}
+
+#[test]
+fn report_filename_accepts_a_nested_markdown_path_and_keeps_the_value() {
+  for value in ["plan.md", "sub/review.md", ".hidden/notes.md"] {
+    let filename = ReportFilename::try_from(value).expect("reports/ の下の .md の相対パスを受け入れます");
+    assert_eq!(filename.as_str(), value);
+  }
+}
+
+#[test]
+fn report_filename_rejects_names_that_leave_the_reports_directory_or_are_not_markdown() {
+  assert_size(ReportFilename::try_from(""), "空のレポートの名前");
+  assert_size(ReportFilename::try_from(format!("{}.md", "a".repeat(1024)).as_str()), "長すぎるレポートの名前");
+  assert_lexical(ReportFilename::try_from("   "), "空白だけのレポートの名前");
+  assert_lexical(ReportFilename::try_from("plan\n.md"), "制御文字を含むレポートの名前");
+  for value in ["/etc/hosts.md", "../meta.md", "sub/../../meta.md", "./plan.md", "sub//plan.md", "sub\\plan.md", "sub/"]
+  {
+    assert_syntax(ReportFilename::try_from(value), &format!("区切りが不正なレポートの名前 {value:?}"));
+  }
+  for value in ["plan.txt", "meta.json", "plan.md.bak"] {
+    assert_semantics(ReportFilename::try_from(value), &format!(".md で終わらないレポートの名前 {value:?}"));
+  }
+}
+
+#[test]
+fn instruction_id_rejects_zero_negative_and_out_of_range_values() {
+  assert_size(InstructionId::try_from(0_i32), "0 の指示書の ID");
+  assert_size(InstructionId::try_from(-1_i32), "負の指示書の ID");
+  assert_size(InstructionId::try_from(i64::from(i32::MAX) + 1), "i32 を超える指示書の ID");
+  assert_eq!(InstructionId::try_from(2_i32).expect("正の ID を受け入れます").get(), 2);
+  assert_eq!(InstructionId::try_from(3_i64).expect("正の ID を受け入れます").get(), 3);
 }

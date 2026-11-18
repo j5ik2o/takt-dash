@@ -19,10 +19,11 @@ const renderSidebar = (
   initialState: ReturnType<typeof createDashboardState>,
   frontendBuild: BuildInfo = FRONTEND_BUILD,
 ): string => {
-  const props = {
+  // children は Provider の props の必須項目のため、型付けした props ごと渡す。
+  const props: ComponentProps<typeof StateStreamProvider> = {
     initialState,
     children: createElement(LiveSidebar, { frontendBuild }),
-  } satisfies ComponentProps<typeof StateStreamProvider>;
+  };
   return renderToStaticMarkup(createElement(StateStreamProvider, props));
 };
 

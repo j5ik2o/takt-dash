@@ -40,16 +40,6 @@ pub(super) fn optional_string(value: &Value, key: &str) -> Option<String> {
   value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
-/// run の開始時刻を読む。takt-mcp は実行中の run では `startedAt` ではなく `startTime` で
-/// 開始時刻を返すため、`startedAt` を優先し、無ければ `startTime` を読む。どちらも無ければ
-/// `None` を返し、呼び出し側が欠損の扱いを決める（不正な文字列は従来どおり解析エラー）。
-pub(super) fn parse_run_start_time(value: &Value) -> Result<Option<DateTime<Utc>>, ToolError> {
-  match parse_time(value.get("startedAt"))? {
-    | Some(time) => Ok(Some(time)),
-    | None => parse_time(value.get("startTime")),
-  }
-}
-
 pub(super) fn parse_time(value: Option<&Value>) -> Result<Option<DateTime<Utc>>, ToolError> {
   match value {
     | None | Some(Value::Null) => Ok(None),

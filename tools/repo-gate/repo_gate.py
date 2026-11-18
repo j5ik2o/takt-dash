@@ -50,7 +50,9 @@ from pathlib import Path
 from gate_aislop import invokes_aislop_check, runs_aislop_gate
 from gate_ci import check_ci
 from gate_common import GateError, run_command, tomllib
+from gate_frontend_style import check_frontend_style
 from gate_makefile import check_machine_gate, install_commands, is_install_guard, parse_makefile
+from gate_publish import publish_stages
 from gate_repository import check_gitignore, check_toolchain, check_workspace_layout
 from gate_workflow import check_workflow_machine_gate
 
@@ -70,6 +72,7 @@ __all__ = [
     "install_commands",
     "is_install_guard",
     "parse_makefile",
+    "publish_stages",
 ]
 
 
@@ -80,6 +83,7 @@ def run_checks(root, make_timeout_seconds, skip_make):
         ("workflow-machine-gate", lambda: check_workflow_machine_gate(root)),
         ("gitignore-rules", lambda: check_gitignore(root)),
         ("stable-toolchain", lambda: check_toolchain(root)),
+        ("frontend-style", lambda: check_frontend_style(root, GateError)),
     ]
     if skip_make:
         checks.append(("machine-gate", lambda: {"make_done": "skipped"}))

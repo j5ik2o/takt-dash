@@ -11,8 +11,7 @@
   "servers": {
     "mac-mini": {
       "name": "your-mac-mini",
-      "kind": "Mac mini",
-      "concurrency": 4
+      "kind": "Mac mini"
     }
   },
   "projects": [

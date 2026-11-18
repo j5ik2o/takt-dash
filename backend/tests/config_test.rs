@@ -332,3 +332,118 @@ fn thresholds_beyond_the_proto_int32_range_are_rejected_but_the_maximum_is_accep
   }"#;
   parse_config(maximum, Path::new("/base")).expect("i32 の上限ちょうどの閾値は受け入れます");
 }
+
+/// プロジェクトの cwd に .takt/config.yaml を置いた状態で load_config が解決する
+/// プロジェクトの同時実行上限を返す。takt_config が None のときは .takt 自体を作らない。
+fn concurrency_resolved_from_takt_config(takt_config: Option<&str>) -> i32 {
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let project_dir = directory.path().join("proj");
+  std::fs::create_dir_all(&project_dir).expect("プロジェクトのディレクトリを作れます");
+  if let Some(text) = takt_config {
+    std::fs::create_dir_all(project_dir.join(".takt")).expect(".takt を作れます");
+    std::fs::write(project_dir.join(".takt/config.yaml"), text).expect("takt の設定を書けます");
+  }
+  let config_path = directory.path().join("taktdash.config.json");
+  let config_text = format!(
+    r#"{{ "mcpServers": {{ "mini": {{ "command": "node", "args": [] }} }},
+         "servers": {{ "mini": {{ "name": "Mac mini", "kind": "Mac mini" }} }},
+         "projects": [ {{ "name": "proj", "server": "mini", "cwd": "{}" }} ] }}"#,
+    project_dir.display()
+  );
+  std::fs::write(&config_path, config_text).expect("設定を書けます");
+  let config = load_config(&config_path).expect("設定を読み込めます");
+  config.projects[0].concurrency
+}
+
+#[test]
+fn project_concurrency_comes_from_the_project_takt_config() {
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("concurrency: 3\n")),
+    3,
+    ".takt/config.yaml の concurrency をプロジェクトの上限にする"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("concurrency: 2 # 同時実行の上限\n")),
+    2,
+    "値の後ろのコメントは無視する"
+  );
+}
+
+#[test]
+fn project_concurrency_defaults_to_one_without_a_takt_value() {
+  assert_eq!(concurrency_resolved_from_takt_config(None), 1, ".takt/config.yaml が無ければ takt の既定値1にする");
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("other: true\n")),
+    1,
+    "concurrency キーが無ければ既定値1にする"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("nested:\n  concurrency: 5\n")),
+    1,
+    "ネストした同名キーは対象にしない"
+  );
+  assert_eq!(concurrency_resolved_from_takt_config(Some("concurrency: 0\n")), 1, "0以下は既定値1にする");
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("concurrency: many\n")),
+    1,
+    "数値として読めなければ既定値1にする"
+  );
+}
+
+#[test]
+fn project_concurrency_accepts_valid_yaml_notations() {
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("\"concurrency\": 3\n")),
+    3,
+    "キーを二重引用した表記でも上限を読む"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("'concurrency': 4\n")),
+    4,
+    "キーを単一引用した表記でも上限を読む"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("  other: true\n  concurrency: 5\n")),
+    5,
+    "ルート全体をインデントした表記でも上限を読む"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("concurrency:\n  6\n")),
+    6,
+    "数値を次行に置く表記でも上限を読む"
+  );
+  assert_eq!(concurrency_resolved_from_takt_config(Some("{concurrency: 7}\n")), 7, "フローマッピングでも上限を読む");
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("{ other: true, concurrency: 8 }\n")),
+    8,
+    "フローマッピングに他のキーがあっても上限を読む"
+  );
+}
+
+#[test]
+fn project_concurrency_handles_quotes_inside_plain_scalars_in_flow_mappings() {
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("{base_branch: feature/o'brien, concurrency: 8}\n")),
+    8,
+    "フローマッピングで通常文字列の中のアポストロフィを引用の開始と誤認しない"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("{base_branch: \"say \\\"hi, there\\\"\", concurrency: 9}\n")),
+    9,
+    "フローマッピングで二重引用の中のエスケープとカンマを項目の区切りと誤認しない"
+  );
+}
+
+#[test]
+fn project_concurrency_rejects_multi_line_plain_scalars() {
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("concurrency:\n  3\n  invalid\n")),
+    1,
+    "次行の値に継続行が続く場合は複数行の通常スカラーであり、値全体が数値でないため既定値1にする"
+  );
+  assert_eq!(
+    concurrency_resolved_from_takt_config(Some("concurrency: 3\n  invalid\n")),
+    1,
+    "同行の値に継続行が続く場合も複数行の通常スカラーとして既定値1にする"
+  );
+}

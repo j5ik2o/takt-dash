@@ -1,10 +1,11 @@
-import type { ReactElement } from "react";
-import type { ActivityEvent, ActivityKind, DailySummary, GetActivityResponse } from "../proto/taktdash";
-import { groupActivityEvents } from "../state/activity";
+import { Fragment, type ReactElement } from "react";
+import type { ActivityEvent, ActivityKind, DailySummary, DashboardState, GetActivityResponse } from "../proto/taktdash";
+import { activityBodyLines, groupActivityEvents } from "../state/activity";
 import { ACTIVITY_KIND } from "../state/proto-values";
 import { formatClock } from "../state/format";
 
 type ActivityContentProps = {
+  state: DashboardState;
   response: GetActivityResponse;
   now: Date;
 };
@@ -62,9 +63,8 @@ const toNewestFirst = (events: readonly ActivityEvent[]): ActivityEvent[] =>
 const toNewestDayFirst = (days: readonly DailySummary[]): DailySummary[] =>
   [...days].sort((a, b) => b.date.localeCompare(a.date));
 
-export function ActivityContent({ response, now }: ActivityContentProps): ReactElement {
-  const state = response.state;
-  const serverNames = new Map((state?.servers ?? []).map((server) => [server.serverId, server.name]));
+export function ActivityContent({ state, response, now }: ActivityContentProps): ReactElement {
+  const serverNames = new Map(state.servers.map((server) => [server.serverId, server.name]));
   const events = toNewestFirst(response.events);
   const groups = groupActivityEvents(events);
   const dailySummaries = toNewestDayFirst(response.dailySummaries);
@@ -100,7 +100,15 @@ export function ActivityContent({ response, now }: ActivityContentProps): ReactE
                   </span>
                   <span className="msg">
                     {newest.project ? <b>{newest.project}：</b> : null}
-                    {single ? newest.body : "接続の状態が変わりました。"}
+                    {/* グループは同種・同一サーバー・同一プロジェクトの接続イベントだけを
+                        集めるため、最新の出来事の本文がグループ全体の具体的な文言になる */}
+                    {/* 本文の改行は、エスケープされた「\n」と実際の改行のどちらも改行として出す */}
+                    {activityBodyLines(newest.body).map((line, lineIndex) => (
+                      <Fragment key={lineIndex}>
+                        {lineIndex > 0 ? <br /> : null}
+                        {line}
+                      </Fragment>
+                    ))}
                   </span>
                   <span className="sv">{serverNames.get(newest.serverId) ?? newest.serverId}</span>
                 </li>

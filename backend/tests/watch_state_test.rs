@@ -36,12 +36,13 @@ fn seeded_harness() -> GrpcHarness {
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), goal_state("g1")).build();
   let snapshot = ProjectSnapshot {
-    goals:         vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
-    tasks:         vec![],
-    inquiries:     vec![],
-    runs:          vec![],
+    goals: vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   harness
@@ -222,11 +223,8 @@ async fn watch_state_sends_the_current_server_meta_after_a_config_change() {
   assert_eq!(first.servers[0].name, "j5ik2o-mac-mini", "初回は接続時のサーバー表示情報を返します");
 
   // 設定のサーバー表示情報を書き換え、定期読み取りの1サイクルを回す。
-  harness.rewrite_server_meta("mac-mini", ServerMeta {
-    name:        "renamed-mini".to_owned(),
-    kind:        "Mac Studio".to_owned(),
-    concurrency: 8,
-  });
+  harness
+    .rewrite_server_meta("mac-mini", ServerMeta { name: "renamed-mini".to_owned(), kind: "Mac Studio".to_owned() });
   let mut poller = Poller::new(
     harness.config_path().to_path_buf(),
     harness.activity.clone(),
@@ -244,7 +242,6 @@ async fn watch_state_sends_the_current_server_meta_after_a_config_change() {
   assert_eq!(second.servers.len(), 1, "設定にあるサーバーだけを返します");
   assert_eq!(second.servers[0].name, "renamed-mini", "変化通知後のサーバー名は変更後の値です");
   assert_eq!(second.servers[0].kind, "Mac Studio", "種類も変更後に追随します");
-  assert_eq!(second.servers[0].concurrency, 8, "同時実行数も変更後に追随します");
 
   poller.shutdown().await;
   server.stop().await;
@@ -403,36 +400,40 @@ async fn watch_state_sends_added_server_metadata_after_a_config_change() {
     .expect("ストリームから読めます")
     .expect("変化後の状態があります");
   assert_eq!(second.servers[0].name, "j5ik2o-mac-mini-renamed", "変化通知後の servers は新しい設定の表示名を返します");
-  assert_eq!(second.servers[0].concurrency, 8, "並列度の変更も新しい状態に現れます");
 
   poller.shutdown().await;
   server.stop().await;
 }
 
-/// running なタスクと、その run を持つ mock の状態。`lastLogAt` を固定し、無音判定を決定的にする。
-fn run_state(last_log_at: &str) -> serde_json::Value {
+/// running なタスクを持つ mock の状態。run 自体は保存場所（`meta.json` と本体ログ）から読む。
+fn running_task_state(started_at: &str) -> serde_json::Value {
   json!({
-    "tasks": [ { "name": "implement", "status": "running", "runSlug": "run-1", "startedAt": last_log_at } ],
-    "runs": { "run-1": { "runSlug": "run-1", "status": "running", "currentStep": "implement", "startedAt": last_log_at, "lastLogAt": last_log_at } }
+    "tasks": [ { "name": "implement", "status": "running", "runSlug": "run-1", "startedAt": started_at } ]
   })
 }
 
 #[tokio::test]
 async fn watch_state_reassembles_and_returns_the_new_run_log_silent() {
-  // 同じ WatchState ストリームを開いたまま、run の最終ログ時刻を閾値外へ変えて poller を
-  // 1サイクル回す。変化通知後に再 assemble した状態が新しい無音を返す。
+  // 同じ WatchState ストリームを開いたまま、run の最終ログ（本体ログの更新時刻）を閾値外へ変えて
+  // poller を1サイクル回す。変化通知後に再 assemble した状態が新しい無音を返す。
   // 通知時に以前の assemble 結果を再利用する実装では、古い無音のままになる。
   let recent = Utc::now() - chrono::Duration::minutes(5);
+  let stale = Utc::now() - chrono::Duration::minutes(300);
   let harness = GrpcHarness::builder()
-    .single_project(project("takt-dash", project_dir()), server_meta(), run_state(&recent.to_rfc3339()))
+    .single_project(project("takt-dash", project_dir()), server_meta(), running_task_state(&stale.to_rfc3339()))
     .build();
+  let fixture = RunFixture::new(harness.project_dir());
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("run-1"), source_run_slug: None }]);
+  fixture.write_meta("run-1", &running_meta("implement", 1, "development-core", &stale.to_rfc3339()));
+  fixture.append_records("run-1", &[workflow_start_record("development-core")]);
   let snapshot = ProjectSnapshot {
-    goals:         vec![],
-    tasks:         vec![],
-    inquiries:     vec![],
-    runs:          vec![run("run-1", "implement", recent)],
+    goals: vec![],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![run("run-1", "implement", recent)],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, Utc::now());
 
@@ -449,9 +450,9 @@ async fn watch_state_reassembles_and_returns_the_new_run_log_silent() {
   assert_eq!(first.runs.len(), 1);
   assert!(!first.runs[0].log_silent, "5分前なら10分の閾値の内側で無音ではありません");
 
-  // 同じ run の最終ログ時刻を閾値外へ変え、同じストリームを開いたまま poller を1サイクル回す。
-  let stale = Utc::now() - chrono::Duration::minutes(300);
-  harness.rewrite_state(run_state(&stale.to_rfc3339()));
+  // 同じ run の本体ログの更新時刻を閾値外へ変え、同じストリームを開いたまま poller
+  // を1サイクル回す。
+  fixture.set_body_log_modified("run-1", stale);
   let mut poller = Poller::new(
     harness.config_path().to_path_buf(),
     harness.activity.clone(),

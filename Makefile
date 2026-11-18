@@ -1,4 +1,6 @@
-.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-prod e2e-skip-only-check
+.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-build e2e-prod e2e-screenshots e2e-skip-only-check prod-check
+
+BASE_URL ?= http://127.0.0.1:3000
 
 fmt:
 	cargo +nightly fmt --all -- --check
@@ -64,15 +66,29 @@ done:
 e2e-skip-only-check:
 	! grep -RInE 'test\.(skip|only)([^A-Za-z0-9_]|$$)' e2e/tests e2e/smoke
 
-e2e:
+# startStack（e2e/support/stack.ts）で backend と web を起動する Playwright の実行に共通するビルドの前提。
+e2e-build:
 	test -d e2e/node_modules || npm --prefix e2e ci
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
 	cargo build -p takt-dash-backend
 	npm --prefix frontend/web run build
+
+e2e: e2e-build
 	$(MAKE) e2e-skip-only-check
 	npm --prefix e2e test
+
+# 撮影の手順（docs/layout.md の「撮影」）。make e2e とは別の入口で、e2e-build でビルドしてから撮る。
+e2e-screenshots: e2e-build
+	npm --prefix e2e run screenshots
 
 e2e-prod:
 	test -d e2e/node_modules || npm --prefix e2e ci
 	$(MAKE) e2e-skip-only-check
 	npm --prefix e2e run test:prod
+
+# 終了コードで判定するジョブは make を経由しないこと。GNU make はレシピの
+# 失敗を一律に 2 へ変えるため、prod_check.py の 1（不合格）と 2（確認
+# できず）を区別できない。ジョブからは python3 tools/prod-check/prod_check.py
+# を直接実行する。
+prod-check:
+	python3 tools/prod-check/prod_check.py --base-url $(BASE_URL) $(if $(WITH_E2E),--with-e2e,)

@@ -119,6 +119,7 @@ test("種別の表示名は3種別を判別できる", () => {
   assert.match(registrationLabel, /承認/);
   assert.notEqual(registrationLabel, inquiryLabel);
 
+  // 未知の種別は生成コードの UNRECOGNIZED で表し、既定の表示名へ落ちることを見る。
   assert.equal(decisionTypeLabel({ ...optionsQuestion(), type: PendingDecisionType.UNRECOGNIZED }), "判断待ち");
 });
 
@@ -327,10 +328,8 @@ test("確定の意図はダイアログに対応する操作を選び、承認�
 
 test("マージ確認は開いた時点の PR 番号と URL を保持し、確認時もその PR を送る", () => {
   const target = openDecisionDialog(merge(), "merge");
-  assert.ok(target);
-  assert.equal(target.kind, "merge");
-  assert.equal(target.prNumber, 418);
-  assert.equal(target.url, "https://example.test/pr/418");
+  assert.equal(target?.kind === "merge" ? target.prNumber : undefined, 418);
+  assert.equal(target?.kind === "merge" ? target.url : undefined, "https://example.test/pr/418");
 
   const resolution = resolveDecisionIntent(
     merge(),

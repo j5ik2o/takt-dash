@@ -12,7 +12,8 @@
      止まる。
   3. pr は tasks.yaml の該当 run_slug の base_branch を --base に渡す。main ベースの
      タスクでは main を渡す。base を解決できないときは gh pr create を呼ばず非ゼロで
-     理由を stdout に出す。既存 PR がある場合だけ成功として扱う。
+     理由を stdout に出す。作成に失敗したときは、同じ base への既存 PR がある場合
+     だけ成功として扱い、base が異なる既存 PR だけでは成功として扱わない。
   4. 新しい commit は前回の push を無効にし、push 無しで pr を実行できない。
   5. status は order.md の issue URL を --url に渡す。issue 番号は設定の repository で
      URL にする。pull URL しか無いときは gh を呼ばず「未実施: issue の記述が
@@ -23,6 +24,10 @@
   7. status は run ディレクトリも応答ファイルも無いとき、.takt/tasks.yaml の該当
      エントリの task_dir から order.md を解決する（開始時点の解決経路）。
   8. status の gh 失敗は非致命で、終了コード 0 と stdout の記録にする。
+  9. commit は、ステージされた Python の bytecode（__pycache__ 配下と *.pyc）を
+     コミット対象から外す。bytecode だけがステージされたときはコミットせず成功する。
+     日本語などを含むパスの bytecode も外す。ステージ済みの一覧は -z で取得し、
+     引用・エスケープされていない実パスで判定と解除を行う。
 
 実 gh・実 Git は呼ばない。publish.py と project_status.py を一時リポジトリへ複製し、
 PATH の先頭に置いたスタブだけを呼ぶ。
@@ -74,6 +79,12 @@ with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as handle:
     handle.write("gh " + " ".join(sys.argv[1:]) + "\\n")
 key = " ".join(sys.argv[1:3])
 entry = config.get(key, {})
+if "prs" in entry:
+    args = sys.argv[1:]
+    base = args[args.index("--base") + 1] if "--base" in args else None
+    matched = [pr for pr in entry["prs"] if base is None or pr.get("base") == base]
+    sys.stdout.write(json.dumps([{"url": pr["url"]} for pr in matched]) + "\\n")
+    raise SystemExit(entry.get("exit", 0))
 sys.stdout.write(entry.get("stdout", ""))
 sys.stderr.write(entry.get("stderr", ""))
 raise SystemExit(entry.get("exit", 0))
@@ -91,7 +102,7 @@ def _on_timeout(signum, frame):
 def default_git_config() -> dict:
     return {
         "add": {},
-        "diff": {"stdout": "changed.txt\n"},
+        "diff": {"stdout": "changed.txt\x00"},
         "diff-quiet": {"exit": 1},
         "status": {"stdout": "M  changed.txt\n"},
         "commit": {},
@@ -306,6 +317,53 @@ def test_commit_without_changes_succeeds_without_commit() -> None:
         assert not any(line.startswith("git commit") for line in repo.git_calls()), repo.git_calls()
 
 
+def test_commit_excludes_staged_bytecode() -> None:
+    with Repo() as repo:
+        data = default_git_config()
+        data["diff"] = {
+            "stdout": "changed.txt\x00tools/project-status/__pycache__/publish.cpython-315.pyc\x00"
+        }
+        repo.set_git(data)
+        run_ok(repo, "commit")
+        calls = repo.git_calls()
+        resets = [line for line in calls if line.startswith("git reset")]
+        assert len(resets) == 1, calls
+        assert "tools/project-status/__pycache__/publish.cpython-315.pyc" in resets[0], resets
+        assert "changed.txt" not in resets[0], resets
+        assert any(line.startswith("git commit") for line in calls), calls
+
+
+def test_commit_with_only_bytecode_succeeds_without_commit() -> None:
+    with Repo() as repo:
+        data = default_git_config()
+        data["diff"] = {"stdout": "tools/project-status/__pycache__/task_context.cpython-315.pyc\x00"}
+        repo.set_git(data)
+        result = run_ok(repo, "commit")
+        calls = repo.git_calls()
+        assert any(line.startswith("git reset") for line in calls), calls
+        assert not any(line.startswith("git commit") for line in calls), calls
+        assert "コミットする変更はありません" in result.stdout, result.stdout
+
+
+def test_commit_excludes_bytecode_with_non_ascii_path() -> None:
+    with Repo() as repo:
+        data = default_git_config()
+        data["diff"] = {
+            "stdout": "changed.txt\x00"
+            "資料/__pycache__/legacy.cpython-315.pyc\x00"
+            "日本/legacy.pyc\x00"
+        }
+        repo.set_git(data)
+        run_ok(repo, "commit")
+        calls = repo.git_calls()
+        resets = [line for line in calls if line.startswith("git reset")]
+        assert len(resets) == 1, calls
+        assert "資料/__pycache__/legacy.cpython-315.pyc" in resets[0], resets
+        assert "日本/legacy.pyc" in resets[0], resets
+        assert "changed.txt" not in resets[0], resets
+        assert any(line.startswith("git commit") for line in calls), calls
+
+
 def test_commit_failure_blocks_push() -> None:
     with Repo() as repo:
         data = default_git_config()
@@ -398,6 +456,29 @@ def test_pr_existing_pull_request_is_success() -> None:
         lists = [line for line in repo.gh_calls() if line.startswith("gh pr list")]
         assert len(lists) == 1, repo.gh_calls()
         assert f"--head {BRANCH}" in lists[0], lists
+        assert f"--base {GOAL_BASE}" in lists[0], lists
+
+
+def test_pr_existing_pull_request_with_different_base_is_failure() -> None:
+    with Repo() as repo:
+        repo.goal_task()
+        prepare_pushed(repo)
+        data = default_gh_config()
+        data["pr create"] = {"exit": 1, "stderr": "error: HTTP 422\n"}
+        data["pr list"] = {
+            "prs": [{"url": "https://github.com/example/owner/pull/59", "base": "main"}]
+        }
+        repo.set_gh(data)
+        result = repo.run("pr")
+        assert result.returncode != 0, (
+            f"base が異なる既存 PR だけでは pr を成功として扱えません: {result.stdout!r}"
+        )
+        assert "HTTP 422" in result.stdout, f"失敗理由が stdout にありません: {result.stdout!r}"
+        lists = [line for line in repo.gh_calls() if line.startswith("gh pr list")]
+        assert len(lists) == 1, repo.gh_calls()
+        assert f"--base {GOAL_BASE}" in lists[0], lists
+        for markers in (repo.context / ".publish", repo.root / ".takt" / ".publish"):
+            assert not (markers / "pr.ok").is_file(), f"失敗で pr.ok が生成されました: {markers}"
 
 
 def test_pr_failure_without_existing_pr_is_failure() -> None:
@@ -472,6 +553,20 @@ def test_status_changes_issue_url_from_order() -> None:
 def test_status_builds_issue_url_from_number() -> None:
     with Repo() as repo:
         repo.write_order("対象は issue #32 です。\n")
+        repo.write_status_config(base_status_config(repository="j5ik2o/takt-dash"))
+        expected = "https://github.com/j5ik2o/takt-dash/issues/32"
+        repo.gh_with_item(expected)
+        repo.mark_published()
+        run_ok(repo, "status", "--status", "In Review", "--require-published")
+        edits = [line for line in repo.gh_calls() if line.startswith("gh project item-edit")]
+        assert len(edits) == 1, repo.gh_calls()
+        assert f"--url {expected}" in edits[0], edits
+        assert "--value In Review" in edits[0], edits
+
+
+def test_status_builds_issue_url_from_number_with_trailing_period() -> None:
+    with Repo() as repo:
+        repo.write_order("Fix issue #32.\n")
         repo.write_status_config(base_status_config(repository="j5ik2o/takt-dash"))
         expected = "https://github.com/j5ik2o/takt-dash/issues/32"
         repo.gh_with_item(expected)
@@ -596,6 +691,9 @@ def main() -> int:
     tests = [
         test_commit_commits_staged_changes,
         test_commit_without_changes_succeeds_without_commit,
+        test_commit_excludes_staged_bytecode,
+        test_commit_with_only_bytecode_succeeds_without_commit,
+        test_commit_excludes_bytecode_with_non_ascii_path,
         test_commit_failure_blocks_push,
         test_push_requires_successful_commit,
         test_push_pushes_current_branch,
@@ -604,12 +702,14 @@ def main() -> int:
         test_pr_uses_main_for_main_based_task,
         test_pr_fails_without_base_branch,
         test_pr_existing_pull_request_is_success,
+        test_pr_existing_pull_request_with_different_base_is_failure,
         test_pr_failure_without_existing_pr_is_failure,
         test_status_requires_published_after_pr_failure,
         test_pr_requires_successful_push,
         test_new_commit_invalidates_previous_push,
         test_status_changes_issue_url_from_order,
         test_status_builds_issue_url_from_number,
+        test_status_builds_issue_url_from_number_with_trailing_period,
         test_status_require_published_changes_after_publish,
         test_status_without_require_published_ignores_markers,
         test_status_pull_url_is_unprocessed,
