@@ -15,15 +15,18 @@ import { resetBackendResponded } from "../../src/grpc/client.ts";
 import { GoalDetailContent } from "../../src/components/goal-detail-content.tsx";
 import { GoalDetailLoader } from "../../src/components/goal-detail-loader.tsx";
 import GoalDetailPage from "../../app/goals/[goalId]/page.tsx";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 
 const NOT_FOUND_DIGEST = "NEXT_HTTP_ERROR_FALLBACK;404";
 
 const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {

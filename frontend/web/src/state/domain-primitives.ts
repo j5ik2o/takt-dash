@@ -47,6 +47,8 @@ export type RunCount = number & { readonly __brand: "RunCount" };
 export type RunLimit = number & { readonly __brand: "RunLimit" };
 export type StaleMinutes = number & { readonly __brand: "StaleMinutes" };
 export type SilentMinutes = number & { readonly __brand: "SilentMinutes" };
+export type ReportFilename = string & { readonly __brand: "ReportFilename" };
+export type InstructionId = number & { readonly __brand: "InstructionId" };
 
 /** 検証済みの異常判定の基準。 */
 export type ValidatedAnomalyThresholds = {
@@ -103,6 +105,34 @@ export const toRunSlug = (value: unknown): RunSlug => {
   }
   return slug as RunSlug;
 };
+
+const MAX_REPORT_FILENAME_BYTES = 1024;
+
+/**
+ * run のレポートの名前（reports/ からの "/" 区切りの相対パス）。名前は ".md" で終わる。
+ * 絶対パス、"\\"、空の区切り、"." と ".." の区切りは書式の誤りとして拒否する。
+ */
+export const toReportFilename = (value: unknown): ReportFilename => {
+  if (typeof value === "string" && new TextEncoder().encode(value).length > MAX_REPORT_FILENAME_BYTES) {
+    throw new DomainPrimitiveError("size", "レポートの名前");
+  }
+  const filename = text("レポートの名前", value);
+  if (
+    filename.includes("\\") ||
+    filename.startsWith("/") ||
+    filename.split("/").some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new DomainPrimitiveError("syntax", "レポートの名前");
+  }
+  if (!filename.endsWith(".md")) {
+    throw new DomainPrimitiveError("semantics", "レポートの名前");
+  }
+  return filename as ReportFilename;
+};
+
+/** run への指示書の ID。takt が 1 から順に振る正の整数。 */
+export const toInstructionId = (value: unknown): InstructionId =>
+  boundedInteger("指示書の ID", value, 1, I32_MAX) as InstructionId;
 
 export const toPullRequestNumber = (value: unknown): PullRequestNumber =>
   boundedInteger("プルリクエスト番号", value, 1, Number.MAX_SAFE_INTEGER) as PullRequestNumber;

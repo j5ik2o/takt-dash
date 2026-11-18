@@ -1,10 +1,20 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, openSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, connect, type AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { buildMockState, PROJECT_ABOUT, PROJECT_NAME, SERVER_ID, SERVER_NAME } from "./fixture";
+import {
+  buildMockState,
+  buildRunFiles,
+  PROJECT_ABOUT,
+  PROJECT_NAME,
+  RUN_BODY_LOG,
+  RUN_SLUG,
+  SERVER_ID,
+  SERVER_NAME,
+  toJsonLines,
+} from "./fixture";
 
 // リポジトリのルートは e2e/support から2階層上。ビルド済み成果物と実行ファイルをここから解決する。
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -24,6 +34,9 @@ export type Stack = {
   projectDir: string;
   readCalls: () => Promise<ToolCall[]>;
   updateState: (mutate: (state: Record<string, unknown>) => Record<string, unknown>) => Promise<void>;
+  // 実行中の run（RUN_SLUG）の本体ログの末尾へ、レコードを1行ずつ追記する。
+  // run のファイルを書く既定の状態（mockState を渡さない起動）でだけ使える。
+  appendRunLog: (records: readonly Record<string, unknown>[]) => Promise<void>;
   setMockDelay: (ms: number) => Promise<void>;
   stopMock: () => Promise<void>;
   stopBackend: () => Promise<void>;
@@ -296,6 +309,8 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
   const backendLog = path.join(tempDir, "backend.log");
   const webLog = path.join(tempDir, "web.log");
   const homeDir = path.join(tempDir, "home");
+  const runDir = path.join(projectDir, ".takt", "runs", RUN_SLUG);
+  const runBodyLogPath = path.join(runDir, "logs", RUN_BODY_LOG);
 
   let backend: ChildProcess | undefined;
   let web: ChildProcess | undefined;
@@ -364,6 +379,21 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     }
   };
 
+  // backend は実行中の run を run のファイルから組み立てるため、モックの状態と同じ run を
+  // プロジェクトの .takt へ書く。backend の起動前に用意し、最初の読み取りから一覧に載せる。
+  const writeRunFiles = async (now: Date): Promise<void> => {
+    const files = buildRunFiles(now);
+    await mkdir(path.dirname(runBodyLogPath), { recursive: true });
+    await writeFile(path.join(projectDir, ".takt", "tasks.yaml"), files.tasksYaml, "utf8");
+    await writeFile(path.join(runDir, "meta.json"), JSON.stringify(files.meta), "utf8");
+    await writeFile(runBodyLogPath, toJsonLines(files.bodyLogRecords), "utf8");
+  };
+
+  // 1回の appendFile で完結した行だけを書き、backend に書きかけの行を読ませない。
+  const appendRunLog = async (records: readonly Record<string, unknown>[]): Promise<void> => {
+    await appendFile(runBodyLogPath, toJsonLines(records), "utf8");
+  };
+
   const updateState = async (
     mutate: (state: Record<string, unknown>) => Record<string, unknown>,
   ): Promise<void> => {
@@ -412,7 +442,14 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     options.projects ?? [{ name: PROJECT_NAME, about: PROJECT_ABOUT }];
 
   try {
-    await writeFile(statePath, JSON.stringify((options.mockState ?? buildMockState)(new Date())), "utf8");
+    const startedAt = new Date();
+    await writeFile(statePath, JSON.stringify((options.mockState ?? buildMockState)(startedAt)), "utf8");
+    // run のファイル（buildRunFiles）は既定の状態（buildMockState）の run を表すため、既定の状態のときだけ書く。
+    // mockState を渡した状態（撮影の states.ts）では書かない。backend は対応表を読めない run を
+    // takt_get_run から組み立てるため、run は同じモックの状態から読まれ、既定の run も混ざらない。
+    if (options.mockState === undefined) {
+      await writeRunFiles(startedAt);
+    }
     // backend がモックを起動する前に遅延 0（透過）を用意し、ラッパーが初回から同じ契約で読めるようにする。
     await writeFile(delayPath, JSON.stringify({ stdoutDelayMs: 0 }), "utf8");
     await mkdir(homeDir, { recursive: true });
@@ -483,6 +520,7 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     projectDir,
     readCalls,
     updateState,
+    appendRunLog,
     setMockDelay,
     stopMock: stopMockProcess,
     stopBackend: stopBackendProcess,

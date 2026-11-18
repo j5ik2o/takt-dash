@@ -4,9 +4,12 @@
 mod common;
 
 use std::{
+  cell::RefCell,
   collections::BTreeMap,
+  io::Write,
   path::{Path, PathBuf},
-  sync::Arc,
+  sync::{Arc, Mutex, Once},
+  time::{Duration, Instant},
 };
 
 use common::*;
@@ -16,7 +19,7 @@ use takt_dash_backend::{
   config::Thresholds,
   domain::{SilentMinutes, StaleMinutes},
   mcp::McpClientRegistry,
-  model::{ActivityEvent, EventKind},
+  model::{ActivityEvent, EventKind, ProjectSnapshot},
   poller::{run_until_stopped, Poller},
   store::StateStore,
 };
@@ -25,6 +28,7 @@ struct Harness {
   _directory:       tempfile::TempDir,
   config_path:      PathBuf,
   state_path:       PathBuf,
+  call_log_path:    PathBuf,
   project_dir:      PathBuf,
   activity:         Arc<ActivityStore>,
   activity_db_path: PathBuf,
@@ -98,12 +102,75 @@ fn state_with_goal(goal_id: &str) -> Value {
   json!({ "goals": [ { "id": goal_id, "status": "created", "executionStatus": "active", "objective": format!("ゴール {goal_id}"), "integrationBranch": format!("takt/{goal_id}") } ] })
 }
 
-/// running なタスクと、その run を持つ状態。`lastLogAt` を固定し、無音判定を決定的にする。
-fn state_with_running_run(last_log_at: &str) -> Value {
+fn state_with_goals(count: usize, status: &str, execution_status: &str) -> Value {
+  let goals: Vec<Value> = (0..count)
+    .map(|index| {
+      json!({
+        "id": format!("g{index}"),
+        "status": status,
+        "executionStatus": execution_status,
+        "objective": format!("ゴール {index}"),
+        "integrationBranch": format!("takt/g{index}")
+      })
+    })
+    .collect();
+  json!({ "goals": goals })
+}
+
+/// running なタスクを持ち、takt_get_run には run の保存場所と食い違う値を返す mock の状態。
+///
+/// run の status・currentStep・stepLogs を保存場所（`meta.json` と本体ログ）と異なる値にし、
+/// 一覧の run がどちらから作られたかを値で区別できるようにします。workflow の step 名一覧は
+/// takt_get_workflow から返し、ステップ位置の補完に使います。
+fn state_with_running_tasks(run_slugs: &[&str]) -> Value {
+  let tasks: Vec<Value> = run_slugs
+    .iter()
+    .map(|run_slug| {
+      json!({ "name": format!("task-{run_slug}"), "status": "running", "runSlug": run_slug, "startedAt": "2026-11-13T08:00:00Z" })
+    })
+    .collect();
+  let runs: serde_json::Map<String, Value> = run_slugs
+    .iter()
+    .map(|run_slug| {
+      (
+        (*run_slug).to_owned(),
+        json!({
+          "runSlug": run_slug,
+          "status": "completed",
+          "workflow": "development-core",
+          "currentStep": "decoy",
+          "startedAt": "2026-11-13T07:00:00Z",
+          "lastLogAt": "2026-11-13T07:30:00Z",
+          "stepLogs": [ { "step": "decoy", "persona": "coder", "status": "done", "timestamp": "2026-11-13T07:30:00Z", "iteration": 1 } ],
+          "reports": [ { "filename": "decoy.md", "sizeBytes": 1 } ]
+        }),
+      )
+    })
+    .collect();
   json!({
-    "tasks": [ { "name": "implement", "status": "running", "runSlug": "r1", "startedAt": last_log_at } ],
-    "runs": { "r1": { "runSlug": "r1", "status": "running", "currentStep": "implement", "startedAt": last_log_at, "lastLogAt": last_log_at } }
+    "tasks": tasks,
+    "runs": runs,
+    "workflows": { "development-core": ["plan", "implement", "review"] }
   })
+}
+
+/// mock の takt_get_run を道具エラーにした状態を返す。
+fn with_failing_get_run(mut state: Value) -> Value {
+  state["isError"] = json!(["takt_get_run"]);
+  state
+}
+
+/// 1 周期分の snapshot から、指定した run を取り出す。
+fn stored_run(harness: &Harness, run_slug: &str) -> Option<takt_dash_backend::model::RunEntry> {
+  harness
+    .store
+    .slot("takt-dash")
+    .and_then(|slot| slot.snapshot)
+    .and_then(|snapshot| snapshot.runs.into_iter().find(|run| run.run_slug == run_slug))
+}
+
+fn step_names(run: &takt_dash_backend::model::RunEntry) -> Vec<String> {
+  run.steps.iter().map(|step| step.step_name.clone()).collect()
 }
 
 impl Harness {
@@ -113,11 +180,12 @@ impl Harness {
     let state_path = directory.path().join("state.json");
     let project_dir = directory.path().join("project");
     std::fs::create_dir_all(&project_dir).expect("プロジェクトの cwd を作れます");
+    let call_log_path = directory.path().join("calls.log");
     write_json(&state_path, &state);
     write_json(
       &config_path,
       &json!({
-        "mcpServers": { "mac-mini": { "command": "node", "args": [mock_script().display().to_string(), "--state", state_path.display().to_string()], "env": {} } },
+        "mcpServers": { "mac-mini": { "command": "node", "args": [mock_script().display().to_string(), "--state", state_path.display().to_string(), "--call-log", call_log_path.display().to_string()], "env": {} } },
         "servers": { "mac-mini": { "name": "j5ik2o-mac-mini", "kind": "Mac mini", "concurrency": 4 } },
         "projects": [ { "name": "takt-dash", "server": "mac-mini", "about": "説明", "cwd": project_dir.display().to_string() } ],
         "intervalSeconds": 30,
@@ -136,7 +204,17 @@ impl Harness {
     let activity_db_path = directory.path().join("events.sqlite");
     let activity = Arc::new(ActivityStore::open(&activity_db_path).expect("SQLite を開けます"));
     let (changes, _) = tokio::sync::broadcast::channel(16);
-    Harness { _directory: directory, config_path, state_path, project_dir, activity, activity_db_path, store, changes }
+    Harness {
+      _directory: directory,
+      config_path,
+      state_path,
+      call_log_path,
+      project_dir,
+      activity,
+      activity_db_path,
+      store,
+      changes,
+    }
   }
 
   fn poller(&self) -> Poller {
@@ -174,6 +252,45 @@ impl Harness {
     write_json(&self.state_path, &state);
   }
 
+  /// 設定したプロジェクトの cwd に、run の保存場所を作る fixture を返す。
+  fn run_fixture(&self) -> RunFixture {
+    RunFixture::new(&self._directory.path().join("project"))
+  }
+
+  fn calls(&self) -> Vec<String> {
+    recorded_calls(&self.call_log_path)
+  }
+
+  fn clear_calls(&self) {
+    clear_recorded_calls(&self.call_log_path);
+  }
+
+  /// 追加のプロジェクトを専用のサーバーと状態ファイルで設定へ加える。
+  fn add_project_with_state(&self, name: &str, state: &Value) -> PathBuf {
+    let directory = self._directory.path();
+    let project_dir = directory.join(name);
+    std::fs::create_dir_all(&project_dir).expect("追加プロジェクトの cwd を作れます");
+    let state_path = directory.join(format!("{name}-state.json"));
+    write_json(&state_path, state);
+    let server_key = format!("server-{name}");
+    let mut config: Value = serde_json::from_str(&std::fs::read_to_string(&self.config_path).expect("設定を読めます"))
+      .expect("設定を解析できます");
+    config["mcpServers"][&server_key] = json!({
+      "command": "node",
+      "args": [mock_script().display().to_string(), "--state", state_path.display().to_string()],
+      "env": {}
+    });
+    config["servers"][&server_key] = json!({ "name": format!("j5ik2o-{name}"), "kind": "Mac mini", "concurrency": 4 });
+    config["projects"].as_array_mut().expect("プロジェクト一覧があります").push(json!({
+      "name": name,
+      "server": server_key,
+      "about": format!("{name} の説明"),
+      "cwd": project_dir.display().to_string()
+    }));
+    write_json(&self.config_path, &config);
+    state_path
+  }
+
   fn rewrite_connection_thresholds(&self, failure_count: u32, delay_seconds: u32) {
     let current = std::fs::read_to_string(&self.config_path).expect("設定を読めます");
     let mut value: Value = serde_json::from_str(&current).expect("設定を解析できます");
@@ -188,6 +305,135 @@ impl Harness {
     mutate(&mut value);
     write_json(&self.config_path, &value);
   }
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+  fn contents(&self) -> String {
+    let bytes = self.0.lock().expect("ログのバッファを取得できます").clone();
+    String::from_utf8(bytes).expect("ログは UTF-8 です")
+  }
+}
+
+thread_local! {
+  /// このスレッドで動くテストのログの取り込み先。取り込み中のテストが無ければ None です。
+  static CURRENT_LOGS: RefCell<Option<CapturedLogs>> = const { RefCell::new(None) };
+}
+
+/// グローバルな購読者の書き込み先。書き込んだスレッドの取り込み先へ振り分け、取り込み中の
+/// テストが無いスレッドのログは捨てる。
+struct ThreadLocalWriter;
+
+impl Write for ThreadLocalWriter {
+  fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+    CURRENT_LOGS.with(|current| {
+      if let Some(logs) = current.borrow().as_ref() {
+        logs.0.lock().expect("ログのバッファを取得できます").extend_from_slice(buffer);
+      }
+    });
+    Ok(buffer.len())
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
+  }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
+  type Writer = ThreadLocalWriter;
+
+  fn make_writer(&'a self) -> Self::Writer {
+    ThreadLocalWriter
+  }
+}
+
+/// drop したときに、このスレッドのログの取り込みを止める。
+struct CaptureGuard;
+
+impl Drop for CaptureGuard {
+  fn drop(&mut self) {
+    CURRENT_LOGS.with(|current| current.borrow_mut().take());
+  }
+}
+
+/// このスレッドのログを取り込む。
+///
+/// tracing は callsite ごとの関心を全スレッドで共有してキャッシュする。テストごとに
+/// `set_default` で購読者を差し替えると、購読者を持たない別のテストのスレッドが先に周期ログの
+/// callsite を登録したときに「関心なし」がキャッシュされ、ログが届かなくなる。そのため購読者は
+/// テストバイナリで1回だけグローバルに入れ、書き込み先をスレッドごとに振り分ける。
+/// `#[tokio::test]` は current_thread で動くため、周期ログはテストのスレッドで出る。
+fn capture_logs() -> (CapturedLogs, CaptureGuard) {
+  static INITIALIZE: Once = Once::new();
+  INITIALIZE.call_once(|| {
+    tracing_subscriber::fmt()
+      .with_max_level(tracing::Level::INFO)
+      .with_ansi(false)
+      .with_writer(ThreadLocalWriter)
+      .init();
+  });
+  let logs = CapturedLogs::default();
+  CURRENT_LOGS.with(|current| *current.borrow_mut() = Some(logs.clone()));
+  (logs, CaptureGuard)
+}
+
+fn single_cycle_log_line(logs: &CapturedLogs) -> String {
+  let output = logs.contents();
+  let lines: Vec<&str> = output.lines().filter(|line| line.contains("cycle_ms=")).collect();
+  assert_eq!(lines.len(), 1, "1周期につき集計ログを1本だけ出します: {output}");
+  lines[0].to_owned()
+}
+
+/// 指定した順番（0 始まり）の周期ログ行を取り出す。
+fn nth_cycle_log_line(logs: &CapturedLogs, index: usize) -> String {
+  let output = logs.contents();
+  let lines: Vec<&str> = output.lines().filter(|line| line.contains("cycle_ms=")).collect();
+  assert!(lines.len() > index, "{index} 番目の周期ログがありません: {output}");
+  lines[index].to_owned()
+}
+
+/// 周期ログの `tool_calls=<数>` を数値で取り出す。
+fn tool_calls_value(line: &str) -> usize {
+  let prefix = "tool_calls=";
+  let start = line.find(prefix).unwrap_or_else(|| panic!("tool_calls がありません: {line}")) + prefix.len();
+  let digits: String = line[start..].chars().take_while(|character| character.is_ascii_digit()).collect();
+  digits.parse().expect("tool_calls の値が数値ではありません")
+}
+
+struct TwoCycleObservation {
+  first_calls:  Vec<String>,
+  second_calls: Vec<String>,
+  second_line:  String,
+  snapshot:     ProjectSnapshot,
+}
+
+/// 同じ Harness で 2 周期読み取り、1 周期目と 2 周期目の呼び出し・2 周期目のログ行・
+/// 最終スナップショットを返す。
+async fn run_two_cycles(state: Value) -> TwoCycleObservation {
+  let harness = Harness::new(state);
+  let (logs, _guard) = capture_logs();
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+  let first_calls = harness.calls();
+  harness.clear_calls();
+  poller.read_cycle_once().await.expect("2周期目を実行できます");
+  let second_calls = harness.calls();
+  let second_line = nth_cycle_log_line(&logs, 1);
+  let snapshot = harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).expect("スナップショットがあります");
+  poller.shutdown().await;
+  TwoCycleObservation { first_calls, second_calls, second_line, snapshot }
+}
+
+/// 周期ログの `tools=` から、指定した道具1件分のエントリを取り出す。
+fn tool_entry(line: &str, tool: &str) -> String {
+  let prefix = format!("{tool}(");
+  let start = line.find(&prefix).unwrap_or_else(|| panic!("道具 {tool} のエントリがありません: {line}"));
+  let entry = &line[start..];
+  // 複数あるときは `), ` の直前まで、最後の1件は行末までがエントリです。
+  let end = entry.find("), ").map_or(entry.len(), |index| index + 1);
+  entry[..end].to_owned()
 }
 
 #[tokio::test]
@@ -599,26 +845,376 @@ async fn standalone_inquiry_tool_error_keeps_connected_and_previous_inquiry() {
 }
 
 #[tokio::test]
-async fn get_run_tool_error_keeps_connected_and_records_no_connection_lost() {
-  // takt_get_run の isError は道具エラーであり接続断ではありません。サイクルは成功し、
-  // 偽の ConnectionLost を記録しません。
-  let harness = Harness::new(json!({
-    "goals": [],
-    "tasks": [ { "name": "a", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T10:00:00Z" } ],
-    "isError": ["takt_get_run"]
-  }));
+async fn running_run_is_built_from_the_run_files_without_calling_takt_get_run() {
+  // 一覧の run は meta.json と本体ログから作る。mock の takt_get_run は status・currentStep・
+  // stepLogs を別の値で返すため、takt_get_run
+  // から作る実装や両方を読む実装は値か呼び出し記録で落ちる。
+  let harness = Harness::new(state_with_running_tasks(&["r1"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  fixture.write_meta("r1", &running_meta("implement", 2, "development-core", "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    workflow_start_record("development-core"),
+    step_complete_record("plan", "architect", 1, "2026-11-13T10:00:00Z"),
+  ]);
   let mut poller = harness.poller();
 
-  let report = poller.read_cycle_once().await.expect("get_run の道具エラーでサイクルは失敗しません");
+  let report = poller.read_cycle_once().await.expect("1周期を実行できます");
+  let run = stored_run(&harness, "r1").expect("running の run が一覧にあります");
+  let calls = harness.calls();
+  poller.shutdown().await;
 
-  assert_eq!(report.projects_read, 1, "get_run の道具エラーではプロジェクトは読み取り成功です");
+  assert_eq!(report.projects_read, 1);
+  assert_eq!(run.status, takt_dash_backend::model::RunStatus::Running, "status は meta.json の値です");
+  assert_eq!(run.current_step.as_deref(), Some("implement"), "現在ステップは meta.json の値です");
+  assert_eq!(run.current_iteration, Some(2), "現在の iteration は meta.json の値です");
+  assert_eq!(run.started_at, Some(time("2026-11-13T09:00:00Z")), "開始時刻は meta.json の startTime です");
+  assert_eq!(step_names(&run), vec!["plan".to_owned()], "steps は本体ログの step_complete です");
+  assert_eq!(run.steps[0].started_at, time("2026-11-13T10:00:00Z"), "step の時刻は step_complete の timestamp です");
+  assert_eq!(run.steps[0].ended_at, None, "終了時刻は持ちません");
+  assert_eq!(run.steps[0].model, "", "model は空のままです");
+  assert_eq!(run.task_name.as_str(), "task-r1", "タスク名は takt_list_tasks のタスクから補います");
+  assert!(!calls.iter().any(|call| call == "takt_get_run"), "定期読み取りは takt_get_run を呼びません: {calls:?}");
+}
+
+#[tokio::test]
+async fn step_position_uses_the_meta_workflow_and_the_current_step() {
+  // ステップ位置は meta.json の workflow を takt_get_workflow で引き、meta.json の currentStep の
+  // 位置で決める。
+  let harness = Harness::new(state_with_running_tasks(&["r1"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  fixture.write_meta("r1", &running_meta("implement", 1, "development-core", "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[workflow_start_record("development-core")]);
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1周期を実行できます");
+  let run = stored_run(&harness, "r1").expect("running の run が一覧にあります");
+  poller.shutdown().await;
+
+  assert_eq!(run.current_step_number, Some(2), "implement は workflow の 2 番目です");
+  assert_eq!(run.total_steps, Some(3), "workflow の step は 3 件です");
+}
+
+#[tokio::test]
+async fn appended_step_complete_is_added_on_the_next_cycle_of_the_same_poller() {
+  // 同じ Poller の上で、1周期目の後に追記した step_complete が2周期目に加わる。
+  let harness = Harness::new(state_with_running_tasks(&["r1"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  fixture.write_meta("r1", &running_meta("implement", 1, "development-core", "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    workflow_start_record("development-core"),
+    step_complete_record("plan", "architect", 1, "2026-11-13T10:00:00Z"),
+  ]);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+  let first = stored_run(&harness, "r1").expect("1周期目の run があります");
+  assert_eq!(step_names(&first), vec!["plan".to_owned()]);
+
+  fixture.append_records("r1", &[step_complete_record("implement", "coder", 1, "2026-11-13T10:05:00Z")]);
+  poller.read_cycle_once().await.expect("2周期目を実行できます");
+  let second = stored_run(&harness, "r1").expect("2周期目の run があります");
+  let calls = harness.calls();
+  poller.shutdown().await;
+
+  assert_eq!(
+    step_names(&second),
+    vec!["plan".to_owned(), "implement".to_owned()],
+    "追記した step_complete だけが加わり、既読の step を重複させません"
+  );
+  assert!(!calls.iter().any(|call| call == "takt_get_run"), "どの周期も takt_get_run を呼びません: {calls:?}");
+}
+
+#[tokio::test]
+async fn already_read_part_of_an_unchanged_run_log_is_not_read_again_on_the_same_poller() {
+  // 1周期目で読んだ範囲を、inode と大きさを変えずに同じバイト長の別の文字列へ書き換える。
+  // 毎周期 先頭から読み直す実装は2周期目に "PLAN" を返して落ちる。
+  let harness = Harness::new(state_with_running_tasks(&["r1"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  fixture.write_meta("r1", &running_meta("implement", 1, "development-core", "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    workflow_start_record("development-core"),
+    step_complete_record("plan", "architect", 1, "2026-11-13T10:00:00Z"),
+  ]);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  fixture.overwrite_body_log_in_place("r1", "\"plan\"", "\"PLAN\"");
+  poller.read_cycle_once().await.expect("2周期目を実行できます");
+  let run = stored_run(&harness, "r1").expect("2周期目の run があります");
+  poller.shutdown().await;
+
+  assert_eq!(step_names(&run), vec!["plan".to_owned()], "既読範囲は読み直さず、1周期目の集計を保ちます");
+}
+
+#[tokio::test]
+async fn top_level_step_start_of_the_current_iteration_sets_the_current_step_started_at() {
+  // meta の currentStep・currentIteration・workflow に一致する最上位の step_start
+  // だけが現在ステップの 開始時刻になる。iteration の異なる先の step_start を採る実装は 10:00
+  // を返して落ちる。
+  let harness = Harness::new(state_with_running_tasks(&["r1"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  fixture.write_meta("r1", &running_meta("implement", 3, "development-core", "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    workflow_start_record("development-core"),
+    step_start_record("implement", "development-core", 2, "2026-11-13T10:00:00Z", &["implement"]),
+    step_start_record("implement", "development-core", 3, "2026-11-13T10:10:00Z", &["implement"]),
+  ]);
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1周期を実行できます");
+  let run = stored_run(&harness, "r1").expect("running の run が一覧にあります");
+  poller.shutdown().await;
+
+  assert_eq!(run.current_step_started_at, Some(time("2026-11-13T10:10:00Z")));
+  assert!(run.steps.is_empty(), "step_start はステップの記録になりません: {:?}", run.steps);
+}
+
+#[tokio::test]
+async fn nested_step_start_with_the_same_name_is_not_the_current_step_start() {
+  // stack の長さが 2 で外側の step が review の step_start は、名前が currentStep と同じでも
+  // 現在ステップの開始ではない。step_start もステップの記録にはならない。
+  let harness = Harness::new(state_with_running_tasks(&["r1"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  fixture.write_meta("r1", &running_meta("implement", 1, "development-core", "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    workflow_start_record("development-core"),
+    step_start_record("implement", "development-core", 1, "2026-11-13T10:10:00Z", &["review", "implement"]),
+  ]);
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1周期を実行できます");
+  let run = stored_run(&harness, "r1").expect("running の run が一覧にあります");
+  poller.shutdown().await;
+
+  assert!(run.steps.is_empty(), "step_start はステップの記録になりません: {:?}", run.steps);
+  assert_eq!(run.current_step_started_at, None, "入れ子の同名 step_start は最上位の一致として数えません");
+}
+
+#[tokio::test]
+async fn run_reports_are_listed_from_the_reports_directory() {
+  // 一覧の reports は run の reports/ の通常ファイルを、/ 区切りの相対パスの昇順と大きさで返す。
+  // takt_get_run の reports（decoy.md）は使わない。
+  let harness = Harness::new(state_with_running_tasks(&["r1"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  fixture.write_meta("r1", &running_meta("implement", 1, "development-core", "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[workflow_start_record("development-core")]);
+  fixture.write_report("r1", "subworkflows/review.md", "レビュー");
+  fixture.write_report("r1", "plan.md", "0123456789");
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1周期を実行できます");
+  let run = stored_run(&harness, "r1").expect("running の run が一覧にあります");
+  poller.shutdown().await;
+
+  let reports: Vec<(String, i64)> =
+    run.reports.iter().map(|report| (report.filename.clone(), report.size_bytes)).collect();
+  assert_eq!(reports, vec![("plan.md".to_owned(), 10), ("subworkflows/review.md".to_owned(), "レビュー".len() as i64)]);
+}
+
+#[tokio::test]
+async fn unreadable_run_keeps_its_previous_value_while_healthy_runs_use_the_new_value() {
+  // 1周期目は両方の run を読めた。2周期目は r2 の meta.json を壊し、r1 に step を追記する。
+  // r2 だけ前回値に戻り、r1 は今回値になり、プロジェクトは読み取り成功のまま接続断を記録しない。
+  // takt_get_run も失敗させ、保存場所でも takt-mcp でも読めない run の扱いを確かめる。
+  let harness = Harness::new(with_failing_get_run(state_with_running_tasks(&["r1", "r2"])));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }, RunTaskLine {
+    run_slug:        Some("r2"),
+    source_run_slug: None,
+  }]);
+  for run_slug in ["r1", "r2"] {
+    fixture.write_meta(run_slug, &running_meta("implement", 1, "development-core", "2026-11-13T09:00:00Z"));
+    fixture.append_records(run_slug, &[
+      workflow_start_record("development-core"),
+      step_complete_record("plan", "architect", 1, "2026-11-13T10:00:00Z"),
+    ]);
+  }
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+  let previous_r2 = stored_run(&harness, "r2").expect("1周期目の r2 があります");
+
+  fixture.write_meta_raw("r2", "{ this is not json");
+  fixture.append_records("r1", &[step_complete_record("implement", "coder", 1, "2026-11-13T10:05:00Z")]);
+  let report = poller.read_cycle_once().await.expect("2周期目を実行できます");
+  let r1 = stored_run(&harness, "r1").expect("2周期目の r1 があります");
+  let r2 = stored_run(&harness, "r2").expect("読めない r2 は前回値で残ります");
+  poller.shutdown().await;
+
+  assert_eq!(report.projects_read, 1, "run を1件読めなくてもプロジェクトは読み取り成功です");
   assert_eq!(report.projects_failed, 0);
-  let slot = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert!(slot.is_connected(), "補助読み取りの道具エラーは connected を偽にしません");
+  assert_eq!(r2, previous_r2, "読めない run は前回の同じ run の値です");
+  assert_eq!(step_names(&r1), vec!["plan".to_owned(), "implement".to_owned()], "健常な run は今回の値です");
   let events: Vec<EventKind> =
     harness.activity.recent_events(10).unwrap().into_iter().map(|event| event.kind).collect();
-  assert!(!events.contains(&EventKind::ConnectionLost), "偽の ConnectionLost を記録しません: {events:?}");
+  assert!(!events.contains(&EventKind::ConnectionLost), "run の読み取り失敗で接続断を記録しません: {events:?}");
+}
+
+#[tokio::test]
+async fn unreadable_run_without_a_previous_value_is_left_out_of_the_list() {
+  // 前回値の無い run が保存場所でも takt-mcp でも読めないときは、その run だけ一覧から欠落し、
+  // 健常な run は一覧に入る。
+  let harness = Harness::new(with_failing_get_run(state_with_running_tasks(&["r1", "r2"])));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }, RunTaskLine {
+    run_slug:        Some("r2"),
+    source_run_slug: None,
+  }]);
+  fixture.write_meta("r1", &running_meta("implement", 1, "development-core", "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[workflow_start_record("development-core")]);
+  fixture.write_meta_raw("r2", "{ this is not json");
+  let mut poller = harness.poller();
+
+  let report = poller.read_cycle_once().await.expect("1周期を実行できます");
+  let r1 = stored_run(&harness, "r1");
+  let r2 = stored_run(&harness, "r2");
   poller.shutdown().await;
+
+  assert_eq!(report.projects_read, 1);
+  assert!(r1.is_some(), "健常な run は一覧に入ります");
+  assert!(r2.is_none(), "前回値の無い読めない run は一覧から欠落します");
+}
+
+/// running なタスク `run_slugs` を持ち、takt_get_run が r-remote だけを実行中の run として返す
+/// mock の状態。r-remote の値はリモートのサーバーにある run を表し、ローカルの保存場所には無い。
+fn state_with_remote_run(run_slugs: &[&str]) -> Value {
+  let tasks: Vec<Value> = run_slugs
+    .iter()
+    .map(|run_slug| {
+      json!({ "name": format!("task-{run_slug}"), "status": "running", "runSlug": run_slug, "startedAt": "2026-11-13T08:00:00Z" })
+    })
+    .collect();
+  json!({
+    "tasks": tasks,
+    "runs": {
+      "r-remote": {
+        "runSlug": "r-remote",
+        "status": "running",
+        "workflow": "development-core",
+        "currentStep": "implement",
+        "currentIteration": 2,
+        "startedAt": "2026-11-13T09:00:00Z",
+        "stepLogs": [ { "step": "plan", "persona": "architect", "status": "done", "timestamp": "2026-11-13T09:10:00Z", "iteration": 1 } ],
+        "reports": [ { "filename": "plan.md", "sizeBytes": 10 } ]
+      }
+    },
+    "workflows": { "development-core": ["plan", "implement", "review"] }
+  })
+}
+
+#[tokio::test]
+async fn run_of_a_project_without_a_local_task_table_is_built_from_takt_get_run() {
+  // リモートのサーバーのプロジェクトは、ローカルに tasks.yaml
+  // が無く保存場所を読めない。その実行中の run は takt_get_run
+  // の値で一覧に入る。ローカルの読み取りだけに頼る実装は run が一覧から消えて落ちる。
+  let harness = Harness::new(state_with_remote_run(&["r-remote"]));
+  let mut poller = harness.poller();
+
+  let report = poller.read_cycle_once().await.expect("1周期を実行できます");
+  let run = stored_run(&harness, "r-remote");
+  let calls = harness.calls();
+  poller.shutdown().await;
+
+  assert_eq!(report.projects_read, 1);
+  let run = run.expect("ローカルで読めない実行中の run も一覧に入ります");
+  assert_eq!(run.status, takt_dash_backend::model::RunStatus::Running);
+  assert_eq!(run.current_step.as_deref(), Some("implement"), "現在ステップは takt_get_run の値です");
+  assert_eq!(run.current_iteration, Some(2));
+  assert_eq!(run.started_at, Some(time("2026-11-13T09:00:00Z")));
+  assert_eq!(step_names(&run), vec!["plan".to_owned()], "steps は takt_get_run の stepLogs です");
+  let reports: Vec<(String, i64)> =
+    run.reports.iter().map(|report| (report.filename.clone(), report.size_bytes)).collect();
+  assert_eq!(reports, vec![("plan.md".to_owned(), 10)]);
+  assert!(
+    calls.iter().any(|call| call == "takt_get_run"),
+    "ローカルで読めない run は takt_get_run で読みます: {calls:?}"
+  );
+}
+
+#[tokio::test]
+async fn remote_run_with_more_than_one_page_of_step_logs_collects_every_page_and_uses_the_last_step_time() {
+  // takt_get_run は stepLogs を1ページ 50 件で返す（mock も実 takt-mcp と同じ大きさ）。51 件の
+  // stepLogs を持つリモートの run（ローカルに tasks.yaml が無く Unreadable）では、2ページ目まで
+  // 集めて steps が 51 件になり、最終ログ時刻は最後のページの最後のステップの時刻になる。
+  // 1ページ目だけを読む実装は steps が 50 件で s49 の時刻になって落ちる。
+  let mut state = state_with_remote_run(&["r-remote"]);
+  let step_logs: Vec<Value> = (0..51)
+    .map(|index| {
+      json!({
+        "step": format!("s{index}"),
+        "persona": "coder",
+        "status": "done",
+        "timestamp": (time("2026-11-13T09:00:00Z") + chrono::Duration::minutes(index)).to_rfc3339(),
+        "iteration": 1
+      })
+    })
+    .collect();
+  state["runs"]["r-remote"]["stepLogs"] = json!(step_logs);
+  let harness = Harness::new(state);
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1周期を実行できます");
+  let run = stored_run(&harness, "r-remote").expect("ローカルで読めない実行中の run も一覧に入ります");
+  poller.shutdown().await;
+
+  assert_eq!(run.steps.len(), 51, "2ページ目の stepLogs まで集めます: {:?}", step_names(&run));
+  assert_eq!(run.steps.last().map(|step| step.step_name.as_str()), Some("s50"));
+  assert_eq!(
+    run.last_log_at,
+    Some(time("2026-11-13T09:00:00Z") + chrono::Duration::minutes(50)),
+    "最終ログ時刻は最後のページの最後のステップの時刻です"
+  );
+}
+
+#[tokio::test]
+async fn run_missing_from_the_local_task_table_is_built_from_takt_get_run_while_local_runs_are_not() {
+  // ローカルの tasks.yaml に載っていない run（NotListed）は takt_get_run で読み、載っている run は
+  // 保存場所から読む。takt_get_run は r-remote の1回だけで、ローカルで読めた run には呼ばない。
+  let harness = Harness::new(state_with_remote_run(&["r-local", "r-remote"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r-local"), source_run_slug: None }]);
+  fixture.write_meta("r-local", &running_meta("review", 1, "development-core", "2026-11-13T09:00:00Z"));
+  fixture.append_records("r-local", &[workflow_start_record("development-core")]);
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1周期を実行できます");
+  let local = stored_run(&harness, "r-local").expect("ローカルの run は一覧にあります");
+  let remote = stored_run(&harness, "r-remote");
+  let calls = harness.calls();
+  poller.shutdown().await;
+
+  assert_eq!(local.current_step.as_deref(), Some("review"), "ローカルの run は meta.json の値です");
+  let remote = remote.expect("tasks.yaml に無い実行中の run も一覧に入ります");
+  assert_eq!(remote.current_step.as_deref(), Some("implement"), "対応表に無い run は takt_get_run の値です");
+  assert_eq!(
+    calls.iter().filter(|call| *call == "takt_get_run").count(),
+    1,
+    "takt_get_run はローカルで読めない run の分だけ呼びます: {calls:?}"
+  );
+}
+
+#[tokio::test]
+async fn run_summary_is_the_first_line_of_the_meta_task() {
+  // 一覧の run の要約は meta.json の task の1行目です。空のままにする実装は落ちる。
+  let harness = Harness::new(state_with_running_tasks(&["r1"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  let mut meta = running_meta("implement", 1, "development-core", "2026-11-13T09:00:00Z");
+  meta["task"] = json!("認証処理を実装する\n詳細: トークンの検証を加える");
+  fixture.write_meta("r1", &meta);
+  fixture.append_records("r1", &[workflow_start_record("development-core")]);
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1周期を実行できます");
+  let run = stored_run(&harness, "r1").expect("running の run が一覧にあります");
+  poller.shutdown().await;
+
+  assert_eq!(run.summary, "認証処理を実装する");
 }
 
 #[tokio::test]
@@ -709,6 +1305,426 @@ async fn change_notification_is_sent_when_a_project_becomes_delayed() {
 
   assert!(changes.try_recv().is_ok(), "遅延中への変化も通知します");
   poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn cycle_log_reports_duration_projects_and_per_tool_call_counts() {
+  let harness = Harness::new(state_with_goal("g1"));
+  let (logs, _guard) = capture_logs();
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("1サイクルを実行できます");
+  poller.shutdown().await;
+
+  let line = single_cycle_log_line(&logs);
+  assert!(line.contains("cycle_ms="), "周期の所要時間を出します: {line}");
+  assert!(line.contains("projects=1"), "設定上のプロジェクト数を出します: {line}");
+  assert!(line.contains("tool_calls=6"), "道具呼び出しの総数を出します: {line}");
+  assert!(line.contains("tool_timeouts=0"), "タイムアウト件数を出します: {line}");
+  assert!(line.contains("takt_list_goals(calls=1,"), "道具名ごとの回数を出します: {line}");
+  assert!(line.contains("takt_get_goal(calls=1,"), "道具名ごとの回数を出します: {line}");
+  assert!(
+    line.contains("takt_list_goal_registration_proposals(calls=1,"),
+    "ゴール登録提案も1サイクルに1回だけ読みます: {line}"
+  );
+
+  let goals = tool_entry(&line, "takt_list_goals");
+  assert!(goals.contains("calls=1,"), "道具エントリに回数を出します: {goals}");
+  assert!(goals.contains("failures=0,"), "道具エントリに失敗件数を出します: {goals}");
+  assert!(goals.contains("timeouts=0,"), "道具エントリにタイムアウト件数を出します: {goals}");
+  assert!(goals.contains("total_ms="), "道具エントリに合計時間を出します: {goals}");
+  assert!(goals.contains("max_ms="), "道具エントリに最大時間を出します: {goals}");
+  assert!(goals.contains("p95_ms="), "道具エントリに p95 を出します: {goals}");
+}
+
+#[tokio::test]
+async fn cycle_log_records_failed_tool_calls_and_separates_projects_from_projects_read() {
+  let harness = Harness::new(json!({ "goals": [], "isError": ["takt_list_goals"] }));
+  let (logs, _guard) = capture_logs();
+  let mut poller = harness.poller();
+
+  poller.read_cycle_once().await.expect("失敗してもサイクルは完了します");
+  poller.shutdown().await;
+
+  let line = single_cycle_log_line(&logs);
+  assert!(line.contains("projects=1"), "設定上のプロジェクト数を出します: {line}");
+  assert!(line.contains("projects_read=0"), "読み取り成功数と区別します: {line}");
+  assert!(line.contains("projects_failed=1"), "失敗したプロジェクト数を出します: {line}");
+  assert!(line.contains("tool_calls=1"), "失敗した呼び出しも1回として記録します: {line}");
+  assert!(line.contains("takt_list_goals(calls=1,"), "失敗した呼び出しも道具名ごとに記録します: {line}");
+  assert!(line.contains("failures=1"), "失敗した呼び出しを失敗として数えます: {line}");
+
+  assert!(line.contains("tool_failures=1"), "周期全体の失敗件数を出します: {line}");
+  let goals = tool_entry(&line, "takt_list_goals");
+  assert!(goals.contains("calls=1,"), "道具エントリに回数を出します: {goals}");
+  assert!(goals.contains("failures=1,"), "道具別の失敗件数を出します: {goals}");
+  assert!(goals.contains("timeouts=0,"), "道具エントリにタイムアウト件数を出します: {goals}");
+  assert!(goals.contains("total_ms="), "道具エントリに合計時間を出します: {goals}");
+  assert!(goals.contains("max_ms="), "道具エントリに最大時間を出します: {goals}");
+  assert!(goals.contains("p95_ms="), "道具エントリに p95 を出します: {goals}");
+}
+
+#[tokio::test]
+async fn completed_goals_do_not_increase_tool_calls_between_cycles() {
+  let without_goals = run_two_cycles(state_with_goals(0, "completed", "active")).await;
+  let with_completed = run_two_cycles(state_with_goals(20, "completed", "active")).await;
+
+  assert_eq!(
+    tool_calls_value(&without_goals.second_line),
+    tool_calls_value(&with_completed.second_line),
+    "完了ゴールが 20 件あっても、状態が変わらない 2 周期目の呼び出し回数は 0 件のときと同じです"
+  );
+  assert!(with_completed.second_line.contains("projects_read=1"), "{}", with_completed.second_line);
+  assert_eq!(with_completed.snapshot.goals.len(), 20, "20 件の完了ゴールを保持します");
+
+  let first_questions = with_completed.first_calls.iter().filter(|call| *call == "takt_list_goal_questions").count();
+  assert_eq!(first_questions, 20, "1 周期目は各ゴールの質問を読んで基準化します: {:?}", with_completed.first_calls);
+  assert!(
+    with_completed.first_calls.iter().any(|call| call == "takt_get_goal"),
+    "1 周期目は各ゴールの通知を読んで基準化します: {:?}",
+    with_completed.first_calls
+  );
+
+  assert!(
+    !with_completed.second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "状態が変わらない完了ゴールの質問は 2 周期目に読みません: {:?}",
+    with_completed.second_calls
+  );
+  assert!(
+    !with_completed.second_calls.iter().any(|call| call == "takt_get_goal"),
+    "状態が変わらない完了ゴールの通知は 2 周期目に読みません: {:?}",
+    with_completed.second_calls
+  );
+}
+
+#[tokio::test]
+async fn terminal_goal_skips_aux_reads_and_keeps_pending_items_without_new_events() {
+  let state = json!({
+    "goals": [ { "id": "g1", "status": "completed", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ],
+    "goalQuestions": { "g1": [ { "id": "q1", "status": "pending", "kind": "question", "body": "どうしますか", "createdAt": "2026-11-13T09:00:00Z" } ] },
+    "notifications": { "g1": [ { "id": "n-blocked", "kind": "blocked", "body": "依存解決に失敗しました", "recordedAt": "2026-11-13T09:30:00Z" } ] }
+  });
+  let harness = Harness::new(state);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1 周期目を実行できます");
+  harness.clear_calls();
+  let report = poller.read_cycle_once().await.expect("2 周期目を実行できます");
+  let snapshot = harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).expect("スナップショットがあります");
+  let second_calls = harness.calls();
+  poller.shutdown().await;
+
+  assert_eq!(report.events_recorded, 0, "状態が変わらない周期では新しい出来事を記録しません");
+  assert!(
+    snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id.as_str() == "q1"),
+    "スキップしたゴールの未回答問い合わせを前回値から引き継ぎます"
+  );
+  assert!(
+    snapshot.notifications.iter().any(|notification| notification.notification_id == "n-blocked"),
+    "スキップしたゴールの blocked 通知を前回値から引き継ぎます"
+  );
+  assert!(
+    !second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "完了ゴールの質問は 2 周期目に読みません: {second_calls:?}"
+  );
+  assert!(
+    !second_calls.iter().any(|call| call == "takt_get_goal"),
+    "完了ゴールの通知は 2 周期目に読みません: {second_calls:?}"
+  );
+
+  let blocked: usize =
+    harness.activity.recent_events(50).unwrap().into_iter().filter(|event| event.kind == EventKind::Blocked).count();
+  assert_eq!(blocked, 0, "引き継いだ通知を新しい出来事として重複記録しません");
+}
+
+#[tokio::test]
+async fn awaiting_merge_goal_is_read_on_every_cycle() {
+  let state = json!({
+    "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1", "pullRequest": { "number": 5, "url": "https://example.test/pr/5" } } ],
+    "goalQuestions": { "g1": [ { "id": "q1", "status": "pending", "kind": "question", "body": "どうしますか", "createdAt": "2026-11-13T09:00:00Z" } ] },
+    "notifications": { "g1": [ { "id": "n-merge", "kind": "awaiting_merge", "body": "マージ待ち", "recordedAt": "2026-11-13T09:30:00Z" } ] }
+  });
+  let harness = Harness::new(state);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1 周期目を実行できます");
+  harness.clear_calls();
+  poller.read_cycle_once().await.expect("2 周期目を実行できます");
+  let second_calls = harness.calls();
+  poller.shutdown().await;
+
+  assert!(
+    second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "人のマージ待ちは終端ではないため、2 周期目も質問を読みます: {second_calls:?}"
+  );
+  assert!(
+    second_calls.iter().any(|call| call == "takt_get_goal"),
+    "人のマージ待ちは終端ではないため、2 周期目も通知を読みます: {second_calls:?}"
+  );
+}
+
+#[tokio::test]
+async fn status_transition_to_completed_reads_auxiliary_data_again() {
+  let created = json!({
+    "goals": [ { "id": "g1", "status": "created", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ],
+    "goalQuestions": { "g1": [ { "id": "q1", "status": "pending", "kind": "question", "body": "1 周期目の質問", "createdAt": "2026-11-13T09:00:00Z" } ] },
+    "notifications": { "g1": [ { "id": "n1", "kind": "blocked", "body": "1 周期目の通知", "recordedAt": "2026-11-13T09:30:00Z" } ] }
+  });
+  let harness = Harness::new(created);
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1 周期目を実行できます");
+  harness.clear_calls();
+
+  harness.rewrite_state(json!({
+    "goals": [ { "id": "g1", "status": "completed", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ],
+    "goalQuestions": { "g1": [
+      { "id": "q1", "status": "pending", "kind": "question", "body": "1 周期目の質問", "createdAt": "2026-11-13T09:00:00Z" },
+      { "id": "q2", "status": "pending", "kind": "question", "body": "2 周期目の質問", "createdAt": "2026-11-13T10:00:00Z" }
+    ] },
+    "notifications": { "g1": [ { "id": "n2", "kind": "blocked", "body": "2 周期目の通知", "recordedAt": "2026-11-13T10:30:00Z" } ] }
+  }));
+  poller.read_cycle_once().await.expect("2 周期目を実行できます");
+  let second_calls = harness.calls();
+  let snapshot = harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).expect("スナップショットがあります");
+  poller.shutdown().await;
+
+  assert!(
+    second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "終端へ変わった周期は質問を読みます: {second_calls:?}"
+  );
+  assert!(
+    second_calls.iter().any(|call| call == "takt_get_goal"),
+    "終端へ変わった周期は通知を読みます: {second_calls:?}"
+  );
+  assert!(
+    snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id.as_str() == "q2"),
+    "遷移周期の新しい質問を snapshot に入れます"
+  );
+  assert!(
+    snapshot.notifications.iter().any(|notification| notification.notification_id == "n2"),
+    "遷移周期の新しい通知を snapshot に入れます"
+  );
+}
+
+#[tokio::test]
+async fn aborted_goals_do_not_increase_tool_calls_between_cycles() {
+  let without_goals = run_two_cycles(state_with_goals(0, "created", "aborted")).await;
+  let with_aborted = run_two_cycles(state_with_goals(20, "created", "aborted")).await;
+
+  assert_eq!(
+    tool_calls_value(&without_goals.second_line),
+    tool_calls_value(&with_aborted.second_line),
+    "中止ゴールが 20 件あっても、状態が変わらない 2 周期目の呼び出し回数は 0 件のときと同じです"
+  );
+  assert_eq!(with_aborted.snapshot.goals.len(), 20, "20 件の中止ゴールを保持します");
+  assert!(
+    !with_aborted.second_calls.iter().any(|call| call == "takt_list_goal_questions"),
+    "状態が変わらない中止ゴールの質問は 2 周期目に読みません: {:?}",
+    with_aborted.second_calls
+  );
+  assert!(
+    !with_aborted.second_calls.iter().any(|call| call == "takt_get_goal"),
+    "状態が変わらない中止ゴールの通知は 2 周期目に読みません: {:?}",
+    with_aborted.second_calls
+  );
+}
+
+/// ゴールの補助読み取りの項目。
+#[derive(Clone, Copy, Debug)]
+enum AuxRead {
+  Questions,
+  Notifications,
+}
+
+impl AuxRead {
+  fn tool(self) -> &'static str {
+    match self {
+      | AuxRead::Questions => "takt_list_goal_questions",
+      | AuxRead::Notifications => "takt_get_goal",
+    }
+  }
+
+  fn other(self) -> AuxRead {
+    match self {
+      | AuxRead::Questions => AuxRead::Notifications,
+      | AuxRead::Notifications => AuxRead::Questions,
+    }
+  }
+
+  /// 終端状態になってから現れる項目（q2 または n2）が snapshot にあるか。
+  fn has_terminal_item(self, snapshot: &ProjectSnapshot) -> bool {
+    match self {
+      | AuxRead::Questions => snapshot.inquiries.iter().any(|inquiry| inquiry.inquiry_id.as_str() == "q2"),
+      | AuxRead::Notifications => {
+        snapshot.notifications.iter().any(|notification| notification.notification_id == "n2")
+      },
+    }
+  }
+}
+
+/// ゴール g1 の状態と、指定した補助読み取りの道具エラーを持つ mock の状態。終端（completed）の
+/// ときだけ、質問 q2 と通知 n2 が加わる。
+fn aux_state(status: &str, failing: Option<AuxRead>) -> Value {
+  let terminal = status == "completed";
+  let mut questions = vec![
+    json!({ "id": "q1", "status": "pending", "kind": "question", "body": "質問 1", "createdAt": "2026-11-13T09:00:00Z" }),
+  ];
+  let mut notifications =
+    vec![json!({ "id": "n1", "kind": "blocked", "body": "通知 1", "recordedAt": "2026-11-13T09:30:00Z" })];
+  if terminal {
+    questions.push(
+      json!({ "id": "q2", "status": "pending", "kind": "question", "body": "質問 2", "createdAt": "2026-11-13T10:00:00Z" }),
+    );
+    notifications
+      .push(json!({ "id": "n2", "kind": "blocked", "body": "通知 2", "recordedAt": "2026-11-13T10:30:00Z" }));
+  }
+  let is_error: Vec<String> = failing.into_iter().map(|aux| format!("{}:g1", aux.tool())).collect();
+  json!({
+    "goals": [ { "id": "g1", "status": status, "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ],
+    "goalQuestions": { "g1": questions },
+    "notifications": { "g1": notifications },
+    "isError": is_error
+  })
+}
+
+/// 終端のゴールで `failing` の補助読み取りだけが失敗した後、同じ Poller の上で
+/// 「失敗 → 次周期に読み直す → 以降は読まない」を観測する。
+///
+/// `from_transition` が真なら、1周期目は created で読み、2周期目に completed へ変わった周期で
+/// 失敗させる。偽なら、1周期目に completed を初めて観測した周期で失敗させる。
+async fn assert_terminal_aux_failure_is_retried(failing: AuxRead, from_transition: bool) {
+  let harness =
+    Harness::new(if from_transition { aux_state("created", None) } else { aux_state("completed", Some(failing)) });
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+  if from_transition {
+    harness.rewrite_state(aux_state("completed", Some(failing)));
+    poller.read_cycle_once().await.expect("終端へ変わる周期を実行できます");
+  }
+  let failed = harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).expect("スナップショットがあります");
+  assert!(!failing.has_terminal_item(&failed), "失敗した周期は {failing:?} の新しい項目を読めていない前提です");
+  assert!(failing.other().has_terminal_item(&failed), "失敗しなかった {:?} は終端の値を読めています", failing.other());
+
+  harness.rewrite_state(aux_state("completed", None));
+  harness.clear_calls();
+  poller.read_cycle_once().await.expect("読み直す周期を実行できます");
+  let retry_calls = harness.calls();
+  let retried = harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).expect("スナップショットがあります");
+  harness.clear_calls();
+  poller.read_cycle_once().await.expect("状態が変わらない周期を実行できます");
+  let steady_calls = harness.calls();
+  poller.shutdown().await;
+
+  assert!(
+    retry_calls.iter().any(|call| call == failing.tool()),
+    "終端のゴールで読めなかった {failing:?} は次の周期に読み直します: {retry_calls:?}"
+  );
+  assert!(failing.has_terminal_item(&retried), "読み直した {failing:?} の値を snapshot に入れます");
+  assert!(
+    !retry_calls.iter().any(|call| call == failing.other().tool()),
+    "読めていた {:?} は読み直しません: {retry_calls:?}",
+    failing.other()
+  );
+  assert!(
+    !steady_calls.iter().any(|call| call == AuxRead::Questions.tool() || call == AuxRead::Notifications.tool()),
+    "読み直しに成功した後は、状態が変わらない終端のゴールの補助読み取りを省きます: {steady_calls:?}"
+  );
+}
+
+#[tokio::test]
+async fn terminal_goal_question_read_failure_on_the_transition_is_retried_on_the_next_cycle() {
+  assert_terminal_aux_failure_is_retried(AuxRead::Questions, true).await;
+}
+
+#[tokio::test]
+async fn terminal_goal_question_read_failure_on_the_first_observation_is_retried_on_the_next_cycle() {
+  assert_terminal_aux_failure_is_retried(AuxRead::Questions, false).await;
+}
+
+#[tokio::test]
+async fn terminal_goal_notification_read_failure_on_the_transition_is_retried_on_the_next_cycle() {
+  assert_terminal_aux_failure_is_retried(AuxRead::Notifications, true).await;
+}
+
+#[tokio::test]
+async fn terminal_goal_notification_read_failure_on_the_first_observation_is_retried_on_the_next_cycle() {
+  assert_terminal_aux_failure_is_retried(AuxRead::Notifications, false).await;
+}
+
+/// ゴール g1 の状態と、指定した補助読み取りの道具エラーを持つ mock の状態。質問は q1、通知は n1
+/// だけで、終端になっても増えない。読み直しても画面に出る内容は変わらない。
+fn unchanged_aux_state(status: &str, failing: Option<AuxRead>) -> Value {
+  let is_error: Vec<String> = failing.into_iter().map(|aux| format!("{}:g1", aux.tool())).collect();
+  json!({
+    "goals": [ { "id": "g1", "status": status, "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ],
+    "goalQuestions": { "g1": [ { "id": "q1", "status": "pending", "kind": "question", "body": "質問 1", "createdAt": "2026-11-13T09:00:00Z" } ] },
+    "notifications": { "g1": [ { "id": "n1", "kind": "blocked", "body": "通知 1", "recordedAt": "2026-11-13T09:30:00Z" } ] },
+    "isError": is_error
+  })
+}
+
+/// 受け取り済みの変化通知を捨てる。
+fn drain_changes(changes: &mut tokio::sync::broadcast::Receiver<()>) {
+  while changes.try_recv().is_ok() {}
+}
+
+/// completed へ変わった周期で `failing` の補助読み取りだけが失敗し、次の周期で読み直しに成功する。
+/// 読み直した内容が前回値と同じなら、その周期は画面に出る状態を変えないため、変化通知を送らない。
+async fn assert_retry_with_unchanged_content_sends_no_change_notification(failing: AuxRead) {
+  let harness = Harness::new(unchanged_aux_state("created", None));
+  let mut changes = harness.changes.subscribe();
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+  harness.rewrite_state(unchanged_aux_state("completed", Some(failing)));
+  poller.read_cycle_once().await.expect("終端へ変わる周期を実行できます");
+  drain_changes(&mut changes);
+
+  harness.rewrite_state(unchanged_aux_state("completed", None));
+  harness.clear_calls();
+  poller.read_cycle_once().await.expect("読み直す周期を実行できます");
+  let retry_calls = harness.calls();
+  let notified = changes.try_recv();
+  poller.shutdown().await;
+
+  assert!(
+    retry_calls.iter().any(|call| call == failing.tool()),
+    "終端のゴールで読めなかった {failing:?} は次の周期に読み直します: {retry_calls:?}"
+  );
+  assert!(notified.is_err(), "読み直した {failing:?} の内容が同じ周期では変化通知を送りません: {notified:?}");
+}
+
+#[tokio::test]
+async fn retried_terminal_goal_questions_with_unchanged_content_send_no_change_notification() {
+  assert_retry_with_unchanged_content_sends_no_change_notification(AuxRead::Questions).await;
+}
+
+#[tokio::test]
+async fn retried_terminal_goal_notifications_with_unchanged_content_send_no_change_notification() {
+  assert_retry_with_unchanged_content_sends_no_change_notification(AuxRead::Notifications).await;
+}
+
+#[tokio::test]
+async fn projects_are_read_concurrently() {
+  // 子プロセスの起動時間は、並列に動くほかのテストの負荷で大きく揺れる。遅延なしの1周期目で
+  // 3 プロジェクトの子プロセスを起動しておき、遅延を入れた2周期目の読み取りだけを測る。
+  let delayed = json!({ "delayMs": { "takt_list_goals": 1000 } });
+  let harness = Harness::new(json!({}));
+  let second_state = harness.add_project_with_state("project-two", &json!({}));
+  let third_state = harness.add_project_with_state("project-three", &json!({}));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("子プロセスを起動する 1 サイクル目を実行できます");
+  for state_path in [&harness.state_path, &second_state, &third_state] {
+    write_json(state_path, &delayed);
+  }
+
+  let started = Instant::now();
+  let report = poller.read_cycle_once().await.expect("1 サイクルを実行できます");
+  let elapsed = started.elapsed();
+  poller.shutdown().await;
+
+  assert_eq!(report.projects_read, 3, "3 プロジェクトを読み取ります");
+  assert!(
+    elapsed < Duration::from_millis(2500),
+    "プロジェクト間の読み取りを並行にします。直列なら 1 秒の遅延が 3 回で 3 秒以上かかります: {elapsed:?}"
+  );
 }
 
 #[tokio::test]
@@ -1214,8 +2230,17 @@ async fn config_server_changes_are_reflected_after_a_cycle_and_notify_watchers()
 async fn log_silent_threshold_crossing_notifies_once_on_the_same_poller() {
   // 同じ Poller 実体のまま時刻だけを進め、run のログ無音が閾値（既定 10 分）を跨いだ
   // サイクルでだけ変化通知を 1 回送る。時刻は注入し、実時間の待機に依存しない。
+  // 最後のログは step_complete の時刻と本体ログの更新時刻を同じ 10:00 に揃えて固定する。
   let last_log_at = "2026-11-13T10:00:00Z";
-  let harness = Harness::new(state_with_running_run(last_log_at));
+  let harness = Harness::new(state_with_running_tasks(&["r1"]));
+  let fixture = harness.run_fixture();
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("r1"), source_run_slug: None }]);
+  fixture.write_meta("r1", &running_meta("implement", 1, "development-core", last_log_at));
+  fixture.append_records("r1", &[
+    workflow_start_record("development-core"),
+    step_complete_record("plan", "architect", 1, last_log_at),
+  ]);
+  fixture.set_body_log_modified("r1", time(last_log_at));
   let mut changes = harness.changes.subscribe();
   let mut poller = harness.poller();
 
@@ -1273,15 +2298,20 @@ async fn pending_decision_stale_threshold_crossing_notifies_once_on_the_same_pol
 #[tokio::test]
 async fn stop_request_during_the_wait_returns_promptly() {
   // interval 30 秒の待機中に停止要求を送ると、interval の満了を待たずに戻る。
+  // 子プロセスの起動時間は並列に動くほかのテストの負荷で揺れるため、先に1周期読んで起動しておき、
+  // 期限には起動済みの子プロセスでの周期と待機だけを含める。
   let harness = Harness::new(state_with_goal("g1"));
   let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("子プロセスを起動する 1 サイクル目を実行できます");
+  let warmed_up_at = harness.store.slot("takt-dash").and_then(|slot| slot.last_read_at);
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
   let (sent_at_tx, sent_at_rx) = tokio::sync::oneshot::channel();
   let store = harness.store.clone();
   let signal = tokio::spawn(async move {
-    // 最初のサイクルが終わって待機に入ったことを、状態ストアで観測してから停止を送る。
+    // run_until_stopped の最初のサイクルが終わって待機に入ったことを、読めた時刻が進んだことで
+    // 観測してから停止を送る。
     for _ in 0..500 {
-      if store.slot("takt-dash").is_some_and(|slot| slot.is_connected()) {
+      if store.slot("takt-dash").is_some_and(|slot| slot.is_connected() && slot.last_read_at != warmed_up_at) {
         break;
       }
       tokio::time::sleep(std::time::Duration::from_millis(10)).await;

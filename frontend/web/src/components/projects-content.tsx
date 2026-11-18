@@ -1,12 +1,12 @@
 import type { ReactElement } from "react";
-import type { GetProjectsResponse, Goal } from "../proto/taktdash";
+import type { DashboardState, Goal } from "../proto/taktdash";
 import { projectAnchorId } from "../state/anchors";
 import { goalBadge, goalSection, type GoalSection } from "../state/goal-badge";
 import { goalDisplayName, goalListHeading, goalTaskProgress } from "../state/goal-summary";
 import { FAILED_TASK_KINDS_LABEL, projectKey, resolveThresholds, sortPendingDecisions, toRunView } from "../state/dashboard";
 
 type ProjectsContentProps = {
-  response: GetProjectsResponse;
+  state: DashboardState;
   now: Date;
 };
 
@@ -77,11 +77,7 @@ function GoalFold({
   );
 }
 
-export function ProjectsContent({ response, now }: ProjectsContentProps): ReactElement {
-  const state = response.state;
-  if (state === undefined) {
-    return <main className="page"><p className="note">プロジェクトの状態を取得できませんでした。</p></main>;
-  }
+export function ProjectsContent({ state, now }: ProjectsContentProps): ReactElement {
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
   const projectByKey = new Map(
     state.projects.map((project) => [projectKey(project.serverId, project.name), project]),

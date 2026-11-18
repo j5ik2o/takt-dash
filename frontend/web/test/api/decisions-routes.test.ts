@@ -12,15 +12,18 @@ import { POST as postAnswer } from "../../app/api/decisions/answer/route.ts";
 import { POST as postMerge } from "../../app/api/decisions/merge/route.ts";
 import { POST as postApproveRegistration } from "../../app/api/decisions/goal-registration/approve/route.ts";
 import { POST as postRejectRegistration } from "../../app/api/decisions/goal-registration/reject/route.ts";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 
 type RouteHandler = (request: NextRequest) => Promise<Response>;
 
 const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {

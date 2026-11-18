@@ -1,13 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import {
-  BackendUnavailableError,
-  createBackendClient,
-  hasBackendResponded,
-  type BackendFailure,
-} from "@/src/grpc/client";
-import { DashboardState } from "@/src/proto/taktdash";
-import { resolveThresholds } from "@/src/state/dashboard";
+import { hasBackendResponded } from "@/src/grpc/client";
+import { loadServerState } from "@/src/state/server-state";
+import { measurePage } from "@/src/telemetry/timing";
 import { StateStreamProviderWithRefresh } from "@/src/components/state-provider";
 import { LiveSidebar } from "@/src/components/live-sidebar";
 import { normalizeBuildInfo } from "@/src/state/build-info";
@@ -24,44 +19,21 @@ const FRONTEND_BUILD = normalizeBuildInfo({
   branch: process.env.TAKTDASH_FRONTEND_BRANCH,
 });
 
-const EMPTY_STATE = DashboardState.create({
-  thresholds: resolveThresholds(undefined),
-});
-
-// 最後に取得できた概要の状態。読み込みに失敗しても画面を空にせず、この内容を
-// 取得時刻つきで残す（issue #152）。一度も取得できていない場合は空の状態を使う。
-let lastLoadedState: DashboardState | undefined;
-
-async function loadInitialState(): Promise<{
-  state: DashboardState;
-  failure?: BackendFailure;
-  respondedBefore: boolean;
-}> {
-  const client = createBackendClient();
-  try {
-    const state = await client.getOverview();
-    lastLoadedState = state;
-    return { state, respondedBefore: hasBackendResponded() };
-  } catch (error) {
-    if (error instanceof BackendUnavailableError) {
-      // 今回の読み込みは失敗しても、この Web プロセスが過去に応答を受けて
-      // いれば接続履歴は応答ありのままにする（issue #152）。キャッシュを返す
-      // 経路でも履歴を落とさないよう、成否とは別に履歴を返す。失敗理由は
-      // 画面側の通知の文面の振り分けに使うため、そのまま渡す（issue #92）。
-      return {
-        state: lastLoadedState ?? EMPTY_STATE,
-        failure: error.failure,
-        respondedBefore: hasBackendResponded(),
-      };
-    }
-    throw error;
-  } finally {
-    await client.close();
-  }
-}
-
 export default async function RootLayout({ children }: LayoutProps<"/">) {
-  const { state, failure, respondedBefore } = await loadInitialState();
+  // layout は全ページで実行されるため、ここで各ページのサーバー側 RPC（GetOverview）と
+  // ページ応答の内訳を page=layout の1行として記録する。状態は要求内で共有し、
+  // ページ側はこれを再利用する。
+  const { state, error } = await measurePage("layout", async (timing) => {
+    const loaded = await loadServerState();
+    timing.recordRpc({ rpc: "GetOverview", durationMs: loaded.rpcMs });
+    return loaded;
+  });
+  // 今回の読み込みは失敗しても、この Web プロセスが過去に応答を受けて
+  // いれば接続履歴は応答ありのままにする（issue #152）。キャッシュを返す
+  // 経路でも履歴を落とさないよう、成否とは別に履歴を渡す。失敗理由は
+  // 画面側の通知の文面の振り分けに使うため、そのまま渡す（issue #92）。
+  const failure = error?.failure;
+  const respondedBefore = hasBackendResponded();
   return (
     <html lang="ja">
       <body>

@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import {
   BackendUnavailableError,
   backendUnavailableSituation,
-  createBackendClient,
+  getBackendClient,
   RunNotFoundError,
 } from "../grpc/client";
 import type { GetRunDetailResponse } from "../proto/taktdash";
@@ -23,10 +23,9 @@ type LoadResult =
 // 接続できないときはページを落とさず、接続できない旨を表示する（order.md:21）。
 export async function RunDetailLoader({ params }: RunDetailLoaderProps): Promise<ReactElement> {
   const { slug } = await params;
-  const client = createBackendClient();
   let result: LoadResult;
   try {
-    result = { kind: "found", detail: await client.getRunDetail(slug) };
+    result = { kind: "found", detail: await getBackendClient().getRunDetail(slug) };
   } catch (error) {
     if (error instanceof RunNotFoundError) {
       notFound();
@@ -36,8 +35,6 @@ export async function RunDetailLoader({ params }: RunDetailLoaderProps): Promise
     } else {
       throw error;
     }
-  } finally {
-    await client.close();
   }
   if (result.kind === "unavailable") {
     return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;

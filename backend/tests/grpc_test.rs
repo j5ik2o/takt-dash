@@ -85,13 +85,13 @@ fn seeded_harness() -> GrpcHarness {
   let mut merge = merge_goal("g-merge", 42);
   merge.awaiting_merge_at = Some(time("2026-11-13T08:00:00Z"));
   let snapshot = ProjectSnapshot {
-    goals:         vec![
+    goals: vec![
       goal_with_pause("g-pause", "公開の日取りを待っています。"),
       merge,
       goal("g-open", GoalStatus::Created, ExecutionStatus::Active),
       goal("g1", GoalStatus::Created, ExecutionStatus::Active),
     ],
-    tasks:         vec![
+    tasks: vec![
       TaskEntry {
         name:            TaskName::try_from("impl").expect("テストのタスク名は有効です"),
         goal_id:         Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
@@ -114,13 +114,14 @@ fn seeded_harness() -> GrpcHarness {
         merge_task:      false,
       },
     ],
-    inquiries:     vec![
+    inquiries: vec![
       InquiryEntry { kind: InquiryKind::OperationRequest, ..inquiry("q-open", false, time("2026-11-13T07:00:00Z")) },
       inquiry("q-answered", true, time("2026-11-13T07:00:00Z")),
     ],
-    runs:          vec![recent_run("run-1")],
+    runs: vec![recent_run("run-1")],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
@@ -230,12 +231,13 @@ async fn get_overview_marks_a_run_silent_beyond_the_configured_threshold() {
   let mut stale_run = run_entry("run-1");
   stale_run.last_log_at = Some(Utc::now() - Duration::minutes(30));
   let snapshot = ProjectSnapshot {
-    goals:         vec![],
-    tasks:         vec![],
-    inquiries:     vec![],
-    runs:          vec![stale_run],
+    goals: vec![],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![stale_run],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, Utc::now());
   let server = start_server(&harness).await;
@@ -349,7 +351,7 @@ async fn get_pending_decisions_returns_only_unanswered_inquiries_and_human_merge
 }
 
 #[tokio::test]
-async fn get_projects_returns_the_state_and_recent_events_newest_first() {
+async fn get_projects_returns_recent_events_newest_first_without_assembling_the_state() {
   let harness = seeded_harness();
   harness
     .activity
@@ -364,10 +366,7 @@ async fn get_projects_returns_the_state_and_recent_events_newest_first() {
 
   let response = client.get_projects(GetProjectsRequest {}).await.expect("プロジェクトを取得できます").into_inner();
 
-  let state = response.state.expect("状態があります");
-  assert_eq!(state.projects.len(), 1);
-  assert_eq!(state.projects[0].name, "takt-dash");
-  assert_eq!(state.goals.len(), 4, "プロジェクトの状態にゴールを含みます");
+  assert!(response.state.is_none(), "状態は GetOverview に一本化します");
 
   let bodies: Vec<&str> = response.recent_events.iter().map(|event| event.body.as_str()).collect();
   assert_eq!(bodies, vec!["新しい出来事", "古い出来事"], "直近の出来事を新しい順に返します");
@@ -410,7 +409,7 @@ async fn get_activity_returns_events_daily_summaries_and_today_counts() {
 
   let response = client.get_activity(GetActivityRequest {}).await.expect("アクティビティを取得できます").into_inner();
 
-  assert!(response.state.is_some(), "状態を同梱します");
+  assert!(response.state.is_none(), "状態は GetOverview に一本化します");
   let event_bodies: Vec<&str> = response.events.iter().map(|event| event.body.as_str()).collect();
   assert_eq!(event_bodies, vec!["登録", "問い合わせ", "開始"], "出来事を新しい順に返します");
   assert_eq!(response.events[0].kind, ActivityKind::GoalCreated as i32);
@@ -531,8 +530,9 @@ async fn プロジェクトごとの接続状態と最後に読めた時刻を�
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
-  let response = client.get_projects(GetProjectsRequest {}).await.expect("プロジェクトを取得できます").into_inner();
-  let state = response.state.expect("状態があります");
+  // GetProjects は状態を組み立てない（状態は GetOverview に一本化）ため、プロジェクトごとの
+  // 接続状態と最後に読めた時刻は GetOverview から観測します。
+  let state = client.get_overview(GetOverviewRequest {}).await.expect("概要を取得できます").into_inner();
 
   let healthy = state.projects.iter().find(|entry| entry.name == "takt-dash").expect("takt-dash のプロジェクト");
   assert!(healthy.connected, "読み取れたプロジェクトは接続ありです");

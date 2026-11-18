@@ -3,7 +3,7 @@
 // 入力の形だけを検証し、値はそのまま gRPC の書き込み API へ渡す。業務的な検証
 // （ゴールの所属、pull_request の有無など）は backend に任せ、ここでは重複しない。
 import * as grpc from "@grpc/grpc-js";
-import { BackendUnavailableError, createBackendClient, type BackendClient } from "../../../src/grpc/client";
+import { BackendUnavailableError, getBackendClient, type BackendClient } from "../../../src/grpc/client";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" } as const;
 
@@ -173,7 +173,7 @@ export const isPositiveInteger = (value: unknown): value is number =>
 
 // 書き込みを実行し、成功・入力不正・接続不能を HTTP の応答へ一度だけ変換する。
 export async function runWrite(call: (client: BackendClient) => Promise<unknown>): Promise<Response> {
-  const client = createBackendClient();
+  const client = getBackendClient();
   try {
     await call(client);
     return jsonResponse(200, { ok: true });
@@ -194,7 +194,5 @@ export async function runWrite(call: (client: BackendClient) => Promise<unknown>
       return jsonResponse(400, { ok: false, error: serviceError.details || "入力が正しくありません。" });
     }
     return jsonResponse(500, { ok: false, error: "操作に失敗しました。" });
-  } finally {
-    await client.close();
   }
 }

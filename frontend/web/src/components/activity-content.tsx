@@ -1,10 +1,11 @@
 import { Fragment, type ReactElement } from "react";
-import type { ActivityEvent, ActivityKind, DailySummary, GetActivityResponse } from "../proto/taktdash";
+import type { ActivityEvent, ActivityKind, DailySummary, DashboardState, GetActivityResponse } from "../proto/taktdash";
 import { activityBodyLines, groupActivityEvents } from "../state/activity";
 import { ACTIVITY_KIND } from "../state/proto-values";
 import { formatClock } from "../state/format";
 
 type ActivityContentProps = {
+  state: DashboardState;
   response: GetActivityResponse;
   now: Date;
 };
@@ -62,9 +63,8 @@ const toNewestFirst = (events: readonly ActivityEvent[]): ActivityEvent[] =>
 const toNewestDayFirst = (days: readonly DailySummary[]): DailySummary[] =>
   [...days].sort((a, b) => b.date.localeCompare(a.date));
 
-export function ActivityContent({ response, now }: ActivityContentProps): ReactElement {
-  const state = response.state;
-  const serverNames = new Map((state?.servers ?? []).map((server) => [server.serverId, server.name]));
+export function ActivityContent({ state, response, now }: ActivityContentProps): ReactElement {
+  const serverNames = new Map(state.servers.map((server) => [server.serverId, server.name]));
   const events = toNewestFirst(response.events);
   const groups = groupActivityEvents(events);
   const dailySummaries = toNewestDayFirst(response.dailySummaries);

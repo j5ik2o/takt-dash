@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import {
   BackendUnavailableError,
   backendUnavailableSituation,
-  createBackendClient,
+  getBackendClient,
   GoalNotFoundError,
 } from "../grpc/client";
 import type { GetGoalDetailResponse } from "../proto/taktdash";
@@ -23,7 +23,7 @@ type LoadResult =
 // 落とさず、接続できない旨を表示する。
 export async function GoalDetailLoader({ params }: GoalDetailLoaderProps): Promise<ReactElement> {
   const { goalId } = await params;
-  const client = createBackendClient();
+  const client = getBackendClient();
   let result: LoadResult;
   try {
     result = { kind: "found", detail: await client.getGoalDetail(goalId) };
@@ -36,8 +36,6 @@ export async function GoalDetailLoader({ params }: GoalDetailLoaderProps): Promi
     } else {
       throw error;
     }
-  } finally {
-    await client.close();
   }
   if (result.kind === "unavailable") {
     return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;

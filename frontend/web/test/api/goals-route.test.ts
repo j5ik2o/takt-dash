@@ -14,15 +14,18 @@ import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-serve
 import { GET as getGoalDetail } from "../../app/api/goals/[goalId]/route.ts";
 import { GET as getTaskDetail } from "../../app/api/tasks/[project]/route.ts";
 import type { GetTaskDetailRequest } from "../../src/proto/taktdash.ts";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 
 const TASK_NAME = "採用ページのレイアウトを直す";
 
 const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {

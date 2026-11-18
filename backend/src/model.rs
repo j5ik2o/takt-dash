@@ -3,7 +3,7 @@
 //! これらの型は lib の公開 API の一部であり、後続のタスクの gRPC サーバーが
 //! 読み取り系 API の応答を組み立てるために使います。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 
@@ -282,7 +282,7 @@ pub struct ReportEntry {
   pub size_bytes: i64,
 }
 
-/// takt_get_run から得た run の情報。
+/// 実行中の run の情報。状態とステップの記録は run の保存場所から読みます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunEntry {
   pub run_slug:                String,
@@ -302,30 +302,6 @@ pub struct RunEntry {
   pub reports:                 Vec<ReportEntry>,
 }
 
-/// takt_get_run から得た、run 詳細の本文。一覧の投影では使わない詳細情報です。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunDetail {
-  pub run_slug: RunSlug,
-  pub session_id: String,
-  pub task_name: Option<TaskName>,
-  pub goal_id: Option<GoalId>,
-  pub task_text: String,
-  pub summary: String,
-  pub workflow: String,
-  pub status: RunStatus,
-  pub started_at: Option<DateTime<Utc>>,
-  pub current_step: Option<String>,
-  pub current_iteration: Option<i32>,
-  pub current_step_started_at: Option<DateTime<Utc>>,
-  pub current_step_execution_count: Option<i32>,
-  pub phase: Option<i32>,
-  pub step_logs: Vec<StepLogEntry>,
-  pub log_tail: String,
-  pub reports: Vec<RunReportEntry>,
-  pub instructions: Vec<RunInstructionEntry>,
-  pub last_log_at: Option<DateTime<Utc>>,
-}
-
 /// run のステップの記録。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepLogEntry {
@@ -337,45 +313,43 @@ pub struct StepLogEntry {
   pub iteration: i32,
 }
 
-/// run のレポートの一覧項目と本文。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunReportEntry {
-  pub filename:   String,
-  pub content:    String,
-  pub size_bytes: i64,
-}
-
-/// run への指示書。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunInstructionEntry {
-  pub instruction_id: i32,
-  pub issued_at:      DateTime<Utc>,
-  pub state:          String,
-  pub content:        String,
-}
-
 /// 1回の読み取りで得た、1プロジェクト分の状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSnapshot {
-  pub goals:         Vec<GoalEntry>,
-  pub tasks:         Vec<TaskEntry>,
-  pub inquiries:     Vec<InquiryEntry>,
-  pub runs:          Vec<RunEntry>,
-  pub notifications: Vec<NotificationEntry>,
+  pub goals:          Vec<GoalEntry>,
+  pub tasks:          Vec<TaskEntry>,
+  pub inquiries:      Vec<InquiryEntry>,
+  pub runs:           Vec<RunEntry>,
+  pub notifications:  Vec<NotificationEntry>,
   /// ゴール登録の承認待ち。承認待ちが無ければ空です。
-  pub proposals:     Vec<RegistrationProposalEntry>,
+  pub proposals:      Vec<RegistrationProposalEntry>,
+  /// 終端状態のゴールで、補助読み取りに成功した項目。
+  pub terminal_reads: TerminalReads,
+}
+
+/// 終端状態（完了または中止）のゴールのうち、その状態で補助読み取りに成功したゴール。
+///
+/// 状態が変わらない終端のゴールは、ここに載っている項目だけ読み取りを省きます。終端状態で読み取りに
+/// 失敗した項目は載せず、次の周期で読み直します。質問と通知は別々に扱います。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalReads {
+  /// 質問（takt_list_goal_questions）を読めたゴール。
+  pub questions:     BTreeSet<GoalId>,
+  /// 通知（takt_get_goal の notifications）を読めたゴール。
+  pub notifications: BTreeSet<GoalId>,
 }
 
 impl ProjectSnapshot {
   /// 空の状態。対象プロジェクトにゴールもタスクもない場合に使います。
   pub fn empty() -> Self {
     ProjectSnapshot {
-      goals:         Vec::new(),
-      tasks:         Vec::new(),
-      inquiries:     Vec::new(),
-      runs:          Vec::new(),
-      notifications: Vec::new(),
-      proposals:     Vec::new(),
+      goals:          Vec::new(),
+      tasks:          Vec::new(),
+      inquiries:      Vec::new(),
+      runs:           Vec::new(),
+      notifications:  Vec::new(),
+      proposals:      Vec::new(),
+      terminal_reads: TerminalReads::default(),
     }
   }
 }

@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-server.ts";
 import { createDashboardState } from "../support/fixtures.ts";
 import {
+  closeBackendClient,
   createBackendClient,
   hasBackendResponded,
   resetBackendResponded,
@@ -21,12 +22,14 @@ import { ProjectsLoader } from "../../src/components/projects-loader.tsx";
 import { RunDetailLoader } from "../../src/components/run-detail-loader.tsx";
 
 const withClosedBackend = async <T>(run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const closedAddress = await reserveClosedAddress();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = closedAddress;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {
@@ -62,12 +65,15 @@ test("backend に接続できないとき会話のローダーは落ちず不通
   assertUnavailableNotice(html);
 });
 
+// ローダーはプロセス共有のクライアントを使うため、前後で破棄して指定のアドレスで作り直させる。
 const withBackendAddress = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {

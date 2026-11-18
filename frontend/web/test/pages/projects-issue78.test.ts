@@ -37,7 +37,7 @@ const renderProjects = (goals: Goal[], state: Partial<DashboardState> = {}): str
   const base = createDashboardState();
   const next = DashboardState.create({ ...base, goals, ...state });
   return renderToStaticMarkup(
-    createElement(ProjectsPage, { response: { state: next, recentEvents: [] }, now: NOW }),
+    createElement(ProjectsPage, { state: next, now: NOW }),
   );
 };
 

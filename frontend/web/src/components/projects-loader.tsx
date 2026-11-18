@@ -1,28 +1,19 @@
 import type { ReactElement } from "react";
-import { BackendUnavailableError, backendUnavailableSituation, createBackendClient } from "../grpc/client";
-import type { GetProjectsResponse } from "../proto/taktdash";
+import { backendUnavailableSituation } from "../grpc/client";
+import { loadServerState } from "../state/server-state";
+import { measurePage } from "../telemetry/timing";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { ProjectsContent } from "./projects-content";
 
-// プロジェクトは直近の出来事を含む GetProjects を使うため、サーバー側で取得して表示する。
-// backend に接続できないときはページを落とさず、接続できない旨を表示する（order.md:21）。
+// プロジェクトは要求内で共有する状態から描画する。layout の GetOverview を再利用するため、
+// ページ自身は RPC を発行しない（AC72F-1）。backend に接続できないときは、layout と同じ
+// 不通の旨を表示する（order.md:21）。
 export async function ProjectsLoader(): Promise<ReactElement> {
-  const client = createBackendClient();
-  let result:
-    | { kind: "ok"; response: GetProjectsResponse }
-    | { kind: "unavailable"; error: BackendUnavailableError };
-  try {
-    result = { kind: "ok", response: await client.getProjects() };
-  } catch (error) {
-    if (!(error instanceof BackendUnavailableError)) {
-      throw error;
+  return measurePage("/projects", async () => {
+    const { state, error } = await loadServerState();
+    if (error !== undefined) {
+      return <BackendUnavailableNotice situation={backendUnavailableSituation(error)} />;
     }
-    result = { kind: "unavailable", error };
-  } finally {
-    await client.close();
-  }
-  if (result.kind === "unavailable") {
-    return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;
-  }
-  return <ProjectsContent response={result.response} now={new Date()} />;
+    return <ProjectsContent state={state} now={new Date()} />;
+  });
 }

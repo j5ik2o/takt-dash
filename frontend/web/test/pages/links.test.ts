@@ -10,7 +10,7 @@ import { createElement, type ComponentType, type ReactElement } from "react";
 import { readFile } from "node:fs/promises";
 import { renderToStaticMarkup } from "react-dom/server";
 import { fileURLToPath } from "node:url";
-import { createDashboardState, createProjectsResponse, NOW } from "../support/fixtures.ts";
+import { createDashboardState, NOW } from "../support/fixtures.ts";
 import { elementWithAttribute, textOf } from "../support/markup.ts";
 import { ConnectionState, DashboardState, InquiryKind, PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
@@ -48,7 +48,7 @@ const renderOverviewWithState = (state = createDashboardState()): string =>
   renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
 
 const renderProjectsWithState = (state = createDashboardState()): string =>
-  renderPage(ProjectsPage, { response: { ...createProjectsResponse(), state }, now: NOW });
+  renderPage(ProjectsPage, { state, now: NOW });
 
 const renderSidebarWithState = (state = createDashboardState()): string =>
   renderToStaticMarkup(

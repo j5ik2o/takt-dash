@@ -14,16 +14,19 @@ import { resetBackendResponded } from "../../src/grpc/client.ts";
 import { TaskDetailContent } from "../../src/components/task-detail-content.tsx";
 import { TaskDetailLoader } from "../../src/components/task-detail-loader.tsx";
 import TaskDetailPage from "../../app/tasks/[project]/page.tsx";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 
 const NOT_FOUND_DIGEST = "NEXT_HTTP_ERROR_FALLBACK;404";
 const TASK_NAME = "採用ページのレイアウトを直す";
 
 const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {

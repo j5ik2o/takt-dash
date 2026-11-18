@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ActivityKind, type GetActivityResponse } from "../../src/proto/taktdash.ts";
-import { createActivityResponse, NOW } from "../support/fixtures.ts";
+import { createActivityResponse, createDashboardState, NOW } from "../support/fixtures.ts";
 import { ActivityContent } from "../../src/components/activity-content.tsx";
 
 const renderWithBody = (body: string): string => {
@@ -24,7 +24,7 @@ const renderWithBody = (body: string): string => {
       },
     ],
   };
-  return renderToStaticMarkup(createElement(ActivityContent, { response, now: NOW }));
+  return renderToStaticMarkup(createElement(ActivityContent, { state: createDashboardState(), response, now: NOW }));
 };
 
 test("blocked 通知の本文の改行の生の「\\n\\n」を改行として描画する", () => {

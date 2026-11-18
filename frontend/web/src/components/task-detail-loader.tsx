@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import {
   BackendUnavailableError,
   backendUnavailableSituation,
-  createBackendClient,
+  getBackendClient,
   TaskNotFoundError,
 } from "../grpc/client";
 import type { GetTaskDetailResponse } from "../proto/taktdash";
@@ -34,7 +34,7 @@ export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoade
   if (taskName === undefined || taskName.trim() === "") {
     notFound();
   }
-  const client = createBackendClient();
+  const client = getBackendClient();
   let result: LoadResult;
   try {
     result = { kind: "found", detail: await client.getTaskDetail(project, taskName, goalId) };
@@ -47,8 +47,6 @@ export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoade
     } else {
       throw error;
     }
-  } finally {
-    await client.close();
   }
   if (result.kind === "unavailable") {
     return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;

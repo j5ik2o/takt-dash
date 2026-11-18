@@ -12,7 +12,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   createActivityResponse,
   createDashboardState,
-  createProjectsResponse,
   createRunDetailResponse,
   NOW,
 } from "../support/fixtures.ts";
@@ -277,10 +276,10 @@ test("PR リンクは本文と区別できるリンク色を持ち、hover で�
 });
 
 test("一時停止のゴールは待機の色のバッジを付け、進行中のゴールと区別する", () => {
-  const base = createProjectsResponse();
+  const base = createDashboardState();
   const state = DashboardState.create({
-    ...base.state!,
-    goals: base.state!.goals.map((goal) =>
+    ...base,
+    goals: base.goals.map((goal) =>
       goal.goalId === "goal-2"
         ? goal
         : {
@@ -290,7 +289,7 @@ test("一時停止のゴールは待機の色のバッジを付け、進行中�
           },
     ),
   });
-  const html = renderPage(ProjectsPage, { response: { ...base, state }, now: NOW });
+  const html = renderPage(ProjectsPage, { state, now: NOW });
 
   const paused = goalBadgeFor(html, "一時停止");
   assert.match(paused, /class="[^"]*\bidle\b[^"]*"/, "一時停止のバッジは待機の色クラスを持つ");
@@ -501,7 +500,7 @@ test("時刻と識別子は等幅書体になり、run 詳細の識別子に mon
     "このステップの開始の span を等幅にする",
   );
 
-  const projects = renderPage(ProjectsPage, { response: createProjectsResponse(), now: NOW });
+  const projects = renderPage(ProjectsPage, { state: createDashboardState(), now: NOW });
   const runLink = /<a\b[^>]*href="\/runs\/run-aaa"[^>]*>/.exec(projects)?.[0];
   assert.ok(runLink !== undefined, "run のリンクが描画されている");
   assert.match(runLink, /class="[^"]*\bmono\b[^"]*"/, "run の識別子を等幅にする");
@@ -526,15 +525,15 @@ test("ゴールのバッジの色クラスは状態ごとのトークンで描�
     "600",
   );
 
-  const base = createProjectsResponse();
+  const base = createDashboardState();
   const state = DashboardState.create({
-    ...base.state!,
-    goals: base.state!.goals.map((goal) => ({
+    ...base,
+    goals: base.goals.map((goal) => ({
       ...goal,
       executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED,
     })),
   });
-  const html = renderPage(ProjectsPage, { response: { ...base, state }, now: NOW });
+  const html = renderPage(ProjectsPage, { state, now: NOW });
   const aborted = goalBadgeFor(html, "中止");
   assert.match(aborted, /class="[^"]*\bwarn\b[^"]*"/, "中止のバッジは警告の色クラスを持つ");
 });
@@ -609,7 +608,7 @@ const activityRowFor = (kind: ActivityKind): string => {
       },
     ],
   };
-  const html = renderPage(ActivityPage, { response, now: NOW });
+  const html = renderPage(ActivityPage, { state: createDashboardState(), response, now: NOW });
   const row = /<li class="ev[\s\S]*?<\/li>/.exec(html)?.[0];
   if (row === undefined) {
     assert.fail(`kind ${kind} の出来事行が描画されていない`);
@@ -655,7 +654,7 @@ test("接続の切断と復帰は別の行になり、それぞれの種類の�
       },
     ],
   };
-  const html = renderPage(ActivityPage, { response, now: NOW });
+  const html = renderPage(ActivityPage, { state: createDashboardState(), response, now: NOW });
   const rows = html.match(/<li class="ev[\s\S]*?<\/li>/g) ?? [];
   assert.equal(rows.length, 2, "切断と復帰は別の行になる");
   const restoredRow = rows[0]!;

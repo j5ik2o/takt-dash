@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod model;
 pub mod poller;
 pub mod run_log;
+pub mod run_progress;
 pub mod store;
 
 pub mod takt_dash {

@@ -5,37 +5,42 @@
 //! 輸送エラーとは区別します。
 
 use std::{
-  collections::{BTreeMap, HashMap},
+  collections::{BTreeMap, BTreeSet, HashMap},
   path::PathBuf,
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use super::client::{CallError, McpClient, McpClientConfig, TransportError};
+use super::{
+  client::{CallError, McpClient, McpClientConfig, TransportError},
+  metrics::{ToolCallMetrics, ToolCallOutcome},
+};
 use crate::{
   config::McpServer,
   domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   model::{
-    GoalDetail, GoalEntry, GoalQuestionEntry, GoalTaskEntry, GoalWorkLogEntry, InquiryEntry, NotificationEntry,
-    ProjectSnapshot, RegistrationProposalEntry, RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, TaskDetail,
-    TaskEntry, TaskStatus,
+    ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
+    InquiryEntry, NotificationEntry, ProjectSnapshot, RegistrationProposalEntry, RunEntry, TaskDetail, TaskEntry,
+    TaskStatus, TerminalReads,
   },
+  run_progress::{read_run, retain_runs, RunLogHandle, RunReadFailure},
 };
 
 mod goal;
 mod parse;
 mod run;
 
+pub use self::run::RemoteRun;
 use self::{
   goal::{
     is_missing_goal_field, parse_goal, parse_goal_execution_status, parse_goal_question, parse_goal_status,
     parse_goal_work_log, parse_inquiry, parse_notification, parse_task, parse_task_detail, prev_inquiries,
     registration_summary_text, resolve_awaiting_merge_at, resolve_inquiry, ParsedInquiry, TaskLinkFields,
   },
-  parse::{checked_i32, domain_value, optional_string, parse_time, required_i32, required_string, string_field, Page},
-  run::{parse_run, parse_run_detail, report_summaries, step_entries, step_log_entries, step_log_next_offset},
+  parse::{domain_value, optional_string, required_i32, required_string, string_field, Page},
+  run::{parse_remote_run, step_entries, step_log_entries, step_log_next_offset},
 };
 
 /// 一覧読み取り（ゴール・タスク）の期限。応答が大きく、2026-11-17 の本番実測では
@@ -46,8 +51,8 @@ const LIST_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// takt-mcp 子プロセスの起動設定を作る。
 ///
-/// poller の定期読み取りと GetRunDetail の要求時読み取りが、同じ起動条件（タイムアウトを含む）を
-/// 共有するために公開します。
+/// poller の定期読み取りと、書き込み・詳細の RPC が要求時に使う子プロセスが、同じ起動条件
+/// （タイムアウトを含む）を共有するために公開します。
 pub fn client_config(server: &McpServer, cwd: &std::path::Path) -> McpClientConfig {
   McpClientConfig {
     command:         server.command.clone(),
@@ -106,6 +111,7 @@ fn degrades_to_previous(error: &ToolError) -> bool {
 pub struct ToolSet<'a> {
   client:    &'a mut McpClient,
   cwd:       PathBuf,
+  metrics:   ToolCallMetrics,
   workflows: HashMap<String, Option<Vec<String>>>,
 }
 
@@ -117,7 +123,12 @@ const SPECIFICATION_NOTATIONS: [&str; 3] = ["gherkin", "quint", "alloy"];
 
 impl<'a> ToolSet<'a> {
   pub fn new(client: &'a mut McpClient, cwd: PathBuf) -> Self {
-    ToolSet { client, cwd, workflows: HashMap::new() }
+    ToolSet { client, cwd, metrics: ToolCallMetrics::default(), workflows: HashMap::new() }
+  }
+
+  /// この道具のまとまりが記録した呼び出しの集計を取り出す。
+  pub(crate) fn take_metrics(&mut self) -> ToolCallMetrics {
+    std::mem::take(&mut self.metrics)
   }
 
   /// `cwd` を含む tools/call の引数を組み立てる。
@@ -132,27 +143,33 @@ impl<'a> ToolSet<'a> {
 
   /// ゴール・タスク・問い合わせ・run を読み取り、1プロジェクト分の snapshot を組み立てる。
   ///
-  /// `prev` には前回の snapshot を渡します。補助読み取り（run・ゴール質問・通知・ゴールに
-  /// 属さない問い合わせ）が道具エラーか輸送の期限切れで失敗したときは、その項目だけ
-  /// 前回値（無ければ空）を保持し、プロジェクト全体を失敗にしません。ゴール登録提案も
-  /// 道具エラーと解析エラーと期限切れのときは前回の提案（無ければ空）へ縮退し、周期を
-  /// 失敗させません。コア読み取り（ゴール・タスク）の失敗と、補助読み取りの期限切れ
-  /// 以外の輸送エラーは全体の失敗として伝播します。
+  /// `prev` には前回の snapshot を渡します。`runs` はプロジェクトの run の集計で、同じ取っ手を
+  /// 周期をまたいで渡すと、run
+  /// の本体ログは前回の続きだけを読みます。補助読み取り（run・ゴール質問・通知・ゴールに
+  /// 属さない問い合わせ）が道具エラーまたはタイムアウトで失敗したときは、その項目だけ前回値
+  /// （無ければ空）を保持し、プロジェクト全体を失敗にしません。ゴール登録提案も道具エラーと
+  /// 解析エラーと期限切れのときは前回の提案（無ければ空）へ縮退し、周期を失敗させません。
+  /// コア読み取り（ゴール・タスク）の失敗と、補助読み取りのその他の輸送エラー・解析エラーは
+  /// 全体の失敗として伝播します。
   ///
   /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知から得るため、通知を読んだ後に
   /// ゴールへ起点時刻を反映します。通知が無いゴールは前回 snapshot の同じゴールの起点を
   /// 引き継ぎ、前回が無い初回観測でもその読み取りの観測時刻を起点として確定します。
-  pub async fn read_snapshot(&mut self, prev: Option<&ProjectSnapshot>) -> Result<ProjectSnapshot, ToolError> {
+  pub async fn read_snapshot(
+    &mut self,
+    prev: Option<&ProjectSnapshot>,
+    runs: &RunLogHandle,
+  ) -> Result<ProjectSnapshot, ToolError> {
     let observed_at = Utc::now();
     let mut goals = self.list_goals().await?;
     let tasks = self.list_tasks().await?;
-    let inquiries = self.list_all_inquiries(&goals, prev, observed_at).await?;
-    let (notifications, awaiting_merge_at) = self.list_notifications(&goals, prev).await?;
+    let (inquiries, questions_read) = self.list_all_inquiries(&goals, prev, observed_at).await?;
+    let (notifications, awaiting_merge_at, notifications_read) = self.list_notifications(&goals, prev).await?;
     for goal in &mut goals {
       goal.awaiting_merge_at =
         resolve_awaiting_merge_at(goal, awaiting_merge_at.get(&goal.goal_id).copied(), prev, observed_at);
     }
-    let runs = self.get_running_runs(&tasks, prev).await?;
+    let runs = self.get_running_runs(&tasks, prev, runs).await?;
     let proposals = match self.list_goal_registration_proposals().await {
       | Ok(entries) => entries,
       | Err(error) if matches!(error, ToolError::Parse(_)) || degrades_to_previous(&error) => {
@@ -160,12 +177,18 @@ impl<'a> ToolSet<'a> {
       },
       | Err(error) => return Err(error),
     };
-    Ok(ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals })
+    let terminal_reads = TerminalReads { questions: questions_read, notifications: notifications_read };
+    Ok(ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals, terminal_reads })
   }
 
   async fn call_json(&mut self, name: &str, extra: Value) -> Result<Value, ToolError> {
     let arguments = self.arguments(extra);
-    let text = self.client.call_tool(name, arguments).await?;
+    // 子プロセスの起動と initialize は道具呼び出しではないため、計時を始める前に済ませます。
+    self.client.ensure_started().await?;
+    let started = Instant::now();
+    let result = self.client.call_tool(name, arguments).await;
+    self.metrics.record(name, started.elapsed(), call_outcome(&result));
+    let text = result?;
     serde_json::from_str(&text).map_err(|error| ToolError::Parse(format!("{name}: {error}")))
   }
 
@@ -225,30 +248,45 @@ impl<'a> ToolSet<'a> {
   /// ゴールに属する問い合わせと、ゴールに属さない問い合わせをまとめて集める。
   ///
   /// ゴール質問の取得は行使済みの goals を再利用します（ゴール一覧の再取得はしません）。
-  /// 道具エラー（そのゴールの質問だけ取得できない、またはゴールに属さない問い合わせだけ
-  /// 取得できない）は、該当項目だけ前回 snapshot の同じゴールの問い合わせを引き継ぎます
-  /// （初回観測時は空）。輸送エラーと解析エラーは全体の失敗として伝播します。
+  /// 道具エラーまたはタイムアウト（そのゴールの質問だけ取得できない、またはゴールに属さない
+  /// 問い合わせだけ取得できない）は、該当項目だけ前回 snapshot の同じゴールの問い合わせを
+  /// 引き継ぎます（初回観測時は空）。その他の輸送エラーと解析エラーは全体の失敗として伝播します。
+  ///
+  /// あわせて、終端状態で質問を読めたゴール（読み取りを省いたゴールを含む）を返します。
+  /// 問い合わせへの回答の後に poller が前回の記録から外したゴールは、終端でも読み直します。
   async fn list_all_inquiries(
     &mut self,
     goals: &[GoalEntry],
     prev: Option<&ProjectSnapshot>,
     observed_at: DateTime<Utc>,
-  ) -> Result<Vec<InquiryEntry>, ToolError> {
+  ) -> Result<(Vec<InquiryEntry>, BTreeSet<GoalId>), ToolError> {
     let mut inquiries = match self.list_standalone_inquiries().await {
       | Ok(entries) => entries,
       | Err(error) if degrades_to_previous(&error) => prev_inquiries(prev, |goal_id| goal_id.is_none()),
       | Err(error) => return Err(error),
     };
+    let mut read_in_terminal = BTreeSet::new();
     for goal in goals {
+      if is_unchanged_terminal_goal(goal, prev, |reads| &reads.questions) {
+        inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id)));
+        read_in_terminal.insert(goal.goal_id.clone());
+        continue;
+      }
       match self.list_goal_questions(&goal.goal_id).await {
-        | Ok(mut entries) => inquiries.append(&mut entries),
+        | Ok(mut entries) => {
+          inquiries.append(&mut entries);
+          if is_terminal(goal) {
+            read_in_terminal.insert(goal.goal_id.clone());
+          }
+        },
         | Err(error) if degrades_to_previous(&error) => {
           inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id)))
         },
         | Err(error) => return Err(error),
       }
     }
-    Ok(inquiries.into_iter().map(|parsed| resolve_inquiry(parsed, prev, observed_at)).collect())
+    let inquiries = inquiries.into_iter().map(|parsed| resolve_inquiry(parsed, prev, observed_at)).collect();
+    Ok((inquiries, read_in_terminal))
   }
 
   async fn list_goal_questions(&mut self, goal_id: &GoalId) -> Result<Vec<ParsedInquiry>, ToolError> {
@@ -290,64 +328,86 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_list_standalone_inquiries のページ追従が上限に達しました".to_owned()))
   }
 
-  /// running なタスクの run を集める。`takt_get_run` が道具エラーを返した run だけ、前回
-  /// snapshot の同じ runSlug を引き継ぎ（無ければ欠落）、健常な run は今回の値を採ります。
-  /// 輸送エラーと解析エラーは全体の失敗として伝播します。
+  /// running なタスクの run を、run の保存場所（`meta.json` と本体ログ）から集める。
+  ///
+  /// 保存場所の対応表に無い run（[`RunReadFailure::NotListed`]）と、対応表を読めない run
+  /// （[`RunReadFailure::Unreadable`]。SSH 越しに扱うリモートのサーバーのプロジェクトなど）は、
+  /// takt-mcp の takt_get_run から作ります。保存場所で読めた run には takt_get_run を呼びません。
+  ///
+  /// どちらからも読めなかった run
+  /// と、ステップ位置の補完が縮退できる失敗（道具エラー・タイムアウト） になった run だけ、前回
+  /// snapshot の同じ runSlug を引き継ぎ（無ければ欠落）、健常な run は
+  /// 今回の値を採ります。これらの失敗はプロジェクトの失敗にしません。takt_get_run と補完の
+  /// その他の輸送エラーは全体の失敗として伝播します。running でなくなった run の集計は、次の周期に
+  /// 持ち越さないよう捨てます。
   async fn get_running_runs(
     &mut self,
     tasks: &[TaskEntry],
     prev: Option<&ProjectSnapshot>,
+    handle: &RunLogHandle,
   ) -> Result<Vec<RunEntry>, ToolError> {
     let mut runs = Vec::new();
+    let mut running = Vec::new();
     for task in tasks.iter().filter(|task| task.status == TaskStatus::Running) {
       let Some(run_slug) = task.run_slug.clone() else {
         continue;
       };
-      match self.read_run(&run_slug, task).await {
-        | Ok(run) => runs.push(run),
-        | Err(error) if degrades_to_previous(&error) => {
-          if let Some(previous) =
-            prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str()))
-          {
-            runs.push(previous.clone());
+      running.push(run_slug.clone());
+      let (mut run, workflow) = match read_run(handle, run_slug.clone()).await {
+        | Ok(view) => (view.run_entry(&run_slug, task), view.workflow),
+        | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
+          match self.read_remote_run(&run_slug).await {
+            | Ok(remote) => (remote.run_entry(task), remote.workflow),
+            | Err(error) if matches!(error, ToolError::Parse(_)) || degrades_to_previous(&error) => {
+              tracing::warn!(run_slug = %run_slug.as_str(), local = %failure, error = %error, "run を保存場所からも takt_get_run からも読めませんでした。前回の値を使います。");
+              runs.extend(previous_run(prev, &run_slug));
+              continue;
+            },
+            | Err(error) => return Err(error),
           }
+        },
+        | Err(failure) => {
+          tracing::warn!(run_slug = %run_slug.as_str(), error = %failure, "run を保存場所から読めませんでした。前回の値を使います。");
+          runs.extend(previous_run(prev, &run_slug));
+          continue;
+        },
+      };
+      let enriched = match workflow.as_deref().filter(|workflow| !workflow.is_empty()) {
+        | Some(workflow) => self.enrich_step_progress(&mut run, workflow).await,
+        | None => Ok(()),
+      };
+      match enriched {
+        | Ok(()) => runs.push(run),
+        | Err(error) if degrades_to_previous(&error) => {
+          tracing::warn!(run_slug = %run_slug.as_str(), error = %error, "run のステップ位置を補えませんでした。前回の値を使います。");
+          runs.extend(previous_run(prev, &run_slug));
         },
         | Err(error) => return Err(error),
       }
     }
+    retain_runs(handle, running).await;
     Ok(runs)
   }
 
-  async fn read_run(&mut self, run_slug: &RunSlug, task: &TaskEntry) -> Result<RunEntry, ToolError> {
+  /// takt_get_run から run を読む。stepLogs は先頭のウィンドウだけが返るため、
+  /// stepLogPage.nextOffset が残っていれば追加のページを取得して全件を集めます。
+  pub async fn read_remote_run(&mut self, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
     let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
-    self.parse_run_with_pages(&value, task).await
-  }
-
-  /// takt_get_run の応答を解析する。stepLogs は先頭 50 件のウィンドウで返るため、
-  /// stepLogPage.nextOffset が残っていれば追加ページを取得して全件を集める。
-  async fn parse_run_with_pages(&mut self, value: &Value, task: &TaskEntry) -> Result<RunEntry, ToolError> {
-    let mut step_logs = step_log_entries(value);
-    let mut steps = step_entries(value);
-    let mut next_offset = step_log_next_offset(value);
-    let run_slug = domain_value("run slug", RunSlug::try_from(string_field(value, "runSlug")?.as_str()))?;
+    let mut steps = step_entries(&value);
+    let mut step_logs = step_log_entries(&value);
+    let mut next_offset = step_log_next_offset(&value);
     let mut pages_taken = 0;
     while let Some(offset) = next_offset {
       if pages_taken >= MAX_PAGES {
         return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
       }
       pages_taken += 1;
-      let page_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
-      steps.extend(step_entries(&page_value));
-      step_logs.extend(step_log_entries(&page_value));
-      next_offset = step_log_next_offset(&page_value);
+      let page = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
+      steps.extend(step_entries(&page));
+      step_logs.extend(step_log_entries(&page));
+      next_offset = step_log_next_offset(&page);
     }
-    let workflow = optional_string(value, "workflow").unwrap_or_default();
-    let mut run = parse_run(value, task, step_logs, steps)?;
-    if !workflow.is_empty() {
-      self.enrich_step_progress(&mut run, &workflow).await?;
-    }
-    Ok(run)
+    parse_remote_run(&value, steps, step_logs)
   }
 
   /// workflow の step 名一覧から、run の現在ステップの位置と全ステップ数を補う。
@@ -358,9 +418,9 @@ impl<'a> ToolSet<'a> {
     let Some(steps) = self.workflow_steps(workflow).await? else {
       return Ok(());
     };
-    // takt_get_run の currentStep は takt_get_workflow が返す workflow の step 名に対応する。
-    // stepLogs の末尾は入れ子 workflow の内側の step になり得るため、位置の算出には使わない。
-    // currentStep が無い応答だけ、従来どおり stepLogs の末尾で補う。
+    // meta.json の currentStep は takt_get_workflow が返す workflow の step 名に対応する。
+    // ステップの記録の末尾は入れ子 workflow の内側の step になり得るため、位置の算出には使わない。
+    // currentStep が無い run だけ、従来どおりステップの記録の末尾で補う。
     let Some(current) = run
       .current_step
       .as_deref()
@@ -424,35 +484,39 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_get_workflow のページ追従が上限に達しました".to_owned()))
   }
 
+  /// ゴールごとの通知と、マージ待ちの起点時刻を集める。あわせて、終端状態で通知を読めたゴール
+  /// （読み取りを省いたゴールを含む）を返します。
   async fn list_notifications(
     &mut self,
     goals: &[GoalEntry],
     prev: Option<&ProjectSnapshot>,
-  ) -> Result<(Vec<NotificationEntry>, BTreeMap<GoalId, DateTime<Utc>>), ToolError> {
+  ) -> Result<(Vec<NotificationEntry>, BTreeMap<GoalId, DateTime<Utc>>, BTreeSet<GoalId>), ToolError> {
     let mut notifications = Vec::new();
     let mut awaiting_merge_at = BTreeMap::new();
+    let mut read_in_terminal = BTreeSet::new();
     for goal in goals {
+      if is_unchanged_terminal_goal(goal, prev, |reads| &reads.notifications) {
+        inherit_previous_notifications(&mut notifications, &mut awaiting_merge_at, goal, prev);
+        read_in_terminal.insert(goal.goal_id.clone());
+        continue;
+      }
       match self.list_goal_notifications(&goal.goal_id).await {
         | Ok((goal_notifications, goal_awaiting_merge_at)) => {
           if let Some(recorded_at) = goal_awaiting_merge_at {
             awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
           }
           notifications.extend(goal_notifications);
+          if is_terminal(goal) {
+            read_in_terminal.insert(goal.goal_id.clone());
+          }
         },
         | Err(error) if degrades_to_previous(&error) => {
-          if let Some(prev) = prev {
-            notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal.goal_id).cloned());
-            if let Some(recorded_at) =
-              prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id).and_then(|entry| entry.awaiting_merge_at)
-            {
-              awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
-            }
-          }
+          inherit_previous_notifications(&mut notifications, &mut awaiting_merge_at, goal, prev);
         },
         | Err(error) => return Err(error),
       }
     }
-    Ok((notifications, awaiting_merge_at))
+    Ok((notifications, awaiting_merge_at, read_in_terminal))
   }
 
   /// 1 ゴールの通知を nextOffset が null になるまで追従して集める。あわせて、そのゴールの
@@ -484,6 +548,68 @@ impl<'a> ToolSet<'a> {
       }
     }
     Err(ToolError::Parse("takt_get_goal の notices 追従が上限に達しました".to_owned()))
+  }
+}
+
+/// 道具呼び出しの結果を集計用の結果へ分類する。応答の解析エラーは道具呼び出し自体の結果では
+/// ないため、ここでは扱いません。
+fn call_outcome(result: &Result<String, CallError>) -> ToolCallOutcome {
+  match result {
+    | Ok(_) => ToolCallOutcome::Succeeded,
+    | Err(CallError::Tool(_)) => ToolCallOutcome::Failed,
+    | Err(CallError::Transport(TransportError::Timeout(_))) => ToolCallOutcome::TimedOut,
+    | Err(CallError::Transport(_)) => ToolCallOutcome::Failed,
+  }
+}
+
+/// 終端（`status == Completed` または `execution_status == Aborted`）のゴールか。
+fn is_terminal(goal: &GoalEntry) -> bool {
+  goal.status == GoalStatus::Completed || goal.execution_status == ExecutionStatus::Aborted
+}
+
+/// 補助読み取りの項目 `item` を省ける、前回と同じ状態の終端ゴールかを判定する。
+///
+/// 前回の同じゴールが同じ終端状態で、かつ前回その状態でこの項目を読めていた場合だけ省けます。
+/// 初回観測、状態変化、`AwaitingMerge` などの非終端、前回の終端状態で読み取りに失敗した項目は
+/// 読み取り対象のままです。問い合わせへの回答の後に前回の記録から外されたゴールも、
+/// 質問を読み直します。
+fn is_unchanged_terminal_goal(
+  goal: &GoalEntry,
+  prev: Option<&ProjectSnapshot>,
+  item: impl Fn(&TerminalReads) -> &BTreeSet<GoalId>,
+) -> bool {
+  let Some(prev) = prev else {
+    return false;
+  };
+  let Some(previous) = prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id) else {
+    return false;
+  };
+  previous.status == goal.status
+    && previous.execution_status == goal.execution_status
+    && is_terminal(goal)
+    && item(&prev.terminal_reads).contains(&goal.goal_id)
+}
+
+/// 前回 snapshot の同じ runSlug の run を返す。前回が無ければ `None` です。
+fn previous_run(prev: Option<&ProjectSnapshot>, run_slug: &RunSlug) -> Option<RunEntry> {
+  prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str())).cloned()
+}
+
+/// 前回 snapshot の同じゴールの通知と、マージ待ちの起点時刻を引き継ぐ。前回が無ければ何もしません。
+fn inherit_previous_notifications(
+  notifications: &mut Vec<NotificationEntry>,
+  awaiting_merge_at: &mut BTreeMap<GoalId, DateTime<Utc>>,
+  goal: &GoalEntry,
+  prev: Option<&ProjectSnapshot>,
+) {
+  let Some(prev) = prev else {
+    return;
+  };
+  notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal.goal_id).cloned());
+  if let Some(recorded_at) =
+    prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id).and_then(|entry| entry.awaiting_merge_at)
+  {
+    awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
   }
 }
 
@@ -696,70 +822,6 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_list_tasks のページ追従が上限に達しました".to_owned()))
   }
 
-  /// 指定した runSlug の詳細を takt_get_run から読み取る。
-  ///
-  /// stepLogs は先頭 50 件のウィンドウで返るため、stepLogPage.nextOffset が残っていれば追加ページを
-  /// 取得して全件を集めます。レポートと指示書の本文は一覧に含まれないため、一覧の filename と
-  /// instructionId を使って1件ずつ本文を取得します。
-  pub async fn read_run_detail(&mut self, run_slug: &RunSlug) -> Result<RunDetail, ToolError> {
-    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
-    // runSlug の一致を優先し、無ければ sourceRunSlug の一致でタスクを引きます。
-    // 完了タスクが sourceRunSlug だけを持つ場合でもゴールとタスク名を補えるように
-    // するためです。
-    let tasks = self.list_tasks().await?;
-    let task = tasks
-      .iter()
-      .find(|task| task.run_slug.as_ref() == Some(run_slug))
-      .or_else(|| tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())))
-      .cloned();
-    let mut step_logs = step_log_entries(&value);
-    let mut next_offset = step_log_next_offset(&value);
-    let mut pages_taken = 0;
-    while let Some(offset) = next_offset {
-      if pages_taken >= MAX_PAGES {
-        return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
-      }
-      pages_taken += 1;
-      let page_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
-      step_logs.extend(step_log_entries(&page_value));
-      next_offset = step_log_next_offset(&page_value);
-    }
-    let mut reports = Vec::new();
-    for summary in report_summaries(&value) {
-      let report_value =
-        self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "report": summary.filename })).await?;
-      reports.push(RunReportEntry {
-        filename:   summary.filename.clone(),
-        content:    optional_string(&report_value, "content").unwrap_or_default(),
-        size_bytes: report_value.get("sizeBytes").and_then(Value::as_i64).unwrap_or(summary.size_bytes),
-      });
-    }
-    let mut instructions = Vec::new();
-    for instruction in value.get("instructions").and_then(Value::as_array).cloned().unwrap_or_default() {
-      let instruction_id = match instruction.get("instructionId") {
-        | None => 0,
-        | Some(field) => checked_i32(Some(field), "instructionId")?,
-      };
-      let instruction_value = self
-        .call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "instructionId": instruction_id }))
-        .await?;
-      instructions.push(RunInstructionEntry {
-        instruction_id,
-        issued_at: parse_time(instruction_value.get("issuedAt"))
-          .ok()
-          .flatten()
-          .or_else(|| parse_time(instruction.get("issuedAt")).ok().flatten())
-          .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-        state: optional_string(&instruction_value, "state")
-          .or_else(|| optional_string(&instruction, "state"))
-          .unwrap_or_default(),
-        content: optional_string(&instruction_value, "content").unwrap_or_default(),
-      });
-    }
-    parse_run_detail(&value, run_slug, task.as_ref(), step_logs, reports, instructions)
-  }
-
   /// 問い合わせへ回答する。`answer` は takt の `answer` オブジェクト（例: `{"text": "..."}`）。
   /// 応答の `questionId` を返します。takt の入力契約では `goalId` は必須（UUID）なので、
   /// `goal_id` は必須の引数として受け取ります。
@@ -854,4 +916,154 @@ pub struct ApproveGoalRegistrationResult {
 pub struct MergeGoalPrResult {
   pub task_name: TaskName,
   pub workflow:  String,
+}
+
+#[cfg(test)]
+mod tests {
+  //! 道具呼び出しの計時境界と、結果分類を固定する。
+  //!
+  //! 計時境界は mock MCP サーバの起動と initialize を遅らせ、読み取り全体の経過時間と
+  //! 道具別の所要時間を同時に観測して確かめます。
+
+  use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+  };
+
+  use super::{call_outcome, ToolError, ToolSet};
+  use crate::{
+    mcp::{
+      client::{CallError, McpClient, McpClientConfig, ToolCallError, TransportError},
+      metrics::{ToolCallMetrics, ToolCallOutcome},
+    },
+    run_progress::run_log_handle,
+  };
+
+  fn mock_script() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("mock_mcp_server.mjs")
+  }
+
+  fn write_state(directory: &Path) -> PathBuf {
+    let path = directory.join("state.json");
+    std::fs::write(&path, "{}").expect("状態ファイルを書けます");
+    path
+  }
+
+  fn config(directory: &Path, command: &str, args: Vec<String>, timeout_secs: u64) -> McpClientConfig {
+    McpClientConfig {
+      command: command.to_owned(),
+      args,
+      env: Default::default(),
+      cwd: directory.to_path_buf(),
+      request_timeout: Duration::from_secs(timeout_secs),
+      tool_timeouts: Default::default(),
+    }
+  }
+
+  fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+  }
+
+  /// mock サーバの起動と initialize を `delay` 秒遅らせる設定を作る。
+  fn delayed_config(directory: &Path, delay: &str) -> McpClientConfig {
+    let state = write_state(directory);
+    let script = mock_script();
+    let command = format!(
+      "sleep {delay}; exec node {} --state {}",
+      shell_quote(&script.display().to_string()),
+      shell_quote(&state.display().to_string())
+    );
+    config(directory, "sh", vec!["-c".to_owned(), command], 5)
+  }
+
+  #[tokio::test]
+  async fn initial_call_duration_excludes_process_start_and_initialize() {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let mut client = McpClient::new(delayed_config(directory.path(), "1.5"));
+    let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
+
+    let started = Instant::now();
+    tools
+      .read_snapshot(None, &run_log_handle(directory.path().to_path_buf()))
+      .await
+      .expect("起動の遅延後も読み取れます");
+    let elapsed = started.elapsed();
+    let metrics = tools.take_metrics();
+    drop(tools);
+
+    let goals = metrics.stats("takt_list_goals").expect("takt_list_goals の集計があります");
+    assert_eq!(goals.calls, 1);
+    assert!(elapsed >= Duration::from_millis(1500), "起動と initialize の遅延を含む経過時間です: {elapsed:?}");
+    assert!(goals.max < Duration::from_millis(1000), "道具呼び出しの計時に起動と initialize を含めません: {goals:?}");
+    client.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn start_failure_is_not_recorded_as_a_tool_call() {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let config = config(directory.path(), "this-command-does-not-exist", Vec::new(), 1);
+    let mut client = McpClient::new(config);
+    let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
+
+    let error = tools
+      .read_snapshot(None, &run_log_handle(directory.path().to_path_buf()))
+      .await
+      .expect_err("起動できない client は読み取れません");
+    let metrics = tools.take_metrics();
+    drop(tools);
+
+    assert!(
+      matches!(error, ToolError::Transport(TransportError::Spawn(_) | TransportError::Io(_))),
+      "起動失敗は輸送エラーです: {error}"
+    );
+    assert_eq!(metrics.total_calls(), 0, "起動失敗を道具呼び出しとして記録しません");
+    assert_eq!(metrics.total_failures(), 0);
+  }
+
+  #[tokio::test]
+  async fn exit_before_initialize_reply_is_not_recorded_as_a_tool_call() {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    // initialize の要求を読んだ後、応答せずに終了する子プロセスです。
+    let config = config(directory.path(), "sh", vec!["-c".to_owned(), "read -r _line; exit 0".to_owned()], 1);
+    let mut client = McpClient::new(config);
+    let mut tools = ToolSet::new(&mut client, directory.path().to_path_buf());
+
+    let error = tools
+      .read_snapshot(None, &run_log_handle(directory.path().to_path_buf()))
+      .await
+      .expect_err("initialize に応答がなければ読み取れません");
+    let metrics = tools.take_metrics();
+    drop(tools);
+
+    assert!(
+      matches!(error, ToolError::Transport(TransportError::ProcessExited)),
+      "initialize の前の終了は輸送エラーです: {error}"
+    );
+    assert_eq!(metrics.total_calls(), 0, "起動中の終了を道具呼び出しとして記録しません");
+    assert_eq!(metrics.total_failures(), 0, "起動中の終了を道具の失敗として記録しません");
+    assert_eq!(metrics.total_timeouts(), 0, "起動中の終了を道具のタイムアウトとして記録しません");
+  }
+
+  #[test]
+  fn classifies_tool_call_results_into_success_failure_and_timeout() {
+    assert_eq!(call_outcome(&Ok("{}".to_owned())), ToolCallOutcome::Succeeded);
+    assert_eq!(
+      call_outcome(&Err(CallError::Tool(ToolCallError {
+        tool:    "takt_list_goals".to_owned(),
+        message: "失敗しました".to_owned(),
+      }))),
+      ToolCallOutcome::Failed
+    );
+    assert_eq!(call_outcome(&Err(CallError::Transport(TransportError::Timeout(15)))), ToolCallOutcome::TimedOut);
+    assert_eq!(
+      call_outcome(&Err(CallError::Transport(TransportError::Io("切断".to_owned())))),
+      ToolCallOutcome::Failed
+    );
+
+    let mut metrics = ToolCallMetrics::default();
+    let timeout = Err(CallError::Transport(TransportError::Timeout(15)));
+    metrics.record("takt_list_goals", Duration::from_millis(4), call_outcome(&timeout));
+    assert_eq!(metrics.total_timeouts(), 1);
+    assert_eq!(metrics.total_failures(), 0, "タイムアウトを失敗に混ぜません");
+  }
 }
