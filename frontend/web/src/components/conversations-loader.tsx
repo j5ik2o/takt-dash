@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import { BackendUnavailableError, createBackendClient } from "../grpc/client";
+import { BackendUnavailableError, backendUnavailableSituation, createBackendClient } from "../grpc/client";
 import { GetConversationResponse } from "../proto/taktdash";
 import { restoreConversationResponse, type ConversationPage } from "../state/conversation";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
@@ -7,7 +7,7 @@ import { LiveConversation } from "./live-conversation";
 
 type LoadResult =
   | { kind: "ok"; projects: string[]; page: ConversationPage }
-  | { kind: "unavailable" }
+  | { kind: "unavailable"; error: BackendUnavailableError }
   | { kind: "empty" };
 
 // プロジェクト一覧から先頭の会話を取得し、1秒更新の表示へ渡す。
@@ -29,14 +29,14 @@ export async function ConversationsLoader(): Promise<ReactElement> {
     if (!(error instanceof BackendUnavailableError)) {
       throw error;
     }
-    result = { kind: "unavailable" };
+    result = { kind: "unavailable", error };
   } finally {
     await client.close();
   }
 
   switch (result.kind) {
     case "unavailable":
-      return <BackendUnavailableNotice />;
+      return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;
     case "empty":
       return (
         <main className="page">

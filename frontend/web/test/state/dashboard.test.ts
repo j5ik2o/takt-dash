@@ -27,13 +27,18 @@ import {
   DEFAULT_ANOMALY_THRESHOLDS,
   projectKey,
   isHumanMergeWaiting,
+  mergeTaskFailureNote,
+  pendingDecisionMergeFailureNote,
   resolveThresholds,
+  serverStateFrom,
+  serverStateLabel,
   sortPendingDecisions,
   summarizePendingDecisions,
   toRunView,
 } from "../../src/state/dashboard.ts";
-import { DomainPrimitiveError } from "../../src/state/domain-primitives.ts";
+import { DomainPrimitiveError, toRunCount } from "../../src/state/domain-primitives.ts";
 import { decisionKey } from "../../src/state/decision-actions.ts";
+import { goalSection } from "../../src/state/goal-badge.ts";
 
 test("判断待ちは待ち時間の長い順に並ぶ", () => {
   const sorted = sortPendingDecisions(createDashboardState().pendingDecisions, NOW);
@@ -77,6 +82,10 @@ test("承認待ちを独立の区分として数え、内訳の和を total に�
     createdAt: new Date(NOW.getTime() - 60 * 60_000),
     body: "新しいゴール",
     options: [],
+    // ゴール登録の承認待ちにはプルリクエストと問い合わせ ID が無い。proto の
+    // 必須フィールドとして、フィクスチャと同じ形で明示する。
+    pullRequest: undefined,
+    inquiryId: "",
     stale: false,
     revision: 3,
   };
@@ -288,7 +297,7 @@ test("入れ子 workflow の内側ログがあってもステップ名は位置�
   assert.equal(view.iteration, 3, "反復回数は独立して保持する");
 });
 
-test("遅延中のプロジェクトの run は接続中のまま遅延の状態と最後に読めた時刻の注記を出す", () => {
+test("遅延中のプロジェクトでも、ログが出続けている run は実行中のままにし、読み取り時刻の注記を付けない", () => {
   const state = createDashboardStateWithProjectConnection(
     "corporate-site",
     ConnectionState.CONNECTION_STATE_DELAYED,
@@ -299,20 +308,55 @@ test("遅延中のプロジェクトの run は接続中のまま遅延の状態
   const run = view.runs[0]!;
 
   assert.equal(run.connected, true, "遅延中は接続中として扱う");
-  assert.equal(run.state, "delayed", "遅延中は idle にしない");
-  assert.equal(run.note, "読み取りが遅れています（最後に読めたのは 300 秒前）");
+  assert.equal(run.state, "live", "ログが出続けている run は遅延表示にしない");
+  assert.equal(run.label, "実行中");
+  assert.equal(run.note, "", "読み取り時刻を根拠にした注記は付けない");
 });
 
-test("遅延の注記の秒数は時刻が1秒進むと1秒増える", () => {
-  const state = createDashboardStateWithProjectConnection(
+test("最後に読めた時刻が最新でも、ログが無音なら遅延の理由はログの無音として表示する", () => {
+  const base = createDashboardStateWithProjectConnection(
+    "corporate-site",
+    ConnectionState.CONNECTION_STATE_DELAYED,
+    NOW,
+  );
+  const state = {
+    ...base,
+    runs: base.runs.map((run) => ({
+      ...run,
+      logSilent: false,
+      lastLogAt: new Date(NOW.getTime() - 93 * 60_000),
+    })),
+  };
+
+  const view = buildOverviewView(state, NOW);
+  const run = view.runs[0]!;
+
+  assert.equal(run.state, "warn", "ログの無音で警告にする");
+  assert.equal(run.label, "ログが止まっています");
+  assert.equal(run.note, "ログが 93分 出ていません。", "注記は最後のログの時刻で書く");
+  assert.doesNotMatch(run.note, /最後に読めたのは/, "読み取り時刻の注記と混ぜない");
+});
+
+test("読み取りもログも古いときは、注記は読み取り時刻ではなくログの時刻で書く", () => {
+  const base = createDashboardStateWithProjectConnection(
     "corporate-site",
     ConnectionState.CONNECTION_STATE_DELAYED,
     new Date(NOW.getTime() - 300 * 1_000),
   );
+  const state = {
+    ...base,
+    runs: base.runs.map((run) => ({
+      ...run,
+      logSilent: false,
+      lastLogAt: new Date(NOW.getTime() - (SILENT_MINUTES * 60_000 + 60_000)),
+    })),
+  };
 
-  const oneSecondLater = buildOverviewView(state, new Date(NOW.getTime() + 1_000));
+  const view = buildOverviewView(state, NOW);
+  const run = view.runs[0]!;
 
-  assert.equal(oneSecondLater.runs[0]!.note, "読み取りが遅れています（最後に読めたのは 301 秒前）");
+  assert.equal(run.state, "warn", "読み取りが遅れていてもログの無音で警告にする");
+  assert.equal(run.note, "ログが 11分 出ていません。", "注記はログ基準にする");
 });
 
 test("応答なしのプロジェクトの run は従来どおり最後に読めた時点の idle 表示になる", () => {
@@ -332,7 +376,7 @@ test("応答なしのプロジェクトの run は従来どおり最後に読め
 test("概要は実行上限・24時間完了・失敗・中止・無音を導出する", () => {
   const view = buildOverviewView(createDashboardState(), NOW);
 
-  assert.equal(view.runLimit, 8, "全サーバーの concurrency の合計を実行上限にする");
+  assert.equal(view.runLimit, 8, "全プロジェクトの concurrency の合計を実行上限にする");
   assert.equal(view.completedTasks24h, 4, "全プロジェクトの24時間完了タスクを合計する");
   assert.equal(view.failedTaskCount, 1, "失敗・上限超過・PR作成失敗を合わせて数える");
   assert.equal(view.abortedGoalCount, 0, "中止したゴールは無い");
@@ -402,11 +446,23 @@ test("runLimit は concurrency が0でも破綻しない", () => {
   const base = createHealthyDashboardState();
   const state = {
     ...base,
-    servers: base.servers.map((server) => ({ ...server, concurrency: 0 })),
+    projects: base.projects.map((project) => ({ ...project, concurrency: 0 })),
   };
   const view = buildOverviewView(state, NOW);
 
   assert.equal(view.runLimit, 0);
+});
+
+// main のこのテストは、サーバーカードの下端に出す view.servers[].runLimit / runningRuns / inProgressGoals /
+// pendingCount / waitingTasks を確かめていた。概要はサーバーを1行で出す形（issue #120）に変わり、
+// OverviewServerView はこれらのフィールドを持たない。上限を配下プロジェクトの concurrency の合計にする
+// main の振る舞いと、run・判断待ちの件数は、概要が表示する全体の値で確かめる。
+test("全体の上限はプロジェクトの concurrency の合計で、run と判断待ちの件数を数える", () => {
+  const view = buildOverviewView(createDashboardState(), NOW);
+
+  assert.equal(view.runLimit, 8, "全プロジェクトの concurrency の合計を上限にする");
+  assert.equal(view.runningRuns, 1, "実行中の run を数える");
+  assert.equal(view.pendingCounts.total, 2, "判断待ちを数える");
 });
 
 test("応答なしの読み取り時刻が1件も無いときは partialReadAt を捏造しない", () => {
@@ -445,6 +501,53 @@ test("未読のプロジェクトは応答なしに含めず、異常として�
   assert.equal(view.partialReadAt, undefined, "未読を最後に読めた時刻に使わない");
 });
 
+// main のこのテストは、サーバーカードの下端の view.servers[].inProgressGoals で進行中ゴールの件数を
+// 確かめていた。概要はサーバーごとの件数を表示しなくなった（issue #120）ため、同じ7件のゴールについて、
+// 進行中の分類（goal-badge の進行中の区画から、人のマージ待ちを除く）を公開関数で確かめる。
+test("進行中ゴールは完了・中止・未着手・人のマージ待ちを除き、仕上げタスクが進行中のマージ待ちを含める", () => {
+  const goalBase = createHealthyDashboardState().goals[0]!;
+  const goal = (overrides: Partial<typeof goalBase>) => ({ ...goalBase, ...overrides });
+  const goals = [
+    goal({
+      goalId: "g-human-merge",
+      status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+      mergeTaskLast: undefined,
+    }),
+    goal({
+      goalId: "g-paused",
+      status: GoalStatus.GOAL_STATUS_CREATED,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_PAUSED,
+    }),
+    goal({ goalId: "g-completed", status: GoalStatus.GOAL_STATUS_COMPLETED }),
+    goal({
+      goalId: "g-aborted",
+      status: GoalStatus.GOAL_STATUS_CREATED,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED,
+    }),
+    goal({
+      goalId: "g-merge-in-progress",
+      status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+      mergeTaskLast: TaskStatus.TASK_STATUS_PENDING,
+    }),
+    goal({
+      goalId: "g-merge-failed",
+      status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+      mergeTaskLast: TaskStatus.TASK_STATUS_FAILED,
+    }),
+    goal({
+      goalId: "g-untouched",
+      status: GoalStatus.GOAL_STATUS_CREATED,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+      taskCounts: { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 },
+    }),
+  ];
+
+  const inProgress = goals
+    .filter((item) => goalSection(item) === "inProgress" && !isHumanMergeWaiting(item))
+    .map((item) => item.goalId);
+  assert.deepEqual(inProgress, ["g-paused", "g-merge-in-progress"], "一時停止中と仕上げタスク進行中のマージ待ちだけを数える");
+});
+
 test("失敗タスクは失敗・上限超過・PR作成失敗の3分類を合計する", () => {
   const base = createHealthyDashboardState();
   const state = {
@@ -477,13 +580,21 @@ test("人のマージ待ちは仕上げタスクの末尾状態だけで判定�
     "仕上げタスクの末尾状態が未設定でも人のマージ待ちです",
   );
 
+  // 仕上げタスクが失敗系の状態で終わったゴールは、自動では進まず人の判断が要るため
+  // 人のマージ待ちに含める（issue #231）。
   for (const status of [
-    TaskStatus.TASK_STATUS_PENDING,
-    TaskStatus.TASK_STATUS_RUNNING,
     TaskStatus.TASK_STATUS_FAILED,
     TaskStatus.TASK_STATUS_EXCEEDED,
     TaskStatus.TASK_STATUS_PR_FAILED,
   ]) {
+    assert.equal(
+      isHumanMergeWaiting(awaiting(status)),
+      true,
+      `仕上げタスクの末尾状態が ${TaskStatus[status]} なら人のマージ待ちです`,
+    );
+  }
+
+  for (const status of [TaskStatus.TASK_STATUS_PENDING, TaskStatus.TASK_STATUS_RUNNING]) {
     assert.equal(
       isHumanMergeWaiting(awaiting(status)),
       false,
@@ -500,6 +611,83 @@ test("人のマージ待ちは仕上げタスクの末尾状態だけで判定�
   );
 });
 
+test("仕上げタスクの失敗の文面は失敗系の末尾状態だけに出る", () => {
+  const awaiting = (mergeTaskLast?: TaskStatus): ReturnType<typeof createGoal> =>
+    createGoal({ status: GoalStatus.GOAL_STATUS_AWAITING_MERGE, mergeTaskLast });
+
+  assert.equal(
+    mergeTaskFailureNote(awaiting(TaskStatus.TASK_STATUS_FAILED)),
+    "仕上げタスクが失敗しました。",
+  );
+  assert.equal(
+    mergeTaskFailureNote(awaiting(TaskStatus.TASK_STATUS_EXCEEDED)),
+    "仕上げタスクが上限超過で止まりました。",
+  );
+  assert.equal(
+    mergeTaskFailureNote(awaiting(TaskStatus.TASK_STATUS_PR_FAILED)),
+    "仕上げタスクのプルリクエスト作成が失敗しました。",
+  );
+
+  for (const status of [
+    undefined,
+    TaskStatus.TASK_STATUS_PENDING,
+    TaskStatus.TASK_STATUS_RUNNING,
+    TaskStatus.TASK_STATUS_COMPLETED,
+  ]) {
+    assert.equal(
+      mergeTaskFailureNote(awaiting(status)),
+      undefined,
+      `仕上げタスクの末尾状態が ${status === undefined ? "未設定" : TaskStatus[status]} なら失敗の文面は出ない`,
+    );
+  }
+
+  assert.equal(
+    mergeTaskFailureNote(
+      createGoal({ status: GoalStatus.GOAL_STATUS_CREATED, mergeTaskLast: TaskStatus.TASK_STATUS_FAILED }),
+    ),
+    undefined,
+    "awaiting_merge 以外のゴールでは失敗の文面を出さない",
+  );
+});
+
+test("判断待ちの失敗の文面はマージ待ちで失敗系の末尾状態のときだけ出る", () => {
+  const merge = createDashboardState().pendingDecisions[1]!;
+  const withLast = (mergeTaskLast?: TaskStatus): PendingDecision => ({ ...merge, mergeTaskLast });
+
+  assert.equal(
+    pendingDecisionMergeFailureNote(withLast(TaskStatus.TASK_STATUS_FAILED)),
+    "仕上げタスクが失敗しました。",
+  );
+  assert.equal(
+    pendingDecisionMergeFailureNote(withLast(TaskStatus.TASK_STATUS_EXCEEDED)),
+    "仕上げタスクが上限超過で止まりました。",
+  );
+  assert.equal(
+    pendingDecisionMergeFailureNote(withLast(TaskStatus.TASK_STATUS_PR_FAILED)),
+    "仕上げタスクのプルリクエスト作成が失敗しました。",
+  );
+
+  for (const status of [
+    undefined,
+    TaskStatus.TASK_STATUS_PENDING,
+    TaskStatus.TASK_STATUS_RUNNING,
+    TaskStatus.TASK_STATUS_COMPLETED,
+  ]) {
+    assert.equal(
+      pendingDecisionMergeFailureNote(withLast(status)),
+      undefined,
+      `仕上げタスクの末尾状態が ${status === undefined ? "未設定" : TaskStatus[status]} なら失敗の文面は出ない`,
+    );
+  }
+
+  const inquiry = createDashboardState().pendingDecisions[0]!;
+  assert.equal(
+    pendingDecisionMergeFailureNote({ ...inquiry, mergeTaskLast: TaskStatus.TASK_STATUS_FAILED }),
+    undefined,
+    "マージ待ち以外の判断待ちでは失敗の文面を出さない",
+  );
+});
+
 test("通常タスクの未着手・実行中は人のマージ待ちの判定に影響しない", () => {
   const base = createGoal({
     status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
@@ -509,10 +697,20 @@ test("通常タスクの未着手・実行中は人のマージ待ちの判定�
 
   assert.equal(isHumanMergeWaiting(base), true, "通常タスクが動いていなくても人のマージ待ちです");
 
-  const withRunning = { ...base, taskCounts: { ...base.taskCounts, pending: 0, running: 1 } };
+  // 件数の一部だけを変えたゴールも createGoal で作り、TaskStatusCounts の
+  // 全フィールドがそろった形を保つ。
+  const withRunning = createGoal({
+    status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+    mergeTaskLast: TaskStatus.TASK_STATUS_COMPLETED,
+    taskCounts: { pending: 0, running: 1, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+  });
   assert.equal(isHumanMergeWaiting(withRunning), true, "通常タスクが実行中でも人のマージ待ちです");
 
-  const withPending = { ...base, taskCounts: { ...base.taskCounts, pending: 1, running: 0 } };
+  const withPending = createGoal({
+    status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+    mergeTaskLast: TaskStatus.TASK_STATUS_COMPLETED,
+    taskCounts: { pending: 1, running: 0, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+  });
   assert.equal(isHumanMergeWaiting(withPending), true, "通常タスクが未着手でも人のマージ待ちです");
 });
 
@@ -566,4 +764,91 @@ test("ゴールに属さない run も概要の run 一覧に表示する", () =
 
   assert.equal(overview.runs[0]?.run.goalId, undefined);
   assert.equal(overview.runs[0]?.run.runSlug, "run-aaa");
+});
+
+test("サーバーの状態は接続の有無と run の件数だけで決まる", () => {
+  assert.equal(serverStateFrom(false, toRunCount(3)), "down", "未接続なら run があっても応答なしの側にする");
+  assert.equal(serverStateFrom(false, toRunCount(0)), "down", "未接続なら down にする");
+  assert.equal(serverStateFrom(true, toRunCount(1)), "live", "接続済みで run があれば live にする");
+  assert.equal(serverStateFrom(true, toRunCount(0)), "idle", "接続済みで run が無ければ idle にする");
+});
+
+test("サーバーの状態の文言は接続と活動を区別する", () => {
+  assert.equal(serverStateLabel("down"), "応答なし", "未接続の表示は従来どおり応答なしにする");
+  assert.equal(serverStateLabel("live"), "動作中", "run がある場合は動作中にする");
+  assert.equal(
+    serverStateLabel("idle"),
+    "接続中",
+    "接続済みで run が無いことを、応答なしとも動作中とも違う文言で示す",
+  );
+});
+
+test("接続済みで run が0件のサーバーは概要カードで「接続中」になる", () => {
+  const state = createDashboardState();
+  const overview = buildOverviewView({ ...state, runs: [] }, NOW);
+
+  const mini = overview.servers.find((item) => item.server.serverId === "mini");
+  assert.equal(mini?.state, "idle", "接続済みで run が無いサーバーは idle である");
+  assert.equal(mini?.stateLabel, "接続中", "カードの文言が接続できていることを示す");
+
+  const down = overview.servers.find((item) => item.server.serverId === "down");
+  assert.equal(down?.state, "down", "未接続のサーバーは down のままである");
+  assert.equal(down?.stateLabel, "応答なし", "応答なしの表示は従来どおりである");
+});
+
+test("接続済みで run があるサーバーは概要カードで「動作中」になる", () => {
+  const overview = buildOverviewView(createDashboardState(), NOW);
+
+  const mini = overview.servers.find((item) => item.server.serverId === "mini");
+  assert.equal(mini?.state, "live", "run があるサーバーは live である");
+  assert.equal(mini?.stateLabel, "動作中", "カードの文言は動作中である");
+});
+
+// main のこのテストは、全体の上限に加えて、サーバーカードの下端に出す view.servers[].runLimit（配下の
+// プロジェクトの concurrency の合計。プロジェクトが無いサーバーは0）を確かめていた。概要はサーバーを1行で
+// 出す形（issue #120）に変わり、OverviewServerView はサーバーごとの上限を持たない。サーバーごとの上限の
+// 代わりに、別のサーバーのプロジェクトも全体の上限へ合計されることを確かめる。
+test("runLimit はサーバーの concurrency ではなく、プロジェクトの concurrency の合計にする", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    projects: base.projects.map((project) =>
+      project.name === "corporate-site" ? { ...project, concurrency: 1 } : { ...project, concurrency: 2 },
+    ),
+  };
+  const view = buildOverviewView(state, NOW);
+
+  assert.equal(view.runLimit, 3, "全プロジェクトの concurrency の合計を実行上限にする");
+
+  const template = state.projects[0]!;
+  const withDownProject = buildOverviewView(
+    { ...state, projects: [...state.projects, { ...template, name: "down-project", serverId: "down", concurrency: 4 }] },
+    NOW,
+  );
+  assert.equal(withDownProject.runLimit, 7, "別のサーバーのプロジェクトの concurrency も合計する");
+});
+
+test("プロジェクトごとに実行中の run 件数とそのプロジェクトの上限を対比できる", () => {
+  const view = buildOverviewView(createDashboardState(), NOW);
+  const corporate = view.projects.find((project) => project.name === "corporate-site");
+  assert.ok(corporate, "corporate-site のカードがある");
+  assert.equal(corporate.concurrency, 4, "プロジェクト自身の concurrency を上限として持つ");
+  assert.equal(corporate.runningRuns, 1, "そのプロジェクトの実行中の run を数える");
+  const esa = view.projects.find((project) => project.name === "esa");
+  assert.ok(esa, "esa のカードがある");
+  assert.equal(esa.runningRuns, 0, "実行中の run が無いプロジェクトは0件にする");
+});
+
+
+test("概要の最終読み取り時刻は、1件も読めていない場合に現在時刻で補わない", () => {
+  const state = { ...createDashboardState(), readAt: undefined };
+  const later = new Date(NOW.getTime() + 30 * 60_000);
+  const overview = buildOverviewView(state, later);
+  assert.equal(overview.readAt, undefined, "読めた時刻が無い場合は時刻を作りません");
+});
+
+test("概要の最終読み取り時刻は、表示用の現在時刻ではなく最後に実際に読めた時刻を保持する", () => {
+  const later = new Date(NOW.getTime() + 30 * 60_000);
+  const overview = buildOverviewView(createDashboardState(), later);
+  assert.equal(overview.readAt?.getTime(), NOW.getTime(), "state の readAt をそのまま使います");
 });

@@ -80,6 +80,12 @@ SQL からの復元では、`ServerCount.server_id`（`backend/src/activity.rs:3
 
 第1段の調査時点では、takt 応答の `status` が欠落または未知のとき `RunStatus::Running` に丸めていました。第2段では `parse_run_status`（`backend/src/mcp/tools.rs:637`）が欠落と未知を `ToolError::Parse` にし、既知の4値だけを受けます。そのため、`status` を持たない run 応答は読み取りエラーになります。これは要求 `R17` で明示された唯一の外部挙動の変更です。既存の run fixture には有効な `"status"` を追加し、欠落・未知の期待を `ToolError::Parse` に更新しました。既知4値の応答と gRPC の射影は従来と同じです。
 
+### 詳細モデルの追随（issue #157）
+
+第2段の置換から漏れていた詳細モデル（`TaskDetail`、`GoalDetail`、`GoalTaskEntry`、`backend/src/model.rs`）の識別子も、既存の値オブジェクトへ置き換えました。`TaskDetail` はプロジェクト名（`ProjectName`）、タスク名（`TaskName`）、ゴール ID（`Option<GoalId>`）、run slug（`Option<RunSlug>` と `Vec<RunSlug>`）、プルリクエスト番号（`Option<PullRequestNumber>`）を持ち、`GoalDetail` はゴール ID（`GoalId`）、`GoalTaskEntry` はタスク名（`TaskName`）と run slug（`Option<RunSlug>`）を持ちます。
+
+解析（`parse_task_detail`、`backend/src/mcp/tools/goal.rs`）は、一覧の解析（`parse_task`、`parse_goal`）と同じ流儀で `domain_value` を通して検証し、不正な値は `ToolError::Parse` にします。たとえば `prNumber` が 0 の応答は、詳細の読み取り全体が解析エラーになります。空文字の `goalId`・`runSlug`・`sourceRunSlug` は、一覧と同じく未所属（`None`）として扱います。`GoalDetail` と `GoalTaskEntry` の識別子は、検証済みの要求値（`GoalId`）と一覧の `TaskEntry` から組み立てるため、新しい検証は増えていません。proto の定義は変えず、gRPC の組み立て（`backend/src/grpc/mod.rs`、`backend/src/grpc/mapping.rs`）で値オブジェクトと proto の生の型を相互変換します。
+
 ### 値オブジェクトで検証しない意味制約
 
 参照先の存在・一意性・一致は外部状態を要するため、型では検証せず、既存の境界に残しています。

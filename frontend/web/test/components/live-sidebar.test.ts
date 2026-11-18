@@ -5,7 +5,7 @@
 // ビルド情報はビルド時に埋め込んだ値を prop で受け取って、サイドバー下端に表示する。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createElement } from "react";
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BACKEND_BRANCH, BACKEND_COMMIT, createDashboardState } from "../support/fixtures.ts";
 import { StateStreamProvider } from "../../src/components/state-provider.tsx";
@@ -18,14 +18,14 @@ const FRONTEND_BUILD: BuildInfo = { commit: "a1b2c3d", branch: "takt/20261116-fr
 const renderSidebar = (
   initialState: ReturnType<typeof createDashboardState>,
   frontendBuild: BuildInfo = FRONTEND_BUILD,
-): string =>
-  renderToStaticMarkup(
-    createElement(
-      StateStreamProvider,
-      { initialState },
-      createElement(LiveSidebar, { frontendBuild }),
-    ),
-  );
+): string => {
+  // children は Provider の props の必須項目のため、型付けした props ごと渡す。
+  const props: ComponentProps<typeof StateStreamProvider> = {
+    initialState,
+    children: createElement(LiveSidebar, { frontendBuild }),
+  };
+  return renderToStaticMarkup(createElement(StateStreamProvider, props));
+};
 
 const sideFoot = (html: string): string => {
   const match = /<div class="side-foot">([\s\S]*?)<\/div>/.exec(html);

@@ -13,10 +13,10 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use super::client::{CallError, McpClient, McpClientConfig};
+use super::client::{CallError, McpClient, McpClientConfig, TransportError};
 use crate::{
   config::McpServer,
-  domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
+  domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   model::{
     GoalDetail, GoalEntry, GoalQuestionEntry, GoalTaskEntry, GoalWorkLogEntry, InquiryEntry, NotificationEntry,
     ProjectSnapshot, RegistrationProposalEntry, RunDetail, RunEntry, RunInstructionEntry, RunReportEntry, TaskDetail,
@@ -38,6 +38,12 @@ use self::{
   run::{parse_run, parse_run_detail, report_summaries, step_entries, step_log_entries, step_log_next_offset},
 };
 
+/// 一覧読み取り（ゴール・タスク）の期限。応答が大きく、2026-11-17 の本番実測では
+/// 高負荷のときに takt_list_goals の応答が最大で約15秒、takt_list_tasks が15秒の
+/// 期限切れになり、読み取りサイクル全体が失敗しました。初期化の期限（60秒）と
+/// 同じ予算まで広げ、遅れてもサイクルを失敗させないようにします。
+const LIST_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// takt-mcp 子プロセスの起動設定を作る。
 ///
 /// poller の定期読み取りと GetRunDetail の要求時読み取りが、同じ起動条件（タイムアウトを含む）を
@@ -49,6 +55,10 @@ pub fn client_config(server: &McpServer, cwd: &std::path::Path) -> McpClientConf
     env:             server.env.clone(),
     cwd:             cwd.to_path_buf(),
     request_timeout: Duration::from_secs(15),
+    tool_timeouts:   BTreeMap::from([
+      ("takt_list_goals".to_owned(), LIST_READ_TIMEOUT),
+      ("takt_list_tasks".to_owned(), LIST_READ_TIMEOUT),
+    ]),
   }
 }
 
@@ -72,6 +82,21 @@ impl From<CallError> for ToolError {
       | CallError::Tool(error) => ToolError::Tool(error),
     }
   }
+}
+
+/// 輸送エラーのうち期限切れかどうか。
+fn is_timeout(error: &ToolError) -> bool {
+  matches!(error, ToolError::Transport(TransportError::Timeout(_)))
+}
+
+/// 補助読み取りの失敗のうち、前回値へ縮退してよい失敗かどうか。
+///
+/// 道具エラーは従来どおり縮退します。輸送の期限切れも、高負荷で1件の補助読み取りが
+/// 遅れただけでプロジェクト全体を失敗させないため、縮退の対象に加えます。それ以外の
+/// 輸送エラー（プロセス終了・起動失敗など）は接続自体が壊れている兆候として、
+/// 従来どおり全体の失敗にします。
+fn degrades_to_previous(error: &ToolError) -> bool {
+  matches!(error, ToolError::Tool(_)) || is_timeout(error)
 }
 
 /// 1プロジェクト分の状態を読み取るための道具のまとまり。
@@ -108,10 +133,11 @@ impl<'a> ToolSet<'a> {
   /// ゴール・タスク・問い合わせ・run を読み取り、1プロジェクト分の snapshot を組み立てる。
   ///
   /// `prev` には前回の snapshot を渡します。補助読み取り（run・ゴール質問・通知・ゴールに
-  /// 属さない問い合わせ）が道具エラーで失敗したときは、その項目だけ前回値（無ければ空）を
-  /// 保持し、プロジェクト全体を失敗にしません。ゴール登録提案も道具エラーと解析エラーの
-  /// ときは前回の提案（無ければ空）へ縮退し、周期を失敗させません。コア読み取り
-  /// （ゴール・タスク）の失敗と、補助読み取りの輸送エラーは全体の失敗として伝播します。
+  /// 属さない問い合わせ）が道具エラーか輸送の期限切れで失敗したときは、その項目だけ
+  /// 前回値（無ければ空）を保持し、プロジェクト全体を失敗にしません。ゴール登録提案も
+  /// 道具エラーと解析エラーと期限切れのときは前回の提案（無ければ空）へ縮退し、周期を
+  /// 失敗させません。コア読み取り（ゴール・タスク）の失敗と、補助読み取りの期限切れ
+  /// 以外の輸送エラーは全体の失敗として伝播します。
   ///
   /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知から得るため、通知を読んだ後に
   /// ゴールへ起点時刻を反映します。通知が無いゴールは前回 snapshot の同じゴールの起点を
@@ -129,7 +155,7 @@ impl<'a> ToolSet<'a> {
     let runs = self.get_running_runs(&tasks, prev).await?;
     let proposals = match self.list_goal_registration_proposals().await {
       | Ok(entries) => entries,
-      | Err(ToolError::Tool(_)) | Err(ToolError::Parse(_)) => {
+      | Err(error) if matches!(error, ToolError::Parse(_)) || degrades_to_previous(&error) => {
         prev.map(|snapshot| snapshot.proposals.clone()).unwrap_or_default()
       },
       | Err(error) => return Err(error),
@@ -143,7 +169,17 @@ impl<'a> ToolSet<'a> {
     serde_json::from_str(&text).map_err(|error| ToolError::Parse(format!("{name}: {error}")))
   }
 
+  /// ゴール一覧を全ページ集める。輸送の期限切れのときだけ、もう1回だけ読み直します。
+  /// 期限切れで子プロセスは破棄されるため、再試行は新しい子プロセスへの読み直しに
+  /// なります。読み取り専用の道具なので、再試行に副作用はありません。
   async fn list_goals(&mut self) -> Result<Vec<GoalEntry>, ToolError> {
+    match self.fetch_goals().await {
+      | Err(error) if is_timeout(&error) => self.fetch_goals().await,
+      | result => result,
+    }
+  }
+
+  async fn fetch_goals(&mut self) -> Result<Vec<GoalEntry>, ToolError> {
     let mut entries = Vec::new();
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
@@ -160,7 +196,16 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_list_goals のページ追従が上限に達しました".to_owned()))
   }
 
+  /// タスク一覧を全ページ集める。ゴール一覧と同じく、輸送の期限切れのときだけ
+  /// もう1回だけ読み直します。
   async fn list_tasks(&mut self) -> Result<Vec<TaskEntry>, ToolError> {
+    match self.fetch_tasks().await {
+      | Err(error) if is_timeout(&error) => self.fetch_tasks().await,
+      | result => result,
+    }
+  }
+
+  async fn fetch_tasks(&mut self) -> Result<Vec<TaskEntry>, ToolError> {
     let mut entries = Vec::new();
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
@@ -191,13 +236,15 @@ impl<'a> ToolSet<'a> {
   ) -> Result<Vec<InquiryEntry>, ToolError> {
     let mut inquiries = match self.list_standalone_inquiries().await {
       | Ok(entries) => entries,
-      | Err(ToolError::Tool(_)) => prev_inquiries(prev, |goal_id| goal_id.is_none()),
+      | Err(error) if degrades_to_previous(&error) => prev_inquiries(prev, |goal_id| goal_id.is_none()),
       | Err(error) => return Err(error),
     };
     for goal in goals {
       match self.list_goal_questions(&goal.goal_id).await {
         | Ok(mut entries) => inquiries.append(&mut entries),
-        | Err(ToolError::Tool(_)) => inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id))),
+        | Err(error) if degrades_to_previous(&error) => {
+          inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id)))
+        },
         | Err(error) => return Err(error),
       }
     }
@@ -258,7 +305,7 @@ impl<'a> ToolSet<'a> {
       };
       match self.read_run(&run_slug, task).await {
         | Ok(run) => runs.push(run),
-        | Err(ToolError::Tool(_)) => {
+        | Err(error) if degrades_to_previous(&error) => {
           if let Some(previous) =
             prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str()))
           {
@@ -392,7 +439,7 @@ impl<'a> ToolSet<'a> {
           }
           notifications.extend(goal_notifications);
         },
-        | Err(ToolError::Tool(_)) => {
+        | Err(error) if degrades_to_previous(&error) => {
           if let Some(prev) = prev {
             notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal.goal_id).cloned());
             if let Some(recorded_at) =
@@ -446,44 +493,40 @@ impl<'a> ToolSet<'a> {
   /// 目的・対象外・受け入れ条件・制約・仕様は takt_get_goal の path/textOffset を全ページ追従して
   /// 全文を集めます。作業記録と質問は専用の一覧道具を全ページ追従します。紐づくタスクは
   /// takt_list_tasks を全ページ取得して goal_id で絞ります。
-  pub async fn read_goal_detail(&mut self, goal_id: &str) -> Result<GoalDetail, ToolError> {
-    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id })).await?;
+  pub async fn read_goal_detail(&mut self, goal_id: &GoalId) -> Result<GoalDetail, ToolError> {
+    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id.as_str() })).await?;
     let goal =
       value.get("goal").ok_or_else(|| ToolError::Parse("takt_get_goal の応答に goal がありません".to_owned()))?;
     let returned_id = string_field(goal, "id")?;
-    if returned_id != goal_id {
+    if returned_id != goal_id.as_str() {
       return Err(ToolError::Parse(format!("要求したゴール {goal_id} と応答のゴール {returned_id} が一致しません")));
     }
     let status = parse_goal_status(goal.get("status"))?;
     let execution_status = parse_goal_execution_status(goal.get("executionStatus"))?;
     let branch = optional_string(goal, "branch").unwrap_or_default();
     let integration_branch = optional_string(goal, "integrationBranch").unwrap_or_default();
-    let objective = self.read_goal_text(goal_id, "objective").await?;
-    let out_of_scope = self.read_goal_array(goal_id, "outOfScope").await?;
-    let acceptance_criteria = self.read_goal_array(goal_id, "acceptanceCriteria").await?;
-    let constraints = self.read_goal_array(goal_id, "constraints").await?;
+    let objective = self.read_goal_text(goal_id.as_str(), "objective").await?;
+    let out_of_scope = self.read_goal_array(goal_id.as_str(), "outOfScope").await?;
+    let acceptance_criteria = self.read_goal_array(goal_id.as_str(), "acceptanceCriteria").await?;
+    let constraints = self.read_goal_array(goal_id.as_str(), "constraints").await?;
     let mut specifications = BTreeMap::new();
     for notation in SPECIFICATION_NOTATIONS {
-      let content = self.read_goal_text(goal_id, &format!("specifications.{notation}")).await?;
+      let content = self.read_goal_text(goal_id.as_str(), &format!("specifications.{notation}")).await?;
       if !content.is_empty() {
         specifications.insert(notation.to_owned(), content);
       }
     }
-    let work_log = self.read_goal_work_log(goal_id).await?;
-    let questions = self.read_goal_questions(goal_id).await?;
+    let work_log = self.read_goal_work_log(goal_id.as_str()).await?;
+    let questions = self.read_goal_questions(goal_id.as_str()).await?;
     let tasks = self
       .list_tasks()
       .await?
       .into_iter()
-      .filter(|task| task.goal_id.as_ref().map(|goal_id| goal_id.as_str()) == Some(goal_id))
-      .map(|task| GoalTaskEntry {
-        task_name: task.name.as_str().to_owned(),
-        status:    task.status,
-        run_slug:  task.run_slug.as_ref().map(|run_slug| run_slug.as_str().to_owned()),
-      })
+      .filter(|task| task.goal_id.as_ref() == Some(goal_id))
+      .map(|task| GoalTaskEntry { task_name: task.name, status: task.status, run_slug: task.run_slug })
       .collect();
     Ok(GoalDetail {
-      goal_id: goal_id.to_owned(),
+      goal_id: goal_id.clone(),
       status,
       execution_status,
       objective,
@@ -620,26 +663,28 @@ impl<'a> ToolSet<'a> {
   /// 一致するタスクが無ければ Ok(None)、ページ追従が上限に達したら Parse エラーにします。
   pub async fn read_task_detail(
     &mut self,
-    project: &str,
-    task_name: &str,
-    goal_id: Option<&str>,
+    project: &ProjectName,
+    task_name: &TaskName,
+    goal_id: Option<&GoalId>,
   ) -> Result<Option<TaskDetail>, ToolError> {
     let mut offset = 0;
     for _ in 0..MAX_PAGES {
       let value = self.call_json("takt_list_tasks", json!({ "offset": offset })).await?;
       let page = Page::from_value(&value, "tasks")?;
       for item in &page.items {
-        if item.get("name").and_then(Value::as_str) != Some(task_name) {
+        if item.get("name").and_then(Value::as_str) != Some(task_name.as_str()) {
           continue;
         }
         if let Some(goal_id) = goal_id {
-          if item.get("goalId").and_then(Value::as_str) != Some(goal_id) {
+          if item.get("goalId").and_then(Value::as_str) != Some(goal_id.as_str()) {
             continue;
           }
         }
+        // goalId が空文字のタスクはゴール未所属（parse_task と同じ扱い）とし、
+        // takt_get_goal を呼ばずに、ID が欠落する場合と同じ既定値を使う。
         let links = match optional_string(item, "goalId") {
-          | Some(task_goal_id) => self.read_task_link_fields(&task_goal_id).await?,
-          | None => TaskLinkFields::default(),
+          | Some(task_goal_id) if !task_goal_id.is_empty() => self.read_task_link_fields(&task_goal_id).await?,
+          | _ => TaskLinkFields::default(),
         };
         return Ok(Some(parse_task_detail(project, item, links)?));
       }
@@ -658,7 +703,15 @@ impl<'a> ToolSet<'a> {
   /// instructionId を使って1件ずつ本文を取得します。
   pub async fn read_run_detail(&mut self, run_slug: &RunSlug) -> Result<RunDetail, ToolError> {
     let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
-    let task = self.list_tasks().await?.into_iter().find(|task| task.run_slug.as_ref() == Some(run_slug));
+    // runSlug の一致を優先し、無ければ sourceRunSlug の一致でタスクを引きます。
+    // 完了タスクが sourceRunSlug だけを持つ場合でもゴールとタスク名を補えるように
+    // するためです。
+    let tasks = self.list_tasks().await?;
+    let task = tasks
+      .iter()
+      .find(|task| task.run_slug.as_ref() == Some(run_slug))
+      .or_else(|| tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())))
+      .cloned();
     let mut step_logs = step_log_entries(&value);
     let mut next_offset = step_log_next_offset(&value);
     let mut pages_taken = 0;

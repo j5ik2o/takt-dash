@@ -1,6 +1,11 @@
 import type { ReactElement } from "react";
 import { notFound } from "next/navigation";
-import { BackendUnavailableError, createBackendClient, RunNotFoundError } from "../grpc/client";
+import {
+  BackendUnavailableError,
+  backendUnavailableSituation,
+  createBackendClient,
+  RunNotFoundError,
+} from "../grpc/client";
 import type { GetRunDetailResponse } from "../proto/taktdash";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { RunDetailContent } from "./run-detail-content";
@@ -11,7 +16,7 @@ type RunDetailLoaderProps = {
 
 type LoadResult =
   | { kind: "found"; detail: GetRunDetailResponse }
-  | { kind: "unavailable" };
+  | { kind: "unavailable"; error: BackendUnavailableError };
 
 // run が見つからないときは 404 を返す（order.md:27）。gRPC の NOT_FOUND と
 // 応答の runSlug 不一致は、どちらも RunNotFoundError として扱う。backend 自体に
@@ -27,7 +32,7 @@ export async function RunDetailLoader({ params }: RunDetailLoaderProps): Promise
       notFound();
     }
     if (error instanceof BackendUnavailableError) {
-      result = { kind: "unavailable" };
+      result = { kind: "unavailable", error };
     } else {
       throw error;
     }
@@ -35,7 +40,7 @@ export async function RunDetailLoader({ params }: RunDetailLoaderProps): Promise
     await client.close();
   }
   if (result.kind === "unavailable") {
-    return <BackendUnavailableNotice />;
+    return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;
   }
   return <RunDetailContent detail={result.detail} now={new Date()} />;
 }

@@ -142,7 +142,11 @@ message Server {
   string kind = 3;                             // 表示用の機種ラベル（"Mac mini" など）
   bool connected = 4;                          // 応答の有無
   google.protobuf.Timestamp last_read_at = 5;  // 最後に読めた時刻
-  int32 concurrency = 6;                       // 同時実行の上限
+
+  // 同時実行の上限はサーバー単位には存在せず、プロジェクト単位であるため、
+  // かつて使っていた 6 番（concurrency）は欠番にする。
+  reserved 6;
+  reserved "concurrency";
 }
 
 // 集約対象のプロジェクトを表す。
@@ -154,6 +158,7 @@ message Project {
   bool connected = 5;                          // 応答の有無（プロジェクト単位）
   google.protobuf.Timestamp last_read_at = 6;  // 最後に読めた時刻
   ConnectionState connection_state = 7;        // 接続状態（未読は UNSPECIFIED）
+  int32 concurrency = 8;                       // 同時実行の上限（.takt/config.yaml の concurrency。キーが無ければ takt の既定値1）
 }
 
 // タスクの状態ごとの件数を表す。
@@ -237,6 +242,7 @@ message PendingDecision {
   bool stale = 10;                        // 滞留の判定済みフラグ
   string inquiry_id = 11;                 // 問い合わせの識別子（AnswerInquiry の inquiry_id に渡す。マージ待ちは空。ゴールに属さない問い合わせには回答できない）
   optional int32 revision = 12;           // ゴール登録の承認待ちの revision（承認・却下に渡す。それ以外は省略）
+  optional TaskStatus merge_task_last = 13;  // マージ待ちのゴールの仕上げタスクの最後の状態（それ以外は省略する）
 }
 
 // 異常判定の基準を表す。
