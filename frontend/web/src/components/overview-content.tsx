@@ -1,6 +1,8 @@
 import type { ReactElement } from "react";
 import Link from "next/link";
 import type { OverviewView } from "../state/dashboard";
+import { FAILED_TASK_KINDS_LABEL, notRespondingProjectText } from "../state/dashboard";
+import { CONNECTION_STATE } from "../state/proto-values";
 import { decisionKey, decisionTypeLabel } from "../state/decision-actions";
 import { formatClock, formatDateTime, formatDuration, formatModel } from "../state/format";
 import { decisionHref, projectHref, serverAnchorId } from "../state/anchors";
@@ -86,7 +88,7 @@ export function OverviewContent({
               <p>ログが止まっている run が {view.silentRunCount}件あります。</p>
             ) : null}
             {view.failedTaskCount > 0 ? (
-              <p>失敗したタスクが {view.failedTaskCount}件あります。</p>
+              <p>{FAILED_TASK_KINDS_LABEL}のタスクが {view.failedTaskCount}件あります。</p>
             ) : null}
             {view.abortedGoalCount > 0 ? (
               <p>中止したゴールが {view.abortedGoalCount}件あります。</p>
@@ -149,7 +151,7 @@ export function OverviewContent({
             <small>件</small>
           </div>
           {view.failedTaskCount > 0 ? (
-            <div className="t-note">失敗したタスクが {view.failedTaskCount}件残っています。</div>
+            <div className="t-note">{FAILED_TASK_KINDS_LABEL}のタスクが {view.failedTaskCount}件残っています。</div>
           ) : null}
         </div>
       </section>
@@ -180,7 +182,7 @@ export function OverviewContent({
         </h2>
         <div className="scards">
           {view.servers.map(
-            ({ server, state, stateLabel, runs, runLimit, runningRuns, inProgressGoals, pendingCount, waitingTasks }) => (
+            ({ server, state, stateLabel, runs, runLimit, runningRuns, inProgressGoals, pendingCount, waitingTasks, notRespondingProjects }) => (
               <article
                 id={serverAnchorId(server.serverId)}
                 className={`scard ${state === "down" ? "down" : ""}`}
@@ -209,6 +211,18 @@ export function OverviewContent({
                       : "まだ一度も読めていません。"}
                   </div>
                 ) : null}
+                {/* サーバーの読み取り時刻は配下プロジェクトの最新の時刻であり、応答していない
+                    プロジェクトがあっても進んでしまう。プロジェクトごとの最後に読めた時刻を
+                    並べることで、サーバー単位の時刻とプロジェクトごとの時刻の関係が画面から
+                    読み取れるようにする（issue #264）。 */}
+                {notRespondingProjects.map((project) => (
+                  <div className="stale-note" key={project.name}>
+                    {notRespondingProjectText(project)}
+                    {project.connectionState === CONNECTION_STATE.UNRESPONSIVE && project.lastReadAt
+                      ? `最後に読めたのは ${formatClock(project.lastReadAt)} です。`
+                      : null}
+                  </div>
+                ))}
                 <ul className="runs">
                   {runs.length > 0 ? (
                     runs.map((runView) => {
