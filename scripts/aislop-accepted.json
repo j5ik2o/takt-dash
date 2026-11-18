@@ -92,23 +92,6 @@
           "message": "File too large (limit: 400, flagged above 441 lines)"
         }
       ]
-    },
-    {
-      "reason": "作業ツリーで dashboard.ts が index 上の競合段階（stage 1・2・3）を持つ間は、git ls-files が同じパスを3回返し、aislop が同じファイルを3回走査して同一の行数超過を3件出す。ファイルの内容に競合記号は残っておらず、指摘の実体は上の群で受け入れた1件と同じである。重複分の2件を同じ理由で受け入れる。index が解決されれば重複は出なくなり、この2件は出なくなった指摘として扱われる。",
-      "findings": [
-        {
-          "engine": "code-quality",
-          "rule": "complexity/file-too-large",
-          "file": "frontend/web/src/state/dashboard.ts",
-          "message": "File too large (limit: 400, flagged above 441 lines)"
-        },
-        {
-          "engine": "code-quality",
-          "rule": "complexity/file-too-large",
-          "file": "frontend/web/src/state/dashboard.ts",
-          "message": "File too large (limit: 400, flagged above 441 lines)"
-        }
-      ]
     }
   ]
 }
