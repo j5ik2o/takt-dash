@@ -72,12 +72,20 @@ impl LaneKey {
 /// レジストリのキー。設定上、プロジェクト名はサーバー内で一意です。
 type ClientKey = (String, String, LaneKey);
 
-/// プロジェクトを指すキー。レーンをまたぐ記録（作り直し・書き込みの通し番号）に使います。
+/// プロジェクトを指すキー。poller の再構築記録とレーンをまたぐ書き込みの記録に使います。
 type ProjectKey = (String, String);
 
 /// レジストリが貸し出すクライアントの取っ手。クライアントごとの排他はこの中の
 /// [`tokio::sync::Mutex`] で行います。
 pub type ClientHandle = Arc<AsyncMutex<McpClient>>;
+
+/// 定期読み取りへ渡す、同じ取得時点の読取先と書き込みの通し番号。
+pub(crate) struct ClientRead {
+  pub(crate) client:         ClientHandle,
+  pub(crate) cwd:            std::path::PathBuf,
+  pub(crate) rebuilt:        bool,
+  pub(crate) write_sequence: u64,
+}
 
 /// 1 レーン分のクライアントと、その起動設定。
 struct Entry {
@@ -119,7 +127,7 @@ impl McpClientRegistry {
   ///
   /// 登録が無ければ `make` で起動設定を作って登録します。登録済みのクライアントの起動設定が
   /// `make` の返す設定と異なる場合は、旧ハンドルをレジストリから外して新しい設定で作り直し、
-  /// 作り直したことをプロジェクト単位で記録します。戻り値の2つ目は、クライアントを新規に
+  /// poller レーンの作り直しを記録します。戻り値の2つ目は、クライアントを新規に
   /// 作った（作り直しを含む）かどうかで、呼び出し側が起動時の温めを行う判断に使います。
   ///
   /// 子プロセスの起動は最初の道具呼び出しまで遅延します（温めは呼び出し側が行います）。
@@ -228,7 +236,7 @@ impl McpClientRegistry {
       // 作り直しの記録は、既存のクライアントを設定の違いで置き換えた場合だけに残します。
       // 新しいレーンの追加（画面読み取りレーンの増設など）では定期読み取りの接続先は
       // 変わっていないため、差分基準をリセットしません。
-      if replaced.is_some() {
+      if replaced.is_some() && lane_key == LaneKey::Poller {
         inner.rebuilt.insert((server_id.to_owned(), project.to_owned()));
       }
       (handle, true, replaced)
@@ -239,16 +247,18 @@ impl McpClientRegistry {
     (handle, created)
   }
 
-  /// 指定したプロジェクト・レーンのクライアントを返す。登録が無ければ `None` を返します。
-  pub fn get(&self, server_id: &str, project: &str, lane: Lane) -> Option<ClientHandle> {
-    let lane_key = match lane {
-      | Lane::Poller => LaneKey::Poller,
-      | Lane::Write => LaneKey::Write,
-      | Lane::Screen => LaneKey::Screen(0),
-    };
-    let key = (server_id.to_owned(), project.to_owned(), lane_key);
-    let inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-    inner.clients.get(&key).map(|entry| entry.client.clone())
+  /// poller のハンドル・cwd・再構築記録・書き込み通し番号を同じロック内で取得する。
+  ///
+  /// RPC が別レーンを置き換えても、準備済みの poller の読取先と比較基準は変えません。
+  /// 取得した cwd は道具とローカル run の両方に使い、周期冒頭の設定との混在を防ぎます。
+  pub(crate) fn take_for_read(&self, server_id: &str, project: &str) -> Option<ClientRead> {
+    let key = (server_id.to_owned(), project.to_owned());
+    let lane_key = (server_id.to_owned(), project.to_owned(), LaneKey::Poller);
+    let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+    let entry = inner.clients.get(&lane_key).map(|entry| (entry.client.clone(), entry.config.cwd.clone()));
+    let rebuilt = inner.rebuilt.remove(&key);
+    let write_sequence = inner.write_counts.get(&key).copied().unwrap_or(0);
+    entry.map(|(client, cwd)| ClientRead { client, cwd, rebuilt, write_sequence })
   }
 
   /// 指定したプロジェクト以外のクライアントをレジストリから外す。
@@ -264,16 +274,6 @@ impl McpClientRegistry {
     inner.screen_next.retain(|key, _| wanted.contains(key));
     inner.write_counts.retain(|key, _| wanted.contains(key));
     inner.write_gates.retain(|key, _| wanted.contains(key));
-  }
-
-  /// 指定したプロジェクトが作り直されたかを返し、記録を消す。
-  ///
-  /// 定期読み取りは読み取りの前にこれを呼び、作り直したプロジェクトの差分基準を
-  /// リセットします。読み取り側の設定差分と、書き込み RPC 経由の作り直しの双方を拾えます。
-  pub fn take_rebuilt_for(&self, server_id: &str, project: &str) -> bool {
-    let key = (server_id.to_owned(), project.to_owned());
-    let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-    inner.rebuilt.remove(&key)
   }
 
   /// プロジェクトの現在の書き込みの通し番号を返す。書き込みがまだ無ければ0です。
@@ -382,6 +382,41 @@ mod tests {
     assert_eq!(registry.write_sequence("local", "other"), 0, "通し番号はプロジェクトごとに独立です");
   }
 
+  #[test]
+  fn read_acquisition_keeps_the_poller_source_when_other_lanes_change() {
+    let registry = McpClientRegistry::new();
+    registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), config);
+    let mut changed = config();
+    changed.cwd = PathBuf::from("/tmp/changed");
+    registry.client("local", "proj", Lane::Write, || changed.clone());
+    registry.client("local", "proj", Lane::Screen, || changed.clone());
+    registry.record_write("local", "proj");
+
+    let read = registry.take_for_read("local", "proj").expect("poller があります");
+    let (poller, _) = registry.client("local", "proj", Lane::Poller, config);
+    assert!(Arc::ptr_eq(&read.client, &poller), "書き込みレーンのハンドルを読み取りに使いません");
+    assert_eq!(read.cwd, config().cwd);
+    assert!(!read.rebuilt, "他レーンの置換では読取先の再構築を通知しません");
+    assert_eq!(read.write_sequence, 1);
+    registry.record_write("local", "proj");
+    assert_eq!(read.write_sequence, 1, "取得済みの通し番号は取得後の書き込みでは変わりません");
+
+    registry.client("local", "proj", Lane::Poller, || changed.clone());
+    let read = registry.take_for_read("local", "proj").expect("新しい poller があります");
+    assert_eq!(read.cwd, changed.cwd);
+    assert!(read.rebuilt);
+    assert_eq!(read.write_sequence, 2);
+    assert!(!registry.take_for_read("local", "proj").expect("poller があります").rebuilt);
+  }
+
+  #[test]
+  fn read_acquisition_requires_a_poller_lane() {
+    let registry = McpClientRegistry::new();
+    assert!(registry.take_for_read("local", "proj").is_none());
+    registry.client("local", "proj", Lane::Write, config);
+    assert!(registry.take_for_read("local", "proj").is_none(), "書き込みレーンだけでは読み取りできません");
+  }
+
   /// プロジェクトの画面読み取りレーンの番号の一覧。レジストリの中身を直接観測します。
   fn screen_lane_indexes(registry: &McpClientRegistry, server_id: &str, project: &str) -> Vec<u32> {
     let inner = registry.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
@@ -401,20 +436,32 @@ mod tests {
   fn adding_a_screen_lane_does_not_mark_the_project_rebuilt() {
     let registry = McpClientRegistry::new();
     registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), config);
-    assert!(!registry.take_rebuilt_for("local", "proj"), "初回のそろえでは作り直しとして記録しません");
+    assert!(
+      !registry.take_for_read("local", "proj").expect("poller があります").rebuilt,
+      "初回のそろえでは作り直しとして記録しません"
+    );
     registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(2), config);
-    assert!(!registry.take_rebuilt_for("local", "proj"), "画面レーンの増設だけでは差分基準をリセットしません");
+    assert!(
+      !registry.take_for_read("local", "proj").expect("poller があります").rebuilt,
+      "画面レーンの増設だけでは差分基準をリセットしません"
+    );
   }
 
   #[test]
   fn replacing_clients_with_a_different_config_marks_the_project_rebuilt() {
     let registry = McpClientRegistry::new();
     registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), config);
-    assert!(!registry.take_rebuilt_for("local", "proj"), "同じ設定のそろえでは作り直しとして記録しません");
+    assert!(
+      !registry.take_for_read("local", "proj").expect("poller があります").rebuilt,
+      "同じ設定のそろえでは作り直しとして記録しません"
+    );
     let mut changed = config();
     changed.command = "node-changed".to_owned();
     registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), move || changed.clone());
-    assert!(registry.take_rebuilt_for("local", "proj"), "設定が変わって置き換えた場合は作り直しとして記録します");
+    assert!(
+      registry.take_for_read("local", "proj").expect("poller があります").rebuilt,
+      "設定が変わって置き換えた場合は作り直しとして記録します"
+    );
   }
 
   #[test]

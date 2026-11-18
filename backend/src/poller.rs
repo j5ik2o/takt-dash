@@ -21,7 +21,7 @@ use crate::{
   activity::ActivityStore,
   config::{load_config, Config, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
-  mcp::{client_config, Lane, McpClientRegistry, ReadToolSet, ToolCallMetrics, ToolError},
+  mcp::{client_config, McpClientRegistry, ReadToolSet, ToolCallMetrics, ToolError},
   model::{
     ConnectionState, ConnectionTransition, EventKind, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot,
     TerminalReads,
@@ -56,6 +56,8 @@ pub struct Poller {
   deferred_lost:  BTreeMap<String, (DateTime<Utc>, ConnectionTransition)>,
   changes:        broadcast::Sender<()>,
   last_signature: Option<StoreSignature>,
+  #[cfg(test)]
+  read_barrier:   Option<rebuild_tests::ReadBarrier>,
   /// プロジェクトごとの run の集計と、その集計を作ったときの cwd。周期をまたいで持ち、
   /// run の本体ログを前回の続きから読むために使います。
   run_logs:       RunLogHandles<String>,
@@ -95,6 +97,8 @@ impl Poller {
       deferred_lost: BTreeMap::new(),
       changes,
       last_signature: None,
+      #[cfg(test)]
+      read_barrier: None,
       run_logs: RunLogHandles::default(),
     }
   }
@@ -127,6 +131,11 @@ impl Poller {
     };
     self.store.set_thresholds(config.thresholds);
     self.store.set_servers(config.server_meta.clone());
+    for previous in self.store.project_views() {
+      if !config.projects.iter().any(|project| project.name == previous.name && project.server == previous.server_id) {
+        self.reset_project_baseline(&previous.name);
+      }
+    }
     self.store.set_projects(config.projects.clone());
     self.sync_clients(&config);
     self.run_logs.retain(|name| config.projects.iter().any(|project| &project.name == name));
@@ -141,41 +150,42 @@ impl Poller {
     // 続けるため、最初の記録エラーだけを保持してサイクルの末尾で返します。
     let mut record_error: Option<crate::config::ConfigError> = None;
     let mut handles = Vec::with_capacity(config.projects.len());
-    // 読み取り開始時点の書き込みの通し番号。読み取りの途中で書き込みが成功した
-    // プロジェクトは、読み取り結果が書き込み前の状態を映している可能性があるため、
-    // 結果を反映せずに捨てます（`read_result_is_stale`）。
-    let mut write_sequences = Vec::with_capacity(config.projects.len());
     for project in &config.projects {
-      // 設定変更（読み取り側・書き込み RPC 経由の双方）でクライアントを作り直した
-      // プロジェクトは、旧接続先の差分基準を新接続先へ投影しないよう読み取り前にリセットします。
-      if self.registry.take_rebuilt_for(&project.server, &project.name) {
+      #[cfg(test)]
+      self.pause_read(rebuild_tests::ReadBoundary::BeforeAcquisition).await;
+      let acquired = self.registry.take_for_read(&project.server, &project.name);
+      // 他レーンの置換ではなく、実際の読取先の変更に合わせて比較基準を捨てます。
+      if acquired.as_ref().is_some_and(|read| read.rebuilt) {
         self.reset_project_baseline(&project.name);
       }
+      #[cfg(test)]
+      self.pause_read(rebuild_tests::ReadBoundary::AfterAcquisition).await;
       // 再起動や作り直しで比較基準が無いプロジェクトは、記録済みの接続の出来事から
       // 基準を作り、未対応の切断を取りこぼさないようにします。
       self.seed_connection_baseline(project);
       self.forget_answered_terminal_questions(&project.name);
       let prev = self.previous.get(&project.name).cloned();
-      let run_logs = self.run_logs.handle_for(&project.name, &project.cwd);
-      write_sequences.push(self.registry.write_sequence(&project.server, &project.name));
-      match self.registry.get(&project.server, &project.name, Lane::Poller) {
-        | Some(handle) => {
-          let project = project.clone();
-          handles.push(Some(tokio::spawn(async move {
+      match acquired {
+        | Some(read) => {
+          let run_logs = self.run_logs.handle_for(&project.name, &read.cwd);
+          let cwd = read.cwd;
+          let handle = read.client;
+          let task = tokio::spawn(async move {
             let read_at = Utc::now();
             let mut client = handle.lock().await;
-            let mut tools = ReadToolSet::new(&mut client, project.cwd.clone());
+            let mut tools = ReadToolSet::new(&mut client, cwd);
             let result = tools.read_snapshot(prev.as_ref(), &run_logs).await;
             let metrics = tools.take_metrics();
             (read_at, result, metrics)
-          })));
+          });
+          handles.push(Some((task, read.write_sequence)));
         },
         | None => handles.push(None),
       }
     }
-    for ((project, handle), write_sequence_at_start) in config.projects.iter().zip(handles).zip(write_sequences) {
+    for (project, handle) in config.projects.iter().zip(handles) {
       let prev = self.previous.get(&project.name).cloned();
-      let Some(handle) = handle else {
+      let Some((handle, write_sequence_at_start)) = handle else {
         let error = ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name));
         self.apply_failure(project, &error, prev.as_ref(), Utc::now(), &mut report, &mut record_error);
         continue;
@@ -725,3 +735,7 @@ mod tests {
     assert!(other_server.try_lock().is_ok(), "別サーバーのゲートも独立です");
   }
 }
+
+#[cfg(test)]
+#[path = "poller_rebuild_tests.rs"]
+mod rebuild_tests;
