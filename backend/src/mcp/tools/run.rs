@@ -3,8 +3,9 @@
 //! run は通常、run の保存場所（[`crate::run_progress`]）から読みます。ローカルに保存場所を読めない
 //! プロジェクト（SSH 越しに扱うリモートのサーバーのプロジェクトなど）の run だけ、takt-mcp の
 //! takt_get_run の応答から作ります。同じプロジェクトの run のレポート本文も、takt_get_run の
-//! view report から読みます。run 詳細では、指示書の一覧（view instructions）と、要約には
-//! 含まれないタスク本文（view task）も同じ道具から読みます。
+//! view report から読みます。指示書の本文は view instructions へ instructionId を指定して
+//! 読みます。run 詳細では、指示書の一覧（view instructions）と、要約には含まれないタスク本文
+//! （view task）も同じ道具から読みます。
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
@@ -417,6 +418,97 @@ impl ToolSet<'_> {
       }
     }
   }
+}
+
+/// takt_get_run の view instructions（instructionId 指定）が1回で返す本文の上限
+/// （バイト）。view report と同じく、takt の入力契約で maxBytes は 4〜4096 です。
+const INSTRUCTION_PAGE_MAX_BYTES: u64 = 4096;
+/// takt_get_run の view instructions（instructionId 指定）に渡せる maxBytes の下限
+/// （バイト）。
+const INSTRUCTION_PAGE_MIN_BYTES: u64 = 4;
+
+impl ToolSet<'_> {
+  /// takt_get_run の view instructions から、run の指示書 `instruction_id` の本文を
+  /// 先頭から `max_bytes` まで読む。
+  ///
+  /// 応答は `{ instruction: {content, totalBytes, nextOffset} }` で、view report と
+  /// 同じく nextOffset をたどって連結します。対象の指示書が無いと takt-mcp は道具
+  /// エラーを返します。応答に `instruction` が無い、型が違う、または nextOffset が
+  /// 進まない場合は解析エラーにします。
+  pub async fn read_remote_instruction(
+    &mut self,
+    run_slug: &RunSlug,
+    instruction_id: InstructionId,
+    max_bytes: u64,
+  ) -> Result<RunContent, ToolError> {
+    let mut content = String::new();
+    let mut offset = 0_u64;
+    loop {
+      let remaining = max_bytes.saturating_sub(content.len() as u64);
+      let value = self
+        .call_json(
+          "takt_get_run",
+          json!({
+            "runSlug": run_slug.as_str(),
+            "view": "instructions",
+            "instructionId": instruction_id.get(),
+            "offset": offset,
+            "maxBytes": remaining.clamp(INSTRUCTION_PAGE_MIN_BYTES, INSTRUCTION_PAGE_MAX_BYTES),
+          }),
+        )
+        .await?;
+      let page = parse_instruction_page(&value)?;
+      content.push_str(&page.content);
+      let next = match page.next_offset {
+        | Some(next) if next <= offset || page.content.is_empty() => {
+          return Err(ToolError::Parse("takt_get_run の instruction の nextOffset が進みません".to_owned()));
+        },
+        | next => next,
+      };
+      let collected = content.len() as u64;
+      match next {
+        | Some(next) if collected + INSTRUCTION_PAGE_MIN_BYTES <= max_bytes => offset = next,
+        | _ => {
+          truncate_at_char_boundary(&mut content, max_bytes);
+          let truncated = (content.len() as u64) < page.total_bytes;
+          return Ok(RunContent { content, size_bytes: page.total_bytes, truncated });
+        },
+      }
+    }
+  }
+}
+
+/// takt_get_run の view instructions（instructionId 指定）が返す、指示書本文の1ページ。
+struct InstructionPage {
+  content:     String,
+  /// 指示書全体の大きさ（バイト）。
+  total_bytes: u64,
+  /// 続きの読み位置。最後のページでは `None` です。
+  next_offset: Option<u64>,
+}
+
+/// takt_get_run の view instructions（instructionId 指定）の応答から
+/// `instruction.{content,totalBytes,nextOffset}` を読む。
+///
+/// `instruction` が無い、または各項目の型が違う場合は解析エラーにします
+/// （view report と同じ規則）。
+fn parse_instruction_page(value: &Value) -> Result<InstructionPage, ToolError> {
+  let instruction = value
+    .get("instruction")
+    .filter(|instruction| instruction.is_object())
+    .ok_or_else(|| ToolError::Parse("takt_get_run の応答に instruction がありません".to_owned()))?;
+  let content = string_field(instruction, "content")?;
+  let total_bytes = instruction
+    .get("totalBytes")
+    .and_then(Value::as_u64)
+    .ok_or_else(|| ToolError::Parse("instruction の totalBytes が数値ではありません".to_owned()))?;
+  let next_offset = match instruction.get("nextOffset") {
+    | None | Some(Value::Null) => None,
+    | Some(next) => {
+      Some(next.as_u64().ok_or_else(|| ToolError::Parse("instruction の nextOffset が数値ではありません".to_owned()))?)
+    },
+  };
+  Ok(InstructionPage { content, total_bytes, next_offset })
 }
 
 /// 応答の instructions 配列から、指示書の要約を出現順に取り出す。応答に配列が無ければ

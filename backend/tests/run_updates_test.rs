@@ -552,6 +552,11 @@ async fn get_run_updates_reads_a_run_without_a_local_task_table_from_takt_get_ru
 
   assert!(first.reset, "リモートの run の最初の追記分は全体を置き換える指示です");
   assert!(!first.logs_removed);
+  assert!(
+    (0..=9_007_199_254_740_991).contains(&first.epoch),
+    "世代は JavaScript の安全な整数（Number.MAX_SAFE_INTEGER）の範囲です: {}",
+    first.epoch
+  );
   assert_eq!(texts(&first), vec![
     "2026-11-13T09:10:00Z step_complete remote-plan".to_owned(),
     "2026-11-13T09:30:00Z step_complete remote-implement".to_owned(),

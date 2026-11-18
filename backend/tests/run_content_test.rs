@@ -4,7 +4,8 @@
 //! takt-mcp を起動も呼び出しもしない。
 //!
 //! ローカルで保存場所を解決できない run（tasks.yaml が無い、または対応表に載っていない）の
-//! レポート本文は takt_get_run の report 指定で返し、それでも読めなければ従来のステータスで返す。
+//! 本文は、レポートは takt_get_run の report 指定、指示書は instructions 指定（instructionId）
+//! で返し、それでも読めなければ従来のステータスで返す。
 
 mod common;
 mod grpc_harness;
@@ -367,6 +368,128 @@ async fn get_run_content_keeps_not_found_when_the_run_is_neither_listed_nor_read
     .expect_err("対応表に無く takt_get_run でも読めない run のレポートは返しません");
 
   assert_eq!(status.code(), tonic::Code::NotFound, "対応表に無い run は Not Found です: {status:?}");
+}
+
+/// takt_get_run が run-1 の指示書として返す mock の状態。指示書は本文（content）まで含む。
+fn remote_instruction_state(instructions: serde_json::Value) -> serde_json::Value {
+  json!({
+    "runs": {
+      "run-1": {
+        "runSlug": "run-1",
+        "status": "running",
+        "instructions": instructions
+      }
+    }
+  })
+}
+
+/// takt_get_run の instructions 指定（instructionId）で指示書の本文を読んだことを確かめる。
+fn assert_read_instruction_through_takt_get_run(harness: &GrpcHarness, instruction_id: i64) {
+  let calls = takt_get_run_calls(harness);
+  assert!(!calls.is_empty(), "ローカルで読めない run の指示書は takt_get_run で読みます: {calls:?}");
+  for call in &calls {
+    assert_eq!(call["runSlug"], json!("run-1"));
+    assert_eq!(call["view"], json!("instructions"), "本文は view instructions で読みます: {call:?}");
+    assert_eq!(call["instructionId"], json!(instruction_id), "対象の指示書を指定します: {call:?}");
+  }
+}
+
+#[tokio::test]
+async fn get_run_content_reads_an_instruction_of_a_run_without_a_local_task_table_from_takt_get_run() {
+  // リモートのサーバーのプロジェクトは、ローカルに tasks.yaml が無く保存場所を読めない。その run の
+  // 指示書の本文は takt_get_run の instructions 指定（instructionId）で返す。ローカルの
+  // interventions.jsonl だけに頼る実装は Not Found で落ちて、詳細ページの指示書が開けない。
+  let harness = remote_harness(remote_instruction_state(json!([
+    { "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "state": "pending", "content": "一つ目" },
+    { "instructionId": 2, "issuedAt": "2026-11-13T08:55:00Z", "state": "deliveredSameSession", "content": "二つ目" },
+  ])));
+
+  let content = request_content(&harness, instruction_request("run-1", 2))
+    .await
+    .expect("ローカルで読めない run の指示書も取得できます");
+
+  assert_eq!(content.run_slug, "run-1");
+  assert_eq!(content.content, "二つ目", "指定した ID の指示書の本文だけを返します");
+  assert!(!content.content.contains("一つ目"), "ほかの指示書の本文を含めません");
+  assert_eq!(content.size_bytes, "二つ目".len() as i64);
+  assert!(!content.truncated);
+  assert_read_instruction_through_takt_get_run(&harness, 2);
+}
+
+#[tokio::test]
+async fn get_run_content_reads_an_instruction_of_a_run_missing_from_the_task_table_from_takt_get_run() {
+  // ローカルの tasks.yaml に載っていない run の指示書の本文も、takt_get_run の値で返す。
+  let harness = remote_harness(remote_instruction_state(json!([
+    { "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "state": "pending", "content": "リモートの指示本文" },
+  ])));
+  let fixture = RunFixture::new(harness.project_dir());
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("other-run"), source_run_slug: None }]);
+
+  let content =
+    request_content(&harness, instruction_request("run-1", 1)).await.expect("対応表に無い run の指示書も取得できます");
+
+  assert_eq!(content.content, "リモートの指示本文", "本文は takt_get_run の値です");
+  assert!(!content.truncated);
+  assert_read_instruction_through_takt_get_run(&harness, 1);
+}
+
+#[tokio::test]
+async fn get_run_content_reads_a_remote_instruction_larger_than_one_page_in_full() {
+  // takt_get_run は1回の応答で最大 4096 バイトしか本文を返さない。それより大きい指示書も、
+  // nextOffset をたどって全体を返す。本文は3バイトの文字で作り、ページの境界が文字の途中に
+  // 来ても本文を壊さないことも確かめる。
+  let large = "あ".repeat(3000);
+  let harness = remote_harness(remote_instruction_state(json!([
+    { "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "state": "pending", "content": large },
+  ])));
+
+  let content =
+    request_content(&harness, instruction_request("run-1", 1)).await.expect("大きなリモートの指示書も返します");
+
+  assert_eq!(content.content.len(), large.len(), "本文の全体を返します");
+  assert!(content.content == large, "本文をページの境界で壊さずにつなぎます");
+  assert_eq!(content.size_bytes, large.len() as i64, "size_bytes は指示書全体の大きさです");
+  assert!(!content.truncated, "全体を返した本文は truncated ではありません");
+  let calls = takt_get_run_calls(&harness);
+  assert!(calls.len() >= 3, "4096 バイトを超える本文はページをたどって読みます: {calls:?}");
+  assert_read_instruction_through_takt_get_run(&harness, 1);
+}
+
+#[tokio::test]
+async fn get_run_content_keeps_not_found_for_an_instruction_of_a_run_neither_listed_nor_readable() {
+  // ローカルの tasks.yaml に載っておらず、takt_get_run でも読めない run の指示書は Not Found
+  // です。
+  let mut state = remote_instruction_state(json!([
+    { "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "state": "pending", "content": "リモートの指示本文" },
+  ]));
+  state["isError"] = json!(["takt_get_run"]);
+  let harness = remote_harness(state);
+  let fixture = RunFixture::new(harness.project_dir());
+  fixture.write_tasks(&[RunTaskLine { run_slug: Some("other-run"), source_run_slug: None }]);
+
+  let status = request_content(&harness, instruction_request("run-1", 1))
+    .await
+    .expect_err("対応表に無く takt_get_run でも読めない run の指示書は返しません");
+
+  assert_eq!(status.code(), tonic::Code::NotFound, "対応表に無い run は Not Found です: {status:?}");
+}
+
+#[tokio::test]
+async fn get_run_content_keeps_unavailable_for_an_instruction_when_neither_can_be_read() {
+  // ローカルの tasks.yaml を読めず、takt_get_run も失敗する run の指示書は、従来どおり
+  // Unavailable です。
+  let mut state = remote_instruction_state(json!([
+    { "instructionId": 1, "issuedAt": "2026-11-13T08:50:00Z", "state": "pending", "content": "リモートの指示本文" },
+  ]));
+  state["isError"] = json!(["takt_get_run"]);
+  let harness = remote_harness(state);
+
+  let status = request_content(&harness, instruction_request("run-1", 1))
+    .await
+    .expect_err("どちらでも読めない run の指示書は返しません");
+
+  assert_eq!(status.code(), tonic::Code::Unavailable, "読めない run は Unavailable です: {status:?}");
+  assert!(!takt_get_run_calls(&harness).is_empty(), "ローカルで読めない run は takt_get_run を試します");
 }
 
 #[tokio::test]

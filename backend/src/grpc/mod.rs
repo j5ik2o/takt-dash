@@ -5,7 +5,7 @@
 //! GetRunDetail は状態ストアと run の保存場所から組み立て、ローカルで保存場所を読めた run では
 //! takt-mcp を起動しません。保存場所の対応表に無い run と対応表を読めない run（SSH 越しに扱う
 //! リモートのサーバーのプロジェクトなど）だけ、要求時に takt-mcp の takt_get_run を呼びます。
-//! GetRunContent はレポートか指示書の本文を1件だけ読みます。レポートの本文も、GetRunDetail と同じ
+//! GetRunContent はレポートか指示書の本文を1件だけ読みます。本文は、GetRunDetail と同じ
 //! 条件の run だけ takt_get_run から読みます。GetConversation は保存領域の manager
 //! の会話を読みます。GetGoals・ GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
 //! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
@@ -47,7 +47,7 @@ use crate::{
   mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
   model::{self},
   run_log::{ContentRead, InitialRead, Instruction},
-  run_progress::{read_instruction_body, read_run, read_run_instructions, RunLogHandle, RunLogHandles, RunReadFailure},
+  run_progress::{read_run, read_run_instructions, RunLogHandle, RunLogHandles, RunReadFailure},
   store::StateStore,
   takt_dash::v1::{
     self, get_run_content_request, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
@@ -555,7 +555,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
         format!("run {} にレポート {} はありません。", run_slug.as_str(), filename.as_str()),
       ),
       | ContentTarget::Instruction(instruction_id) => (
-        read_instruction_body(resolved.cwd.clone(), run_slug.clone(), instruction_id, RUN_CONTENT_MAX_BYTES).await,
+        run_content::read_instruction_body(&resolved, &run_slug, instruction_id, RUN_CONTENT_MAX_BYTES).await,
         format!("run {} に指示書 #{} はありません。", run_slug.as_str(), instruction_id.get()),
       ),
     };

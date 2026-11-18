@@ -157,12 +157,17 @@ fn run_updates_from_remote(remote: &RemoteRun, after: Option<LogCursor>) -> RunU
   RunUpdates { epoch, reset: !received_all, lines, activity: SessionActivity::default() }
 }
 
+/// JavaScript の Number.MAX_SAFE_INTEGER（2の53乗 - 1）。世代を Web 側で損失なく
+/// 扱える上限です。
+const JS_MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
 /// 行の集まりから決まる世代。ステップが進んで行が変われば世代も変わります。
-/// 世代は proto の i64 で往復するため、正の範囲に収めます。
+/// 世代は proto の i64 で往復し、Web 側では JavaScript の数値として解釈するため、
+/// 安全な整数の範囲に収めます。
 fn lines_epoch(lines: &[String]) -> u64 {
   let mut hasher = DefaultHasher::new();
   lines.hash(&mut hasher);
-  hasher.finish() & (i64::MAX as u64)
+  hasher.finish() & JS_MAX_SAFE_INTEGER
 }
 
 fn run_reports(reports: &[ReportEntry]) -> Vec<RunReport> {

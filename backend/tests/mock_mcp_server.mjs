@@ -232,6 +232,12 @@ const runReportMissing = () => ({
   isError: true,
 });
 
+// 実 takt-mcp の対象指示書不在（runSessionReader の throw）と同じ道具エラー。
+const runInstructionMissing = () => ({
+  content: [{ type: "text", text: "Selected instruction does not exist" }],
+  isError: true,
+});
+
 // takt_get_run の view "report" の応答。実 takt-mcp（runSessionReader の loadReports）と同じく、
 // reports[].content の UTF-8 バイト列を offset と maxBytes（既定 4096）で切り出し、
 // { runSlug, report: { filename, content, totalBytes, offset, returnedBytes, direction, truncated, nextOffset } }
@@ -251,8 +257,26 @@ const runReportResponse = (state, args) => {
 // takt_get_run の view "instructions" の応答。実 takt-mcp（runSessionReader）と同じく、
 // { runSlug, instructions: [{instructionId, issuedAt, state}], collection, totalCount,
 // returnedCount, omittedCount, offset, nextOffset, truncated } を返す。limit の既定は 50。
+// instructionId の指定がある場合は一覧ではなく、その指示書の本文を
+// { runSlug, instruction: { instructionId, issuedAt, state, content, totalBytes, offset,
+// returnedBytes, direction, truncated, nextOffset } } で返し、対象が無ければ道具エラーにする。
 const runInstructionsResponse = (state, args) => {
   const run = (state.runs ?? {})[args.runSlug];
+  if (args.instructionId !== undefined) {
+    const instruction = (run?.instructions ?? []).find((entry) => entry.instructionId === Number(args.instructionId));
+    if (instruction === undefined) {
+      return runInstructionMissing();
+    }
+    return asText({
+      runSlug: args.runSlug,
+      instruction: {
+        instructionId: instruction.instructionId,
+        issuedAt: instruction.issuedAt,
+        state: instruction.state,
+        ...textPage(instruction.content ?? "", args.offset, args.maxBytes),
+      },
+    });
+  }
   if (run === undefined) {
     return {};
   }

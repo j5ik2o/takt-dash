@@ -771,6 +771,10 @@ pub async fn read_run_instructions(
 
 /// 別スレッドで、プロジェクト側の `interventions.jsonl` から指定した ID の指示書の本文を、先頭から
 /// `max_bytes` まで読む。
+///
+/// レポートの読み取り（[`read_report_content`]）と同じく、run の保存場所を解決できない
+/// （対応表に無い・対応表を読めない）場合は失敗として返し、呼び出し側が takt_get_run へ
+/// 切り替えられるようにします。
 pub async fn read_instruction_body(
   project_cwd: PathBuf,
   run_slug: RunSlug,
@@ -778,8 +782,13 @@ pub async fn read_instruction_body(
   max_bytes: u64,
 ) -> Result<ContentRead, RunReadFailure> {
   tokio::task::spawn_blocking(move || {
-    run_log::read_instruction_content(&project_cwd, &run_slug, instruction_id, max_bytes)
+    let reader = RunLogReader::new(project_cwd.clone(), worktrees_root(&project_cwd));
+    match reader.resolve(&run_slug) {
+      | RunLocation::NotListed => Err(RunReadFailure::NotListed),
+      | RunLocation::Unreadable(reason) => Err(RunReadFailure::Unreadable(reason)),
+      | _ => Ok(run_log::read_instruction_content(&project_cwd, &run_slug, instruction_id, max_bytes)),
+    }
   })
   .await
-  .map_err(|error| RunReadFailure::Unreadable(format!("読み取りのスレッドが終了しました: {error}")))
+  .map_err(|error| RunReadFailure::Unreadable(format!("読み取りのスレッドが終了しました: {error}")))?
 }
