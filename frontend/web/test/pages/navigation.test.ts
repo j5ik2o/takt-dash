@@ -119,7 +119,7 @@ test("プロジェクト画面にプロジェクトごとの進行中ゴール�
 });
 
 test("概要のプロジェクトカードからプロジェクトで絞り込んだゴール一覧へ入れる", () => {
-  const view = buildOverviewView(createDashboardState(), NOW);
+  const view = buildOverviewView(createDashboardState(), NOW, true);
   const html = renderToStaticMarkup(createElement(OverviewContent, { view, disconnected: false }));
   assert.match(html, /href="\/goals\?project=corporate-site"/);
   assert.match(html, /href="\/goals\?project=esa"/);

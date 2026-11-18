@@ -17,7 +17,7 @@ import OverviewPage from "../../app/page.tsx";
 const occurrences = (html: string, needle: string): number => html.split(needle).length - 1;
 
 const renderOverview = (state: DashboardState): string =>
-  renderToStaticMarkup(createElement(OverviewPage, { view: buildOverviewView(state, NOW) }));
+  renderToStaticMarkup(createElement(OverviewPage, { view: buildOverviewView(state, NOW, true) }));
 
 const tilesSection = (html: string): string => {
   const start = html.indexOf('class="tiles');
@@ -256,6 +256,7 @@ test("応答なしのときは最後に読めた時点の件数であること�
   const base = createDashboardState();
   const state = {
     ...base,
+    projects: base.projects.map((project) => ({ ...project, serverId: "down" })),
     runs: base.runs.map((run) => ({ ...run, serverId: "down" })),
   };
   const html = renderOverview(state);
@@ -277,6 +278,10 @@ test("最後に読めた時刻が1件も無いときは不明と表示し、時�
   const base = createDashboardState();
   const state = {
     ...base,
+    projects: base.projects.map((project) => project.name === "esa"
+      ? { ...project, serverId: "down", lastReadAt: undefined, connected: false,
+          connectionState: ConnectionState.CONNECTION_STATE_UNSPECIFIED }
+      : project),
     servers: base.servers.map((server) =>
       server.serverId === "down" ? { ...server, lastReadAt: undefined } : server,
     ),
@@ -316,7 +321,10 @@ test("プロジェクトだけが応答なしのときはヘッダーとタイ�
 });
 
 test("サーバーが応答なしのときはヘッダーとタイルがサーバーを主語にする", () => {
-  const html = renderOverview(createDashboardState());
+  const base = createDashboardState();
+  const html = renderOverview({ ...base,
+    projects: base.projects.map((project) => ({ ...project, serverId: "down" })),
+  });
   const head = pageHead(html);
   const tile = tileWithLabel(html, "実行中の run");
 

@@ -26,7 +26,7 @@ const cssPath = fileURLToPath(new URL("../../app/globals.css", import.meta.url))
 const readCss = (): Promise<string> => readFile(cssPath, "utf8");
 
 const renderOverview = (state: DashboardState): string =>
-  renderToStaticMarkup(createElement(OverviewPage, { view: buildOverviewView(state, NOW) }));
+  renderToStaticMarkup(createElement(OverviewPage, { view: buildOverviewView(state, NOW, true) }));
 
 const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
 
@@ -317,7 +317,7 @@ test("正常な run の行は警告の見た目と注記を持たず、ログが
 
   const tenMinutesLater = new Date(NOW.getTime() + 10 * 60_000);
   const warnHtml = renderToStaticMarkup(
-    createElement(OverviewPage, { view: buildOverviewView(createHealthyDashboardState(), tenMinutesLater) }),
+    createElement(OverviewPage, { view: buildOverviewView(createHealthyDashboardState(), tenMinutesLater, true) }),
   );
   const warn = runRows(runsSection(warnHtml))[0];
   assert.ok(warn !== undefined, "ログが止まった run の行がある");
