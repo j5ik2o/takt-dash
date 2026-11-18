@@ -34,3 +34,6 @@ __pycache__/
 
 # takt-dash のローカル設定（環境依存のため追跡しない）
 taktdash.config.json
+
+# E2E の撮影の出力（docs/layout.md の「撮影」）。撮影の結果はコミットしない
+/e2e/screenshots/

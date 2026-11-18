@@ -41,6 +41,7 @@ import {
 } from "../../src/state/dashboard.ts";
 import { DomainPrimitiveError, toRunCount } from "../../src/state/domain-primitives.ts";
 import { decisionKey } from "../../src/state/decision-actions.ts";
+import { goalSection } from "../../src/state/goal-badge.ts";
 
 test("判断待ちは待ち時間の長い順に並ぶ", () => {
   const sorted = sortPendingDecisions(createDashboardState().pendingDecisions, NOW);
@@ -163,7 +164,7 @@ test("run の状態はその run のプロジェクトの接続状態を使う",
   assert.equal(healthy.label, "実行中");
 });
 
-test("バックエンドが無音と判定した run は閾値直後でも警告になり、サーバー別の run 行にも出る", () => {
+test("バックエンドが無音と判定した run は閾値直後でも警告になる", () => {
   const state = createDashboardState();
   const base = state.runs[0]!;
   // 閾値の10分を1秒だけ超えた時点。画面側の丸め直しが残っていると 10 > 10 で警告を落とす。
@@ -177,9 +178,6 @@ test("バックエンドが無音と判定した run は閾値直後でも警告
 
   assert.equal(overview.runs[0]?.label, "ログが止まっています", "バックエンドの無音判定をそのまま表示します");
   assert.match(overview.runs[0]?.note ?? "", /ログが .*出ていません。/, "無音の説明を添えます");
-  const mini = overview.servers.find((item) => item.server.serverId === "mini");
-  assert.ok(mini, "run の所属サーバーが概要にあります");
-  assert.equal(mini.runs[0]?.label, "ログが止まっています", "サーバー別の run 行にも同じ警告を出します");
 });
 
 test("logSilent が偽でも経過時間が閾値を超えた run は警告にする", () => {
@@ -458,21 +456,16 @@ test("runLimit は concurrency が0でも破綻しない", () => {
   assert.equal(view.runLimit, 0);
 });
 
-test("サーバーごとの下端値は run・進行中ゴール・判断待ち・待機中タスクを数える", () => {
+// main のこのテストは、サーバーカードの下端に出す view.servers[].runLimit / runningRuns / inProgressGoals /
+// pendingCount / waitingTasks を確かめていた。概要はサーバーを1行で出す形（issue #120）に変わり、
+// OverviewServerView はこれらのフィールドを持たない。上限を配下プロジェクトの concurrency の合計にする
+// main の振る舞いと、run・判断待ちの件数は、概要が表示する全体の値で確かめる。
+test("全体の上限はプロジェクトの concurrency の合計で、run と判断待ちの件数を数える", () => {
   const view = buildOverviewView(createDashboardState(), NOW);
-  const mini = view.servers.find((item) => item.server.serverId === "mini");
-  const down = view.servers.find((item) => item.server.serverId === "down");
-  assert.ok(mini, "mini のカードがある");
-  assert.ok(down, "down のカードがある");
 
-  assert.equal(mini.runLimit, 8, "配下のプロジェクトの concurrency の合計を上限にする");
-  assert.equal(mini.runningRuns, 1, "実行中の run を数える");
-  assert.equal(mini.inProgressGoals, 1, "人のマージ待ちを除いた進行中のゴールを数える");
-  assert.equal(mini.pendingCount, 2, "そのサーバーの判断待ちを数える");
-  assert.equal(mini.waitingTasks, 1, "そのサーバーの待機中のタスクを合計する");
-
-  assert.equal(down.runningRuns, 0);
-  assert.equal(down.pendingCount, 0);
+  assert.equal(view.runLimit, 8, "全プロジェクトの concurrency の合計を上限にする");
+  assert.equal(view.runningRuns, 1, "実行中の run を数える");
+  assert.equal(view.pendingCounts.total, 2, "判断待ちを数える");
 });
 
 test("応答なしの読み取り時刻が1件も無いときは partialReadAt を捏造しない", () => {
@@ -511,52 +504,51 @@ test("未読のプロジェクトは応答なしに含めず、異常として�
   assert.equal(view.partialReadAt, undefined, "未読を最後に読めた時刻に使わない");
 });
 
+// main のこのテストは、サーバーカードの下端の view.servers[].inProgressGoals で進行中ゴールの件数を
+// 確かめていた。概要はサーバーごとの件数を表示しなくなった（issue #120）ため、同じ7件のゴールについて、
+// 進行中の分類（goal-badge の進行中の区画から、人のマージ待ちを除く）を公開関数で確かめる。
 test("進行中ゴールは完了・中止・未着手・人のマージ待ちを除き、仕上げタスクが進行中のマージ待ちを含める", () => {
-  const base = createHealthyDashboardState();
-  const goalBase = base.goals[0]!;
+  const goalBase = createHealthyDashboardState().goals[0]!;
   const goal = (overrides: Partial<typeof goalBase>) => ({ ...goalBase, ...overrides });
-  const state = {
-    ...base,
-    goals: [
-      goal({
-        goalId: "g-human-merge",
-        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
-        mergeTaskLast: undefined,
-      }),
-      goal({
-        goalId: "g-paused",
-        status: GoalStatus.GOAL_STATUS_CREATED,
-        executionStatus: ExecutionStatus.EXECUTION_STATUS_PAUSED,
-      }),
-      goal({ goalId: "g-completed", status: GoalStatus.GOAL_STATUS_COMPLETED }),
-      goal({
-        goalId: "g-aborted",
-        status: GoalStatus.GOAL_STATUS_CREATED,
-        executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED,
-      }),
-      goal({
-        goalId: "g-merge-in-progress",
-        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
-        mergeTaskLast: TaskStatus.TASK_STATUS_PENDING,
-      }),
-      goal({
-        goalId: "g-merge-failed",
-        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
-        mergeTaskLast: TaskStatus.TASK_STATUS_FAILED,
-      }),
-      goal({
-        goalId: "g-untouched",
-        status: GoalStatus.GOAL_STATUS_CREATED,
-        executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
-        taskCounts: { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 },
-      }),
-    ],
-  };
-  const view = buildOverviewView(state, NOW);
-  const mini = view.servers.find((item) => item.server.serverId === "mini");
+  const goals = [
+    goal({
+      goalId: "g-human-merge",
+      status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+      mergeTaskLast: undefined,
+    }),
+    goal({
+      goalId: "g-paused",
+      status: GoalStatus.GOAL_STATUS_CREATED,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_PAUSED,
+    }),
+    goal({ goalId: "g-completed", status: GoalStatus.GOAL_STATUS_COMPLETED }),
+    goal({
+      goalId: "g-aborted",
+      status: GoalStatus.GOAL_STATUS_CREATED,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED,
+    }),
+    goal({
+      goalId: "g-merge-in-progress",
+      status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+      mergeTaskLast: TaskStatus.TASK_STATUS_PENDING,
+    }),
+    goal({
+      goalId: "g-merge-failed",
+      status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+      mergeTaskLast: TaskStatus.TASK_STATUS_FAILED,
+    }),
+    goal({
+      goalId: "g-untouched",
+      status: GoalStatus.GOAL_STATUS_CREATED,
+      executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
+      taskCounts: { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 },
+    }),
+  ];
 
-  assert.ok(mini, "mini のカードがある");
-  assert.equal(mini.inProgressGoals, 2, "一時停止中と仕上げタスク進行中のマージ待ちだけを数える");
+  const inProgress = goals
+    .filter((item) => goalSection(item) === "inProgress" && !isHumanMergeWaiting(item))
+    .map((item) => item.goalId);
+  assert.deepEqual(inProgress, ["g-paused", "g-merge-in-progress"], "一時停止中と仕上げタスク進行中のマージ待ちだけを数える");
 });
 
 test("失敗タスクは失敗・上限超過・PR作成失敗の3分類を合計する", () => {
@@ -768,15 +760,13 @@ test("未指定の inquiryId は proto 文字列の境界で空文字へ射影�
   assert.equal(decisionKey(view), "merge:mini:corporate-site:goal-1");
 });
 
-test("ゴールに属さない run も概要とサーバー別の run 行に表示する", () => {
+test("ゴールに属さない run も概要の run 一覧に表示する", () => {
   const state = createDashboardState();
   const withoutGoal = { ...state, runs: [{ ...state.runs[0]!, goalId: undefined }] };
   const overview = buildOverviewView(withoutGoal, NOW);
 
   assert.equal(overview.runs[0]?.run.goalId, undefined);
-  const mini = overview.servers.find((item) => item.server.serverId === "mini");
-  assert.equal(mini?.runs[0]?.run.goalId, undefined);
-  assert.equal(mini?.runs[0]?.run.runSlug, "run-aaa");
+  assert.equal(overview.runs[0]?.run.runSlug, "run-aaa");
 });
 
 test("サーバーの状態は接続の有無と run の件数だけで決まる", () => {
@@ -817,6 +807,10 @@ test("接続済みで run があるサーバーは概要カードで「動作中
   assert.equal(mini?.stateLabel, "動作中", "カードの文言は動作中である");
 });
 
+// main のこのテストは、全体の上限に加えて、サーバーカードの下端に出す view.servers[].runLimit（配下の
+// プロジェクトの concurrency の合計。プロジェクトが無いサーバーは0）を確かめていた。概要はサーバーを1行で
+// 出す形（issue #120）に変わり、OverviewServerView はサーバーごとの上限を持たない。サーバーごとの上限の
+// 代わりに、別のサーバーのプロジェクトも全体の上限へ合計されることを確かめる。
 test("runLimit はサーバーの concurrency ではなく、プロジェクトの concurrency の合計にする", () => {
   const base = createDashboardState();
   const state = {
@@ -828,12 +822,13 @@ test("runLimit はサーバーの concurrency ではなく、プロジェクト�
   const view = buildOverviewView(state, NOW);
 
   assert.equal(view.runLimit, 3, "全プロジェクトの concurrency の合計を実行上限にする");
-  const mini = view.servers.find((item) => item.server.serverId === "mini");
-  assert.ok(mini, "mini のカードがある");
-  assert.equal(mini.runLimit, 3, "サーバーの上限は配下のプロジェクトの concurrency の合計にする");
-  const down = view.servers.find((item) => item.server.serverId === "down");
-  assert.ok(down, "down のカードがある");
-  assert.equal(down.runLimit, 0, "プロジェクトが無いサーバーの上限は0にする");
+
+  const template = state.projects[0]!;
+  const withDownProject = buildOverviewView(
+    { ...state, projects: [...state.projects, { ...template, name: "down-project", serverId: "down", concurrency: 4 }] },
+    NOW,
+  );
+  assert.equal(withDownProject.runLimit, 7, "別のサーバーのプロジェクトの concurrency も合計する");
 });
 
 test("プロジェクトごとに実行中の run 件数とそのプロジェクトの上限を対比できる", () => {

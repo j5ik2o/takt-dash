@@ -2,13 +2,14 @@
 //
 // 「開いた瞬間に全体が分かり、異常だけが目立つ」ため、上部を実行中 run・判断待ち・
 // 24時間完了タスクの3タイルにし、閾値と最終読み取り時刻のタイルを外す。異常がある
-// ときだけ警告バナーと判断待ちパネルを出し、サーバーカードを先に置く。描画結果の
+// ときだけ警告バナーと判断待ちパネルを出し、サーバーの節を先に置く。描画結果の
 // HTML から要素を観測し、ブラウザ自動化は使わない。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createDashboardState, createHealthyDashboardState, NOW } from "../support/fixtures.ts";
+import { elementWithAttribute } from "../support/markup.ts";
 import { type DashboardState, ConnectionState, ExecutionStatus } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import OverviewPage from "../../app/page.tsx";
@@ -72,15 +73,15 @@ const calloutSection = (html: string): string | undefined => {
   return html.slice(start, end < 0 ? html.length : end);
 };
 
-const serverCard = (html: string, serverId: string): string => {
-  const marker = `id="server-${serverId}"`;
-  const at = html.indexOf(marker);
-  if (at < 0) {
-    assert.fail(`サーバー ${serverId} のカードが描画されていない`);
-  }
-  const start = html.lastIndexOf("<article", at);
-  const end = html.indexOf("</article>", start);
-  return html.slice(start, end < 0 ? html.length : end);
+// サーバーの1行と、その下に出す応答なしの注記を含む範囲。注記は1行の要素の中か直後の兄弟に置けるため、
+// 1行の要素の開始から次のサーバーの1行（または節の終わり）までを対象にする。
+const serverLine = (html: string, serverId: string): string => {
+  const section = elementWithAttribute(html, "aria-labelledby", "h-servers").outer;
+  const line = elementWithAttribute(section, "id", `server-${serverId}`);
+  const start = section.indexOf(line.openingTag);
+  const next = section.indexOf('id="server-', start + line.openingTag.length);
+  const end = next < 0 ? section.length : section.lastIndexOf("<", next);
+  return section.slice(start, end);
 };
 
 test("概要の上部は実行中 run・判断待ち・24時間完了タスクの3タイルで、閾値と最終読み取り時刻のタイルを持たない", () => {
@@ -238,17 +239,17 @@ test("サーバーの区画はプロジェクトの区画より先に現れる",
   assert.ok(servers < projects, "サーバーを最初の1画面に置く");
 });
 
-test("サーバーカードの下端は run 件数・進行中ゴール・判断待ち・待機中タスクを出す", () => {
+// main のこのテストは、旧サーバーカードの下端（.sc-foot）でサーバーごとの run 件数と上限・進行中ゴール・
+// 判断待ち・待機中タスクを確かめていた。概要はサーバーを1行で出す形（issue #120）に変わり、サーバーごとの
+// 件数の表示先は無い。上限を配下プロジェクトの concurrency の合計にする main の振る舞いは、全体の
+// タイルの「実行中の run / 上限」で確かめる。進行中ゴールの分類は test/state/dashboard.test.ts で確かめる。
+test("実行中の run のタイルは run 件数と全プロジェクトの上限の合計を出し、判断待ちのタイルは件数を出す", () => {
   const html = renderOverview(createDashboardState());
-  const mini = serverCard(html, "mini");
-  const down = serverCard(html, "down");
+  const runTile = tileWithLabel(html, "実行中の run");
+  const pendingTile = tileWithLabel(html, "判断待ち（全サーバー）");
 
-  assert.match(mini, /run\s*1\s*\/\s*8/, "実行中 run の件数と、配下のプロジェクトの上限の合計を出す");
-  assert.match(mini, /進行中のゴール\s*1件/, "進行中のゴール数を出す");
-  assert.match(mini, /判断待ち\s*2件/, "そのサーバーの判断待ち数を出す");
-  assert.match(mini, /待機中のタスク\s*1件/, "待機中のタスク数を出す");
-
-  assert.match(down, /run\s*0\s*\/\s*0/, "プロジェクトが無いサーバーは上限0で run 0件として出す");
+  assert.match(runTile, /1\s*<small>\s*\/\s*8\s*件/, "実行中 run の件数と、プロジェクトの上限の合計を出す");
+  assert.match(pendingTile, /2\s*<small>\s*件/, "全サーバーの判断待ちの件数を出す");
 });
 
 test("応答なしのときは最後に読めた時点の件数であることと時刻を示す", () => {
@@ -266,10 +267,10 @@ test("応答なしのときは最後に読めた時点の件数であること�
   assert.match(tile, /最後に読めた時点で\s*1\s*件/, "タイルでも読めた時点の値と示す");
   assert.match(tile, /16:09/, "タイルにも最後に読めた時刻を添える");
 
-  const down = serverCard(html, "down");
-  assert.match(down, /class="[^"]*\bstale-note\b/, "応答なしのカードに時点の注記を出す");
-  assert.match(down, /16:09/, "カードにも最後に読めた時刻を出す");
-  assert.match(down, /時点/, "カードの内容が読めた時点のものであると示す");
+  const down = serverLine(html, "down");
+  assert.match(down, /class="[^"]*\bstale-note\b/, "応答なしのサーバーの1行に時点の注記を添える");
+  assert.match(down, /16:09/, "サーバーの1行にも最後に読めた時刻を出す");
+  assert.match(down, /時点/, "サーバーの内容が読めた時点のものであると示す");
 });
 
 test("最後に読めた時刻が1件も無いときは不明と表示し、時刻を捏造しない", () => {
@@ -289,8 +290,8 @@ test("最後に読めた時刻が1件も無いときは不明と表示し、時�
   assert.match(tile, /最後に読めた時刻は不明/, "タイルで時刻を不明と示す");
   assert.doesNotMatch(tile, /\d{2}:\d{2}/, "タイルに実在しない時刻を出さない");
 
-  const down = serverCard(html, "down");
-  assert.match(down, /まだ一度も読めていません/, "カードはまだ読めていないと示す");
+  const down = serverLine(html, "down");
+  assert.match(down, /まだ一度も読めていません/, "サーバーの1行はまだ読めていないと示す");
   assert.doesNotMatch(down, /最後に読めた時点の状態/, "読めていないのに時点の状態と併記しない");
 });
 
@@ -349,7 +350,11 @@ test("トークン消費のタイルは描画しない", () => {
   assert.doesNotMatch(html, /トークン/, "値を推測したトークン消費のタイルを出さない");
 });
 
-test("応答していないプロジェクトはサーバーカードにプロジェクト名と最後に読めた時刻が出る", () => {
+// main のこの2件のテストは、旧サーバーカード（article.scard）の範囲を serverCard で切り出して確かめていた。
+// 概要はサーバーを1行で出す形（issue #120）に変わり、serverCard は無い。応答していないプロジェクトの
+// 状態・注記・最後に読めた時刻という main の振る舞い（issue #264）は、同じ判定をサーバーの1行
+// （serverLine）の範囲で確かめる。
+test("応答していないプロジェクトはサーバーの1行にプロジェクト名と最後に読めた時刻が出る", () => {
   const base = createHealthyDashboardState();
   const failedAt = new Date(NOW.getTime() - 21 * 60_000);
   const state = {
@@ -366,19 +371,46 @@ test("応答していないプロジェクトはサーバーカードにプロ�
     ),
   };
   const html = renderOverview(state);
-  const card = serverCard(html, "mini");
+  const line = serverLine(html, "mini");
 
-  assert.match(card, /一部応答なし/, "カードの状態が正常に見えないようにする");
-  assert.match(card, /esa から応答がありません/, "応答していないプロジェクト名をカードに出す");
+  assert.match(line, /一部応答なし/, "サーバーの1行の状態が正常に見えないようにする");
+  assert.match(line, /esa から応答がありません/, "応答していないプロジェクト名をサーバーの1行に出す");
   assert.match(
-    card,
+    line,
     /最後に読めたのは 16:09 です/,
     "プロジェクトごとの最後に読めた時刻をサーバーの時刻と並べる",
   );
-  assert.match(card, /takt-mcp から 16:29 に読みました/, "サーバーの読み取り時刻も残す");
+  assert.match(line, /takt-mcp から 16:29 に読みました/, "サーバーの読み取り時刻も残す");
 });
 
-test("まだ読めていないプロジェクトはサーバーカードに未読と出る", () => {
+test("同名のプロジェクトが複数のサーバーにあるときは run の表のプロジェクト欄にサーバー名を併記する", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    servers: base.servers.map((server) => ({ ...server, connected: true })),
+    projects: [...base.projects, { ...base.projects[0], serverId: "down" }],
+    runs: [
+      ...base.runs,
+      { ...base.runs[0], runSlug: "run-bbb", sessionId: "session-bbb", serverId: "down" },
+    ],
+  };
+  const html = renderOverview(state);
+  const rows = html
+    .split("<tr")
+    .slice(1)
+    .map((chunk) => `<tr${chunk}`);
+  const miniRow = rows.find((row) => row.includes("/runs/run-aaa"));
+  const studioRow = rows.find((row) => row.includes("/runs/run-bbb"));
+
+  assert.ok(miniRow !== undefined, "Mac mini 側の run の行がある");
+  assert.ok(studioRow !== undefined, "Mac Studio 側の run の行がある");
+  assert.match(miniRow, /corporate-site/, "プロジェクト名を出す");
+  assert.match(miniRow, /Mac mini/, "同じプロジェクト名でも Mac mini の run と分かる");
+  assert.match(studioRow, /corporate-site/, "プロジェクト名を出す");
+  assert.match(studioRow, /Mac Studio/, "同じプロジェクト名でも Mac Studio の run と分かる");
+});
+
+test("まだ読めていないプロジェクトはサーバーの1行に未読と出る", () => {
   const base = createHealthyDashboardState();
   const state = {
     ...base,
@@ -393,8 +425,8 @@ test("まだ読めていないプロジェクトはサーバーカードに未�
     ),
   };
   const html = renderOverview(state);
-  const card = serverCard(html, "mini");
+  const line = serverLine(html, "mini");
 
-  assert.match(card, /一部応答なし/, "未読のプロジェクトがあるカードも正常に見せない");
-  assert.match(card, /esa はまだ一度も読めていません/, "未読のプロジェクト名をカードに出す");
+  assert.match(line, /一部応答なし/, "未読のプロジェクトがあるサーバーの1行も正常に見せない");
+  assert.match(line, /esa はまだ一度も読めていません/, "未読のプロジェクト名をサーバーの1行に出す");
 });

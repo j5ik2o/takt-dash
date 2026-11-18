@@ -91,14 +91,8 @@ type OverviewServerView = {
   server: Server;
   state: "live" | "idle" | "down" | "warn";
   stateLabel: string;
-  runs: RunView[];
-  runLimit: RunLimit;
-  runningRuns: number;
-  inProgressGoals: number;
-  pendingCount: number;
-  waitingTasks: number;
   // 配下で応答していないプロジェクト。サーバー単位の読み取り時刻（配下の最新）だけでは
-  // 正常に見えてしまうため、カードにプロジェクトごとの状態を併記する（issue #264）。
+  // 正常に見えてしまうため、サーバーの1行にプロジェクトごとの状態を併記する（issue #264）。
   notRespondingProjects: Project[];
 };
 
@@ -294,25 +288,6 @@ export const serverStateLabel = (state: OverviewServerView["state"]): string => 
   }
 };
 
-// 仕上げタスクが未着手・実行中の間は仕上げの途中なので、人のマージ待ちではなく進行中の
-// ゴールとして数える。仕上げタスクが失敗・上限超過・PR 作成失敗で終わったゴールは、自動
-// では進まず人の判断が要るため、人のマージ待ちとして数える（issue #231）。
-// merge_task_last が未設定または完了の場合も人のマージ待ちである。
-const MERGE_TASK_RUNNING: ReadonlySet<number> = new Set([TASK_STATUS.PENDING, TASK_STATUS.RUNNING]);
-
-const isHumanMerge = (goal: Goal): boolean =>
-  goal.status === GOAL_STATUS.AWAITING_MERGE &&
-  !(goal.mergeTaskLast !== undefined && MERGE_TASK_RUNNING.has(goal.mergeTaskLast));
-
-// 進行中のゴールは、goal-badge の区画分けで進行中の区画に入るゴールから、人の
-// マージ待ちを除いたものとする。区画分けにより、タスクが登録されていない未着手の
-// ゴールと、完了・中止のゴールは進行中に数えない（issue #242、issue #243）。
-const isInProgressGoal = (goal: Goal): boolean =>
-  goalSection(goal) === "inProgress" && !isHumanMerge(goal);
-
-const waitingTaskCount = (goals: readonly Goal[]): number =>
-  goals.reduce((total, goal) => total + (goal.taskCounts?.pending ?? 0), 0);
-
 // 失敗系の合計の表示名。failedTaskCount が数える「失敗」は、失敗・上限超過・PR 失敗の
 // 3状態の合計である。ゴールページの状態別の欄と同じ文言（taskStatusLabel の「失敗」、
 // 「上限超過」、「PR 失敗」）で内訳を示し、概要の合計をゴールページの欄の合計と
@@ -389,7 +364,6 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
   const unresponsiveProjects = state.projects.filter(isUnresponsiveProject);
   const servers = state.servers.map((server) => {
     const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);
-    const serverGoals = state.goals.filter((goal) => goal.serverId === server.serverId);
     const status = serverDisplayState(server, toRunCount(serverRuns.length), state.projects);
     return {
       server,
@@ -398,18 +372,6 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
       notRespondingProjects: notRespondingProjects(
         state.projects.filter((project) => project.serverId === server.serverId),
       ),
-      runs: serverRuns.map((run) =>
-        toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
-      ),
-      runLimit: toRunLimit(
-        state.projects
-          .filter((project) => project.serverId === server.serverId)
-          .reduce((total, project) => total + project.concurrency, 0),
-      ),
-      runningRuns: serverRuns.filter((run) => run.status === RUN_STATUS.RUNNING).length,
-      inProgressGoals: serverGoals.filter(isInProgressGoal).length,
-      pendingCount: pendingDecisions.filter((decision) => decision.serverId === server.serverId).length,
-      waitingTasks: waitingTaskCount(serverGoals),
     };
   });
   const runningRuns = state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length;
