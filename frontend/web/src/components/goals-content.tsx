@@ -1,6 +1,12 @@
 import type { ReactElement } from "react";
 import type { DashboardGoal as Goal, DashboardState } from "../state/restore-state";
-import { isHumanMergeWaiting, mergeTaskFailureNote, taskStatusLabel } from "../state/dashboard";
+import {
+  isHumanMergeWaiting,
+  mergeTaskFailureNote,
+  neverReadProjects,
+  neverReadServers,
+  taskStatusLabel,
+} from "../state/dashboard";
 import { goalStateSentence } from "../state/goal-badge";
 import { goalDisplayName } from "../state/goal-summary";
 import { TASK_STATUS } from "../state/proto-values";
@@ -33,6 +39,17 @@ const countEntries = (goal: Goal): Array<{ label: string; count: number }> => {
 // 1回だけ出す（issue #252）。
 export function GoalsContent({ state, project, disconnected, unavailableSituation }: GoalsContentProps): ReactElement {
   const goals = project === undefined ? state.goals : state.goals.filter((goal) => goal.project === project);
+  // 未読の判定は、絞り込みがあるときはそのプロジェクトと所属サーバーだけを対象にする。
+  // まだ読めていない対象があると、その配下にゴールがあっても一覧へ出てこない。
+  // 0件でも「ゴールはありません」とは断定できないため、未読を注記する（issue #259）。
+  const scopedProjects =
+    project === undefined ? state.projects : state.projects.filter((item) => item.name === project);
+  const scopedServerIds = new Set(scopedProjects.map((item) => item.serverId));
+  const hasUnread =
+    neverReadProjects(scopedProjects).length > 0 ||
+    neverReadServers(
+      state.servers.filter((server) => project === undefined || scopedServerIds.has(server.serverId)),
+    ).length > 0;
   return (
     <main className="page">
       {disconnected ? <BackendUnavailableNotice situation={unavailableSituation} /> : null}
@@ -44,10 +61,19 @@ export function GoalsContent({ state, project, disconnected, unavailableSituatio
               ? `全サーバー・全プロジェクトのゴールを${goals.length}件表示しています。`
               : `プロジェクト「${project}」のゴールを${goals.length}件表示しています。`}
           </p>
+          {hasUnread ? (
+            <p className="stale-note">
+              まだ読めていないサーバー・プロジェクトがあります。表示している件数には、まだ読めていない分は含まれていません。
+            </p>
+          ) : null}
         </div>
       </header>
       {goals.length === 0 ? (
-        <p className="note">ゴールはありません。</p>
+        hasUnread ? (
+          <p className="note">サーバーからまだ読めていないため、ゴールがあるかどうかは分かりません。</p>
+        ) : (
+          <p className="note">ゴールはありません。</p>
+        )
       ) : (
         <ul className="cards">
           {goals.map((goal) => (

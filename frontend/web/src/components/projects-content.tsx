@@ -3,7 +3,7 @@ import type { DashboardState, Goal } from "../proto/taktdash";
 import { projectAnchorId } from "../state/anchors";
 import { goalBadge, goalSection, type GoalSection } from "../state/goal-badge";
 import { goalDisplayName, goalListHeading, goalTaskProgress } from "../state/goal-summary";
-import { projectKey, resolveThresholds, sortPendingDecisions, toRunView } from "../state/dashboard";
+import { FAILED_TASK_KINDS_LABEL, projectKey, resolveThresholds, sortPendingDecisions, toRunView } from "../state/dashboard";
 
 type ProjectsContentProps = {
   state: DashboardState;
@@ -38,7 +38,7 @@ function GoalRow({ goal }: { goal: Goal }): ReactElement {
         <p className="goal-progress">タスクは完了 {progress.completed} / 全体 {progress.total} です。</p>
       )}
       {progress.failed > 0 ? (
-        <p className="goal-failed warn">失敗したタスクが {progress.failed}件あります。</p>
+        <p className="goal-failed warn">{FAILED_TASK_KINDS_LABEL}のタスクが {progress.failed}件あります。</p>
       ) : null}
       {pullRequest !== undefined && pullRequest.url !== "" ? (
         <p className="goal-pr">
