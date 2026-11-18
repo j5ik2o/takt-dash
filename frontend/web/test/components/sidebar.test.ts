@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Sidebar } from "../../src/components/sidebar.tsx";
+import { ConnectionState, type Project } from "../../src/proto/taktdash.ts";
 import { dashboardStateFromProto, type DashboardRun } from "../../src/state/restore-state.ts";
 import { createDashboardState } from "../support/fixtures.ts";
 
@@ -149,5 +150,61 @@ test("サイドバーのサーバー状態は概要カードと同じ基準と�
     serverRow(withoutRuns, "Mac Studio"),
     { dot: "down", state: "応答なし" },
     "未接続のサーバーの表示は run の有無によらず応答なしのままにする",
+  );
+});
+
+const renderSidebarWithProjects = (projects: readonly Project[]): string => {
+  const state = createDashboardState();
+  return renderToStaticMarkup(
+    createElement(Sidebar, {
+      servers: state.servers,
+      pendingCount: 0,
+      runs: dashboardStateFromProto(state).runs,
+      projects,
+      frontendBuild: FRONTEND_BUILD,
+      backendBuild: BACKEND_BUILD,
+    }),
+  );
+};
+
+test("応答していないプロジェクトがあるサーバーはサイドバーでも一部応答なしになり、下端にプロジェクト名が出る", () => {
+  const state = createDashboardState();
+  const projects = state.projects.map((project) =>
+    project.name === "esa"
+      ? {
+          ...project,
+          connected: false,
+          connectionState: ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
+        }
+      : project,
+  );
+  const html = renderSidebarWithProjects(projects);
+
+  assert.deepEqual(
+    serverRow(html, "Mac mini"),
+    { dot: "warn", state: "一部応答なし" },
+    "配下のプロジェクトが応答していないサーバーは、カードと同じく動作中と表示しない",
+  );
+  const foot = sideFoot(html);
+  assert.match(foot, /esa から応答がありません/, "応答していないプロジェクト名を下端に出す");
+  assert.match(foot, /2台中1台から読めています/, "読めている台数の表示は残す");
+});
+
+test("まだ読めていないプロジェクトはサイドバーでも正常に見せず、下端で未読と分かる", () => {
+  const state = createDashboardState();
+  const projects = state.projects.map((project) =>
+    project.name === "esa" ? { ...project, lastReadAt: undefined } : project,
+  );
+  const html = renderSidebarWithProjects(projects);
+
+  assert.deepEqual(
+    serverRow(html, "Mac mini"),
+    { dot: "warn", state: "一部応答なし" },
+    "未読のプロジェクトがあるサーバーも正常に見せない",
+  );
+  assert.match(
+    sideFoot(html),
+    /esa はまだ一度も読めていません/,
+    "未読のプロジェクト名を下端に出す",
   );
 });

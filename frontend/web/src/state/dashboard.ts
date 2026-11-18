@@ -89,8 +89,11 @@ type PendingCounts = {
 
 type OverviewServerView = {
   server: Server;
-  state: "live" | "idle" | "down";
+  state: "live" | "idle" | "down" | "warn";
   stateLabel: string;
+  // 配下で応答していないプロジェクト。サーバー単位の読み取り時刻（配下の最新）だけでは
+  // 正常に見えてしまうため、サーバーの1行にプロジェクトごとの状態を併記する（issue #264）。
+  notRespondingProjects: Project[];
 };
 
 // 概要のプロジェクト行。プロジェクト自身の同時実行上限と、そのプロジェクトで
@@ -249,8 +252,24 @@ export const serverStateFrom = (
   return runCount > 0 ? "live" : "idle";
 };
 
-const serverState = (server: Server, runs: readonly RunInput[]): OverviewServerView["state"] =>
-  serverStateFrom(server.connected, toRunCount(runs.length));
+// サーバーの表示状態。基本状態（serverStateFrom）に、配下プロジェクトの応答状態を
+// 重ねる。サーバー自体が応答なし（down）のときは down を優先し、それ以外では
+// 応答していないプロジェクトが1件でもあれば warn にする。サーバーは応答していても
+// 配下のプロジェクトが応答していないと、サーバー単位の表示が全体が正常であるかの
+// ように見えてしまう（issue #264）。概要のサーバーカードとサイドバーはこの関数で
+// 同じ状態を使い、表示を食い違わせない（issue #188）。
+export function serverDisplayState(
+  server: Server,
+  runCount: RunCount,
+  projects: readonly Project[],
+): OverviewServerView["state"] {
+  const base = serverStateFrom(server.connected, runCount);
+  if (base === "down") {
+    return base;
+  }
+  const own = projects.filter((project) => project.serverId === server.serverId);
+  return notRespondingProjects(own).length > 0 ? "warn" : base;
+}
 
 // idle は「接続できているが run が無い」状態であり、接続そのものができていない
 // down（応答なし）と区別できる文言にする。文言は「接続中」と短くし、run が無いことは
@@ -264,6 +283,8 @@ export const serverStateLabel = (state: OverviewServerView["state"]): string => 
       return "動作中";
     case "idle":
       return "接続中";
+    case "warn":
+      return "一部応答なし";
   }
 };
 
@@ -297,6 +318,26 @@ export function neverReadProjects(projects: readonly Project[]): Project[] {
   return projects.filter((project) => project.lastReadAt === undefined);
 }
 
+// 応答していないプロジェクト。読み取りが失敗し続けている（応答なし）プロジェクトと、
+// まだ一度も読めていないプロジェクトは、どちらも正常とは言えない。サーバー単位の
+// 表示（サーバーカードとサイドバー）が全体が正常であるかのように見える問題
+// （issue #264）を避けるため、この両方を応答していないものとして扱う。
+// 概要バナーの unresponsiveProjects は応答なしだけを数えるため、名前を分ける。
+export function notRespondingProjects(projects: readonly Project[]): Project[] {
+  return projects.filter(
+    (project) => isUnresponsiveProject(project) || project.lastReadAt === undefined,
+  );
+}
+
+// 応答していないプロジェクトの文言。応答なしと未読では言い方を分ける。
+// サーバーカードとサイドバーで同じ文言を使う。
+export function notRespondingProjectText(project: Project): string {
+  if (isUnresponsiveProject(project)) {
+    return `${project.name} から応答がありません。`;
+  }
+  return `${project.name} はまだ一度も読めていません。`;
+}
+
 // 応答のないサーバー・プロジェクトから最後に読めた時刻のうち、最も古いものを集計の基準にする。
 // 1件も読めた時刻が無ければ undefined のままにし、実在しない時刻を補わない。
 const earliestReadAt = (sources: ReadonlyArray<Date | undefined>): Date | undefined => {
@@ -322,11 +363,16 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
   const unresponsiveServers = state.servers.filter((server) => !server.connected);
   const unresponsiveProjects = state.projects.filter(isUnresponsiveProject);
   const servers = state.servers.map((server) => {
-    const status = serverState(
+    const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);
+    const status = serverDisplayState(server, toRunCount(serverRuns.length), state.projects);
+    return {
       server,
-      state.runs.filter((run) => run.serverId === server.serverId),
-    );
-    return { server, state: status, stateLabel: serverStateLabel(status) };
+      state: status,
+      stateLabel: serverStateLabel(status),
+      notRespondingProjects: notRespondingProjects(
+        state.projects.filter((project) => project.serverId === server.serverId),
+      ),
+    };
   });
   const runningRuns = state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length;
   const silentRunCount = runs.filter((run) => run.state === "warn").length;
