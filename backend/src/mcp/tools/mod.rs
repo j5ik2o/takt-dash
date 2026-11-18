@@ -5,7 +5,7 @@
 //! 輸送エラーとは区別します。
 
 use std::{
-  collections::{BTreeMap, HashMap},
+  collections::{BTreeMap, BTreeSet, HashMap},
   path::PathBuf,
   time::{Duration, Instant},
 };
@@ -23,14 +23,16 @@ use crate::{
   model::{
     ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
     InquiryEntry, NotificationEntry, ProjectSnapshot, RegistrationProposalEntry, RunEntry, TaskDetail, TaskEntry,
-    TaskStatus,
+    TaskStatus, TerminalReads,
   },
-  run_progress::{read_run, retain_runs, RunLogHandle},
+  run_progress::{read_run, retain_runs, RunLogHandle, RunReadFailure},
 };
 
 mod goal;
 mod parse;
+mod run;
 
+pub use self::run::RemoteRun;
 use self::{
   goal::{
     is_missing_goal_field, parse_goal, parse_goal_execution_status, parse_goal_question, parse_goal_status,
@@ -38,6 +40,7 @@ use self::{
     registration_summary_text, resolve_awaiting_merge_at, resolve_inquiry, ParsedInquiry, TaskLinkFields,
   },
   parse::{domain_value, optional_string, required_i32, required_string, string_field, Page},
+  run::{parse_remote_run, step_entries, step_log_entries, step_log_next_offset},
 };
 
 /// 一覧読み取り（ゴール・タスク）の期限。応答が大きく、2026-11-17 の本番実測では
@@ -160,8 +163,8 @@ impl<'a> ToolSet<'a> {
     let observed_at = Utc::now();
     let mut goals = self.list_goals().await?;
     let tasks = self.list_tasks().await?;
-    let inquiries = self.list_all_inquiries(&goals, prev, observed_at).await?;
-    let (notifications, awaiting_merge_at) = self.list_notifications(&goals, prev).await?;
+    let (inquiries, questions_read) = self.list_all_inquiries(&goals, prev, observed_at).await?;
+    let (notifications, awaiting_merge_at, notifications_read) = self.list_notifications(&goals, prev).await?;
     for goal in &mut goals {
       goal.awaiting_merge_at =
         resolve_awaiting_merge_at(goal, awaiting_merge_at.get(&goal.goal_id).copied(), prev, observed_at);
@@ -174,7 +177,8 @@ impl<'a> ToolSet<'a> {
       },
       | Err(error) => return Err(error),
     };
-    Ok(ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals })
+    let terminal_reads = TerminalReads { questions: questions_read, notifications: notifications_read };
+    Ok(ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals, terminal_reads })
   }
 
   async fn call_json(&mut self, name: &str, extra: Value) -> Result<Value, ToolError> {
@@ -247,31 +251,41 @@ impl<'a> ToolSet<'a> {
   /// 道具エラーまたはタイムアウト（そのゴールの質問だけ取得できない、またはゴールに属さない
   /// 問い合わせだけ取得できない）は、該当項目だけ前回 snapshot の同じゴールの問い合わせを
   /// 引き継ぎます（初回観測時は空）。その他の輸送エラーと解析エラーは全体の失敗として伝播します。
+  ///
+  /// あわせて、終端状態で質問を読めたゴール（読み取りを省いたゴールを含む）を返します。
   async fn list_all_inquiries(
     &mut self,
     goals: &[GoalEntry],
     prev: Option<&ProjectSnapshot>,
     observed_at: DateTime<Utc>,
-  ) -> Result<Vec<InquiryEntry>, ToolError> {
+  ) -> Result<(Vec<InquiryEntry>, BTreeSet<GoalId>), ToolError> {
     let mut inquiries = match self.list_standalone_inquiries().await {
       | Ok(entries) => entries,
       | Err(error) if degrades_to_previous(&error) => prev_inquiries(prev, |goal_id| goal_id.is_none()),
       | Err(error) => return Err(error),
     };
+    let mut read_in_terminal = BTreeSet::new();
     for goal in goals {
-      if is_unchanged_terminal_goal(goal, prev) {
+      if is_unchanged_terminal_goal(goal, prev, |reads| &reads.questions) {
         inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id)));
+        read_in_terminal.insert(goal.goal_id.clone());
         continue;
       }
       match self.list_goal_questions(&goal.goal_id).await {
-        | Ok(mut entries) => inquiries.append(&mut entries),
+        | Ok(mut entries) => {
+          inquiries.append(&mut entries);
+          if is_terminal(goal) {
+            read_in_terminal.insert(goal.goal_id.clone());
+          }
+        },
         | Err(error) if degrades_to_previous(&error) => {
           inquiries.extend(prev_inquiries(prev, |goal_id| goal_id == Some(&goal.goal_id)))
         },
         | Err(error) => return Err(error),
       }
     }
-    Ok(inquiries.into_iter().map(|parsed| resolve_inquiry(parsed, prev, observed_at)).collect())
+    let inquiries = inquiries.into_iter().map(|parsed| resolve_inquiry(parsed, prev, observed_at)).collect();
+    Ok((inquiries, read_in_terminal))
   }
 
   async fn list_goal_questions(&mut self, goal_id: &GoalId) -> Result<Vec<ParsedInquiry>, ToolError> {
@@ -315,11 +329,16 @@ impl<'a> ToolSet<'a> {
 
   /// running なタスクの run を、run の保存場所（`meta.json` と本体ログ）から集める。
   ///
-  /// 保存場所を読めなかった run
-  /// と、ステップ位置の補完が道具エラー以外の縮退できる失敗（タイムアウト） になった run だけ、前回
-  /// snapshot の同じ runSlug を引き継ぎ（無ければ欠落）、健常な run は今回の
-  /// 値を採ります。これらの失敗はプロジェクトの失敗にしません。補完のその他の輸送エラーは全体の
-  /// 失敗として伝播します。running でなくなった run の集計は、次の周期に持ち越さないよう捨てます。
+  /// 保存場所の対応表に無い run（[`RunReadFailure::NotListed`]）と、対応表を読めない run
+  /// （[`RunReadFailure::Unreadable`]。SSH 越しに扱うリモートのサーバーのプロジェクトなど）は、
+  /// takt-mcp の takt_get_run から作ります。保存場所で読めた run には takt_get_run を呼びません。
+  ///
+  /// どちらからも読めなかった run
+  /// と、ステップ位置の補完が縮退できる失敗（道具エラー・タイムアウト） になった run だけ、前回
+  /// snapshot の同じ runSlug を引き継ぎ（無ければ欠落）、健常な run は
+  /// 今回の値を採ります。これらの失敗はプロジェクトの失敗にしません。takt_get_run と補完の
+  /// その他の輸送エラーは全体の失敗として伝播します。running でなくなった run の集計は、次の周期に
+  /// 持ち越さないよう捨てます。
   async fn get_running_runs(
     &mut self,
     tasks: &[TaskEntry],
@@ -333,18 +352,15 @@ impl<'a> ToolSet<'a> {
         continue;
       };
       running.push(run_slug.clone());
-      match read_run(handle, run_slug.clone()).await {
-        | Ok(view) => {
-          let mut run = view.run_entry(&run_slug, task);
-          let enriched = match view.workflow.as_deref().filter(|workflow| !workflow.is_empty()) {
-            | Some(workflow) => self.enrich_step_progress(&mut run, workflow).await,
-            | None => Ok(()),
-          };
-          match enriched {
-            | Ok(()) => runs.push(run),
-            | Err(error) if degrades_to_previous(&error) => {
-              tracing::warn!(run_slug = %run_slug.as_str(), error = %error, "run のステップ位置を補えませんでした。前回の値を使います。");
+      let (mut run, workflow) = match read_run(handle, run_slug.clone()).await {
+        | Ok(view) => (view.run_entry(&run_slug, task), view.workflow),
+        | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
+          match self.read_remote_run(&run_slug).await {
+            | Ok(remote) => (remote.run_entry(task), remote.workflow),
+            | Err(error) if matches!(error, ToolError::Parse(_)) || degrades_to_previous(&error) => {
+              tracing::warn!(run_slug = %run_slug.as_str(), local = %failure, error = %error, "run を保存場所からも takt_get_run からも読めませんでした。前回の値を使います。");
               runs.extend(previous_run(prev, &run_slug));
+              continue;
             },
             | Err(error) => return Err(error),
           }
@@ -352,11 +368,45 @@ impl<'a> ToolSet<'a> {
         | Err(failure) => {
           tracing::warn!(run_slug = %run_slug.as_str(), error = %failure, "run を保存場所から読めませんでした。前回の値を使います。");
           runs.extend(previous_run(prev, &run_slug));
+          continue;
         },
+      };
+      let enriched = match workflow.as_deref().filter(|workflow| !workflow.is_empty()) {
+        | Some(workflow) => self.enrich_step_progress(&mut run, workflow).await,
+        | None => Ok(()),
+      };
+      match enriched {
+        | Ok(()) => runs.push(run),
+        | Err(error) if degrades_to_previous(&error) => {
+          tracing::warn!(run_slug = %run_slug.as_str(), error = %error, "run のステップ位置を補えませんでした。前回の値を使います。");
+          runs.extend(previous_run(prev, &run_slug));
+        },
+        | Err(error) => return Err(error),
       }
     }
     retain_runs(handle, running).await;
     Ok(runs)
+  }
+
+  /// takt_get_run から run を読む。stepLogs は先頭のウィンドウだけが返るため、
+  /// stepLogPage.nextOffset が残っていれば追加のページを取得して全件を集めます。
+  pub async fn read_remote_run(&mut self, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
+    let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
+    let mut steps = step_entries(&value);
+    let mut step_logs = step_log_entries(&value);
+    let mut next_offset = step_log_next_offset(&value);
+    let mut pages_taken = 0;
+    while let Some(offset) = next_offset {
+      if pages_taken >= MAX_PAGES {
+        return Err(ToolError::Parse("takt_get_run の stepLogs 追従が上限に達しました".to_owned()));
+      }
+      pages_taken += 1;
+      let page = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str(), "offset": offset })).await?;
+      steps.extend(step_entries(&page));
+      step_logs.extend(step_log_entries(&page));
+      next_offset = step_log_next_offset(&page);
+    }
+    parse_remote_run(&value, steps, step_logs)
   }
 
   /// workflow の step 名一覧から、run の現在ステップの位置と全ステップ数を補う。
@@ -433,16 +483,20 @@ impl<'a> ToolSet<'a> {
     Err(ToolError::Parse("takt_get_workflow のページ追従が上限に達しました".to_owned()))
   }
 
+  /// ゴールごとの通知と、マージ待ちの起点時刻を集める。あわせて、終端状態で通知を読めたゴール
+  /// （読み取りを省いたゴールを含む）を返します。
   async fn list_notifications(
     &mut self,
     goals: &[GoalEntry],
     prev: Option<&ProjectSnapshot>,
-  ) -> Result<(Vec<NotificationEntry>, BTreeMap<GoalId, DateTime<Utc>>), ToolError> {
+  ) -> Result<(Vec<NotificationEntry>, BTreeMap<GoalId, DateTime<Utc>>, BTreeSet<GoalId>), ToolError> {
     let mut notifications = Vec::new();
     let mut awaiting_merge_at = BTreeMap::new();
+    let mut read_in_terminal = BTreeSet::new();
     for goal in goals {
-      if is_unchanged_terminal_goal(goal, prev) {
+      if is_unchanged_terminal_goal(goal, prev, |reads| &reads.notifications) {
         inherit_previous_notifications(&mut notifications, &mut awaiting_merge_at, goal, prev);
+        read_in_terminal.insert(goal.goal_id.clone());
         continue;
       }
       match self.list_goal_notifications(&goal.goal_id).await {
@@ -451,6 +505,9 @@ impl<'a> ToolSet<'a> {
             awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
           }
           notifications.extend(goal_notifications);
+          if is_terminal(goal) {
+            read_in_terminal.insert(goal.goal_id.clone());
+          }
         },
         | Err(error) if degrades_to_previous(&error) => {
           inherit_previous_notifications(&mut notifications, &mut awaiting_merge_at, goal, prev);
@@ -458,7 +515,7 @@ impl<'a> ToolSet<'a> {
         | Err(error) => return Err(error),
       }
     }
-    Ok((notifications, awaiting_merge_at))
+    Ok((notifications, awaiting_merge_at, read_in_terminal))
   }
 
   /// 1 ゴールの通知を nextOffset が null になるまで追従して集める。あわせて、そのゴールの
@@ -504,17 +561,31 @@ fn call_outcome(result: &Result<String, CallError>) -> ToolCallOutcome {
   }
 }
 
-/// 前回と同じ状態の終端ゴールかを判定する。終端は `status == Completed` または
-/// `execution_status == Aborted` で、前回の同じゴールが同じ状態なら補助読み取りを省けます。
-/// 初回観測、状態変化、`AwaitingMerge` などの非終端は読み取り対象のままです。
-fn is_unchanged_terminal_goal(goal: &GoalEntry, prev: Option<&ProjectSnapshot>) -> bool {
-  let Some(previous) = prev.and_then(|snapshot| snapshot.goals.iter().find(|entry| entry.goal_id == goal.goal_id))
-  else {
+/// 終端（`status == Completed` または `execution_status == Aborted`）のゴールか。
+fn is_terminal(goal: &GoalEntry) -> bool {
+  goal.status == GoalStatus::Completed || goal.execution_status == ExecutionStatus::Aborted
+}
+
+/// 補助読み取りの項目 `item` を省ける、前回と同じ状態の終端ゴールかを判定する。
+///
+/// 前回の同じゴールが同じ終端状態で、かつ前回その状態でこの項目を読めていた場合だけ省けます。
+/// 初回観測、状態変化、`AwaitingMerge` などの非終端、前回の終端状態で読み取りに失敗した項目は
+/// 読み取り対象のままです。
+fn is_unchanged_terminal_goal(
+  goal: &GoalEntry,
+  prev: Option<&ProjectSnapshot>,
+  item: impl Fn(&TerminalReads) -> &BTreeSet<GoalId>,
+) -> bool {
+  let Some(prev) = prev else {
+    return false;
+  };
+  let Some(previous) = prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id) else {
     return false;
   };
   previous.status == goal.status
     && previous.execution_status == goal.execution_status
-    && (goal.status == GoalStatus::Completed || goal.execution_status == ExecutionStatus::Aborted)
+    && is_terminal(goal)
+    && item(&prev.terminal_reads).contains(&goal.goal_id)
 }
 
 /// 前回 snapshot の同じ runSlug の run を返す。前回が無ければ `None` です。

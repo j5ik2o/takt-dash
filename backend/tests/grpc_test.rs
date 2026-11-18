@@ -85,13 +85,13 @@ fn seeded_harness() -> GrpcHarness {
   let mut merge = merge_goal("g-merge", 42);
   merge.awaiting_merge_at = Some(time("2026-11-13T08:00:00Z"));
   let snapshot = ProjectSnapshot {
-    goals:         vec![
+    goals: vec![
       goal_with_pause("g-pause", "公開の日取りを待っています。"),
       merge,
       goal("g-open", GoalStatus::Created, ExecutionStatus::Active),
       goal("g1", GoalStatus::Created, ExecutionStatus::Active),
     ],
-    tasks:         vec![
+    tasks: vec![
       TaskEntry {
         name:            TaskName::try_from("impl").expect("テストのタスク名は有効です"),
         goal_id:         Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
@@ -114,13 +114,14 @@ fn seeded_harness() -> GrpcHarness {
         merge_task:      false,
       },
     ],
-    inquiries:     vec![
+    inquiries: vec![
       InquiryEntry { kind: InquiryKind::OperationRequest, ..inquiry("q-open", false, time("2026-11-13T07:00:00Z")) },
       inquiry("q-answered", true, time("2026-11-13T07:00:00Z")),
     ],
-    runs:          vec![recent_run("run-1")],
+    runs: vec![recent_run("run-1")],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
@@ -230,12 +231,13 @@ async fn get_overview_marks_a_run_silent_beyond_the_configured_threshold() {
   let mut stale_run = run_entry("run-1");
   stale_run.last_log_at = Some(Utc::now() - Duration::minutes(30));
   let snapshot = ProjectSnapshot {
-    goals:         vec![],
-    tasks:         vec![],
-    inquiries:     vec![],
-    runs:          vec![stale_run],
+    goals: vec![],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![stale_run],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, Utc::now());
   let server = start_server(&harness).await;

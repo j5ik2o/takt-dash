@@ -43,6 +43,8 @@ const WORKTREES_DIRECTORY: &str = "takt-worktrees";
 /// 1プロジェクトで集計を保持する run の上限。takt の並列度（サーバーあたり数件）に対して十分に
 /// 大きく、run 詳細を開いた run が増え続けても保持量が上限で止まるようにします。
 const MAX_TRACKED_RUNS: usize = 32;
+/// 一覧の run の要約に使う、タスクの本文の1行目の文字数の上限（takt と同じ）。
+const TASK_SUMMARY_CHARS: usize = 80;
 /// ログの末尾として保持する記録の件数。
 const LOG_TAIL_RECORDS: usize = 20;
 /// run 詳細の追記の配信のために、番号付きで保持する行の上限。画面が保持する行の上限と同じです。
@@ -135,7 +137,7 @@ impl RunLogView {
       session_id: String::new(),
       task_name: task.name.clone(),
       goal_id: task.goal_id.clone(),
-      summary: String::new(),
+      summary: self.task_text.as_deref().map(task_summary).unwrap_or_default(),
       status: self.status,
       current_step: self.current_step.clone(),
       current_step_number: None,
@@ -149,7 +151,7 @@ impl RunLogView {
         .iter()
         .map(|completion| RunStepEntry {
           step_name:  completion.step.clone(),
-          model:      String::new(),
+          model:      completion.model.clone().unwrap_or_default(),
           started_at: completion.timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
           ended_at:   None,
         })
@@ -206,6 +208,14 @@ impl RunLogView {
   }
 }
 
+/// takt のタスク要約と同じ規則（前後の空白を除き、1行目の先頭 80 文字）で、タスクの本文を縮める。
+///
+/// takt は UTF-16 の単位で 80 を数えますが、ここでは文字（Unicode のスカラー値）で数えます。
+/// 差が出るのは BMP の外の文字（絵文字など）を含むときだけです。
+pub(crate) fn task_summary(task_text: &str) -> String {
+  task_text.trim().lines().next().unwrap_or_default().chars().take(TASK_SUMMARY_CHARS).collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StepCompletion {
   step:      String,
@@ -213,6 +223,8 @@ struct StepCompletion {
   status:    String,
   timestamp: Option<DateTime<Utc>>,
   iteration: i32,
+  /// そのステップを始めた step_start の model。
+  model:     Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +237,7 @@ struct StepStart {
   /// parallel が無いか、parallel の親（`role == "parent"`）か。
   top_level:       bool,
   timestamp:       Option<DateTime<Utc>>,
+  model:           Option<String>,
 }
 
 /// 1つの run の集計。本体ログの読み取り位置もここに持ちます。
@@ -332,10 +345,22 @@ impl RunProgress {
   fn ingest_body_log(&mut self, run_dir: &Path) -> u64 {
     // 読み取り層はファイルの縮小や置き換えで読み位置を捨て、読み直す。先頭から読む集計は、先頭の
     // workflow_start で初期化される。末尾から読む集計は workflow_start を読まないことがあるため、
-    // 読み直したときは記録を取り込む前に自分で初期化する。本体ログが複数ある run でも、どれかを
-    // 読み直せば集計全体を初期化する。
-    let body_log = self.reader.read_body_log(run_dir);
-    if matches!(self.initial_read, InitialRead::Tail(_)) && body_log.restarted {
+    // 読み直したときは記録を取り込む前に自分で初期化する。
+    //
+    // 本体ログが複数ある run で、どれかのファイルを読み位置なしで読んだ（新しく現れた、縮んだ、
+    // 置き換わった）ときは、集計全体を初期化する。ほかのファイルは読み位置が末尾にあり、そのまま
+    // では集計に戻らないため、全ファイルの読み位置を捨てて同じ呼び出しの中で読み直す。こうして
+    // 集計は、新しく作った取っ手が読む結果と同じになる。
+    let tail = matches!(self.initial_read, InitialRead::Tail(_));
+    let had_positions = self.reader.has_body_log_positions();
+    let mut body_log = self.reader.read_body_log(run_dir);
+    if tail && body_log.restarted && had_positions {
+      self.reader.forget_body_log_positions();
+      let first_bytes = body_log.bytes_read;
+      body_log = self.reader.read_body_log(run_dir);
+      body_log.bytes_read += first_bytes;
+    }
+    if tail && body_log.restarted {
       self.active = false;
       self.completions.clear();
       self.starts.clear();
@@ -393,9 +418,27 @@ impl RunProgress {
         self.starts.clear();
       },
       | Some("step_start") if self.active => self.starts.push(StepStart::from_record(record)),
-      | Some("step_complete") if self.active => self.completions.push(StepCompletion::from_record(record)),
+      | Some("step_complete") if self.active => {
+        let mut completion = StepCompletion::from_record(record);
+        completion.model = self.start_model(&completion.step, record.get("iteration").and_then(Value::as_i64));
+        self.completions.push(completion);
+      },
       | _ => {},
     }
+  }
+
+  /// step_complete より前で最も新しい、同じ step（両方が iteration を持てば同じ iteration）の
+  /// step_start の model。
+  fn start_model(&self, step: &str, iteration: Option<i64>) -> Option<String> {
+    self
+      .starts
+      .iter()
+      .rev()
+      .find(|start| {
+        start.step.as_deref() == Some(step)
+          && start.iteration.zip(iteration).is_none_or(|(started, completed)| started == completed)
+      })
+      .and_then(|start| start.model.clone())
   }
 
   /// 記録を「時刻 種類 ステップ」の1行にしてログの末尾へ足す。無い部分は省き、種類の無い記録は
@@ -487,6 +530,7 @@ impl StepCompletion {
       persona:   record_string(record, "persona").unwrap_or_default(),
       status:    record_string(record, "status").unwrap_or_default(),
       timestamp: record_time(record),
+      model:     None,
       iteration: record
         .get("iteration")
         .and_then(Value::as_i64)
@@ -511,6 +555,7 @@ impl StepStart {
       stack_root_step: stack.and_then(|stack| stack.first()).and_then(|root| record_string(root, "step")),
       top_level,
       timestamp: record_time(record),
+      model: record_string(record, "model"),
     }
   }
 }

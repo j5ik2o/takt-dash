@@ -57,6 +57,30 @@ fn store_opens_a_file_and_creates_parent_schema() {
   assert_eq!(reopened.recent_events(10).expect("一覧を取得できます").len(), 1);
 }
 
+/// `path` で開いた store に記録した出来事を、同じ store の読み取りで取得できることを確かめる。
+fn assert_recorded_event_is_readable(path: &Path) {
+  let store = ActivityStore::open(path).unwrap_or_else(|error| panic!("{path:?} の SQLite を開けます: {error}"));
+  let recorded = event("2026-11-13T10:00:00Z", "mac-mini", Some("p"), EventKind::GoalCreated, "登録");
+  store.record(&recorded).unwrap_or_else(|error| panic!("{path:?} へ出来事を記録できます: {error}"));
+
+  let events = store.recent_events(10).unwrap_or_else(|error| panic!("{path:?} から一覧を取得できます: {error}"));
+
+  assert_eq!(events, vec![recorded], "{path:?} で記録した出来事を同じ store から読めます");
+}
+
+#[test]
+fn memory_path_reads_the_events_recorded_by_the_writer() {
+  // ":memory:" は接続ごとに別のデータベースになるため、読み取り用の接続にも書き込み側の
+  // スキーマと記録が見えるよう、メモリ上の store と同じ扱いにする。
+  assert_recorded_event_is_readable(Path::new(":memory:"));
+}
+
+#[test]
+fn empty_path_reads_the_events_recorded_by_the_writer() {
+  // 空のパスも接続ごとに別の一時データベースになるため、":memory:" と同じ扱いにする。
+  assert_recorded_event_is_readable(Path::new(""));
+}
+
 #[test]
 fn file_backed_reads_see_events_recorded_by_the_writer() {
   // 読み取り接続を writer と分けても、書き込み済みの出来事を同じストアから読める。

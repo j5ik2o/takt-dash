@@ -24,6 +24,7 @@ use crate::{
   mcp::{client_config, McpClientRegistry, ToolCallMetrics, ToolError, ToolSet},
   model::{
     ConnectionState, ConnectionTransition, EventKind, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot,
+    TerminalReads,
   },
   run_progress::RunLogHandles,
   store::StateStore,
@@ -429,7 +430,9 @@ impl Poller {
 /// サーバーの
 /// 表示情報に加えて、時刻から導出されるログの無音と判断待ちの滞留の真偽が変わったサイクルだけを
 /// 変化とみなします。読めた時刻（last_read_at）は読み取りのたびに進むため、内容が同じサイクルを
-/// 変化として扱わないよう指紋から除きます。
+/// 変化として扱わないよう指紋から除きます。終端のゴールで補助読み取りに成功したかの記録
+/// （`terminal_reads`）も、次の周期で読み直すかを決めるための内部の記録で画面には出ないため、
+/// 指紋から除きます。
 #[derive(Debug, PartialEq, Eq)]
 struct StoreSignature {
   thresholds:        Thresholds,
@@ -466,7 +469,9 @@ impl StoreSignature {
           name: view.name,
           concurrency: view.concurrency,
           connection_state: view.connection_state,
-          snapshot: view.snapshot,
+          snapshot: view
+            .snapshot
+            .map(|snapshot| ProjectSnapshot { terminal_reads: TerminalReads::default(), ..snapshot }),
           silent_runs,
         }
       })

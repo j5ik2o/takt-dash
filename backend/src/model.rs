@@ -3,7 +3,7 @@
 //! これらの型は lib の公開 API の一部であり、後続のタスクの gRPC サーバーが
 //! 読み取り系 API の応答を組み立てるために使います。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 
@@ -316,25 +316,40 @@ pub struct StepLogEntry {
 /// 1回の読み取りで得た、1プロジェクト分の状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSnapshot {
-  pub goals:         Vec<GoalEntry>,
-  pub tasks:         Vec<TaskEntry>,
-  pub inquiries:     Vec<InquiryEntry>,
-  pub runs:          Vec<RunEntry>,
-  pub notifications: Vec<NotificationEntry>,
+  pub goals:          Vec<GoalEntry>,
+  pub tasks:          Vec<TaskEntry>,
+  pub inquiries:      Vec<InquiryEntry>,
+  pub runs:           Vec<RunEntry>,
+  pub notifications:  Vec<NotificationEntry>,
   /// ゴール登録の承認待ち。承認待ちが無ければ空です。
-  pub proposals:     Vec<RegistrationProposalEntry>,
+  pub proposals:      Vec<RegistrationProposalEntry>,
+  /// 終端状態のゴールで、補助読み取りに成功した項目。
+  pub terminal_reads: TerminalReads,
+}
+
+/// 終端状態（完了または中止）のゴールのうち、その状態で補助読み取りに成功したゴール。
+///
+/// 状態が変わらない終端のゴールは、ここに載っている項目だけ読み取りを省きます。終端状態で読み取りに
+/// 失敗した項目は載せず、次の周期で読み直します。質問と通知は別々に扱います。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalReads {
+  /// 質問（takt_list_goal_questions）を読めたゴール。
+  pub questions:     BTreeSet<GoalId>,
+  /// 通知（takt_get_goal の notifications）を読めたゴール。
+  pub notifications: BTreeSet<GoalId>,
 }
 
 impl ProjectSnapshot {
   /// 空の状態。対象プロジェクトにゴールもタスクもない場合に使います。
   pub fn empty() -> Self {
     ProjectSnapshot {
-      goals:         Vec::new(),
-      tasks:         Vec::new(),
-      inquiries:     Vec::new(),
-      runs:          Vec::new(),
-      notifications: Vec::new(),
-      proposals:     Vec::new(),
+      goals:          Vec::new(),
+      tasks:          Vec::new(),
+      inquiries:      Vec::new(),
+      runs:           Vec::new(),
+      notifications:  Vec::new(),
+      proposals:      Vec::new(),
+      terminal_reads: TerminalReads::default(),
     }
   }
 }

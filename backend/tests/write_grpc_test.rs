@@ -48,9 +48,9 @@ async fn pending_decision_inquiry_id_is_the_identifier_used_for_answering() {
   harness.store.record_success(
     "takt-dash",
     ProjectSnapshot {
-      goals:         vec![],
-      tasks:         vec![],
-      inquiries:     vec![InquiryEntry {
+      goals: vec![],
+      tasks: vec![],
+      inquiries: vec![InquiryEntry {
         inquiry_id: InquiryId::try_from("8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e")
           .expect("テストの inquiry ID は有効です"),
         goal_id:    Some(
@@ -62,9 +62,10 @@ async fn pending_decision_inquiry_id_is_the_identifier_used_for_answering() {
         answered:   false,
         created_at: time("2026-11-13T07:00:00Z"),
       }],
-      runs:          vec![],
+      runs: vec![],
       notifications: vec![],
-      proposals:     vec![],
+      proposals: vec![],
+      ..ProjectSnapshot::empty()
     },
     time("2026-11-13T12:00:00Z"),
   );
@@ -117,9 +118,9 @@ async fn answered_inquiry_is_absent_from_pending_decisions() {
   harness.store.record_success(
     "takt-dash",
     ProjectSnapshot {
-      goals:         vec![],
-      tasks:         vec![],
-      inquiries:     vec![InquiryEntry {
+      goals: vec![],
+      tasks: vec![],
+      inquiries: vec![InquiryEntry {
         inquiry_id: InquiryId::try_from("answered-id").expect("テストの inquiry ID は有効です"),
         goal_id:    Some(
           GoalId::try_from("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11").expect("テストのゴール ID は有効です"),
@@ -130,9 +131,10 @@ async fn answered_inquiry_is_absent_from_pending_decisions() {
         answered:   true,
         created_at: time("2026-11-13T07:00:00Z"),
       }],
-      runs:          vec![],
+      runs: vec![],
       notifications: vec![],
-      proposals:     vec![],
+      proposals: vec![],
+      ..ProjectSnapshot::empty()
     },
     time("2026-11-13T12:00:00Z"),
   );

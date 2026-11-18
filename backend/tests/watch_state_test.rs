@@ -36,12 +36,13 @@ fn seeded_harness() -> GrpcHarness {
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), goal_state("g1")).build();
   let snapshot = ProjectSnapshot {
-    goals:         vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
-    tasks:         vec![],
-    inquiries:     vec![],
-    runs:          vec![],
+    goals: vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   harness
@@ -426,12 +427,13 @@ async fn watch_state_reassembles_and_returns_the_new_run_log_silent() {
   fixture.write_meta("run-1", &running_meta("implement", 1, "development-core", &stale.to_rfc3339()));
   fixture.append_records("run-1", &[workflow_start_record("development-core")]);
   let snapshot = ProjectSnapshot {
-    goals:         vec![],
-    tasks:         vec![],
-    inquiries:     vec![],
-    runs:          vec![run("run-1", "implement", recent)],
+    goals: vec![],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![run("run-1", "implement", recent)],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, Utc::now());
 

@@ -30,12 +30,13 @@ fn seeded_harness() -> (GrpcHarness, RunFixture) {
   let harness =
     GrpcHarness::builder().single_project(project("takt-dash", project_dir()), server_meta(), json!({})).build();
   let snapshot = ProjectSnapshot {
-    goals:         vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
-    tasks:         vec![],
-    inquiries:     vec![],
-    runs:          vec![run("run-1", "implement", time("2026-11-13T09:06:00Z"))],
+    goals: vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
+    tasks: vec![],
+    inquiries: vec![],
+    runs: vec![run("run-1", "implement", time("2026-11-13T09:06:00Z"))],
     notifications: vec![],
-    proposals:     vec![],
+    proposals: vec![],
+    ..ProjectSnapshot::empty()
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   let fixture = RunFixture::new(harness.project_dir());

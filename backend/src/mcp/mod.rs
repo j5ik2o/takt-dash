@@ -13,4 +13,4 @@ pub mod tools;
 pub use client::{CallError, McpClient, McpClientConfig, ToolCallError, TransportError};
 pub use metrics::{ToolCallMetrics, ToolCallOutcome, ToolCallStat};
 pub use registry::McpClientRegistry;
-pub use tools::{client_config, ApproveGoalRegistrationResult, MergeGoalPrResult, ToolError, ToolSet};
+pub use tools::{client_config, ApproveGoalRegistrationResult, MergeGoalPrResult, RemoteRun, ToolError, ToolSet};
