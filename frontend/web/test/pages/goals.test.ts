@@ -169,8 +169,9 @@ test("ゴール一覧の各行は状態の文面・状態別のタスク件数�
   assert.match(prFailedRow, /マージの承認待ちです/);
   assert.match(prFailedRow, /仕上げタスクのプルリクエスト作成が失敗しました/);
 
+  // 正常なゴールは、承認待ちを述べる文を出さない（issue #148）。
   const runningRow = rowFor(html, "実行中のゴール");
-  assert.match(runningRow, /マージの承認待ちではありません/);
+  assert.doesNotMatch(runningRow, /マージの承認待ち/);
   assert.doesNotMatch(runningRow, /仕上げタスクが/);
 
   const countsRow = rowFor(html, "状態別の件数を持つゴール");
@@ -186,6 +187,169 @@ test("ゴール一覧の各行は状態の文面・状態別のタスク件数�
   }
   // 件数の項目どうしは、区切りを持つコンテナの中に並ぶ（issue #232）。
   assert.match(countsRow, /class="kv task-counts"/);
+});
+
+// 正常なゴールのカードは、判断待ちを述べる文を出さない（issue #148）。
+test("ゴール一覧はマージの承認待ちでないゴールに承認待ちの文を出さない", () => {
+  const state = createDashboardState();
+  const html = renderGoals({
+    ...state,
+    goals: [
+      createGoal({
+        goalId: "goal-running",
+        name: "実行中のゴール",
+        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+        mergeTaskLast: TaskStatus.TASK_STATUS_RUNNING,
+        taskCounts: { pending: 0, running: 1, completed: 2, failed: 0, exceeded: 0, prFailed: 0 },
+      }),
+      createGoal({
+        goalId: "goal-waiting",
+        name: "人のマージ待ちのゴール",
+        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+        taskCounts: { pending: 0, running: 0, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+      }),
+    ],
+  });
+
+  // 同じ画面に、承認待ちの肯定文と、承認待ちでないゴールを並べる。行単位で分けて
+  // 観測し、承認待ちの文が承認待ちでないゴールの行へ漏れていないことを確かめる。
+  const runningRow = rowFor(html, "実行中のゴール");
+  assert.doesNotMatch(runningRow, /マージの承認待ち/);
+
+  const waitingRow = rowFor(html, "人のマージ待ちのゴール");
+  assert.match(waitingRow, /マージの承認待ちです/);
+});
+
+// プルリクエストが無いゴールでは、その旨を述べる文を出さない（issue #148）。
+test("ゴール一覧はプルリクエストが無いゴールにプルリクエストの文を出さない", () => {
+  const state = createDashboardState();
+  const html = renderGoals({
+    ...state,
+    goals: [
+      createGoal({
+        goalId: "goal-no-pr",
+        name: "提案をまとめるゴール",
+        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+        taskCounts: { pending: 0, running: 0, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+      }),
+      createGoal({
+        goalId: "goal-with-pr",
+        name: "リリースを準備するゴール",
+        status: GoalStatus.GOAL_STATUS_AWAITING_MERGE,
+        taskCounts: { pending: 0, running: 0, completed: 5, failed: 0, exceeded: 0, prFailed: 0 },
+        pullRequest: { number: 418, url: "https://example.test/pr/418" },
+      }),
+    ],
+  });
+
+  const noPrRow = rowFor(html, "提案をまとめるゴール");
+  // 既知の1文の完全一致だけでなく、「PR」「プルリクエスト」を含む文（言い換えを含む）が
+  // 出ないことを行単位で検査する（issue #148）。
+  assert.doesNotMatch(noPrRow, /PR|プルリクエスト/);
+
+  // プルリクエストがあるゴールの導線は落とさない。
+  const withPrRow = rowFor(html, "リリースを準備するゴール");
+  assert.match(withPrRow, /#418/);
+  assert.match(withPrRow, /https:\/\/example\.test\/pr\/418/);
+});
+
+// 0件の状態項目はカードに出さない（issue #148）。
+test("ゴール一覧は0件の状態項目を件数欄に出さない", () => {
+  const state = createDashboardState();
+  const html = renderGoals({
+    ...state,
+    goals: [
+      createGoal({
+        goalId: "goal-some-zero",
+        name: "一部の状態が0件のゴール",
+        status: GoalStatus.GOAL_STATUS_CREATED,
+        taskCounts: { pending: 0, running: 3, completed: 0, failed: 2, exceeded: 0, prFailed: 0 },
+      }),
+    ],
+  });
+
+  const row = rowFor(html, "一部の状態が0件のゴール");
+  // 0件でない項目は残る。
+  assert.match(row, /実行中 3件/);
+  assert.match(row, /失敗 2件/);
+  // 0件の項目は、状態の種別の名前ごと出さない。
+  for (const label of ["未着手", "完了", "上限超過", "PR 失敗"]) {
+    assert.doesNotMatch(row, new RegExp(`${label} 0件`), `0件の「${label}」を出さない`);
+    assert.doesNotMatch(row, new RegExp(`>${label}`), `0件の「${label}」の項目を出さない`);
+  }
+});
+
+// すべての状態が0件のゴールでは、件数の見出しごと出さない（issue #148）。
+test("ゴール一覧は全ての状態項目が0件のゴールにタスクの件数の見出しを出さない", () => {
+  const state = createDashboardState();
+  const html = renderGoals({
+    ...state,
+    goals: [createGoal({ goalId: "goal-all-zero", name: "全ての状態が0件のゴール" })],
+  });
+
+  const row = rowFor(html, "全ての状態が0件のゴール");
+  assert.doesNotMatch(row, /タスクの件数/);
+  assert.doesNotMatch(row, /class="kv task-counts"/);
+});
+
+// 失敗・上限超過・PR 失敗の件数は要対応として目立たせる（issue #148）。
+test("ゴール一覧は失敗の状態項目の件数を要対応として目立たせる", () => {
+  const state = createDashboardState();
+  const html = renderGoals({
+    ...state,
+    goals: [
+      createGoal({
+        goalId: "goal-attention",
+        name: "要対応の件数を持つゴール",
+        status: GoalStatus.GOAL_STATUS_CREATED,
+        taskCounts: { pending: 1, running: 0, completed: 2, failed: 1, exceeded: 1, prFailed: 1 },
+      }),
+    ],
+  });
+
+  const row = rowFor(html, "要対応の件数を持つゴール");
+  // 要対応の3項目は警告の見た目のクラスを持つ。
+  for (const label of ["失敗", "上限超過", "PR 失敗"]) {
+    assert.match(
+      row,
+      new RegExp(`class="[^"]*warn[^"]*">${label} 1件`),
+      `「${label}」の件数を要対応の見た目で出す`,
+    );
+  }
+  // 要対応でない項目は警告の見た目のクラスを持たない。
+  for (const label of ["未着手", "完了"]) {
+    assert.doesNotMatch(
+      row,
+      new RegExp(`class="[^"]*warn[^"]*">${label}`),
+      `「${label}」の件数は要対応の見た目にしない`,
+    );
+  }
+});
+
+// 長い目的文を持つゴールは、題名を最初の1文にして全文を折りたたみへ回す（issue #148）。
+test("ゴール一覧は複数文のゴール名を最初の1文だけ題名に出し全文を折りたたむ", () => {
+  const state = createDashboardState();
+  const html = renderGoals({
+    ...state,
+    goals: [
+      createGoal({
+        goalId: "goal-long-name",
+        name: "採用ページのレイアウトを直す。あわせて見出しの文字サイズも見直すので作業範囲を確認する。",
+      }),
+    ],
+  });
+
+  // 題名の要素（h3 のリンク）には最初の1文だけを出す。
+  const heading = html.match(/<h3>([\s\S]*?)<\/h3>/);
+  assert.ok(heading !== null, "題名の見出しがある");
+  assert.match(heading[1] ?? "", /採用ページのレイアウトを直す。/);
+  assert.doesNotMatch(heading[1] ?? "", /見出しの文字サイズも見直す/);
+
+  // 全文は折りたたみ（既定で閉）の中に残す。
+  const details = html.match(/<details class="goal-full">([\s\S]*?)<\/details>/);
+  assert.ok(details !== null, "全文の折りたたみがある");
+  assert.doesNotMatch(details[0], /\sopen/, "全文の折りたたみは既定で閉じる");
+  assert.match(details[0], /採用ページのレイアウトを直す。あわせて見出しの文字サイズも見直す/);
 });
 
 test("ゴール一覧の各行はゴール ID をエスケープした詳細へのリンクを持つ", () => {

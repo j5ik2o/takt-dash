@@ -364,6 +364,24 @@ a {
   gap: 4px 16px;
 }
 
+/* 失敗・上限超過・PR 失敗の件数は、要対応として他の件数と区別して目立たせる（issue #148）。 */
+.task-counts .warn {
+  color: var(--orange-d);
+  font-weight: 600;
+}
+
+/* ゴール一覧のカードの題名は長い目的文でも1行に収め、あふれを省略記号にする（issue #148）。
+   h3 は .card-head（display:flex）の flex 項目であり、flex 基底幅を 0 にしないと内容幅の
+   ままになって縮まず、overflow の省略が効かない。 */
+.goal-card-head h3 {
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
 .sec {
   font-size: var(--font-size-16);
   margin-bottom: var(--space-12);

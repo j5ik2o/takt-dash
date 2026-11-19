@@ -73,3 +73,44 @@ test("概要のリンクカードの高さが同じ行で揃う", async ({ page,
     expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(1);
   }
 });
+
+// issue #148 受入条件3。長い目的文を持つゴールのカードでも、題名は1行に収まり、カードの
+// 見出し行を2行へ押し広げないことを実 Chrome の描画で観測する。題名の h3 が flex 項目として
+// 縮まないと、題名が行の幅を取り、`about`（プロジェクト名）が次の行へ折り返されて見出し行が
+// 2行になる。題名が縮んでいれば `about` と同じ行に収まり見出し行は1行のままになる。
+test("ゴール一覧のカードの長い題名は見出し行を1行に保ち親の幅を超えない", async ({ page, longTitleStack }) => {
+  await page.goto(`${longTitleStack.webUrl}/goals`);
+  await expect(page.getByRole("heading", { name: "ゴール", level: 1 })).toBeVisible();
+
+  const longCard = page
+    .locator(".cards > li.card")
+    .filter({ has: page.locator(".goal-card-head h3 a", { hasText: "採用ページのトップページにある見出し" }) });
+  await expect(longCard).toHaveCount(1);
+
+  const heading = longCard.locator(".goal-card-head h3");
+  const head = longCard.locator(".goal-card-head");
+  const about = longCard.locator(".goal-card-head > .about");
+  await expect(heading).toBeVisible();
+  await expect(about).toBeVisible();
+
+  // 題名は折り返さず1行（white-space: nowrap）。
+  const whiteSpace = await heading.evaluate((element) => getComputedStyle(element).whiteSpace);
+  expect(whiteSpace).toBe("nowrap");
+
+  const headingBox = await heading.boundingBox();
+  const headBox = await head.boundingBox();
+  const aboutBox = await about.boundingBox();
+  expect(headingBox).not.toBeNull();
+  expect(headBox).not.toBeNull();
+  expect(aboutBox).not.toBeNull();
+
+  // 題名の右端が親の見出し行の右端を超えない（縮んで内側に収まる）。
+  expect(headingBox!.x + headingBox!.width).toBeLessThanOrEqual(headBox!.x + headBox!.width + 1);
+
+  // 題名（h3）とプロジェクト名（about）が同じ行に並ぶ。題名が縮まずに幅を取ると about が
+  // 折り返して縦位置がずれ、見出し行の高さが題名の高さを大きく超える。上下の中心が1行以内に
+  // 収まることを観測し、題名がカードを圧迫していないことを確かめる。
+  const headingCenter = headingBox!.y + headingBox!.height / 2;
+  const aboutCenter = aboutBox!.y + aboutBox!.height / 2;
+  expect(Math.abs(headingCenter - aboutCenter)).toBeLessThanOrEqual(headingBox!.height / 2 + 1);
+});
