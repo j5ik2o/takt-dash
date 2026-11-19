@@ -26,6 +26,7 @@ const renderSidebar = (
 ): string =>
   renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: [],
       pendingCount: 0,
       frontendBuild: builds.frontend,
@@ -117,6 +118,7 @@ const serverRow = (html: string, serverName: string): { dot: string; state: stri
 const renderSidebarWithServers = (runs: readonly DashboardRun[]): string =>
   renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: createDashboardState().servers,
       pendingCount: 0,
       runs,
@@ -157,6 +159,7 @@ const renderSidebarWithProjects = (projects: readonly Project[]): string => {
   const state = createDashboardState();
   return renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: state.servers,
       pendingCount: 0,
       runs: dashboardStateFromProto(state).runs,

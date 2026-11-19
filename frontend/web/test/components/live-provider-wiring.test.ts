@@ -21,12 +21,15 @@ import { act, createElement, type ComponentProps, type ReactElement, type ReactN
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import { DashboardState } from "../../src/proto/taktdash.ts";
-import { createDashboardState } from "../support/fixtures.ts";
+import { ConnectionState, DashboardState } from "../../src/proto/taktdash.ts";
+import { createDashboardState, NOW } from "../support/fixtures.ts";
+import { assertUnreadRunList, assertRejectsUnreadEmptyClaim } from "../support/run-list.ts";
 import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
+import { formatClock } from "../../src/state/format.ts";
 import { LiveOverview } from "../../src/components/live-overview.tsx";
 import { LiveDecisions } from "../../src/components/live-decisions.tsx";
 import { LiveGoals } from "../../src/components/live-goals.tsx";
+import { LiveSidebar } from "../../src/components/live-sidebar.tsx";
 import {
   reduceLiveState,
   stateStreamHandlers,
@@ -64,7 +67,7 @@ const renderLive = (
   page: typeof LiveOverview | typeof LiveDecisions,
   state: DashboardState,
 ): string => {
-  const props: ComponentProps<typeof StateStreamProvider> = {
+  const props: ComponentProps<typeof StateStreamProvider> = { initialSnapshotLoaded: true,
     initialState: state,
     children: createElement(page),
   };
@@ -73,6 +76,7 @@ const renderLive = (
 
 const connected = (): StateStreamContextValue => ({
   state: dashboardStateFromProto(createDashboardState()),
+  snapshotLoaded: true,
   disconnected: false,
 });
 
@@ -93,6 +97,7 @@ test("SSE の受信で切断フラグが消え、切断で立ち、切断中も�
 test("切断の開始時刻と接続履歴を Context 値に保持する", () => {
   const initial: StateStreamContextValue = {
     state: dashboardStateFromProto(createDashboardState()),
+    snapshotLoaded: true,
     disconnected: false,
     disconnectedSince: null,
     respondedBefore: true,
@@ -142,7 +147,7 @@ test("判断待ちは Provider の Context が接続中でも最後に読めた�
 test("RSC の初期状態は検証を通してから Context に載せ、必須の値が空なら描画しない", () => {
   const invalid = DashboardState.create({ servers: [{ serverId: "" }] });
 
-  const props: ComponentProps<typeof StateStreamProvider> = {
+  const props: ComponentProps<typeof StateStreamProvider> = { initialSnapshotLoaded: true,
     initialState: invalid,
     children: createElement(LiveOverview),
   };
@@ -164,7 +169,7 @@ const renderInitialValue = (props: {
     holder.current = useLiveState();
     return null;
   };
-  const providerProps: ComponentProps<typeof StateStreamProvider> = {
+  const providerProps: ComponentProps<typeof StateStreamProvider> = { initialSnapshotLoaded: true,
     initialState: createDashboardState(),
     ...props,
     children: createElement(Probe),
@@ -231,7 +236,7 @@ const renderLiveWithInitialFailure = (
   failure: BackendFailure,
   respondedBefore: boolean,
 ): string => {
-  const props: ComponentProps<typeof StateStreamProvider> = {
+  const props: ComponentProps<typeof StateStreamProvider> = { initialSnapshotLoaded: false,
     initialState: state,
     initialFailure: failure,
     initialRespondedBefore: respondedBefore,
@@ -247,7 +252,7 @@ const renderGoalsWithInitialFailure = (
   failure: BackendFailure,
   respondedBefore: boolean,
 ): string => {
-  const props: ComponentProps<typeof StateStreamProvider> = {
+  const props: ComponentProps<typeof StateStreamProvider> = { initialSnapshotLoaded: false,
     initialState: state,
     initialFailure: failure,
     initialRespondedBefore: respondedBefore,
@@ -470,7 +475,234 @@ const fireError = async (source: FakeEventSource): Promise<void> => {
   });
 };
 
+for (const respondedBefore of [false, true]) {
+  test(`概要未取得なら他RPCの応答履歴${respondedBefore}でも両画面のサーバー台数は不明`, () => {
+    const props: ComponentProps<typeof StateStreamProvider> = {
+      initialState: DashboardState.create({}), initialSnapshotLoaded: false,
+      initialFailure: "unreachable", initialRespondedBefore: respondedBefore,
+      children: [createElement(LiveOverview, { key: "overview", initialNowMs: NOW.getTime() }),
+        createElement(LiveSidebar, { key: "sidebar", frontendBuild: { commit: "test", branch: "test" } })],
+    };
+    const page = new JSDOM(renderToStaticMarkup(createElement(StateStreamProvider, props))).window.document;
+    for (const selector of [".page-head > div > p", ".side-foot > p:nth-child(2)"]) {
+      const count = page.querySelector(selector);
+      assert.ok(count);
+      assert.match(count.textContent ?? "", /サーバー.*不明/);
+      assert.doesNotMatch(count.textContent ?? "", /0\s*台/);
+    }
+  });
+}
+
+test("同じ概要とサイドバーは台数不明から取得、切断中の保持、正常な0台の再受信へ追従する", async () => {
+  const base = createDashboardState();
+  const loaded = DashboardState.create({ ...base,
+    servers: base.servers.filter((server) => server.connected),
+  });
+  const { container, unmount } = await mountLive({
+    initialState: DashboardState.create({}), initialSnapshotLoaded: false, initialFailure: "unreachable",
+  }, [createElement(LiveOverview, { key: "overview", initialNowMs: NOW.getTime() }),
+    createElement(LiveSidebar, { key: "sidebar", frontendBuild: { commit: "test", branch: "test" } })]);
+  const counts = (): string[] => [".page-head > div > p", ".side-foot > p:nth-child(2)"].map((selector) => {
+    const element = container.querySelector(selector);
+    assert.ok(element);
+    return element.textContent ?? "";
+  });
+  try {
+    for (const count of counts()) assert.match(count, /サーバー.*不明/);
+    const source = FakeEventSource.instances[0];
+    assert.ok(source);
+    await fireMessage(source, JSON.stringify(DashboardState.toJSON(loaded)));
+    assert.match(counts()[0] ?? "", /1台のサーバー/);
+    assert.match(counts()[1] ?? "", /1台中1台/);
+    await fireError(source);
+    assert.match(counts()[0] ?? "", /1台のサーバー/);
+    assert.match(counts()[1] ?? "", /1台中1台/);
+    await waitForConnections(2);
+    const reconnected = FakeEventSource.instances[1];
+    assert.ok(reconnected);
+    await fireMessage(reconnected, JSON.stringify(DashboardState.toJSON(DashboardState.create({}))));
+    assert.match(counts()[0] ?? "", /0台のサーバー/);
+    assert.match(counts()[1] ?? "", /0台中0台/);
+    assert.equal(container.querySelectorAll('[role="alert"]').length, 0);
+    assert.equal(FakeEventSource.instances.length, 2);
+  } finally {
+    await unmount();
+  }
+});
+
+test("同じライブ画面とサイドバーは未読から空、非空への読み取り結果を反映する", async () => {
+  const populated = createDashboardState();
+  const empty = DashboardState.create({
+    ...populated, goals: [], runs: [], pendingDecisions: [],
+    servers: populated.servers.map((server) => ({ ...server, connected: true, lastReadAt: NOW })),
+    projects: populated.projects.map((project) => ({ ...project, completedTasks24h: 0, connected: true, connectionState: ConnectionState.CONNECTION_STATE_CONNECTED, lastReadAt: NOW })),
+  });
+  const unread = DashboardState.create({
+    ...empty, readAt: undefined,
+    servers: empty.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
+    projects: empty.projects.map((project) => ({
+      ...project, connected: false, lastReadAt: undefined,
+      connectionState: ConnectionState.CONNECTION_STATE_UNSPECIFIED,
+    })),
+  });
+  const children = [
+    createElement("div", { id: "reading-overview", key: "overview" }, createElement(LiveOverview, { initialNowMs: NOW.getTime() })),
+    createElement("div", { id: "reading-decisions", key: "decisions" }, createElement(LiveDecisions)),
+    createElement("div", { id: "reading-goals", key: "goals" }, createElement(LiveGoals)),
+    createElement("div", { id: "reading-sidebar", key: "sidebar" }, createElement(LiveSidebar, { frontendBuild: { commit: "abcdef0", branch: "test" } })),
+  ];
+  const { container, unmount } = await mountLive({ initialSnapshotLoaded: true, initialState: unread }, children);
+  const snapshot = (): Element => {
+    const copy = document.createElement("div");
+    copy.innerHTML = container.innerHTML;
+    return copy;
+  };
+  try {
+    const initial = snapshot();
+    const source = FakeEventSource.instances[0];
+    assert.ok(source);
+    await fireMessage(source, JSON.stringify(DashboardState.toJSON(empty)));
+    const afterEmpty = snapshot();
+    await fireMessage(source, JSON.stringify(DashboardState.toJSON(populated)));
+    const afterPopulated = snapshot();
+    assert.equal(FakeEventSource.instances.length, 1, "同じ購読とマウントで更新する");
+    for (const id of ["reading-overview", "reading-decisions", "reading-goals"]) {
+      const before = initial.querySelector(`#${id}`);
+      const zero = afterEmpty.querySelector(`#${id}`);
+      const filled = afterPopulated.querySelector(`#${id}`);
+      assert.ok(before && zero && filled);
+      assert.doesNotMatch(before.textContent ?? "", /(?:^|[^\d])0\s*件|0\s*\/|(?:run|ゴール|判断待ち)はありません/, id);
+      assert.match(before.textContent ?? "", /未読|まだ.*読|不明|分かりません|確認中/, id);
+      assert.match(zero.textContent ?? "", /0\s*件|ありません/, id);
+      assert.doesNotMatch(zero.textContent ?? "", /あるかどうかは分かりません|まだ一度も読め/, id);
+      assert.match(filled.textContent ?? "", /corporate-site/, id);
+      if (id === "reading-overview") {
+        assertUnreadRunList(before);
+        assertRejectsUnreadEmptyClaim(before);
+        assert.match(before.querySelector('[role="status"]')?.textContent ?? "", /応答がありません/);
+        const emptyRunScopes = [zero.querySelector(".page-head"), zero.querySelector(".tile"), zero.querySelector('[aria-labelledby="h-runs"]')];
+        const emptyRunText = emptyRunScopes.map((scope) => `${scope?.textContent} ${Array.from(scope?.querySelectorAll('[aria-label]') ?? []).map((item) => item.getAttribute('aria-label')).join(' ')}`).join(' ');
+        assert.equal((emptyRunText.match(/(?:^|[^\d])0\s*件|0\s*\/|走っている run はありません/g) ?? []).length, 1, emptyRunText);
+        assert.ok(filled.querySelector('a[href="/runs/run-aaa"]'));
+        assert.match(filled.querySelector(".page-head")?.textContent ?? "", /1件の run/);
+      } else if (id === "reading-decisions") {
+        assert.equal(filled.querySelectorAll(".tray-item").length, 2);
+        assert.match(filled.querySelector(".page-head")?.textContent ?? "", /2件/);
+      } else {
+        assert.equal(filled.querySelectorAll(".cards > li").length, 2);
+        assert.match(filled.querySelector(".page-head")?.textContent ?? "", /2件/);
+      }
+    }
+    const beforeServer = initial.querySelector("#reading-sidebar .srv-list li");
+    const emptyServer = afterEmpty.querySelector("#reading-sidebar .srv-list li");
+    const populatedServer = afterPopulated.querySelector("#reading-sidebar .srv-list li");
+    assert.ok(beforeServer && emptyServer && populatedServer);
+    assert.doesNotMatch(beforeServer.textContent ?? "", /run\s*0件/);
+    assert.match(emptyServer.textContent ?? "", /run\s*0件/);
+    assert.match(populatedServer.textContent ?? "", /run\s*1件/);
+  } finally {
+    await unmount();
+  }
+});
+
 // 受信データは送信側と同じ DashboardState.toJSON の形で作る。
+test("空の正常受信後にSSEだけが切断しても一覧に空を観測した時刻が残る", async () => {
+  const observed = new Date("2026-11-13T12:00:00Z");
+  const base = createDashboardState();
+  const project = base.projects[0];
+  assert.ok(project);
+  const empty = DashboardState.create({ ...base, readAt: observed, runs: [], goals: [], pendingDecisions: [],
+    servers: base.servers.filter((server) => server.serverId === project.serverId)
+      .map((server) => ({ ...server, connected: true, lastReadAt: observed })),
+    projects: [{ ...project, connected: true, connectionState: ConnectionState.CONNECTION_STATE_CONNECTED, lastReadAt: observed }],
+  });
+  const { container, unmount } = await mountLive({ initialState: DashboardState.create({}), initialSnapshotLoaded: false },
+    createElement(LiveOverview, { initialNowMs: observed.getTime() }));
+  const listText = (): string => {
+    const list = container.querySelector('[aria-labelledby="h-runs"]');
+    assert.ok(list);
+    return list.textContent ?? "";
+  };
+  try {
+    const source = FakeEventSource.instances[0];
+    assert.ok(source);
+    await fireMessage(source, JSON.stringify(DashboardState.toJSON(empty)));
+    assert.match(listText(), /走っている run はありません。/);
+    assert.doesNotMatch(listText(), /ありませんでした/);
+    assert.equal(container.querySelectorAll('[role="alert"]').length, 0);
+    await fireError(source);
+    assert.equal(container.querySelectorAll('[role="alert"]').length, 1);
+    assert.ok(listText().includes(formatClock(observed)), listText());
+    assert.match(listText(), /走っている run はありませんでした。/);
+    assert.equal(listText().match(/走っている run はありません/g)?.length, 1);
+  } finally {
+    await unmount();
+  }
+});
+
+test("概要の未取得と取得済みの供給元0件は3画面で区別され、切断と再受信でも取得実績を保つ", async () => {
+  const empty = DashboardState.create({});
+  const children = [
+    createElement("div", { id: "empty-overview", key: "overview" }, createElement(LiveOverview, { initialNowMs: NOW.getTime() })),
+    createElement("div", { id: "empty-decisions", key: "decisions" }, createElement(LiveDecisions)),
+    createElement("div", { id: "empty-goals", key: "goals" }, createElement(LiveGoals)),
+  ];
+  const { container, unmount } = await mountLive({
+    initialState: empty, initialSnapshotLoaded: false,
+    initialFailure: "unreachable", initialRespondedBefore: true,
+  }, children);
+  const lists = (): Element[] => {
+    const overview = container.querySelector('#empty-overview [aria-labelledby="h-runs"]');
+    const decisions = container.querySelector("#empty-decisions main");
+    const goals = container.querySelector("#empty-goals main");
+    assert.ok(overview && decisions && goals);
+    return [overview, decisions, goals];
+  };
+  const assertEmpty = (): void => {
+    for (const list of lists()) {
+      assert.equal((list.textContent ?? "").match(/ありません/g)?.length, 1);
+      assert.doesNotMatch(list.textContent ?? "", /分かりません|まだ読めていない/);
+    }
+    assert.doesNotMatch(lists()[0]?.textContent ?? "", /時点|ありませんでした/);
+    for (const selector of ["#empty-overview .page-head", "#empty-overview .tile"]) {
+      const scope = container.querySelector(selector);
+      assert.ok(scope);
+      assert.doesNotMatch(scope.textContent ?? "", /まだ読めていない|不明|まだ読めていません/);
+    }
+  };
+  try {
+    for (const list of lists()) {
+      assert.match(list.textContent ?? "", /分かりません/);
+      assert.doesNotMatch(list.textContent ?? "", /(?:run|ゴール|判断待ち)\s*はありません/);
+    }
+    const source = FakeEventSource.instances[0];
+    assert.ok(source);
+    assert.equal(container.querySelectorAll('[role="alert"]').length, 3);
+    await fireMessage(source, JSON.stringify(DashboardState.toJSON(empty)));
+    assertEmpty();
+    assert.equal(container.querySelectorAll('[role="alert"]').length, 0);
+    await fireError(source);
+    assertEmpty();
+    assert.equal(container.querySelectorAll('[role="alert"]').length, 3);
+    assert.equal(source.closed, true);
+    await waitForConnections(2);
+    const reconnected = FakeEventSource.instances[1];
+    assert.ok(reconnected);
+    await fireMessage(reconnected, JSON.stringify(DashboardState.toJSON(empty)));
+    assertEmpty();
+    assert.equal(container.querySelectorAll('[role="alert"]').length, 0);
+    await fireMessage(reconnected, JSON.stringify(DashboardState.toJSON(createDashboardState())));
+    await fireError(reconnected);
+    assert.ok(container.querySelector('#empty-overview a[href="/runs/run-aaa"]'));
+    assert.equal(container.querySelectorAll("#empty-decisions .tray-item").length, 2);
+    assert.ok(container.querySelector('#empty-goals a[href="/goals/goal-1"]'));
+    assert.equal(container.querySelectorAll('[role="alert"]').length, 3);
+    assert.equal(FakeEventSource.instances.length, 2);
+  } finally {
+    await unmount();
+  }
+});
+
 const wireState = (mutate?: (wire: Record<string, unknown>) => void): string => {
   const wire = JSON.parse(JSON.stringify(DashboardState.toJSON(createDashboardState()))) as Record<
     string,
@@ -495,7 +727,7 @@ test("マウントで /api/state へ接続し、SSE の受信が Context と画�
   const { holder, Probe } = createProbe();
   let revalidateCalls = 0;
   const { container, unmount } = await mountLive(
-    {
+    { initialSnapshotLoaded: true,
       initialState: createDashboardState(),
       revalidate: () => {
         revalidateCalls += 1;
@@ -528,7 +760,7 @@ test("マウントで /api/state へ接続し、SSE の受信が Context と画�
 
 test("SSE の切断が画面の通知へ反映され、再接続後の受信で通知が消える", async () => {
   const { holder, Probe } = createProbe();
-  const { container, unmount } = await mountLive({ initialState: createDashboardState() }, [
+  const { container, unmount } = await mountLive({ initialSnapshotLoaded: true, initialState: createDashboardState() }, [
     createElement(Probe, { key: "probe" }),
     createElement(LiveDecisions, { key: "decisions" }),
   ]);
@@ -564,7 +796,7 @@ test("router.refresh 相当の再描画でも購読は維持され、状態は�
   };
   const children = [createElement(Probe, { key: "probe" })];
   const { root, unmount } = await mountLive(
-    { initialState: createDashboardState(), revalidate },
+    { initialSnapshotLoaded: true, initialState: createDashboardState(), revalidate },
     children,
   );
   const source = FakeEventSource.instances[0]!;
@@ -579,7 +811,7 @@ test("router.refresh 相当の再描画でも購読は維持され、状態は�
 
   // router.refresh は RSC を再取得し、Provider が新しい initialState で再描画される。
   // revalidate の同一性は変わらないため、effect は再実行されない。
-  await renderProvider(root, { initialState: createDashboardState(), revalidate }, children);
+  await renderProvider(root, { initialSnapshotLoaded: true, initialState: createDashboardState(), revalidate }, children);
   assert.equal(FakeEventSource.instances.length, 1, "再描画で接続は開き直されない");
   assert.equal(source.closed, false, "購読は維持される");
   assert.equal(holder.current?.state.pendingDecisions.length, 0, "状態は新しい初期値へ戻らない");
@@ -603,14 +835,14 @@ test("revalidate の同一性が変わると、古い接続を閉じて1つだ�
   };
   const children = [createElement(Probe, { key: "probe" })];
   const { root, unmount } = await mountLive(
-    { initialState: createDashboardState(), revalidate: revalidateA },
+    { initialSnapshotLoaded: true, initialState: createDashboardState(), revalidate: revalidateA },
     children,
   );
   const first = FakeEventSource.instances[0]!;
   await fireMessage(first, wireState());
   assert.equal(callsA, 1, "最初の revalidate が呼ばれる");
 
-  await renderProvider(root, { initialState: createDashboardState(), revalidate: revalidateB }, children);
+  await renderProvider(root, { initialSnapshotLoaded: true, initialState: createDashboardState(), revalidate: revalidateB }, children);
   assert.equal(FakeEventSource.instances.length, 2, "effect の再実行で接続が1つ開き直される");
   assert.equal(first.closed, true, "古い接続は閉じられる");
   const second = FakeEventSource.instances[1]!;

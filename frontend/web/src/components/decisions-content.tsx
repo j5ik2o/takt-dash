@@ -12,8 +12,6 @@ import {
   type DecisionResult,
 } from "../state/decision-actions";
 import {
-  neverReadProjects,
-  neverReadServers,
   pendingDecisionMergeFailureNote,
   resolveThresholds,
   sortPendingDecisions,
@@ -21,6 +19,7 @@ import {
   type PendingDecisionView,
 } from "../state/dashboard";
 import { decisionAnchorId } from "../state/anchors";
+import { readCoverage } from "../state/read-coverage";
 import { formatClock, formatDateTime, formatDuration } from "../state/format";
 import type { BackendUnavailableSituation } from "../grpc/client";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
@@ -29,6 +28,7 @@ import { DecisionResults } from "./decision-results";
 
 type DecisionsContentProps = {
   state: DecisionsStateInput;
+  snapshotLoaded: boolean;
   now: Date;
   disconnected: boolean;
   /** 切断時に残す最後の内容の取得時刻。ライブ表示だけが渡す。 */
@@ -58,18 +58,15 @@ const splitBodyParagraphs = (body: string): string[] =>
     .split(/\n[ \t]*\n+/)
     .filter((paragraph) => paragraph.trim() !== "");
 
-export function DecisionsContent({ state, now, disconnected, readAt, unavailableSituation }: DecisionsContentProps): ReactElement {
+export function DecisionsContent({ state, snapshotLoaded, now, disconnected, readAt, unavailableSituation }: DecisionsContentProps): ReactElement {
   const thresholds = resolveThresholds(state.thresholds);
   const decisions = sortPendingDecisions(state.pendingDecisions, now, {
     staleThresholdMinutes: thresholds.pendingDecisionStaleMinutes,
   });
-  // まだ読めていないサーバー・プロジェクトがあると、その配下に判断待ちがあっても
-  // 一覧へ出てこない。サーバーの最終読み取り時刻は配下プロジェクトの最大値のため、
-  // サーバーが既読でもプロジェクト単位では未読のことがある。ゴールページと同じく
-  // サーバーとプロジェクトの両方で判定する。
+  // 判断待ちの供給元はプロジェクトであり、配下のないサーバー登録は読み取り対象ではない。
   // 0件でも「判断待ちはありません」とは断定できないため、未読を注記する（issue #259）。
-  const hasUnread =
-    neverReadServers(state.servers).length > 0 || neverReadProjects(state.projects).length > 0;
+  const coverage = readCoverage(state.projects, snapshotLoaded);
+  const hasUnread = coverage !== "complete";
   const [results, setResults] = useState<DecisionResult[]>([]);
 
   const handleResult = useCallback((next: DecisionResult) => {
@@ -82,9 +79,10 @@ export function DecisionsContent({ state, now, disconnected, readAt, unavailable
       <header className="page-head">
         <div>
           <h1>判断待ち</h1>
-          <p>
+          {decisions.length > 0 && coverage !== "unread" ? <p>
+            {coverage === "partial" ? "読めた範囲で、" : null}
             全サーバーで、人の判断を待っている項目が {decisions.length}件あります。待ち時間の長い順に並べています。
-          </p>
+          </p> : null}
           {hasUnread ? (
             <p className="stale-note">
               まだ読めていないサーバー・プロジェクトがあります。表示している件数には、まだ読めていない分は含まれていません。

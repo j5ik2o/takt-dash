@@ -14,6 +14,7 @@ let lastLoadedState: DashboardState | undefined;
 
 export type ServerState = {
   state: DashboardState;
+  snapshotLoaded: boolean;
   // 読み込みに失敗した理由。失敗していなければ undefined。画面側の通知の文面の
   // 振り分けに使う（issue #92）。
   error?: BackendUnavailableError;
@@ -27,10 +28,15 @@ const load = cache(async (): Promise<ServerState> => {
   try {
     const state = await getBackendClient().getOverview();
     lastLoadedState = state;
-    return { state, rpcMs: performance.now() - startedAt };
+    return { state, snapshotLoaded: true, rpcMs: performance.now() - startedAt };
   } catch (error) {
     if (error instanceof BackendUnavailableError) {
-      return { state: lastLoadedState ?? EMPTY_STATE, error, rpcMs: performance.now() - startedAt };
+      return {
+        state: lastLoadedState ?? EMPTY_STATE,
+        snapshotLoaded: lastLoadedState !== undefined,
+        error,
+        rpcMs: performance.now() - startedAt,
+      };
     }
     throw error;
   }

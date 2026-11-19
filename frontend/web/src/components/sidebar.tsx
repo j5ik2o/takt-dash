@@ -12,8 +12,10 @@ import {
   serverStateLabel,
 } from "../state/dashboard";
 import { toRunCount } from "../state/domain-primitives";
+import { readCountText, readCoverage } from "../state/read-coverage";
 
 type SidebarProps = {
+  snapshotLoaded: boolean;
   servers: Server[];
   pendingCount: number;
   currentPath?: string;
@@ -41,6 +43,7 @@ export const isCurrentPath = (currentPath: string | undefined, href: string): bo
   currentPath !== undefined && currentPath === href;
 
 export function Sidebar({
+  snapshotLoaded,
   servers,
   pendingCount,
   currentPath,
@@ -69,13 +72,17 @@ export function Sidebar({
             // 配下のプロジェクトが応答していないサーバーは、接続できていても正常に
             // 見えないようにカードと同じく warn の側へ倒す（issue #264）。
             const state = serverDisplayState(server, runCount, projects ?? []);
+            const ownProjects = projects?.filter((project) => project.serverId === server.serverId);
+            const countText = ownProjects?.length === 0
+              ? "対象なし"
+              : readCountText(runCount, readCoverage(ownProjects ?? [server]));
             return (
               <li key={server.serverId}>
                 <span className={`dot ${state}`} aria-hidden="true" />
                 <Link className="nm" href={serverHref(server.serverId)}>
                   {server.name}
                 </Link>
-                <span className="cnt">run {runCount}件</span>
+                <span className="cnt">run {countText}</span>
                 <span className="srv-state">{serverStateLabel(state)}</span>
               </li>
             );
@@ -105,7 +112,9 @@ export function Sidebar({
       <div className="side-foot">
         <p>最終読み取り時刻 {readAt ? formatClock(readAt) : "不明"}</p>
         <p>
-          {servers.length}台中{connectedCount}台から読めています
+          {snapshotLoaded
+            ? `${servers.length}台中${connectedCount}台から読めています`
+            : "サーバーの総数・接続台数は不明です。"}
         </p>
         {notResponding.map((project) => (
           <p className="stale-note" key={`${project.serverId}:${project.name}`}>

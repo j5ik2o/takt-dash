@@ -11,9 +11,10 @@ import type {
 } from "../proto/taktdash";
 import { projectKey, toRunView, type RunInput, type RunView } from "./run-view";
 import { goalSection } from "./goal-badge";
+import { readCoverage, partialReadSummary, type ReadCoverage } from "./read-coverage";
+import { summarizeOverviewProjects, type OverviewProjectView } from "./overview-projects";
 import {
   toRunCount,
-  toRunLimit,
   toSilentMinutes,
   toStaleMinutes,
   type RunCount,
@@ -25,7 +26,6 @@ import {
   EXECUTION_STATUS,
   GOAL_STATUS,
   PENDING_DECISION_TYPE,
-  RUN_STATUS,
   TASK_STATUS,
 } from "./proto-values";
 
@@ -79,14 +79,10 @@ type OverviewServerView = {
   notRespondingProjects: Project[];
 };
 
-// 概要のプロジェクト行。プロジェクト自身の同時実行上限と、そのプロジェクトで
-// 実行中の run の件数を対比できる形にする。
-export type OverviewProjectView = Omit<Project, "concurrency"> & {
-  concurrency: RunLimit;
-  runningRuns: RunCount;
-};
-
 export type OverviewView = {
+  snapshotLoaded: boolean;
+  coverage: ReadCoverage;
+  inProgressGoalCount: number;
   // 最後に実際に読めた時刻。1件も読めていない場合は実在しない時刻を作らず undefined にする。
   readAt?: Date;
   servers: OverviewServerView[];
@@ -101,6 +97,7 @@ export type OverviewView = {
   silentRunCount: number;
   unresponsiveServers: Server[];
   unresponsiveProjects: Project[];
+  partialReadSubject?: "サーバー" | "プロジェクト" | "サーバーとプロジェクト";
   partialReadAt?: Date;
   hasAnomalies: boolean;
   pendingCounts: PendingCounts;
@@ -227,17 +224,6 @@ const failedTaskCount = (goals: readonly Goal[]): number =>
 const isUnresponsiveProject = (project: Project): boolean =>
   project.connectionState === CONNECTION_STATE.UNRESPONSIVE;
 
-// まだ一度も読めていないサーバーとプロジェクト。最後に読めた時刻が無い対象は、
-// 配下の一覧が空でも「無い」とは断定できない。一覧の件数を表示する画面は、
-// 未読の対象があるとき件数へ注記を付け、空の断定を避ける（issue #259）。
-export function neverReadServers(servers: readonly Server[]): Server[] {
-  return servers.filter((server) => server.lastReadAt === undefined);
-}
-
-export function neverReadProjects(projects: readonly Project[]): Project[] {
-  return projects.filter((project) => project.lastReadAt === undefined);
-}
-
 // 応答していないプロジェクト。読み取りが失敗し続けている（応答なし）プロジェクトと、
 // まだ一度も読めていないプロジェクトは、どちらも正常とは言えない。サーバー単位の
 // 表示（サーバーカードとサイドバー）が全体が正常であるかのように見える問題
@@ -258,16 +244,7 @@ export function notRespondingProjectText(project: Project): string {
   return `${project.name} はまだ一度も読めていません。`;
 }
 
-// 応答のないサーバー・プロジェクトから最後に読めた時刻のうち、最も古いものを集計の基準にする。
-// 1件も読めた時刻が無ければ undefined のままにし、実在しない時刻を補わない。
-const earliestReadAt = (sources: ReadonlyArray<Date | undefined>): Date | undefined => {
-  const times = sources
-    .filter((value): value is Date => value !== undefined)
-    .map((value) => value.getTime());
-  return times.length === 0 ? undefined : new Date(Math.min(...times));
-};
-
-export function buildOverviewView(state: OverviewStateInput, now: Date): OverviewView {
+export function buildOverviewView(state: OverviewStateInput, now: Date, snapshotLoaded: boolean): OverviewView {
   const thresholds = resolveThresholds(state.thresholds);
   const serverById = new Map(state.servers.map((server) => [server.serverId, server]));
   const goalsById = new Map(state.goals.map((goal) => [goal.goalId, goal]));
@@ -294,43 +271,27 @@ export function buildOverviewView(state: OverviewStateInput, now: Date): Overvie
       ),
     };
   });
-  const runningRuns = state.runs.filter((run) => run.status === RUN_STATUS.RUNNING).length;
+  const projectSummary = summarizeOverviewProjects(state.projects, runs);
   const silentRunCount = runs.filter((run) => run.state === "warn").length;
   const failedTasks = failedTaskCount(state.goals);
   const abortedGoals = state.goals.filter((goal) => goalSection(goal) === "aborted").length;
   const pendingCounts = summarizePendingDecisions(pendingDecisions);
   const readAt = state.readAt;
-  const partialReadAt = earliestReadAt(
-    [...unresponsiveServers, ...unresponsiveProjects].map((item) => item.lastReadAt),
-  );
   return {
+    snapshotLoaded,
+    coverage: readCoverage(state.projects, snapshotLoaded),
+    inProgressGoalCount: state.goals.filter((goal) => goalSection(goal) === "inProgress").length,
     readAt,
     servers,
-    projects: state.projects.map((project) => ({
-      ...project,
-      concurrency: toRunLimit(project.concurrency),
-      runningRuns: toRunCount(
-        state.runs.filter(
-          (run) =>
-            projectKey(run.serverId, run.project) === projectKey(project.serverId, project.name) &&
-            run.status === RUN_STATUS.RUNNING,
-        ).length,
-      ),
-    })),
+    ...projectSummary,
     runs,
     thresholds,
-    runningRuns,
-    runLimit: toRunLimit(state.projects.reduce((total, project) => total + project.concurrency, 0)),
-    completedTasks24h: state.projects.reduce(
-      (total, project) => total + project.completedTasks24h,
-      0,
-    ),
     failedTaskCount: failedTasks,
     abortedGoalCount: abortedGoals,
     silentRunCount,
     unresponsiveServers,
     unresponsiveProjects,
-    partialReadAt,
+    ...partialReadSummary(state.projects, unresponsiveServers, unresponsiveProjects),
     hasAnomalies:
       pendingCounts.total > 0 ||
       unresponsiveServers.length > 0 ||

@@ -50,8 +50,17 @@ export function toRunView(
     iteration: run.currentIteration,
     elapsedSeconds,
   };
+  if (server === undefined) {
+    return {
+      ...derived,
+      connected: false,
+      state: "idle",
+      label: "接続未確認（サーバー未登録）",
+      note: "接続先のサーバーが登録されていないため、接続を確認できません。",
+    };
+  }
   const project = projectByKey?.get(projectKey(run.serverId, run.project));
-  if (server !== undefined && (!server.connected || project?.connectionState === CONNECTION_STATE.UNRESPONSIVE)) {
+  if (!server.connected || project?.connectionState === CONNECTION_STATE.UNRESPONSIVE) {
     const lastReadAt = project?.lastReadAt ?? server.lastReadAt;
     const at = lastReadAt ? formatClock(lastReadAt) : "不明";
     return {

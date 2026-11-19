@@ -3,6 +3,7 @@ import type { DashboardState, Goal } from "../proto/taktdash";
 import { projectAnchorId } from "../state/anchors";
 import { goalBadge, goalSection, type GoalSection } from "../state/goal-badge";
 import { goalDisplayName, goalListHeading, goalTaskProgress } from "../state/goal-summary";
+import { readCountText, readCoverage } from "../state/read-coverage";
 import { FAILED_TASK_KINDS_LABEL, projectKey, resolveThresholds, sortPendingDecisions, toRunView } from "../state/dashboard";
 
 type ProjectsContentProps = {
@@ -104,16 +105,17 @@ export function ProjectsContent({ state, now }: ProjectsContentProps): ReactElem
           const untouchedGoals = goalsInSection(goals, "untouched");
           const runs = state.runs.filter((run) => run.project === project.name);
           const projectPending = pending.filter((decision) => decision.project === project.name);
+          const coverage = readCoverage([project]);
           return (
             <article className="card" id={projectAnchorId(project.name)} key={project.name}>
               <div className="card-head">
                 <h3>{project.name}</h3>
                 <span className="about">{project.about}</span>
               </div>
-              <p className="k">判断待ち {projectPending.length}件</p>
+              <p className="k">判断待ち {readCountText(projectPending.length, coverage)}</p>
               <div>
 
-                <p className="k">走っている run（{runs.length}件）</p>
+                <p className="k">走っている run{runs.length > 0 ? `（${readCountText(runs.length, coverage)}）` : ""}</p>
                 <ul className="mini-runs">
                   {runs.map((run) => {
                     const view = toRunView(run, serverById, thresholds, now, undefined, projectByKey);
@@ -127,17 +129,17 @@ export function ProjectsContent({ state, now }: ProjectsContentProps): ReactElem
                       </li>
                     );
                   })}
-                  {runs.length === 0 ? <li className="empty">走っている run はありません。</li> : null}
+                  {runs.length === 0 ? <li className="empty">{coverage === "unread" ? "まだ読めていないため、run の件数は不明です。" : "走っている run はありません。"}</li> : null}
                 </ul>
               </div>
               <div>
-                <p className="k">進行中のゴール（{activeGoals.length}件）</p>
+                <p className="k">進行中のゴール{activeGoals.length > 0 ? `（${readCountText(activeGoals.length, coverage)}）` : ""}</p>
                 <ul className="goals">
                   {activeGoals.map((goal) => (
                     <GoalRow goal={goal} key={goal.goalId} />
                   ))}
                   {activeGoals.length === 0 ? (
-                    <li className="empty">進行中のゴールはありません。</li>
+                    <li className="empty">{coverage === "unread" ? "まだ読めていないため、ゴールの件数は不明です。" : "進行中のゴールはありません。"}</li>
                   ) : null}
                 </ul>
               </div>

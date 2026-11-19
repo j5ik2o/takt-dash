@@ -174,7 +174,7 @@ test("バックエンドが無音と判定した run は閾値直後でも警告
     runs: [{ ...base, logSilent: true, lastLogAt: justOverThreshold }],
   };
 
-  const overview = buildOverviewView(silentState, NOW);
+  const overview = buildOverviewView(silentState, NOW, true);
 
   assert.equal(overview.runs[0]?.label, "ログが止まっています", "バックエンドの無音判定をそのまま表示します");
   assert.match(overview.runs[0]?.note ?? "", /ログが .*出ていません。/, "無音の説明を添えます");
@@ -186,7 +186,7 @@ test("logSilent が偽でも経過時間が閾値を超えた run は警告に�
   const staleLog = new Date(NOW.getTime() - (SILENT_MINUTES * 60_000 + 60_000));
   const overview = buildOverviewView(
     { ...state, runs: [{ ...base, logSilent: false, lastLogAt: staleLog }] },
-    NOW,
+    NOW, true,
   );
 
   assert.equal(
@@ -223,6 +223,7 @@ test("run の無音判定は指定閾値と分単位の境界を保ち、警告�
         runs: [{ ...run, logSilent: false, lastLogAt: new Date(NOW.getTime() - expected.ageMs) }],
       },
       NOW,
+      true,
     );
     const row = view.runs[0];
     assert.ok(row);
@@ -235,7 +236,7 @@ test("run の無音判定は指定閾値と分単位の境界を保ち、警告�
 });
 
 test("概要の集計は proto の閾値をそのまま表示用に運ぶ", () => {
-  const overview = buildOverviewView(createDashboardState(), NOW);
+  const overview = buildOverviewView(createDashboardState(), NOW, true);
   assert.equal(overview.thresholds.pendingDecisionStaleMinutes, 240);
   assert.equal(overview.thresholds.runLogSilentMinutes, 10);
   assert.equal(overview.runningRuns, 1);
@@ -249,7 +250,7 @@ test("概要の集計は閾値の変更に追随し、240/10 を決め打ちし�
     ...state,
     thresholds: { pendingDecisionStaleMinutes: 60, runLogSilentMinutes: 5 },
   };
-  const overview = buildOverviewView(changed, NOW);
+  const overview = buildOverviewView(changed, NOW, true);
   assert.equal(overview.thresholds.pendingDecisionStaleMinutes, 60);
   assert.equal(overview.thresholds.runLogSilentMinutes, 5);
 });
@@ -260,7 +261,7 @@ test("閾値が無い応答では既定値を1か所で解決し、全画面が�
   assert.equal(DEFAULT_ANOMALY_THRESHOLDS.runLogSilentMinutes, 10);
 
   const withoutThresholds = { ...createDashboardState(), thresholds: undefined };
-  const overview = buildOverviewView(withoutThresholds, NOW);
+  const overview = buildOverviewView(withoutThresholds, NOW, true);
   assert.equal(overview.thresholds.pendingDecisionStaleMinutes, 240);
   assert.equal(overview.thresholds.runLogSilentMinutes, 10);
 });
@@ -344,7 +345,7 @@ test("遅延中のプロジェクトでも、ログが出続けている run は
     new Date(NOW.getTime() - 300 * 1_000),
   );
 
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
   const run = view.runs[0]!;
 
   assert.equal(run.connected, true, "遅延中は接続中として扱う");
@@ -368,7 +369,7 @@ test("最後に読めた時刻が最新でも、ログが無音なら遅延の�
     })),
   };
 
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
   const run = view.runs[0]!;
 
   assert.equal(run.state, "warn", "ログの無音で警告にする");
@@ -392,7 +393,7 @@ test("読み取りもログも古いときは、注記は読み取り時刻で�
     })),
   };
 
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
   const run = view.runs[0]!;
 
   assert.equal(run.state, "warn", "読み取りが遅れていてもログの無音で警告にする");
@@ -406,7 +407,7 @@ test("応答なしのプロジェクトの run は従来どおり最後に読め
     new Date(NOW.getTime() - 21 * 60_000),
   );
 
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
   const run = view.runs[0]!;
 
   assert.equal(run.state, "idle", "応答なしは idle のままにする");
@@ -414,7 +415,7 @@ test("応答なしのプロジェクトの run は従来どおり最後に読め
 });
 
 test("概要は実行上限・24時間完了・失敗・中止・無音を導出する", () => {
-  const view = buildOverviewView(createDashboardState(), NOW);
+  const view = buildOverviewView(createDashboardState(), NOW, true);
 
   assert.equal(view.runLimit, 8, "全プロジェクトの concurrency の合計を実行上限にする");
   assert.equal(view.completedTasks24h, 4, "全プロジェクトの24時間完了タスクを合計する");
@@ -425,7 +426,7 @@ test("概要は実行上限・24時間完了・失敗・中止・無音を導出
 });
 
 test("異常が無い状態は hasAnomalies を false にし、失敗・中止・無音を数えない", () => {
-  const view = buildOverviewView(createHealthyDashboardState(), NOW);
+  const view = buildOverviewView(createHealthyDashboardState(), NOW, true);
 
   assert.equal(view.hasAnomalies, false, "異常が無ければ false にする");
   assert.equal(view.silentRunCount, 0);
@@ -441,7 +442,7 @@ test("中止したゴールは異常として数える", () => {
       index === 0 ? { ...goal, executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED } : goal,
     ),
   };
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
 
   assert.equal(view.abortedGoalCount, 1);
   assert.equal(view.hasAnomalies, true);
@@ -454,7 +455,7 @@ test("ログが止まった run は無音として数え、異常ありにする
     ...base,
     runs: base.runs.map((run) => ({ ...run, logSilent: true, lastLogAt: justOverThreshold })),
   };
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
 
   assert.equal(view.silentRunCount, 1, "run 行と同じ警告判定で無音を数える");
   assert.equal(view.hasAnomalies, true);
@@ -476,7 +477,7 @@ test("プロジェクトの応答なしだけでも異常として扱い、最�
         : project,
     ),
   };
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
 
   assert.equal(view.hasAnomalies, true, "プロジェクトの応答なしも異常として扱う");
   assert.equal(view.partialReadAt?.getTime(), failedAt.getTime(), "応答なしの最後に読めた時刻を使う");
@@ -488,7 +489,7 @@ test("runLimit は concurrency が0でも破綻しない", () => {
     ...base,
     projects: base.projects.map((project) => ({ ...project, concurrency: 0 })),
   };
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
 
   assert.equal(view.runLimit, 0);
 });
@@ -498,7 +499,7 @@ test("runLimit は concurrency が0でも破綻しない", () => {
 // OverviewServerView はこれらのフィールドを持たない。上限を配下プロジェクトの concurrency の合計にする
 // main の振る舞いと、run・判断待ちの件数は、概要が表示する全体の値で確かめる。
 test("全体の上限はプロジェクトの concurrency の合計で、run と判断待ちの件数を数える", () => {
-  const view = buildOverviewView(createDashboardState(), NOW);
+  const view = buildOverviewView(createDashboardState(), NOW, true);
 
   assert.equal(view.runLimit, 8, "全プロジェクトの concurrency の合計を上限にする");
   assert.equal(view.runningRuns, 1, "実行中の run を数える");
@@ -513,7 +514,7 @@ test("応答なしの読み取り時刻が1件も無いときは partialReadAt �
       server.serverId === "down" ? { ...server, lastReadAt: undefined } : server,
     ),
   };
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
 
   assert.equal(view.unresponsiveServers.length, 1, "応答なしのサーバーは異常として残す");
   assert.equal(view.partialReadAt, undefined, "読めた時刻が無ければ now で補わない");
@@ -534,7 +535,7 @@ test("未読のプロジェクトは応答なしに含めず、異常として�
         : project,
     ),
   };
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
 
   assert.equal(view.unresponsiveProjects.length, 0, "未読（UNSPECIFIED）は応答なしに含めない");
   assert.equal(view.hasAnomalies, false, "未読だけでは異常にしない");
@@ -601,7 +602,7 @@ test("失敗タスクは失敗・上限超過・PR作成失敗の3分類を合�
         : goal,
     ),
   };
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
 
   assert.equal(view.failedTaskCount, 6, "failed 1 + exceeded 2 + prFailed 3 を合計する");
 });
@@ -783,7 +784,7 @@ test("範囲外の閾値を持つ状態から概要を組み立てない", () =>
     thresholds: { pendingDecisionStaleMinutes: -1, runLogSilentMinutes: 10 },
   };
   assert.throws(
-    () => buildOverviewView(state, NOW),
+    () => buildOverviewView(state, NOW, true),
     (error) => error instanceof DomainPrimitiveError && error.stage === "size",
   );
 });
@@ -800,7 +801,7 @@ test("未指定の inquiryId は proto 文字列の境界で空文字へ射影�
 test("ゴールに属さない run も概要の run 一覧に表示する", () => {
   const state = createDashboardState();
   const withoutGoal = { ...state, runs: [{ ...state.runs[0]!, goalId: undefined }] };
-  const overview = buildOverviewView(withoutGoal, NOW);
+  const overview = buildOverviewView(withoutGoal, NOW, true);
 
   assert.equal(overview.runs[0]?.run.goalId, undefined);
   assert.equal(overview.runs[0]?.run.runSlug, "run-aaa");
@@ -825,7 +826,7 @@ test("サーバーの状態の文言は接続と活動を区別する", () => {
 
 test("接続済みで run が0件のサーバーは概要カードで「接続中」になる", () => {
   const state = createDashboardState();
-  const overview = buildOverviewView({ ...state, runs: [] }, NOW);
+  const overview = buildOverviewView({ ...state, runs: [] }, NOW, true);
 
   const mini = overview.servers.find((item) => item.server.serverId === "mini");
   assert.equal(mini?.state, "idle", "接続済みで run が無いサーバーは idle である");
@@ -837,7 +838,7 @@ test("接続済みで run が0件のサーバーは概要カードで「接続�
 });
 
 test("接続済みで run があるサーバーは概要カードで「動作中」になる", () => {
-  const overview = buildOverviewView(createDashboardState(), NOW);
+  const overview = buildOverviewView(createDashboardState(), NOW, true);
 
   const mini = overview.servers.find((item) => item.server.serverId === "mini");
   assert.equal(mini?.state, "live", "run があるサーバーは live である");
@@ -856,20 +857,20 @@ test("runLimit はサーバーの concurrency ではなく、プロジェクト�
       project.name === "corporate-site" ? { ...project, concurrency: 1 } : { ...project, concurrency: 2 },
     ),
   };
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
 
   assert.equal(view.runLimit, 3, "全プロジェクトの concurrency の合計を実行上限にする");
 
   const template = state.projects[0]!;
   const withDownProject = buildOverviewView(
     { ...state, projects: [...state.projects, { ...template, name: "down-project", serverId: "down", concurrency: 4 }] },
-    NOW,
+    NOW, true,
   );
   assert.equal(withDownProject.runLimit, 7, "別のサーバーのプロジェクトの concurrency も合計する");
 });
 
 test("プロジェクトごとに実行中の run 件数とそのプロジェクトの上限を対比できる", () => {
-  const view = buildOverviewView(createDashboardState(), NOW);
+  const view = buildOverviewView(createDashboardState(), NOW, true);
   const corporate = view.projects.find((project) => project.name === "corporate-site");
   assert.ok(corporate, "corporate-site のカードがある");
   assert.equal(corporate.concurrency, 4, "プロジェクト自身の concurrency を上限として持つ");
@@ -883,13 +884,13 @@ test("プロジェクトごとに実行中の run 件数とそのプロジェク
 test("概要の最終読み取り時刻は、1件も読めていない場合に現在時刻で補わない", () => {
   const state = { ...createDashboardState(), readAt: undefined };
   const later = new Date(NOW.getTime() + 30 * 60_000);
-  const overview = buildOverviewView(state, later);
+  const overview = buildOverviewView(state, later, true);
   assert.equal(overview.readAt, undefined, "読めた時刻が無い場合は時刻を作りません");
 });
 
 test("概要の最終読み取り時刻は、表示用の現在時刻ではなく最後に実際に読めた時刻を保持する", () => {
   const later = new Date(NOW.getTime() + 30 * 60_000);
-  const overview = buildOverviewView(createDashboardState(), later);
+  const overview = buildOverviewView(createDashboardState(), later, true);
   assert.equal(overview.readAt?.getTime(), NOW.getTime(), "state の readAt をそのまま使います");
 });
 
@@ -1011,7 +1012,7 @@ test("概要のサーバー表示は応答していないプロジェクトを�
         : project,
     ),
   };
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
   const mini = view.servers.find((item) => item.server.serverId === "mini");
   assert.ok(mini, "mini のカードがある");
   assert.equal(mini.state, "warn", "カードの状態が正常に見えないようにする");
