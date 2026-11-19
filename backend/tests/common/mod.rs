@@ -113,6 +113,7 @@ pub fn goal(id: &str, status: GoalStatus, execution: ExecutionStatus) -> GoalEnt
     status,
     execution_status: execution,
     objective: format!("ゴール {id}"),
+    objective_truncated: false,
     integration_branch: format!("takt/{id}"),
     pull_request_number: None,
     pull_request_url: None,

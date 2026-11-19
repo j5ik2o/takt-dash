@@ -400,7 +400,7 @@ fn merge_decisions(
         // マージ待ちは問い合わせではないため、問い合わせの種類は持たない。
         inquiry_kind: None,
         created_at,
-        body: goal.objective.clone(),
+        body: goal.objective_display(),
         options: Vec::new(),
         pull_request_number: goal.pull_request_number,
         pull_request_url: goal.pull_request_url.clone(),

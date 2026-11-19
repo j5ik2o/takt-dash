@@ -271,7 +271,7 @@ test("run の表のゴールの列は、切り詰められた preview のゴー�
   const base = createDashboardState();
   const truncated = DashboardState.create({
     ...base,
-    goals: base.goals.map((goal) => (goal.goalId === "goal-1" ? { ...goal, name: TRUNCATED_PREVIEW } : goal)),
+    goals: base.goals.map((goal) => (goal.goalId === "goal-1" ? { ...goal, name: TRUNCATED_PREVIEW, nameTruncated: true } : goal)),
   });
   const truncatedSection = runsSection(renderOverview(truncated));
   const truncatedRow = runRows(truncatedSection)[0];

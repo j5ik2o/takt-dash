@@ -12,7 +12,21 @@ impl ToolSet<'_> {
   /// takt_get_run から run を読む。stepLogs は先頭のウィンドウだけが返るため、
   /// stepLogPage.nextOffset が残っていれば追加のページを取得して全件を集めます。
   pub async fn read_remote_run(&mut self, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
+    let mut value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
+    let summary = value.get("summary").and_then(Value::as_str).filter(|text| !text.is_empty());
+    if summary.is_none() && value.pointer("/taskOmission/truncated").and_then(Value::as_bool) == Some(true) {
+      value["taskText"] = json!(self.read_remote_task_text(run_slug).await?);
+    }
+    self.read_remote_run_steps(run_slug, value).await
+  }
+
+  /// ログ更新は要約用の本文取得に依存せず、ステップの全ページだけを読みます。
+  pub(crate) async fn read_remote_run_logs(&mut self, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
     let value = self.call_json("takt_get_run", json!({ "runSlug": run_slug.as_str() })).await?;
+    self.read_remote_run_steps(run_slug, value).await
+  }
+
+  async fn read_remote_run_steps(&mut self, run_slug: &RunSlug, value: Value) -> Result<RemoteRun, ToolError> {
     let mut steps = step_entries(&value);
     let mut step_logs = step_log_entries(&value);
     let mut next_offset = step_log_next_offset(&value);
@@ -27,7 +41,11 @@ impl ToolSet<'_> {
       step_logs.extend(step_log_entries(&page));
       next_offset = step_log_next_offset(&page);
     }
-    parse_remote_run(&value, steps, step_logs)
+    let mut run = parse_remote_run(&value, steps, step_logs)?;
+    if super::omissions::field_is_omitted(&value, "summary") {
+      run.summary.push('…');
+    }
+    Ok(run)
   }
 
   /// workflow の step 名一覧から、run の現在ステップの位置と全ステップ数を補う。

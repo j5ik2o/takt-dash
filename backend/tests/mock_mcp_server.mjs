@@ -80,6 +80,8 @@ const spawnLogPath = option("--spawn-log");
 const PAGE_SIZE = 50;
 // takt の入力契約では goalId は UUID（z.uuid()）。
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// レコード本文取得は設定先の z.uuid() と同じ version・variant・特殊値を受理する。
+const RECORD_UUID_PATTERN = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 
 if (spawnLogPath !== undefined) {
   appendFileSync(spawnLogPath, `start ${process.pid} ${Date.now()}\n`);
@@ -212,6 +214,13 @@ const validateArguments = (name, args) => {
   // takt の入力契約では goalId は UUID（z.uuid()）。空文字や UUID 以外は拒否する。
   if (name === "takt_answer_goal_question" && !UUID_PATTERN.test(args.goalId)) {
     return "goalId は UUID で指定してください";
+  }
+  if (name === "takt_get_goal" && args.recordId !== undefined) {
+    for (const field of ["goalId", "recordId"]) {
+      if (typeof args[field] !== "string" || !RECORD_UUID_PATTERN.test(args[field])) {
+        return `${field} は UUID で指定してください`;
+      }
+    }
   }
   return undefined;
 };
@@ -390,6 +399,9 @@ const handleToolCall = (name, args) => {
       return asText(pagedBackward(workLog, "workLog", args.offset));
     }
     case "takt_list_standalone_inquiries":
+      if (state.standalonePages !== undefined) {
+        return asText(state.standalonePages[`${args.offset ?? 0}:${args.limit ?? PAGE_SIZE}`]);
+      }
       return asText(paged(state.standaloneInquiries ?? [], "inquiries", args.offset));
     case "takt_get_run":
       if (args.view === "report") {
@@ -403,8 +415,27 @@ const handleToolCall = (name, args) => {
       }
       return asText(runResponse(state, args));
     case "takt_get_goal": {
+      if (args.recordId !== undefined) {
+        const override = state.goalRecordPages?.[`${args.goalId}:${args.recordId}:${args.textOffset ?? 0}`];
+        if (override !== undefined) return asText(override);
+        const [collection, field] = String(args.path).split(".");
+        const detail = (state.goalDetails ?? {})[args.goalId] ?? {};
+        const records = collection === "notifications"
+          ? (state.notifications ?? {})[args.goalId] ?? []
+          : detail[collection] ?? [];
+        const record = records.find((entry) => entry.id === args.recordId);
+        if (record === undefined) {
+          return { content: [{ type: "text", text: "Goal read failed: Selected record does not exist" }], isError: true };
+        }
+        return typeof record[field] === "string"
+          ? asText(textPage(record[field], args.textOffset, args.maxBytes))
+          : goalFieldMissing();
+      }
       if (args.path === "notifications") {
-        return asText(paged((state.notifications ?? {})[args.goalId] ?? [], "items", args.offset));
+        return asText({
+          ...paged((state.notifications ?? {})[args.goalId] ?? [], "items", args.offset),
+          ...(state.notificationOmissions === undefined ? {} : { omissions: state.notificationOmissions }),
+        });
       }
       const detail = (state.goalDetails ?? {})[args.goalId] ?? {};
       if (args.path === undefined) {

@@ -198,6 +198,7 @@ message Goal {
   PullRequest pull_request = 9;                        // プルリクエストの番号と URL
   optional google.protobuf.Timestamp awaiting_merge_at = 10;  // マージ待ちになった時刻
   optional TaskStatus merge_task_last = 11;            // 仕上げタスクの最後の状態（なければ人のマージ待ち）
+  bool name_truncated = 12;                            // 名前の原文から続きが省かれているか
 }
 
 // ゴールの実行で通ったステップを表す。

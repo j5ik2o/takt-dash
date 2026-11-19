@@ -78,6 +78,7 @@ fn sample_overview_projects() -> Vec<Project> {
 
 fn sample_overview_goals() -> Vec<v1::Goal> {
   vec![v1::Goal {
+    name_truncated:    false,
     goal_id:           "goal-cli".to_owned(),
     server_id:         "mini".to_owned(),
     project:           "taktdash-cli".to_owned(),
@@ -200,6 +201,7 @@ fn sample_overview_pending_decisions() -> Vec<PendingDecision> {
 pub(super) fn sample_goals() -> Vec<v1::Goal> {
   vec![
     v1::Goal {
+      name_truncated:    false,
       goal_id:           "goal-cli".to_owned(),
       server_id:         "mini".to_owned(),
       project:           "taktdash-cli".to_owned(),
@@ -220,6 +222,7 @@ pub(super) fn sample_goals() -> Vec<v1::Goal> {
       merge_task_last:   None,
     },
     v1::Goal {
+      name_truncated:    false,
       goal_id:           "goal-web".to_owned(),
       server_id:         "studio".to_owned(),
       project:           "corporate-site".to_owned(),

@@ -481,6 +481,7 @@ export function createRunDetailResponse(runSlug = "run-aaa"): GetRunDetailRespon
 
 export function createGoal(overrides: Partial<Goal> = {}): Goal {
   return {
+    nameTruncated: false,
     goalId: "goal-1",
     serverId: "mini",
     project: "corporate-site",

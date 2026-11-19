@@ -25,6 +25,7 @@ use crate::{
 
 mod goal;
 mod goal_read;
+mod omissions;
 mod parse;
 mod run;
 mod run_follow;

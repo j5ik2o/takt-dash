@@ -105,7 +105,7 @@ pub enum MetaRead {
 /// 本体ログの追記読みの結果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyLogRead {
-  /// 4 キーを除去し長さの上限を適用したレコード。
+  /// 4 キーを除去したレコード。表示用の読み取りでは文字列の長さも制限する。
   pub records:      Vec<Value>,
   /// 解釈できずに飛ばした行の件数。
   pub skipped:      usize,
@@ -248,6 +248,15 @@ impl RunLogReader {
   /// 読み始めます。末尾から読み始めた場合は、範囲の直前の1バイトで行の区切りかを確かめ、範囲の
   /// 先頭が行の途中なら、その書きかけの行を解釈せずに捨てます。範囲の先頭が行頭なら捨てません。
   pub fn read_body_log(&mut self, run_dir: &Path) -> BodyLogRead {
+    self.read_body_log_records(run_dir, true)
+  }
+
+  // 集計の照合には原文を使い、表示へ渡すときだけ切断する。秘匿キーは両入口で除去する。
+  pub(crate) fn read_body_log_for_progress(&mut self, run_dir: &Path) -> BodyLogRead {
+    self.read_body_log_records(run_dir, false)
+  }
+
+  fn read_body_log_records(&mut self, run_dir: &Path, preview_strings: bool) -> BodyLogRead {
     let logs_dir = contained_dir(run_dir, Path::new(LOGS_DIRECTORY));
     let missing = logs_dir.is_none();
     let mut records = Vec::new();
@@ -324,7 +333,7 @@ impl RunLogReader {
           skipped += 1;
           continue;
         }
-        sanitize(&mut record);
+        sanitize(&mut record, preview_strings);
         records.push(record);
       }
 
@@ -736,7 +745,7 @@ fn tool_use_name(line: &[u8]) -> Option<String> {
     return None;
   }
   let tool = event.get("data")?.get("tool")?.as_str()?;
-  Some(tool.chars().take(MAX_SUMMARY_CHARS).collect())
+  Some(log_text_preview(tool))
 }
 
 /// run のデータ（`meta.json` または本体ログ）を持つディレクトリかを返す。
@@ -844,23 +853,31 @@ fn apply_field(entry: &mut TaskEntry, key: &str, value: &str) {
   }
 }
 
-fn sanitize(value: &mut Value) {
+pub(crate) fn log_text_preview(text: &str) -> String {
+  let mut chars = text.chars();
+  let mut preview: String = chars.by_ref().take(MAX_SUMMARY_CHARS).collect();
+  if chars.next().is_some() {
+    preview.pop();
+    preview.push('…');
+  }
+  preview
+}
+
+fn sanitize(value: &mut Value, preview_strings: bool) {
   match value {
     | Value::Object(map) => {
       map.retain(|key, _| !PROMPT_FIELDS.contains(&key.as_str()));
       for value in map.values_mut() {
-        sanitize(value);
+        sanitize(value, preview_strings);
       }
     },
     | Value::Array(items) => {
       for item in items {
-        sanitize(item);
+        sanitize(item, preview_strings);
       }
     },
-    | Value::String(text) => {
-      if text.chars().count() > MAX_SUMMARY_CHARS {
-        *text = text.chars().take(MAX_SUMMARY_CHARS).collect();
-      }
+    | Value::String(text) if preview_strings => {
+      *text = log_text_preview(text);
     },
     | _ => {},
   }
@@ -948,4 +965,19 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     }
   }
   normalized
+}
+
+#[cfg(test)]
+mod preview_tests {
+  use super::log_text_preview;
+
+  #[test]
+  fn character_limit_includes_the_omission_marker() {
+    for length in [511, 512, 513] {
+      let text = "🦀".repeat(length);
+      let preview = log_text_preview(&text);
+      let expected = if length > 512 { format!("{}…", "🦀".repeat(511)) } else { text };
+      assert_eq!(preview, expected);
+    }
+  }
 }

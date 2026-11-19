@@ -131,7 +131,8 @@ pub(super) fn parse_remote_run(
 ) -> Result<RemoteRun, ToolError> {
   let run_slug = domain_value("run slug", RunSlug::try_from(string_field(value, "runSlug")?.as_str()))?;
   let task_text = optional_string(value, "taskText").unwrap_or_default();
-  let summary = optional_string(value, "summary").unwrap_or_else(|| task_summary(&task_text));
+  let summary =
+    optional_string(value, "summary").filter(|text| !text.is_empty()).unwrap_or_else(|| task_summary(&task_text));
   let started_at = match parse_time(value.get("startedAt"))? {
     | Some(time) => Some(time),
     | None => parse_time(value.get("startTime"))?,
@@ -389,7 +390,7 @@ impl ToolSet<'_> {
   /// 要約の応答はタスク本文を含まない（taskOmission だけを返す）ため、詳細の読み取りは
   /// この view で本文を取り直します。応答は `{ task: {content, nextOffset} }` で、nextOffset を
   /// たどって連結します。nextOffset が進まない場合は解析エラーにし、追従がページ数の上限に
-  /// 達したら、そこまでの本文を返します。
+  /// 達したら、全文取得に失敗した解析エラーを返します。
   pub async fn read_remote_task_text(&mut self, run_slug: &RunSlug) -> Result<String, ToolError> {
     let mut content = String::new();
     let mut offset = 0_u64;
@@ -407,7 +408,7 @@ impl ToolSet<'_> {
         | Some(next) if next > offset => {
           pages_taken += 1;
           if pages_taken >= super::MAX_PAGES {
-            return Ok(content);
+            return Err(ToolError::Parse("takt_get_run の task の全文取得が上限に達しました".to_owned()));
           }
           offset = next;
         },

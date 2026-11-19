@@ -155,8 +155,11 @@ impl ToolSet<'_> {
     for _ in 0..MAX_PAGES {
       let value = self.call_json("takt_list_goal_questions", json!({ "goalId": goal_id, "offset": offset })).await?;
       let page = Page::from_value(&value, "questions")?;
-      for item in &page.items {
-        entries.push(parse_goal_question(item)?);
+      for mut item in page.items {
+        if super::omissions::field_is_omitted(&value, "questions[].body") {
+          self.restore_goal_record_body(goal_id, "questions", &mut item).await?;
+        }
+        entries.push(parse_goal_question(&item)?);
       }
       match page.next_offset {
         | Some(next) => offset = next,

@@ -96,6 +96,14 @@ pub(crate) fn render_overview(state: &DashboardState) -> Result<String, domain::
   ))
 }
 
+fn goal_display_name(goal: &Goal) -> String {
+  if goal.name_truncated {
+    format!("{}…", goal.name)
+  } else {
+    goal.name.clone()
+  }
+}
+
 /// ゴール1件の表示行を作る。プロジェクト名・ゴール ID・件数を検証済みの型へ通す。
 fn render_goal_line(goal: &proto::v1::Goal) -> Result<String, domain::DomainError> {
   let project = ProjectName::try_from(goal.project.as_str())?;
@@ -107,7 +115,7 @@ fn render_goal_line(goal: &proto::v1::Goal) -> Result<String, domain::DomainErro
   let running = TaskCount::try_from(counts.running)?;
   Ok(format!(
     "- {project}/{goal_id}「{}」完了{completed}件・失敗{failed}件（未着手{pending}件・実行中{running}件）",
-    goal.name
+    goal_display_name(goal)
   ))
 }
 
@@ -279,7 +287,7 @@ fn render_goal_row(goal: &Goal) -> String {
     goal.server_id,
     goal.project,
     goal.goal_id,
-    goal.name,
+    goal_display_name(goal),
     goal_status_label(goal.status),
     execution_status_label(goal.execution_status),
     counts.completed,

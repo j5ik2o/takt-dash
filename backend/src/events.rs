@@ -76,7 +76,7 @@ fn detect_goals(
 ) {
   for goal in &next.goals {
     let previous = prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id);
-    let name = goal.objective.trim().to_string();
+    let name = goal.objective_display().trim().to_owned();
     match previous {
       | None => events.push(event(
         now,

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use super::{
   call_outcome, degrades_to_previous, inherit_previous_notifications, is_terminal, is_timeout,
   is_unchanged_terminal_goal, parse_goal, parse_inquiry, parse_notification, parse_task, prev_inquiries, previous_run,
-  resolve_awaiting_merge_at, resolve_inquiry, Page, ParsedInquiry, ToolError, ToolSet, MAX_PAGES,
+  resolve_awaiting_merge_at, resolve_inquiry, string_field, Page, ParsedInquiry, ToolError, ToolSet, MAX_PAGES,
 };
 use crate::{
   domain::GoalId,
@@ -177,8 +177,11 @@ impl ToolSet<'_> {
       let value =
         self.call_json("takt_list_goal_questions", json!({ "goalId": goal_id.as_str(), "offset": offset })).await?;
       let page = Page::from_value(&value, "questions")?;
-      for item in &page.items {
-        if let Some(entry) = parse_inquiry(item, Some(goal_id))? {
+      for mut item in page.items {
+        if super::omissions::field_is_omitted(&value, "questions[].body") {
+          self.restore_goal_record_body(goal_id.as_str(), "questions", &mut item).await?;
+        }
+        if let Some(entry) = parse_inquiry(&item, Some(goal_id))? {
           entries.push(entry);
         }
       }
@@ -196,8 +199,13 @@ impl ToolSet<'_> {
     for _ in 0..MAX_PAGES {
       let value = self.call_json("takt_list_standalone_inquiries", json!({ "offset": offset })).await?;
       let page = Page::from_value(&value, "inquiries")?;
-      for item in &page.items {
-        if let Some(entry) = parse_inquiry(item, None)? {
+      let omitted = super::omissions::field_is_omitted(&value, "inquiries[].body");
+      for mut item in page.items {
+        if omitted {
+          let body = string_field(&item, "body")?;
+          item["body"] = json!(format!("{body}…"));
+        }
+        if let Some(entry) = parse_inquiry(&item, None)? {
           entries.push(entry);
         }
       }
@@ -320,8 +328,11 @@ impl ToolSet<'_> {
         .call_json("takt_get_goal", json!({ "goalId": goal_id.as_str(), "path": "notifications", "offset": offset }))
         .await?;
       let page = Page::from_value(&value, "items")?;
-      for item in &page.items {
-        let notification = parse_notification(goal_id, item)?;
+      for mut item in page.items {
+        if super::omissions::field_is_omitted(&value, "items[].body") {
+          self.restore_goal_record_body(goal_id.as_str(), "notifications", &mut item).await?;
+        }
+        let notification = parse_notification(goal_id, &item)?;
         if notification.kind == "awaiting_merge"
           && awaiting_merge_at.is_none_or(|current| notification.recorded_at > current)
         {
