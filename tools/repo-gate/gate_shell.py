@@ -89,14 +89,19 @@ class ShellToken(str):
 
     quoted: 引用符の中かバックスラッシュの直後で作られた文字を含む場合に真。
     演算子に見える文字列でも、引用されたものは演算子ではない。
+    quoted_mask: 各文字が引用符の中かバックスラッシュの直後で作られたかの並び。
+    部分文字列が未引用の文字だけでできているかを判定するために使う。
     space_before: 直前に空白（スペース・タブ・復帰）があった場合に真。
     `&>` と `& >` の区別に使う。
     """
 
-    def __new__(cls, text, *, quoted=False, space_before=False):
+    def __new__(cls, text, *, quoted=False, space_before=False, quoted_mask=None):
         token = super().__new__(cls, text)
         token.quoted = quoted
         token.space_before = space_before
+        token.quoted_mask = (
+            tuple(quoted_mask) if quoted_mask is not None else tuple(False for _ in text)
+        )
         return token
 
 
@@ -107,16 +112,24 @@ def shell_tokens(command):
     （quoted）と、直前に空白があったか（space_before）を保持する。演算子
     の判定はこの情報を使うため、引用符内の `&&` や `;`、エスケープされた
     `;` は演算子にならない。`&>` と `& >` も区別できる。閉じていない
-    引用符がある場合は、shlex と同じく ValueError を上げる。
+    引用符がある場合は、shlex と同じく ValueError を上げる。各文字の引用状態は
+    quoted_mask にも保持するため、引用された部分文字列と未引用の演算子を区別できる。
     """
     text = strip_shell_comments(command)
     tokens = []
     index = 0
     pending_space = False
 
-    def flush_word(chars, quoted, space_before):
+    def flush_word(chars, quoted, space_before, quoted_mask=()):
         if chars or quoted:
-            tokens.append(ShellToken("".join(chars), quoted=quoted, space_before=space_before))
+            tokens.append(
+                ShellToken(
+                    "".join(chars),
+                    quoted=quoted,
+                    space_before=space_before,
+                    quoted_mask=quoted_mask,
+                )
+            )
 
     while index < len(text):
         char = text[index]
@@ -140,12 +153,14 @@ def shell_tokens(command):
         pending_space = False
         chars = []
         quoted = False
+        quoted_mask = []
         while index < len(text):
             char = text[index]
             if char in " \t\r" or char in SHELL_OPERATOR_CHARS:
                 break
             if char == "\\" and index + 1 < len(text):
                 chars.append(text[index + 1])
+                quoted_mask.append(True)
                 quoted = True
                 index += 2
                 continue
@@ -156,18 +171,39 @@ def shell_tokens(command):
                 while index < len(text) and text[index] != quote:
                     if quote == '"' and text[index] == "\\" and index + 1 < len(text):
                         chars.append(text[index + 1])
+                        quoted_mask.append(True)
                         index += 2
                         continue
                     chars.append(text[index])
+                    quoted_mask.append(True)
                     index += 1
                 if index >= len(text):
                     raise ValueError("No closing quotation")
                 index += 1
                 continue
             chars.append(char)
+            quoted_mask.append(False)
             index += 1
-        flush_word(chars, quoted, word_space)
+        flush_word(chars, quoted, word_space, quoted_mask)
     return tokens
+
+
+def contains_unquoted(token, substring):
+    """トークンに、引用されていない文字だけでできた部分文字列が含まれるかを判定する。
+
+    quoted_mask が無いトークンは、従来どおり部分文字列の有無だけで判定する。
+    """
+    text = str(token)
+    mask = getattr(token, "quoted_mask", None)
+    if not substring or len(substring) > len(text):
+        return False
+    if mask is None or len(mask) != len(text):
+        return substring in text
+    return any(
+        text[start:start + len(substring)] == substring
+        and not any(mask[start:start + len(substring)])
+        for start in range(len(text) - len(substring) + 1)
+    )
 
 
 def simple_commands(tokens):

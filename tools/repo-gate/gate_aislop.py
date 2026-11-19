@@ -1,5 +1,5 @@
 """コマンド文字列とステップが aislop チェックを起動し、その失敗を返すかを判定する。"""
-from gate_shell import REDIRECTION, SHELL_KEYWORDS, is_shell_operator, shell_tokens, simple_commands
+from gate_shell import REDIRECTION, SHELL_KEYWORDS, contains_unquoted, is_shell_operator, shell_tokens, simple_commands
 
 AISLOP_CHECK_COMMAND = "scripts/aislop-check-bootstrap.mjs check"
 AISLOP_CHECK_INVOCATION = ["node", "scripts/aislop-check-bootstrap.mjs", "check"]
@@ -42,10 +42,11 @@ def starts_command_list_item(preceding):
     `||` の直後の改行（行継続）を含めて偽とする。改行を挟まずに語が続く場合は、
     その語の引数（echo の引数や ! の否定対象）なので偽とする。先行する各単純コマンドも
     検査し、終了・評価・シェル設定の変更や、解析対象外の制御構文は受理しない。
-    ヒアドキュメントは解析しないため、開始演算子を含む先行トークンは受理しない。
+    ヒアドキュメントは解析しないため、未引用の開始演算子を含む先行トークンは受理しない。
     ヒアドキュメントの本文や区切り行はコマンドとして実行されないためである。
+    引用された `<<` は開始演算子ではないため受理する。
     """
-    if any("<<" in token for token in preceding):
+    if any(contains_unquoted(token, "<<") for token in preceding):
         return False
     index = len(preceding)
     while (

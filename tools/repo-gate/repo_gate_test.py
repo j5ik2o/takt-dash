@@ -2779,6 +2779,16 @@ def test_aislop_check_rejects_heredoc_before_check() -> None:
             assert not sandbox.module.invokes_aislop_check(command), command
 
 
+def test_aislop_check_accepts_quoted_heredoc_operator() -> None:
+    with Sandbox() as sandbox:
+        for command in (
+            "echo '<< ready'\n" + AISLOP_CHECK,
+            'echo "<< ready"\n' + AISLOP_CHECK,
+            "echo \\<< ready\n" + AISLOP_CHECK,
+        ):
+            assert sandbox.module.invokes_aislop_check(command), command
+
+
 def test_workflow_aislop_reachability_with_adjacent_redirection() -> None:
     for separator in ("\n", "; "):
         for head in ("echo</dev/null", "echo 'exit</dev/null'", "exit</dev/null"):
@@ -2833,6 +2843,7 @@ def main() -> int:
         test_aislop_success_must_not_be_shadowed_by_zero_matching_rule,
         test_aislop_rejects_shell_control_before_check,
         test_aislop_check_rejects_heredoc_before_check,
+        test_aislop_check_accepts_quoted_heredoc_operator,
         test_correct_repository_passes,
         test_workspace_members_must_be_backend_and_cli,
         test_backend_must_have_lib_and_cli_must_have_bin,
