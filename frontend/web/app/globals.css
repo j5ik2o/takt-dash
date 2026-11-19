@@ -667,33 +667,6 @@ a {
   border-radius: var(--radius-4);
 }
 
-.bar.thick {
-  height: 12px;
-  border-radius: var(--radius-6);
-}
-
-.run-row .bar.live > i {
-  background-image: linear-gradient(
-    45deg,
-    rgba(255, 255, 255, 0.28) 25%,
-    transparent 25%,
-    transparent 50%,
-    rgba(255, 255, 255, 0.28) 50%,
-    rgba(255, 255, 255, 0.28) 75%,
-    transparent 75%
-  );
-  background-size: 24px 24px;
-  animation: flow 1.6s linear infinite;
-}
-
-.bar.warn > i {
-  background: var(--warn);
-}
-
-.bar.idle > i {
-  background: var(--idle);
-}
-
 .dot {
   display: inline-block;
   width: 10px;
@@ -746,15 +719,6 @@ a {
   }
 }
 
-@keyframes flow {
-  from {
-    background-position: 0 0;
-  }
-  to {
-    background-position: 24px 0;
-  }
-}
-
 .run-row.flash {
   animation: flash 1s ease-out;
 }
@@ -771,7 +735,6 @@ a {
 @media (prefers-reduced-motion: reduce) {
   .dot.live,
   .run-row .dot.live,
-  .run-row .bar.live > i,
   .run-row.flash {
     animation: none;
   }
@@ -1532,3 +1495,44 @@ ol.log-tail li {
 .l-section > h2 {
   font-size: var(--font-size-16);
 }
+
+.workflow-progress { padding: var(--space-16); border: 1px solid var(--line); border-radius: var(--radius-8); background: var(--surface); min-width: 0; }
+.workflow-backbone { align-items: flex-start; }
+.workflow-backbone, .workflow-repair-nodes { display: flex; flex-wrap: wrap; gap: var(--space-12); padding: 0; list-style: none; }
+.workflow-backbone > li { display: flex; align-items: center; max-width: 100%; min-width: 0; }
+.workflow-node { display: flex; flex-direction: column; gap: var(--space-4); max-width: 100%; padding: var(--space-12); border: 1px solid var(--line); border-radius: var(--radius-8); overflow-wrap: anywhere; }
+.workflow-state-1 { color: var(--muted); }
+.workflow-state-2 { border: 2px solid var(--teal); color: var(--teal-d); }
+.workflow-state-3 { background: var(--teal-soft); }
+.workflow-state-4 { color: var(--faint); border-color: var(--line2); }
+.workflow-state-5, .workflow-state-6 { border-color: var(--orange); color: var(--orange-d); background: var(--orange-soft); }
+.workflow-edge { display: inline-block; width: 24px; flex-shrink: 0; border-top: 2px dotted var(--muted); margin-right: var(--space-12); }
+.workflow-edge.unknown { border-top-style: dashed; border-color: var(--orange-d); }
+.workflow-edge.workflow-start { border-top-style: solid; }
+.workflow-edge.passed { border-top-style: solid; border-color: var(--teal-d); }
+.workflow-terminal { padding: var(--space-8); border: 1px solid var(--line); border-radius: var(--radius-pill); }
+.workflow-repair { margin-top: var(--space-12); padding: var(--space-12); background: var(--gray-soft); overflow-wrap: anywhere; }
+.workflow-repair summary { cursor: pointer; }
+.workflow-repair-nodes { margin-top: var(--space-12); }
+.workflow-return { display: flex; align-items: center; gap: var(--space-8); flex-wrap: wrap; }
+.workflow-description { overflow-wrap: anywhere; }
+.workflow-summary { display: flex; flex-direction: column; gap: var(--space-4); }
+.workflow-segments { display: flex; gap: var(--space-4); width: 100%; height: 6px; }
+.workflow-segments > span { flex: 1; min-width: 0; background: var(--track); }
+.workflow-segments > .passed { background: var(--teal); }
+.run-row:has(.dot.warn) .workflow-segments > .passed { background: var(--warn); }
+.run-row:has(.dot.idle) .workflow-segments > .passed { background: var(--idle); }
+
+.workflow-diagram { position: relative; padding-inline: var(--space-12) var(--workflow-return-space); }
+.workflow-backbone > .workflow-node-slot { align-items: flex-start; margin-bottom: var(--workflow-return-space); }
+.workflow-leading { display: flex; align-items: center; margin-top: var(--space-12); }
+.workflow-leading:empty { display: none; }
+.workflow-node-branch { min-width: 0; }
+.workflow-main-node { display: flex; align-items: center; min-width: 0; }
+.workflow-main-node > .workflow-node { flex: 1; }
+.workflow-repair { position: relative; margin-left: 0; border-left: 2px solid var(--muted); border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); }
+.workflow-repair::before, .workflow-repair::after { position: absolute; bottom: 100%; height: 12px; content: ""; border-left: 2px solid var(--muted); }
+.workflow-repair::before { left: -2px; }
+.workflow-repair::after { right: -2px; }
+.workflow-repair-nodes > div { display: flex; align-items: center; min-width: 0; max-width: 100%; }
+.workflow-return-arcs { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; color: var(--orange-d); overflow: visible; }

@@ -1,6 +1,7 @@
 //! gRPC の GetRunDetail が、状態ストアと run の保存場所（`meta.json`、本体ログ、`reports/`、
 //! プロジェクト側の `interventions.jsonl`）から GetRunDetailResponse を組み立て、ローカルで読めた
-//! run では takt-mcp を起動も呼び出しもしないことを検証する。本体ログは末尾の一定量だけを読み、
+//! run では追加の MCP
+//! 読取を進行図の定義に限定することを検証する。本体ログは末尾の一定量だけを読み、
 //! 同じサーバーへの2回目の要求は続きだけを読む。worktree の run、再開した run（source_run_slug）、
 //! 掃除済みの worktree の run も扱う。
 //!
@@ -99,12 +100,13 @@ async fn request_detail(harness: &GrpcHarness, run_slug: &str) -> Result<GetRunD
   result.map(tonic::Response::into_inner)
 }
 
-/// 要求の前後で、mock の takt-mcp の起動と道具呼び出しの記録が増えていないことを確かめる。
-fn assert_no_takt_mcp_activity(harness: &GrpcHarness, processes_before: usize, calls_before: usize) {
+/// run の本文はローカルから読み、追加の MCP 読取は図の定義だけであることを確かめる。
+fn assert_only_workflow_definition_reads(harness: &GrpcHarness, processes_before: usize, calls_before: usize) {
   let processes = harness.recorded_processes();
   let calls = harness.recorded_calls();
-  assert_eq!(processes.len(), processes_before, "GetRunDetail は takt-mcp を起動しません: {processes:?}");
-  assert_eq!(calls.len(), calls_before, "GetRunDetail は takt-mcp の道具を呼びません: {calls:?}");
+  let added = &calls[calls_before..];
+  assert!(added.iter().all(|call| call.name == "takt_get_workflow"), "run の内容を MCP で再取得しません: {added:?}");
+  assert_eq!(processes.len() - processes_before, added.len(), "各詳細要求は定義取得用の接続を終了します");
 }
 
 fn timestamp(text: &str) -> prost_types::Timestamp {
@@ -117,6 +119,107 @@ fn proto_timestamp(time: DateTime<Utc>) -> prost_types::Timestamp {
 
 fn step_log_names(detail: &GetRunDetailResponse) -> Vec<String> {
   detail.step_logs.iter().map(|log| log.step_name.clone()).collect()
+}
+
+#[tokio::test]
+async fn workflow_definition_pages_and_local_execution_evidence_reach_detail_and_overview() {
+  use sha2::{Digest, Sha256};
+
+  let mut state = mcp_state();
+  let mut nodes = vec![
+    json!({ "name": "gate", "kind": "system", "rules": [{}, { "next": "fix" }, { "next": "finish" }] }),
+    json!({ "name": "fix", "kind": "agent", "rules": [{ "next": "gate" }] }),
+  ];
+  nodes.extend((0..51).map(|index| json!({ "name": format!("unused-{index}"), "kind": "agent", "rules": [] })));
+  nodes.push(json!({ "name": "finish", "kind": "agent", "rules": [{ "next": "COMPLETE" }, { "next": "ABORT" }] }));
+  state["workflows"] = json!({ WORKFLOW: { "initialStep": "gate", "steps": nodes } });
+  let harness = seeded_harness(state);
+  let fixture = run_files(&harness);
+  let mut meta = running_meta("fix", 9, WORKFLOW, "2026-11-13T09:00:00Z");
+  meta["stepExecutions"] = json!([
+    { "identity": format!("{:x}", Sha256::digest(serde_json::to_vec(&(Vec::<String>::new(), WORKFLOW, "gate")).unwrap())), "workflow": WORKFLOW, "step": "gate", "count": 3 },
+    { "identity": format!("{:x}", Sha256::digest(serde_json::to_vec(&(Vec::<String>::new(), WORKFLOW, "fix")).unwrap())), "workflow": WORKFLOW, "step": "fix", "count": 1 }
+  ]);
+  fixture.write_meta("run-1", &meta);
+  let mut gate = step_complete_record("gate", "reviewer", 8, "2026-11-13T09:02:00Z");
+  gate["matchedRuleIndex"] = json!(1);
+  fixture.append_records("run-1", &[
+    workflow_start_record(WORKFLOW),
+    gate,
+    step_start_record("fix", WORKFLOW, 9, "2026-11-13T09:03:00Z", &["fix"]),
+  ]);
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+    harness.registry.clone(),
+  );
+  poller.read_cycle_once().await.unwrap();
+  poller.shutdown().await;
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  let overview =
+    client.get_overview(takt_dash_backend::takt_dash::v1::GetOverviewRequest {}).await.unwrap().into_inner();
+  let detail = client.get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() }).await.unwrap().into_inner();
+  server.stop().await;
+  let progress = detail.progress.expect("詳細に進行図があります");
+  assert_eq!(progress.initial_step.as_deref(), Some("gate"));
+  assert_eq!(progress.definition.len(), 54);
+  assert_eq!(progress.definition.last().unwrap().name, "finish");
+  assert_eq!(progress.definition[0].kind, "system");
+  assert_eq!(progress.definition[0].rules[0].next, None);
+  assert_eq!(progress.definition[0].rules[1].next.as_deref(), Some("fix"));
+  assert_eq!(progress.backbone, ["gate", "finish"]);
+  assert_eq!(progress.current_position.unwrap().value, 1);
+  assert_eq!(progress.nodes[0].execution_count.unwrap().value, 3);
+  assert_eq!(
+    progress.edges.iter().find(|edge| edge.source == "gate" && edge.target == "fix").unwrap().traversals.unwrap().value,
+    1
+  );
+  assert!(progress.edges.iter().all(|edge| edge.target != "ABORT"));
+  let run = &overview.runs[0];
+  assert_eq!(run.current_step_number, Some(2), "既存位置は定義順のままです");
+  assert_eq!(run.total_steps, Some(54));
+  assert_eq!(run.current_iteration, Some(9));
+  assert_eq!(run.progress.as_ref().unwrap().current_position.unwrap().value, 1);
+  assert_eq!(run.progress.as_ref().unwrap().backbone, progress.backbone);
+  assert!(harness
+    .recorded_calls()
+    .iter()
+    .any(|call| call.name == "takt_get_workflow" && call.arguments["offset"] == 50));
+}
+
+#[tokio::test]
+async fn remote_progress_does_not_fabricate_counts_or_traversals_missing_from_the_mcp_contract() {
+  let mut state = remote_run_state();
+  state["workflows"] = json!({ "remote-workflow": { "initialStep": "remote-plan", "steps": [
+    { "name": "remote-plan", "kind": "agent", "rules": [{ "next": "remote-implement" }] },
+    { "name": "remote-implement", "kind": "agent", "rules": [{ "next": "COMPLETE" }] }
+  ] } });
+  let harness = seeded_harness(state);
+  let detail = request_detail(&harness, "run-1").await.unwrap();
+  assert_detail_from_takt_get_run(&detail, &harness);
+  let progress = detail.progress.unwrap();
+  assert_eq!(progress.backbone, ["remote-plan", "remote-implement"]);
+  assert!(progress.nodes.iter().all(|node| node.execution_count.is_none()));
+  assert!(progress.edges.iter().all(|edge| edge.traversals.is_none()));
+}
+
+#[tokio::test]
+async fn invalid_progress_counts_do_not_discard_readable_run_detail() {
+  let mut state = mcp_state();
+  state["workflows"] = json!({ WORKFLOW: { "initialStep": "implement", "steps": [{ "name": "implement", "kind": "agent", "rules": [{ "next": "COMPLETE" }] }] } });
+  let harness = seeded_harness(state);
+  let fixture = running_run_files(&harness);
+  let mut meta = running_meta("implement", 3, WORKFLOW, "2026-11-13T09:00:00Z");
+  meta["stepExecutions"] =
+    json!([{ "identity": "a".repeat(64), "workflow": WORKFLOW, "step": "implement", "count": -1 }]);
+  fixture.write_meta("run-1", &meta);
+  let detail = request_detail(&harness, "run-1").await.unwrap();
+  assert_eq!(detail.current_step.as_deref(), Some("implement"));
+  assert_eq!(step_log_names(&detail), ["plan"]);
+  assert!(detail.progress.unwrap().nodes[0].execution_count.is_none());
 }
 
 #[tokio::test]
@@ -193,9 +296,7 @@ async fn get_run_detail_assembles_the_response_from_the_store_and_the_run_files(
 }
 
 #[tokio::test]
-async fn get_run_detail_neither_starts_nor_calls_takt_mcp() {
-  // 実行中の run の詳細を同じサーバーへ2回要求しても、mock の takt-mcp の起動記録と道具呼び出しの
-  // 記録はどちらも空のままです。
+async fn get_run_detail_reads_only_the_workflow_definition_from_takt_mcp() {
   let harness = seeded_harness(mcp_state());
   let fixture = running_run_files(&harness);
   fixture.write_report("run-1", "plan.md", "計画のレポート");
@@ -208,7 +309,136 @@ async fn get_run_detail_neither_starts_nor_calls_takt_mcp() {
   }
   server.stop().await;
 
-  assert_no_takt_mcp_activity(&harness, 0, 0);
+  assert_eq!(harness.recorded_calls().len(), 2, "2回の詳細要求で定義を2回読みます");
+  assert_only_workflow_definition_reads(&harness, 0, 0);
+}
+
+#[tokio::test]
+async fn initial_detail_progress_keeps_completions_outside_the_display_window() {
+  let mut state = mcp_state();
+  state["workflows"] = json!({WORKFLOW:{"initialStep":"head", "steps":[
+    {"name":"head","rules":[{"next":"tail"}]}, {"name":"tail","rules":[{"next":"COMPLETE"}]}
+  ]}});
+  let harness = seeded_harness(state);
+  let fixture = run_files(&harness);
+  fixture.write_meta("run-1", &running_meta("tail", 2, WORKFLOW, "2026-11-13T09:00:00Z"));
+  let mut head = step_complete_record("head", "architect", 1, "2026-11-13T09:01:00Z");
+  head["workflow"] = json!(WORKFLOW);
+  head["matchedRuleIndex"] = json!(0);
+  fixture.append_records("run-1", &[workflow_start_record(WORKFLOW), head]);
+  append_filler_records(&fixture, "run-1", 2 * 1024 * 1024);
+  fixture.append_records("run-1", &[step_complete_record("tail", "coder", 2, "2026-11-13T09:30:00Z")]);
+  let detail = request_detail(&harness, "run-1").await.unwrap();
+  let graph = detail.progress.unwrap();
+  assert_eq!(graph.nodes[0].state, takt_dash_backend::takt_dash::v1::WorkflowNodeState::Completed as i32);
+  assert_eq!(graph.edges[0].traversals.unwrap().value, 1);
+  assert_eq!(graph.nodes[0].log_index, None);
+  assert_eq!(detail.step_logs.len(), 1);
+  assert_eq!(graph.nodes[1].log_index, Some(0));
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+    harness.registry.clone(),
+  );
+  poller.read_cycle_once().await.unwrap();
+  poller.shutdown().await;
+  let server = start_server(&harness).await;
+  let mut api = client(server.address).await;
+  let overview = api.get_overview(takt_dash_backend::takt_dash::v1::GetOverviewRequest {}).await.unwrap().into_inner();
+  let same_history = overview.runs[0].progress.as_ref().unwrap();
+  assert_eq!(same_history.edges, graph.edges);
+  assert_eq!(
+    same_history.nodes.iter().map(|node| node.state).collect::<Vec<_>>(),
+    graph.nodes.iter().map(|node| node.state).collect::<Vec<_>>()
+  );
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn malformed_line_keeps_windowed_completions_and_unknown_edges_in_overview_and_detail() {
+  use std::io::Write;
+  let mut state = mcp_state();
+  state["workflows"] = json!({WORKFLOW:{"initialStep":"head","steps":[
+    {"name":"head","rules":[{"next":"tail"},{"next":"head"}]},
+    {"name":"tail","rules":[{"next":"COMPLETE"}]}
+  ]}});
+  let harness = seeded_harness(state);
+  let fixture = run_files(&harness);
+  fixture.write_meta("run-1", &running_meta("tail", 3, WORKFLOW, "2026-11-13T09:00:00Z"));
+  let mut completion = step_complete_record("head", "coder", 1, "2026-11-13T09:01:00Z");
+  completion["workflow"] = json!(WORKFLOW);
+  completion["matchedRuleIndex"] = json!(0);
+  fixture.append_records("run-1", &[workflow_start_record(WORKFLOW), completion.clone()]);
+  std::fs::OpenOptions::new()
+    .append(true)
+    .open(fixture.body_log("run-1"))
+    .unwrap()
+    .write_all(b"invalid JSON\n")
+    .unwrap();
+  completion["iteration"] = json!(2);
+  fixture.append_records("run-1", &[completion]);
+  append_filler_records(&fixture, "run-1", 2 * 1024 * 1024);
+  fixture.append_records("run-1", &[step_complete_record("tail", "coder", 3, "2026-11-13T09:30:00Z")]);
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+    harness.registry.clone(),
+  );
+  poller.read_cycle_once().await.unwrap();
+  poller.shutdown().await;
+  let server = start_server(&harness).await;
+  let mut api = client(server.address).await;
+  let detail = api.get_run_detail(GetRunDetailRequest { run_slug: "run-1".into() }).await.unwrap().into_inner();
+  let graph = detail.progress.unwrap();
+  assert_eq!(graph.edges[0].traversals.unwrap().value, 2);
+  assert!(graph.edges[1].traversals.is_none());
+  assert_eq!(graph.nodes[0].state, takt_dash_backend::takt_dash::v1::WorkflowNodeState::Completed as i32);
+  assert_eq!(graph.nodes[0].log_index, None);
+  assert_eq!(detail.step_logs.len(), 1);
+  assert_eq!(graph.nodes[1].log_index, Some(0));
+  let overview = api.get_overview(takt_dash_backend::takt_dash::v1::GetOverviewRequest {}).await.unwrap().into_inner();
+  assert_eq!(overview.runs[0].progress.as_ref().unwrap().edges, graph.edges);
+  let repeated = api.get_run_detail(GetRunDetailRequest { run_slug: "run-1".into() }).await.unwrap().into_inner();
+  assert_eq!(repeated.progress.unwrap(), graph);
+  let cursor = api
+    .get_run_updates(takt_dash_backend::takt_dash::v1::GetRunUpdatesRequest {
+      run_slug: "run-1".into(),
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  let partial = json!({"type":"step_complete","step":"head","workflow":WORKFLOW,"iteration":4,"matchedRuleIndex":0,"timestamp":"2026-11-13T09:31:00Z"}).to_string();
+  let mut output = std::fs::OpenOptions::new().append(true).open(fixture.body_log("run-1")).unwrap();
+  output.write_all(partial.as_bytes()).unwrap();
+  let unfinished = api.get_run_detail(GetRunDetailRequest { run_slug: "run-1".into() }).await.unwrap().into_inner();
+  assert_eq!(unfinished.progress.unwrap().edges[0].traversals.unwrap().value, 2);
+  output.write_all(b"\n").unwrap();
+  let updates = api
+    .get_run_updates(takt_dash_backend::takt_dash::v1::GetRunUpdatesRequest {
+      run_slug:       "run-1".into(),
+      epoch:          Some(cursor.epoch),
+      after_sequence: cursor.lines.last().map(|line| line.sequence),
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  assert!(!updates.reset);
+  assert_eq!(updates.epoch, cursor.epoch);
+  assert_eq!(updates.lines.len(), 1);
+  assert!(updates.lines[0].text.ends_with("step_complete head"));
+  for _ in 0..2 {
+    let appended = api.get_run_detail(GetRunDetailRequest { run_slug: "run-1".into() }).await.unwrap().into_inner();
+    let progress = appended.progress.unwrap();
+    assert_eq!(progress.edges[0].traversals.unwrap().value, 3);
+    assert_eq!(progress.nodes[0].log_index, Some(1));
+    assert_eq!(appended.step_logs[1].step_name, "head");
+  }
+  server.stop().await;
 }
 
 #[tokio::test]
@@ -302,7 +532,7 @@ async fn get_run_detail_reads_a_run_in_its_worktree() {
   assert!(!detail.logs_removed);
   assert_eq!(detail.current_step.as_deref(), Some("review"), "状態は worktree 側の meta.json の値です");
   assert_eq!(step_log_names(&detail), vec!["worktree-step".to_owned()], "ステップは worktree 側の本体ログです");
-  assert_no_takt_mcp_activity(&harness, 0, 0);
+  assert_only_workflow_definition_reads(&harness, 0, 0);
 }
 
 #[tokio::test]
@@ -351,7 +581,7 @@ async fn get_run_detail_reads_a_resumed_run_from_its_source_run_slug() {
   assert_eq!(step_log_names(&detail), vec!["resumed-step".to_owned()], "worktree 側の run-source の本体ログです");
   assert_eq!(detail.goal_id, "g-resume", "ゴールは source_run_slug が一致するタスクから取ります");
   assert_eq!(detail.task_name, "resume-task", "タスク名は source_run_slug が一致するタスクから取ります");
-  assert_no_takt_mcp_activity(&harness, 0, 0);
+  assert_only_workflow_definition_reads(&harness, 0, 0);
 }
 
 #[tokio::test]
@@ -377,7 +607,7 @@ async fn get_run_detail_reports_logs_removed_for_a_cleaned_worktree() {
   assert_eq!(detail.goal_id, "g1");
   assert_eq!(detail.task_name, "implement");
   assert_eq!(detail.session_id, "sess-1");
-  assert_no_takt_mcp_activity(&harness, 0, 0);
+  assert_only_workflow_definition_reads(&harness, 0, 0);
 }
 
 #[tokio::test]
@@ -944,7 +1174,7 @@ async fn get_run_detail_resolves_a_completed_task_that_only_has_a_source_run_slu
   assert_eq!(detail.project, "takt-dash", "sourceRunSlug からプロジェクトを解決します");
   assert_eq!(detail.goal_id, "g1", "ゴールは sourceRunSlug が一致する完了タスクから取ります");
   assert_eq!(detail.task_name, "implement", "タスク名は sourceRunSlug が一致する完了タスクから取ります");
-  assert_no_takt_mcp_activity(&harness, processes_before, calls_before);
+  assert_only_workflow_definition_reads(&harness, processes_before, calls_before);
 
   let status =
     request_detail(&harness, "does-not-exist").await.expect_err("sourceRunSlug と異なる slug は解決しません");
@@ -1040,4 +1270,21 @@ async fn get_run_detail_fills_goal_id_from_a_listed_task_that_only_has_a_source_
   assert_eq!(detail.goal_id, "g1", "takt_list_tasks の完了タスクからゴールを補います");
   assert_eq!(detail.task_name, "implement", "タスク名を補います");
   assert_eq!(detail.status, RunStatus::Completed as i32);
+}
+
+#[tokio::test]
+async fn unreadable_full_history_keeps_the_readable_tail_and_its_progress() {
+  let mut state = mcp_state();
+  state["workflows"] = json!({WORKFLOW:{"initialStep":"head","steps":[{"name":"head","rules":[{"next":"tail"}]},{"name":"tail","rules":[{"next":"COMPLETE"}]}]}});
+  let harness = seeded_harness(state);
+  let fixture = run_files(&harness);
+  fixture.write_meta("run-1", &running_meta("tail", 2, WORKFLOW, "2026-11-13T09:00:00Z"));
+  std::fs::write(fixture.body_log("run-1"), "invalid JSON before display window\n").unwrap();
+  append_filler_records(&fixture, "run-1", 2 * 1024 * 1024);
+  fixture.append_records("run-1", &[step_complete_record("tail", "coder", 2, "2026-11-13T09:30:00Z")]);
+  let detail = request_detail(&harness, "run-1").await.unwrap();
+  assert_eq!(detail.step_logs.len(), 1);
+  assert_eq!(detail.step_logs[0].step_name, "tail");
+  assert_eq!(detail.progress.unwrap().nodes[1].log_index, Some(0));
+  assert_eq!(detail.status, RunStatus::Running as i32);
 }

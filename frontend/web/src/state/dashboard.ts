@@ -63,9 +63,6 @@ type RunView = {
   note: string;
   goalName?: string;
   currentStepName?: string;
-  stepNumber?: number;
-  totalSteps?: number;
-  iteration?: number;
   model?: string;
   elapsedSeconds?: number;
 };
@@ -188,9 +185,6 @@ export function toRunView(
     currentStepName:
       run.currentStepName !== undefined && run.currentStepName !== "" ? run.currentStepName : undefined,
     model: lastStep?.model !== undefined && lastStep.model !== "" ? lastStep.model : undefined,
-    stepNumber: run.currentStepNumber,
-    totalSteps: run.totalSteps,
-    iteration: run.currentIteration,
     elapsedSeconds,
   };
   const project = projectByKey?.get(projectKey(run.serverId, run.project));

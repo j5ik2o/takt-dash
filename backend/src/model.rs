@@ -285,6 +285,7 @@ pub struct ReportEntry {
 /// 実行中の run の情報。状態とステップの記録は run の保存場所から読みます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunEntry {
+  pub progress:                Option<crate::workflow_progress::WorkflowProgress>,
   pub run_slug:                String,
   pub session_id:              String,
   pub task_name:               TaskName,

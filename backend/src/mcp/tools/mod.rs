@@ -113,7 +113,7 @@ pub struct ToolSet<'a> {
   client:    &'a mut McpClient,
   cwd:       PathBuf,
   metrics:   ToolCallMetrics,
-  workflows: HashMap<String, Option<Vec<String>>>,
+  workflows: HashMap<String, Option<crate::workflow_progress::WorkflowDefinition>>,
 }
 
 /// ページ形式の一覧を全件集めるための上限。無限追従を避けます。

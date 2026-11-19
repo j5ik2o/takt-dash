@@ -83,6 +83,7 @@ pub enum RunLocation {
 /// `meta.json` から読む run の状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunMeta {
+  pub step_executions:   Option<Vec<crate::workflow_progress::StepExecution>>,
   pub workflow:          Option<String>,
   pub start_time:        Option<String>,
   pub status:            Option<String>,
@@ -105,6 +106,7 @@ pub enum MetaRead {
 /// 本体ログの追記読みの結果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyLogRead {
+  pub(crate) gaps:  Vec<usize>,
   /// 4 キーを除去し長さの上限を適用したレコード。
   pub records:      Vec<Value>,
   /// 解釈できずに飛ばした行の件数。
@@ -155,7 +157,7 @@ struct Cursor {
 }
 
 #[derive(Debug, Clone, Default)]
-struct TaskEntry {
+pub(crate) struct TaskEntry {
   run_slug:        Option<String>,
   source_run_slug: Option<String>,
   worktree_path:   Option<PathBuf>,
@@ -164,14 +166,80 @@ struct TaskEntry {
 /// `.takt` 配下の run を読む読み取り。読んだ位置はこのインスタンスの中だけで保持する。
 #[derive(Debug, Clone)]
 pub struct RunLogReader {
-  project_cwd:    PathBuf,
-  worktrees_root: PathBuf,
-  cursors:        BTreeMap<PathBuf, Cursor>,
-  initial_read:   InitialRead,
-  sessions:       BTreeMap<PathBuf, SessionFileState>,
+  #[cfg(test)]
+  pub(crate) evidence_reads:  std::cell::RefCell<Vec<(u64, u64)>>,
+  #[cfg(test)]
+  pub(crate) history_failure: Option<PathBuf>,
+  project_cwd:                PathBuf,
+  worktrees_root:             PathBuf,
+  cursors:                    BTreeMap<PathBuf, Cursor>,
+  initial_read:               InitialRead,
+  sessions:                   BTreeMap<PathBuf, SessionFileState>,
+  history_cursors:            BTreeMap<PathBuf, Cursor>,
+  history:                    crate::workflow_progress::ExecutionEvidence,
 }
 
 impl RunLogReader {
+  #[cfg(test)]
+  pub(crate) fn history_positions(&self) -> Vec<u64> {
+    self.history_cursors.values().map(|cursor| cursor.offset).collect()
+  }
+
+  /// 表示用の末尾ウィンドウと独立して進行証拠を読む。本文は保持せず、リンク先は
+  /// 今回の応答に含まれる完了ログだけに限定する。
+  pub(crate) fn read_execution_evidence(
+    &mut self,
+    run_dir: &Path,
+    logs: &[crate::model::StepLogEntry],
+  ) -> io::Result<crate::workflow_progress::ExecutionEvidence> {
+    let files = contained_dir(run_dir, Path::new(LOGS_DIRECTORY)).as_deref().map(body_log_files).unwrap_or_default();
+    let metadata = files.iter().map(fs::metadata).collect::<io::Result<Vec<_>>>()?;
+    let reset = files.len() != self.history_cursors.len()
+      || files.iter().zip(&metadata).any(|(path, meta)| {
+        self.history_cursors.get(path).is_none_or(|cursor| cursor.inode != meta.ino() || meta.len() < cursor.offset)
+      });
+    // 途中の I/O 失敗で位置だけが進むと証拠を失うため、全ファイルを読めてから更新する。
+    let mut cursors = if reset { BTreeMap::new() } else { self.history_cursors.clone() };
+    let mut evidence = if reset { Default::default() } else { self.history.clone() };
+    for (path, meta) in files.iter().zip(metadata) {
+      #[cfg(test)]
+      if self.history_failure.as_ref() == Some(path) {
+        return Err(io::Error::other("履歴補完の読取失敗を注入"));
+      }
+      let offset = cursors.get(path).map_or(0, |cursor: &Cursor| cursor.offset);
+      let mut file = File::open(path)?;
+      file.seek(SeekFrom::Start(offset))?;
+      let mut reader = BufReader::new(file);
+      let mut consumed = offset;
+      let mut line = Vec::new();
+      loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+          break;
+        }
+        if !line.ends_with(b"\n") {
+          break;
+        }
+        consumed += line.len() as u64;
+        if line.iter().all(u8::is_ascii_whitespace) {
+          continue;
+        }
+        match serde_json::from_slice::<Value>(&line) {
+          | Ok(record) if record.is_object() => evidence.ingest(&record, None),
+          | _ => evidence.history_complete = false,
+        }
+      }
+      #[cfg(test)]
+      self.evidence_reads.borrow_mut().push((offset, reader.stream_position()? - offset));
+      cursors.insert(path.clone(), Cursor { offset: consumed, inode: meta.ino() });
+    }
+    self.history_cursors = cursors;
+    self.history = evidence;
+    let mut result = self.history.clone();
+    result.bind_logs(logs);
+    Ok(result)
+  }
+
   /// プロジェクトの作業ディレクトリと worktree の置き場を指定して、本体ログを先頭から読む読み取りを
   /// 作る。
   pub fn new(project_cwd: PathBuf, worktrees_root: PathBuf) -> Self {
@@ -181,11 +249,17 @@ impl RunLogReader {
   /// 読み位置を持たない本体ログの読み始めを指定して読み取りを作る。
   pub fn with_initial_read(project_cwd: PathBuf, worktrees_root: PathBuf, initial_read: InitialRead) -> Self {
     RunLogReader {
+      #[cfg(test)]
+      evidence_reads: std::cell::RefCell::new(Vec::new()),
+      #[cfg(test)]
+      history_failure: None,
       project_cwd: normalize(&project_cwd),
       worktrees_root: normalize(&worktrees_root),
       cursors: BTreeMap::new(),
       initial_read,
       sessions: BTreeMap::new(),
+      history_cursors: BTreeMap::new(),
+      history: Default::default(),
     }
   }
 
@@ -196,10 +270,7 @@ impl RunLogReader {
       | Ok(entries) => entries,
       | Err(reason) => return RunLocation::Unreadable(reason),
     };
-    let entry = entries
-      .iter()
-      .find(|entry| entry.run_slug.as_deref() == Some(run_slug))
-      .or_else(|| entries.iter().find(|entry| entry.source_run_slug.as_deref() == Some(run_slug)));
+    let entry = task_for_run(&entries, run_slug);
     let Some(entry) = entry else {
       return RunLocation::NotListed;
     };
@@ -230,15 +301,18 @@ impl RunLogReader {
       | Ok(raw) => raw,
       | Err(error) => return MetaRead::Unreadable(format!("meta.json を解釈できません: {error}")),
     };
+    // 進行図の付加情報の破損で、既に読めた run 本体まで失わない。
+    let step_executions = crate::workflow_progress::execution_counts(raw.step_executions);
     MetaRead::Found(RunMeta {
-      workflow:          raw.workflow,
-      start_time:        raw.start_time,
-      status:            raw.status,
-      current_step:      raw.current_step,
+      step_executions,
+      workflow: raw.workflow,
+      start_time: raw.start_time,
+      status: raw.status,
+      current_step: raw.current_step,
       current_iteration: raw.current_iteration,
-      phase:             raw.phase,
-      updated_at:        raw.updated_at,
-      task:              raw.task,
+      phase: raw.phase,
+      updated_at: raw.updated_at,
+      task: raw.task,
     })
   }
 
@@ -252,6 +326,7 @@ impl RunLogReader {
     let missing = logs_dir.is_none();
     let mut records = Vec::new();
     let mut skipped = 0;
+    let mut gaps = Vec::new();
     let mut bytes_read = 0;
     let mut skipped_head = false;
     let mut restarted = false;
@@ -309,19 +384,22 @@ impl RunLogReader {
       let consumed_len = body.iter().rposition(|byte| *byte == b'\n').map_or(0, |last_newline| last_newline + 1);
 
       for line in body[..consumed_len].split(|byte| *byte == b'\n') {
-        if line.is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
           continue;
         }
         let Ok(text) = std::str::from_utf8(line) else {
           skipped += 1;
+          gaps.push(records.len());
           continue;
         };
         let Ok(mut record) = serde_json::from_str::<Value>(text) else {
           skipped += 1;
+          gaps.push(records.len());
           continue;
         };
         if !record.is_object() {
           skipped += 1;
+          gaps.push(records.len());
           continue;
         }
         sanitize(&mut record);
@@ -331,7 +409,7 @@ impl RunLogReader {
       self.cursors.insert(path, Cursor { offset: read_from + (line_start + consumed_len) as u64, inode });
     }
 
-    BodyLogRead { records, skipped, missing, bytes_read, skipped_head, restarted }
+    BodyLogRead { records, skipped, missing, bytes_read, skipped_head, restarted, gaps }
   }
 
   /// 本体ログの読み位置を1つでも持っているか。
@@ -439,18 +517,9 @@ impl RunLogReader {
 
   /// 対応表の項目から run の候補を、worktree 側・プロジェクト側の順に組み立てる。
   fn run_candidates(&self, entry: &TaskEntry, run_slug: &str) -> Result<Vec<PathBuf>, String> {
-    let mut bases = Vec::new();
-    if let Some(worktree_path) = &entry.worktree_path {
-      if !worktree_path.is_absolute() {
-        return Err(format!("worktree_path {} は絶対パスではありません", worktree_path.display()));
-      }
-      bases.push(normalize(worktree_path));
-    }
-    bases.push(self.project_cwd.clone());
-
-    let mut candidates = Vec::with_capacity(bases.len());
-    for base in bases {
-      let run_dir = normalize(&base.join(".takt").join("runs").join(run_slug));
+    let mut candidates = Vec::new();
+    for path in run_paths(entry, run_slug, &self.project_cwd)? {
+      let run_dir = normalize(&path);
       let allowed = run_dir.starts_with(&self.worktrees_root) || run_dir.starts_with(self.project_runs_root());
       if !allowed {
         return Err(format!("解決したパス {} は許可された置き場の外にあります", run_dir.display()));
@@ -749,6 +818,8 @@ fn has_run_data(run_dir: &Path) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct RawMeta {
+  #[serde(rename = "stepExecutions")]
+  step_executions:   Option<Value>,
   workflow:          Option<String>,
   #[serde(rename = "startTime")]
   start_time:        Option<String>,
@@ -763,7 +834,7 @@ struct RawMeta {
   task:              Option<String>,
 }
 
-fn parse_task_entries(text: &str) -> Result<Vec<TaskEntry>, String> {
+pub(crate) fn parse_task_entries(text: &str) -> Result<Vec<TaskEntry>, String> {
   let mut entries = Vec::new();
   let mut current: Option<TaskEntry> = None;
   let mut saw_tasks = false;
@@ -804,6 +875,25 @@ fn parse_task_entries(text: &str) -> Result<Vec<TaskEntry>, String> {
     return Err("tasks の一覧がありません".to_owned());
   }
   Ok(entries)
+}
+
+pub(crate) fn task_for_run<'a>(entries: &'a [TaskEntry], slug: &str) -> Option<&'a TaskEntry> {
+  entries
+    .iter()
+    .find(|entry| entry.run_slug.as_deref() == Some(slug))
+    .or_else(|| entries.iter().find(|entry| entry.source_run_slug.as_deref() == Some(slug)))
+}
+
+pub(crate) fn run_paths(entry: &TaskEntry, slug: &str, project: &Path) -> Result<Vec<PathBuf>, String> {
+  let mut bases = Vec::new();
+  if let Some(worktree) = &entry.worktree_path {
+    if !worktree.is_absolute() {
+      return Err(format!("worktree_path {} は絶対パスではありません", worktree.display()));
+    }
+    bases.push(worktree.clone());
+  }
+  bases.push(project.to_path_buf());
+  Ok(bases.into_iter().map(|base| base.join(".takt/runs").join(slug)).collect())
 }
 
 fn list_item_content(line: &str) -> Option<&str> {

@@ -16,6 +16,8 @@ import {
   PendingDecisionType,
   RunStatus,
   TaskStatus,
+  WorkflowNodeState,
+  workflowNodeStateFromJSON,
   connectionStateFromJSON,
   conversationSpeakerFromJSON,
   executionStatusFromJSON,
@@ -36,12 +38,19 @@ import {
   PENDING_DECISION_TYPE,
   RUN_STATUS,
   TASK_STATUS,
+  WORKFLOW_NODE_STATE,
   enumFromWire,
   enumFromWireOrUnrecognizedName,
 } from "../../src/state/proto-values.ts";
 import { DomainPrimitiveError } from "../../src/state/domain-primitives.ts";
 
 test("proto-values は生成コードの enum と一致する", () => {
+  for (const [name, value] of Object.entries(WORKFLOW_NODE_STATE)) {
+    const key = name === "UNRECOGNIZED" ? name : `WORKFLOW_NODE_STATE_${name}`;
+    assert.equal(WorkflowNodeState[key as keyof typeof WorkflowNodeState], value);
+    if (name === "UNRECOGNIZED") assert.throws(() => enumFromWire("WorkflowNodeState", key), DomainPrimitiveError);
+    else assert.equal(enumFromWire("WorkflowNodeState", key), workflowNodeStateFromJSON(key));
+  }
   assert.equal(GOAL_STATUS.CREATED, GoalStatus.GOAL_STATUS_CREATED);
   assert.equal(GOAL_STATUS.AWAITING_MERGE, GoalStatus.GOAL_STATUS_AWAITING_MERGE);
   assert.equal(GOAL_STATUS.COMPLETED, GoalStatus.GOAL_STATUS_COMPLETED);

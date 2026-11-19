@@ -10,7 +10,9 @@
 //! 定期読み取りの取っ手は本体ログを先頭から読みます。run 詳細の取っ手は
 //! [`InitialRead::Tail`] で末尾の一定量から読み始めます。そのため、本体ログが上限より大きい run を
 //! 初めて開いたときは、ステップの記録と現在ステップの実行回数が末尾の範囲に含まれる分だけに
-//! なります。読み位置を持った後は、どちらの取っ手も追記分だけを読みます。
+//! なります。表示ログは読み位置を持った後に追記分だけを読み、図の進行証拠は独立して
+//! 初回は先頭から、以降は独立した既読位置から読みます。追加の履歴読取が失敗した場合は、
+//! 取得済みの末尾の証拠を保持します。
 //!
 //! run 詳細の追記の配信（[`read_run_updates`]）のため、ログの行には通し番号を付け、行を初期化する
 //! たびに世代（epoch）を変えます。取っ手はプロジェクトで1つを共有するため、読み位置ではなく、
@@ -29,6 +31,9 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+
+#[cfg(test)]
+mod history_tests;
 
 use crate::{
   domain::{InstructionId, ReportFilename, RunSlug},
@@ -110,6 +115,7 @@ pub enum RunReadFailure {
 /// 1回の読み取りで得た run の状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunLogView {
+  pub evidence: crate::workflow_progress::ExecutionEvidence,
   pub status: RunStatus,
   pub workflow: Option<String>,
   pub current_step: Option<String>,
@@ -120,7 +126,7 @@ pub struct RunLogView {
   pub current_step_execution_count: Option<i32>,
   /// `meta.json` の task（タスクの本文）。
   pub task_text: Option<String>,
-  /// この読み取りでディスクから読んだ本体ログのバイト数。
+  /// 表示用 reader がこの読み取りで読んだ本体ログのバイト数。
   pub body_log_bytes_read: u64,
   completions: Vec<StepCompletion>,
   latest_log_update: Option<DateTime<Utc>>,
@@ -133,6 +139,7 @@ impl RunLogView {
   pub fn run_entry(&self, run_slug: &RunSlug, task: &TaskEntry) -> RunEntry {
     let started_at = self.started_at(Some(task));
     RunEntry {
+      progress: None,
       run_slug: run_slug.as_str().to_owned(),
       session_id: String::new(),
       task_name: task.name.clone(),
@@ -162,18 +169,7 @@ impl RunLogView {
 
   /// run 詳細のステップの記録。takt_get_run の summary と同じく本文は持ちません。
   pub fn step_logs(&self) -> Vec<StepLogEntry> {
-    self
-      .completions
-      .iter()
-      .map(|completion| StepLogEntry {
-        step_name: completion.step.clone(),
-        persona:   completion.persona.clone(),
-        status:    completion.status.clone(),
-        content:   String::new(),
-        timestamp: completion.timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-        iteration: completion.iteration,
-      })
-      .collect()
+    self.completions.iter().map(StepCompletion::step_log).collect()
   }
 
   /// `reports/` の下のレポートの一覧（名前と大きさ）。
@@ -227,6 +223,19 @@ struct StepCompletion {
   model:     Option<String>,
 }
 
+impl StepCompletion {
+  fn step_log(&self) -> StepLogEntry {
+    StepLogEntry {
+      step_name: self.step.clone(),
+      persona:   self.persona.clone(),
+      status:    self.status.clone(),
+      content:   String::new(),
+      timestamp: self.timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+      iteration: self.iteration,
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StepStart {
   step:            Option<String>,
@@ -243,6 +252,7 @@ struct StepStart {
 /// 1つの run の集計。本体ログの読み取り位置もここに持ちます。
 #[derive(Debug)]
 struct RunProgress {
+  evidence:      crate::workflow_progress::ExecutionEvidence,
   reader:        RunLogReader,
   /// 読み位置を持たない本体ログの読み始め。末尾から読む集計は、読み直しのときに自分で初期化します。
   initial_read:  InitialRead,
@@ -263,6 +273,7 @@ struct RunProgress {
 impl RunProgress {
   fn new(project_cwd: PathBuf, worktrees_root: PathBuf, initial_read: InitialRead) -> Self {
     RunProgress {
+      evidence: crate::workflow_progress::ExecutionEvidence::default(),
       reader: RunLogReader::with_initial_read(project_cwd, worktrees_root, initial_read),
       initial_read,
       active: false,
@@ -312,9 +323,22 @@ impl RunProgress {
     let phase = meta.phase.map(|value| meta_i32(value, "phase")).transpose()?;
 
     let body_log_bytes_read = self.ingest_body_log(&run_dir);
+    let evidence = if matches!(self.initial_read, InitialRead::Tail(_)) {
+      let logs = self.completions.iter().map(|completion| completion.step_log()).collect::<Vec<_>>();
+      match self.reader.read_execution_evidence(&run_dir, &logs) {
+        | Ok(evidence) => evidence,
+        | Err(error) => {
+          tracing::warn!(%error, "進行履歴を読めませんでした。取得済みの末尾を保持します。");
+          self.evidence.clone()
+        },
+      }
+    } else {
+      self.evidence.clone()
+    };
     let (current_step_started_at, current_step_execution_count) =
       self.current_step_start(meta.current_step.as_deref(), meta.current_iteration, meta.workflow.as_deref());
     Ok(RunLogView {
+      evidence: crate::workflow_progress::ExecutionEvidence { counts: meta.step_executions, ..evidence },
       status,
       workflow: meta.workflow,
       current_step: meta.current_step,
@@ -361,6 +385,7 @@ impl RunProgress {
       body_log.bytes_read += first_bytes;
     }
     if tail && body_log.restarted {
+      self.evidence = crate::workflow_progress::ExecutionEvidence::default();
       self.active = false;
       self.completions.clear();
       self.starts.clear();
@@ -368,10 +393,17 @@ impl RunProgress {
     }
     // 末尾から読み始めた場合は、範囲より前にある workflow_start を読めないため、ここから数える。
     if body_log.skipped_head {
+      self.evidence.history_complete = false;
       self.active = true;
     }
-    for record in &body_log.records {
+    for (index, record) in body_log.records.iter().enumerate() {
+      if body_log.gaps.contains(&index) {
+        self.evidence.history_complete = false;
+      }
       self.ingest(record);
+    }
+    if body_log.gaps.contains(&body_log.records.len()) {
+      self.evidence.history_complete = false;
     }
     body_log.bytes_read
   }
@@ -413,6 +445,7 @@ impl RunProgress {
     self.push_log_tail(record);
     match record.get("type").and_then(Value::as_str) {
       | Some("workflow_start") => {
+        self.evidence = crate::workflow_progress::ExecutionEvidence { history_complete: true, ..Default::default() };
         self.active = true;
         self.completions.clear();
         self.starts.clear();
@@ -424,6 +457,11 @@ impl RunProgress {
         self.completions.push(completion);
       },
       | _ => {},
+    }
+    if self.active {
+      let log_index = (record.get("type").and_then(Value::as_str) == Some("step_complete"))
+        .then(|| self.completions.len().saturating_sub(1));
+      self.evidence.ingest(record, log_index);
     }
   }
 

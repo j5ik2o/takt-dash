@@ -234,6 +234,7 @@ message Run {
   optional int32 total_steps = 16;                   // workflow の全ステップ数（不明なら省略）
   optional int32 current_iteration = 17;             // 現在の反復回数（不明なら省略）
   optional string current_step_name = 18;            // 今のステップ名（current_step_number と同じ step 集合。不明なら省略）
+  WorkflowProgress progress = 19;                    // backend が組み立てた進行図
 }
 
 // 判断待ちの項目を表す。
@@ -391,6 +392,69 @@ message GetRunDetailResponse {
   bool server_connected = 23;                   // 読み先の応答の有無
   google.protobuf.Timestamp server_last_read_at = 24;  // 読み先から最後に読めた時刻
   bool logs_removed = 25;                       // run の保存場所が残っていない（掃除済みの worktree など）
+  WorkflowProgress progress = 26;               // 定義と実行状態を結合した進行図
+}
+
+// 不明な回数はメッセージ自体を省き、既知のゼロと区別する。
+message StepExecutionCount { uint32 value = 1; }
+message WorkflowPosition { uint32 value = 1; }
+
+enum WorkflowNodeState {
+  WORKFLOW_NODE_STATE_UNKNOWN = 0;
+  WORKFLOW_NODE_STATE_UNVISITED = 1;
+  WORKFLOW_NODE_STATE_RUNNING = 2;
+  WORKFLOW_NODE_STATE_COMPLETED = 3;
+  WORKFLOW_NODE_STATE_SKIPPED = 4;
+  WORKFLOW_NODE_STATE_FAILED = 5;
+  WORKFLOW_NODE_STATE_ABORTED = 6;
+}
+
+message WorkflowRule { optional string next = 1; }
+message WorkflowDefinitionNode {
+  string name = 1;
+  string kind = 2;
+  repeated WorkflowRule rules = 3;
+}
+message WorkflowProgressNode {
+  string name = 1;
+  WorkflowNodeState state = 2;
+  StepExecutionCount execution_count = 3;
+  google.protobuf.Timestamp started_at = 4;
+  repeated string active_children = 5;
+  optional uint32 log_index = 6;
+}
+message WorkflowProgressEdge {
+  string source = 1;
+  string target = 2;
+  uint32 rule_index = 3;
+  StepExecutionCount traversals = 4;
+  bool backward = 5;
+}
+message WorkflowRepairLoop {
+  string source = 1;
+  string target = 2;
+  repeated string steps = 3;
+  StepExecutionCount execution_count = 4;
+}
+// 同じ始点・終点を持つ規則を backend で集約した接続状態。
+// 未設定は不明、false は既知の未通過、true は通過済み。
+message WorkflowProgressConnection {
+  string source = 1;
+  string target = 2;
+  optional bool traversed = 3;
+}
+message WorkflowProgress {
+  optional string initial_step = 1;
+  repeated WorkflowDefinitionNode definition = 2;
+  repeated WorkflowProgressNode nodes = 3;
+  repeated WorkflowProgressEdge edges = 4;
+  repeated string backbone = 5;
+  repeated WorkflowRepairLoop loops = 6;
+  repeated string other_steps = 7;
+  optional string current_step = 8;
+  optional string terminal = 9;
+  WorkflowPosition current_position = 10;
+  repeated WorkflowProgressConnection connections = 11;
 }
 
 // run のレポートまたは指示書の本文の取得を要求する。

@@ -1,7 +1,7 @@
 //! GetRunContent の本文を、run の保存場所か takt-mcp から読む。
 //!
-//! 本文は run の保存場所から読みます。保存場所の対応表に無い run と対応表を読めない run（SSH 越しに
-//! 扱うリモートのサーバーのプロジェクトなど）だけ、GetRunDetail と同じ条件で takt_get_run の
+//! SSH 接続の本文は対象サーバーから読み、同名のローカル保存場所を使いません。
+//! ローカルの対応表に無い run と対応表を読めない run も、GetRunDetail と同じ条件で takt_get_run の
 //! view report（レポート）か view instructions の instructionId 指定（指示書）から読みます。
 //! ローカルで読める run では takt-mcp を起動しません。
 
@@ -22,7 +22,12 @@ pub(super) async fn read_report_body(
   filename: &ReportFilename,
   max_bytes: u64,
 ) -> Result<ContentRead, RunReadFailure> {
-  match read_report_content(resolved.cwd.clone(), run_slug.clone(), filename.clone(), max_bytes).await {
+  let local = if resolved.client_config.is_ssh() {
+    Err(RunReadFailure::NotListed)
+  } else {
+    read_report_content(resolved.cwd.clone(), run_slug.clone(), filename.clone(), max_bytes).await
+  };
+  match local {
     | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
       match read_remote_report(resolved, run_slug, filename, max_bytes).await {
         | Ok(content) => Ok(ContentRead::Found(content)),
@@ -58,7 +63,12 @@ pub(super) async fn read_instruction_body(
   instruction_id: InstructionId,
   max_bytes: u64,
 ) -> Result<ContentRead, RunReadFailure> {
-  match run_progress::read_instruction_body(resolved.cwd.clone(), run_slug.clone(), instruction_id, max_bytes).await {
+  let local = if resolved.client_config.is_ssh() {
+    Err(RunReadFailure::NotListed)
+  } else {
+    run_progress::read_instruction_body(resolved.cwd.clone(), run_slug.clone(), instruction_id, max_bytes).await
+  };
+  match local {
     | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
       match read_remote_instruction(resolved, run_slug, instruction_id, max_bytes).await {
         | Ok(content) => Ok(ContentRead::Found(content)),

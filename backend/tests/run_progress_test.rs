@@ -189,6 +189,47 @@ fn execution_count_is_unset_without_any_step_start() {
 }
 
 #[test]
+fn returning_from_a_fix_updates_counts_on_the_same_reader_and_matches_a_fresh_read() {
+  let project = Project::new();
+  let fixture = project.fixture(&["r1"]);
+  fixture.write_meta("r1", &running_meta("gate", 7, WORKFLOW, "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    workflow_start_record(WORKFLOW),
+    step_start_record("gate", WORKFLOW, 7, "2026-11-13T09:01:00Z", &["gate"]),
+  ]);
+  let mut logs = project.logs();
+  let first = logs.read(&run_slug("r1")).expect("最初の gate を読めます");
+  assert_eq!(first.current_step.as_deref(), Some("gate"));
+  assert_eq!(first.current_step_execution_count, Some(1));
+
+  fixture.write_meta("r1", &running_meta("fix", 8, WORKFLOW, "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    step_complete_record("gate", "reviewer", 7, "2026-11-13T09:02:00Z"),
+    step_start_record("fix", WORKFLOW, 8, "2026-11-13T09:03:00Z", &["fix"]),
+  ]);
+  let fixing = logs.read(&run_slug("r1")).expect("修正中の状態を読めます");
+  assert_eq!(fixing.current_step.as_deref(), Some("fix"));
+  assert_eq!(fixing.current_step_execution_count, Some(1));
+
+  fixture.write_meta("r1", &running_meta("gate", 9, WORKFLOW, "2026-11-13T09:00:00Z"));
+  fixture.append_records("r1", &[
+    step_complete_record("fix", "coder", 8, "2026-11-13T09:04:00Z"),
+    step_start_record("gate", WORKFLOW, 9, "2026-11-13T09:05:00Z", &["gate"]),
+  ]);
+  let returned = logs.read(&run_slug("r1")).expect("修正から戻った gate を読めます");
+  let fresh = project.logs().read(&run_slug("r1")).expect("先頭からも読めます");
+  assert_eq!(returned.current_step.as_deref(), Some("gate"));
+  assert_eq!(returned.current_iteration, Some(9));
+  assert_eq!(returned.current_step_execution_count, Some(2));
+  assert_eq!(returned.current_step_started_at, Some(time("2026-11-13T09:05:00Z")));
+  assert_eq!(returned.current_step_execution_count, fresh.current_step_execution_count);
+  assert_eq!(returned.current_step_started_at, fresh.current_step_started_at);
+
+  let unchanged = logs.read(&run_slug("r1")).expect("変更が無い状態も読めます");
+  assert_eq!(unchanged.current_step_execution_count, Some(2), "再取得だけでは回数を増やしません");
+}
+
+#[test]
 fn run_entry_uses_the_meta_start_time_and_falls_back_to_the_task_start() {
   let project = Project::new();
   let fixture = project.fixture(&["r1"]);

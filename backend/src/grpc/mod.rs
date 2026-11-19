@@ -2,11 +2,11 @@
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
-//! GetRunDetail は状態ストアと run の保存場所から組み立て、ローカルで保存場所を読めた run では
-//! takt-mcp を起動しません。保存場所の対応表に無い run と対応表を読めない run（SSH 越しに扱う
-//! リモートのサーバーのプロジェクトなど）だけ、要求時に takt-mcp の takt_get_run を呼びます。
-//! GetRunContent はレポートか指示書の本文を1件だけ読みます。本文は、GetRunDetail と同じ
-//! 条件の run だけ takt_get_run から読みます。GetConversation は保存領域の manager
+//! GetRunDetail は状態ストアと run の保存場所から組み立て、進行図の定義を takt_get_workflow
+//! から読みます。SSH 接続の run は対象サーバーの takt_get_run を使い、同名のローカル
+//! 保存場所を使いません。ローカルの対応表に無い run と対応表を読めない run も takt_get_run
+//! を呼びます。 GetRunContent はレポートか指示書の本文を1件だけ読みます。本文は、GetRunDetail
+//! と同じ 条件の run だけ takt_get_run から読みます。GetConversation は保存領域の manager
 //! の会話を読みます。GetGoals・ GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
 //! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
 //! 全件を返し、定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
@@ -18,6 +18,7 @@ pub mod mapping;
 mod run_content;
 mod run_detail;
 mod run_updates;
+mod workflow_progress;
 
 use std::{
   path::PathBuf,
@@ -159,7 +160,7 @@ impl TaktDashServiceImpl {
   /// 同じレジストリから同じプロジェクトの子プロセスを取得します。
   ///
   /// GetRunDetail と GetRunContent は要求のたびに設定のパスからプロジェクトの cwd を解決し、
-  /// run の保存場所だけを読みます。takt-mcp の子プロセスは起動しません。
+  /// run の保存場所を読みます。GetRunDetail は図の定義を takt_get_workflow から取得します。
   pub fn new(deps: ServiceDeps) -> Self {
     Self::with_clock(deps, Arc::new(Utc::now))
   }
@@ -209,6 +210,7 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
   for view in views {
     for run in &view.runs {
       runs.push(Run {
+        progress:                run.progress.as_ref().map(workflow_progress::progress),
         run_slug:                run.run_slug.clone(),
         session_id:              run.session_id.clone(),
         server_id:               view.server_id.clone(),
@@ -446,9 +448,14 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .or_else(|| target.view.tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())))
       .cloned();
     let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
-    let read = read_run(&run_logs, run_slug.clone()).await;
-    let instructions =
-      read_run_instructions(target.resolved.cwd.clone(), run_slug.clone()).await.map_err(run_read_failure_status)?;
+    let (read, instructions) = if target.resolved.client_config.is_ssh() {
+      (Err(RunReadFailure::NotListed), Vec::new())
+    } else {
+      (
+        read_run(&run_logs, run_slug.clone()).await,
+        read_run_instructions(target.resolved.cwd.clone(), run_slug.clone()).await.map_err(run_read_failure_status)?,
+      )
+    };
     let goal_id = stored_run
       .as_ref()
       .and_then(|run| run.goal_id.clone())
@@ -481,6 +488,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
         );
         let last_log_at = run_detail::fill_from_run_log(&mut response, &view, stored_task.as_ref());
         response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
+        run_detail::fill_progress(&mut response, &target.resolved, &view.evidence).await;
       },
       // 掃除済みの worktree など、run の保存場所が残っていない run はエラーにせず、状態ストアの値と
       // ログが残っていないことを返します。
@@ -501,8 +509,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
         response.last_log_at = optional_timestamp(last_log_at);
         response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
       },
-      // 保存場所の対応表に無い run と、対応表を読めない run（SSH 越しに扱うリモートのサーバーの
-      // プロジェクトなど）は takt_get_run から読みます。takt_get_run でも読めなければ、保存場所の
+      // SSH 接続、およびローカルの対応表に無い run と対応表を読めない run は
+      // takt_get_run から読みます。takt_get_run でも読めなければ、保存場所の
       // 読み取りの失敗を返します。
       | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
         let last_log_at =

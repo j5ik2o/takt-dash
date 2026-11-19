@@ -498,6 +498,69 @@ export function conversationSpeakerToJSON(object: ConversationSpeaker): string {
   }
 }
 
+export enum WorkflowNodeState {
+  WORKFLOW_NODE_STATE_UNKNOWN = 0,
+  WORKFLOW_NODE_STATE_UNVISITED = 1,
+  WORKFLOW_NODE_STATE_RUNNING = 2,
+  WORKFLOW_NODE_STATE_COMPLETED = 3,
+  WORKFLOW_NODE_STATE_SKIPPED = 4,
+  WORKFLOW_NODE_STATE_FAILED = 5,
+  WORKFLOW_NODE_STATE_ABORTED = 6,
+  UNRECOGNIZED = -1,
+}
+
+export function workflowNodeStateFromJSON(object: any): WorkflowNodeState {
+  switch (object) {
+    case 0:
+    case "WORKFLOW_NODE_STATE_UNKNOWN":
+      return WorkflowNodeState.WORKFLOW_NODE_STATE_UNKNOWN;
+    case 1:
+    case "WORKFLOW_NODE_STATE_UNVISITED":
+      return WorkflowNodeState.WORKFLOW_NODE_STATE_UNVISITED;
+    case 2:
+    case "WORKFLOW_NODE_STATE_RUNNING":
+      return WorkflowNodeState.WORKFLOW_NODE_STATE_RUNNING;
+    case 3:
+    case "WORKFLOW_NODE_STATE_COMPLETED":
+      return WorkflowNodeState.WORKFLOW_NODE_STATE_COMPLETED;
+    case 4:
+    case "WORKFLOW_NODE_STATE_SKIPPED":
+      return WorkflowNodeState.WORKFLOW_NODE_STATE_SKIPPED;
+    case 5:
+    case "WORKFLOW_NODE_STATE_FAILED":
+      return WorkflowNodeState.WORKFLOW_NODE_STATE_FAILED;
+    case 6:
+    case "WORKFLOW_NODE_STATE_ABORTED":
+      return WorkflowNodeState.WORKFLOW_NODE_STATE_ABORTED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return WorkflowNodeState.UNRECOGNIZED;
+  }
+}
+
+export function workflowNodeStateToJSON(object: WorkflowNodeState): string {
+  switch (object) {
+    case WorkflowNodeState.WORKFLOW_NODE_STATE_UNKNOWN:
+      return "WORKFLOW_NODE_STATE_UNKNOWN";
+    case WorkflowNodeState.WORKFLOW_NODE_STATE_UNVISITED:
+      return "WORKFLOW_NODE_STATE_UNVISITED";
+    case WorkflowNodeState.WORKFLOW_NODE_STATE_RUNNING:
+      return "WORKFLOW_NODE_STATE_RUNNING";
+    case WorkflowNodeState.WORKFLOW_NODE_STATE_COMPLETED:
+      return "WORKFLOW_NODE_STATE_COMPLETED";
+    case WorkflowNodeState.WORKFLOW_NODE_STATE_SKIPPED:
+      return "WORKFLOW_NODE_STATE_SKIPPED";
+    case WorkflowNodeState.WORKFLOW_NODE_STATE_FAILED:
+      return "WORKFLOW_NODE_STATE_FAILED";
+    case WorkflowNodeState.WORKFLOW_NODE_STATE_ABORTED:
+      return "WORKFLOW_NODE_STATE_ABORTED";
+    case WorkflowNodeState.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 /** operation_request への回答の種類を表す。 */
 export enum OperationAnswerReport {
   OPERATION_ANSWER_REPORT_UNSPECIFIED = 0,
@@ -699,7 +762,11 @@ export interface Run {
     | number
     | undefined;
   /** 今のステップ名（current_step_number と同じ step 集合。不明なら省略） */
-  currentStepName?: string | undefined;
+  currentStepName?:
+    | string
+    | undefined;
+  /** backend が組み立てた進行図 */
+  progress: WorkflowProgress | undefined;
 }
 
 /** 判断待ちの項目を表す。 */
@@ -979,6 +1046,75 @@ export interface GetRunDetailResponse {
     | undefined;
   /** run の保存場所が残っていない（掃除済みの worktree など） */
   logsRemoved: boolean;
+  /** 定義と実行状態を結合した進行図 */
+  progress: WorkflowProgress | undefined;
+}
+
+/** 不明な回数はメッセージ自体を省き、既知のゼロと区別する。 */
+export interface StepExecutionCount {
+  value: number;
+}
+
+export interface WorkflowPosition {
+  value: number;
+}
+
+export interface WorkflowRule {
+  next?: string | undefined;
+}
+
+export interface WorkflowDefinitionNode {
+  name: string;
+  kind: string;
+  rules: WorkflowRule[];
+}
+
+export interface WorkflowProgressNode {
+  name: string;
+  state: WorkflowNodeState;
+  executionCount: StepExecutionCount | undefined;
+  startedAt: Date | undefined;
+  activeChildren: string[];
+  logIndex?: number | undefined;
+}
+
+export interface WorkflowProgressEdge {
+  source: string;
+  target: string;
+  ruleIndex: number;
+  traversals: StepExecutionCount | undefined;
+  backward: boolean;
+}
+
+export interface WorkflowRepairLoop {
+  source: string;
+  target: string;
+  steps: string[];
+  executionCount: StepExecutionCount | undefined;
+}
+
+/**
+ * 同じ始点・終点を持つ規則を backend で集約した接続状態。
+ * 未設定は不明、false は既知の未通過、true は通過済み。
+ */
+export interface WorkflowProgressConnection {
+  source: string;
+  target: string;
+  traversed?: boolean | undefined;
+}
+
+export interface WorkflowProgress {
+  initialStep?: string | undefined;
+  definition: WorkflowDefinitionNode[];
+  nodes: WorkflowProgressNode[];
+  edges: WorkflowProgressEdge[];
+  backbone: string[];
+  loops: WorkflowRepairLoop[];
+  otherSteps: string[];
+  currentStep?: string | undefined;
+  terminal?: string | undefined;
+  currentPosition: WorkflowPosition | undefined;
+  connections: WorkflowProgressConnection[];
 }
 
 /** run のレポートまたは指示書の本文の取得を要求する。 */
@@ -2488,6 +2624,7 @@ function createBaseRun(): Run {
     totalSteps: undefined,
     currentIteration: undefined,
     currentStepName: undefined,
+    progress: undefined,
   };
 }
 
@@ -2546,6 +2683,9 @@ export const Run: MessageFns<Run> = {
     }
     if (message.currentStepName !== undefined) {
       writer.uint32(146).string(message.currentStepName);
+    }
+    if (message.progress !== undefined) {
+      WorkflowProgress.encode(message.progress, writer.uint32(154).fork()).join();
     }
     return writer;
   },
@@ -2707,6 +2847,14 @@ export const Run: MessageFns<Run> = {
             message.currentStepName = reader.string();
             continue;
           }
+          case 19: {
+            if (tag !== 154) {
+              break;
+            }
+
+            message.progress = WorkflowProgress.decode(reader, reader.uint32());
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -2795,6 +2943,7 @@ export const Run: MessageFns<Run> = {
         : isSet(object.current_step_name)
         ? globalThis.String(object.current_step_name)
         : undefined,
+      progress: isSet(object.progress) ? WorkflowProgress.fromJSON(object.progress) : undefined,
     };
   },
 
@@ -2854,6 +3003,9 @@ export const Run: MessageFns<Run> = {
     if (message.currentStepName !== undefined) {
       obj.currentStepName = message.currentStepName;
     }
+    if (message.progress !== undefined) {
+      obj.progress = WorkflowProgress.toJSON(message.progress);
+    }
     return obj;
   },
 
@@ -2880,6 +3032,9 @@ export const Run: MessageFns<Run> = {
     message.totalSteps = object.totalSteps ?? undefined;
     message.currentIteration = object.currentIteration ?? undefined;
     message.currentStepName = object.currentStepName ?? undefined;
+    message.progress = (object.progress !== undefined && object.progress !== null)
+      ? WorkflowProgress.fromPartial(object.progress)
+      : undefined;
     return message;
   },
 };
@@ -4872,6 +5027,7 @@ function createBaseGetRunDetailResponse(): GetRunDetailResponse {
     serverConnected: false,
     serverLastReadAt: undefined,
     logsRemoved: false,
+    progress: undefined,
   };
 }
 
@@ -4951,6 +5107,9 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
     }
     if (message.logsRemoved !== false) {
       writer.uint32(200).bool(message.logsRemoved);
+    }
+    if (message.progress !== undefined) {
+      WorkflowProgress.encode(message.progress, writer.uint32(210).fork()).join();
     }
     return writer;
   },
@@ -5168,6 +5327,14 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
             message.logsRemoved = reader.bool();
             continue;
           }
+          case 26: {
+            if (tag !== 210) {
+              break;
+            }
+
+            message.progress = WorkflowProgress.decode(reader, reader.uint32());
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -5283,6 +5450,7 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
         : isSet(object.logs_removed)
         ? globalThis.Boolean(object.logs_removed)
         : false,
+      progress: isSet(object.progress) ? WorkflowProgress.fromJSON(object.progress) : undefined,
     };
   },
 
@@ -5363,6 +5531,9 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
     if (message.logsRemoved !== false) {
       obj.logsRemoved = message.logsRemoved;
     }
+    if (message.progress !== undefined) {
+      obj.progress = WorkflowProgress.toJSON(message.progress);
+    }
     return obj;
   },
 
@@ -5396,6 +5567,1119 @@ export const GetRunDetailResponse: MessageFns<GetRunDetailResponse> = {
     message.serverConnected = object.serverConnected ?? false;
     message.serverLastReadAt = object.serverLastReadAt ?? undefined;
     message.logsRemoved = object.logsRemoved ?? false;
+    message.progress = (object.progress !== undefined && object.progress !== null)
+      ? WorkflowProgress.fromPartial(object.progress)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseStepExecutionCount(): StepExecutionCount {
+  return { value: 0 };
+}
+
+export const StepExecutionCount: MessageFns<StepExecutionCount> = {
+  encode(message: StepExecutionCount, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.value !== 0) {
+      writer.uint32(8).uint32(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): StepExecutionCount {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseStepExecutionCount();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.value = reader.uint32();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): StepExecutionCount {
+    return { value: isSet(object.value) ? globalThis.Number(object.value) : 0 };
+  },
+
+  toJSON(message: StepExecutionCount): unknown {
+    const obj: any = {};
+    if (message.value !== 0) {
+      obj.value = Math.round(message.value);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<StepExecutionCount>, I>>(base?: I): StepExecutionCount {
+    return StepExecutionCount.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<StepExecutionCount>, I>>(object: I): StepExecutionCount {
+    const message = createBaseStepExecutionCount();
+    message.value = object.value ?? 0;
+    return message;
+  },
+};
+
+function createBaseWorkflowPosition(): WorkflowPosition {
+  return { value: 0 };
+}
+
+export const WorkflowPosition: MessageFns<WorkflowPosition> = {
+  encode(message: WorkflowPosition, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.value !== 0) {
+      writer.uint32(8).uint32(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WorkflowPosition {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseWorkflowPosition();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.value = reader.uint32();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): WorkflowPosition {
+    return { value: isSet(object.value) ? globalThis.Number(object.value) : 0 };
+  },
+
+  toJSON(message: WorkflowPosition): unknown {
+    const obj: any = {};
+    if (message.value !== 0) {
+      obj.value = Math.round(message.value);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WorkflowPosition>, I>>(base?: I): WorkflowPosition {
+    return WorkflowPosition.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WorkflowPosition>, I>>(object: I): WorkflowPosition {
+    const message = createBaseWorkflowPosition();
+    message.value = object.value ?? 0;
+    return message;
+  },
+};
+
+function createBaseWorkflowRule(): WorkflowRule {
+  return { next: undefined };
+}
+
+export const WorkflowRule: MessageFns<WorkflowRule> = {
+  encode(message: WorkflowRule, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.next !== undefined) {
+      writer.uint32(10).string(message.next);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WorkflowRule {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseWorkflowRule();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.next = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): WorkflowRule {
+    return { next: isSet(object.next) ? globalThis.String(object.next) : undefined };
+  },
+
+  toJSON(message: WorkflowRule): unknown {
+    const obj: any = {};
+    if (message.next !== undefined) {
+      obj.next = message.next;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WorkflowRule>, I>>(base?: I): WorkflowRule {
+    return WorkflowRule.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WorkflowRule>, I>>(object: I): WorkflowRule {
+    const message = createBaseWorkflowRule();
+    message.next = object.next ?? undefined;
+    return message;
+  },
+};
+
+function createBaseWorkflowDefinitionNode(): WorkflowDefinitionNode {
+  return { name: "", kind: "", rules: [] };
+}
+
+export const WorkflowDefinitionNode: MessageFns<WorkflowDefinitionNode> = {
+  encode(message: WorkflowDefinitionNode, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.kind !== "") {
+      writer.uint32(18).string(message.kind);
+    }
+    for (const v of message.rules) {
+      WorkflowRule.encode(v!, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WorkflowDefinitionNode {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseWorkflowDefinitionNode();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.name = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.kind = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.rules.push(WorkflowRule.decode(reader, reader.uint32()));
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): WorkflowDefinitionNode {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      kind: isSet(object.kind) ? globalThis.String(object.kind) : "",
+      rules: globalThis.Array.isArray(object?.rules) ? object.rules.map((e: any) => WorkflowRule.fromJSON(e)) : [],
+    };
+  },
+
+  toJSON(message: WorkflowDefinitionNode): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.kind !== "") {
+      obj.kind = message.kind;
+    }
+    if (message.rules?.length) {
+      obj.rules = message.rules.map((e) => WorkflowRule.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WorkflowDefinitionNode>, I>>(base?: I): WorkflowDefinitionNode {
+    return WorkflowDefinitionNode.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WorkflowDefinitionNode>, I>>(object: I): WorkflowDefinitionNode {
+    const message = createBaseWorkflowDefinitionNode();
+    message.name = object.name ?? "";
+    message.kind = object.kind ?? "";
+    message.rules = object.rules?.map((e) => WorkflowRule.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseWorkflowProgressNode(): WorkflowProgressNode {
+  return {
+    name: "",
+    state: 0,
+    executionCount: undefined,
+    startedAt: undefined,
+    activeChildren: [],
+    logIndex: undefined,
+  };
+}
+
+export const WorkflowProgressNode: MessageFns<WorkflowProgressNode> = {
+  encode(message: WorkflowProgressNode, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.state !== 0) {
+      writer.uint32(16).int32(message.state);
+    }
+    if (message.executionCount !== undefined) {
+      StepExecutionCount.encode(message.executionCount, writer.uint32(26).fork()).join();
+    }
+    if (message.startedAt !== undefined) {
+      Timestamp.encode(toTimestamp(message.startedAt), writer.uint32(34).fork()).join();
+    }
+    for (const v of message.activeChildren) {
+      writer.uint32(42).string(v!);
+    }
+    if (message.logIndex !== undefined) {
+      writer.uint32(48).uint32(message.logIndex);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WorkflowProgressNode {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseWorkflowProgressNode();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.name = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 16) {
+              break;
+            }
+
+            message.state = reader.int32() as any;
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.executionCount = StepExecutionCount.decode(reader, reader.uint32());
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.startedAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.activeChildren.push(reader.string());
+            continue;
+          }
+          case 6: {
+            if (tag !== 48) {
+              break;
+            }
+
+            message.logIndex = reader.uint32();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): WorkflowProgressNode {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      state: isSet(object.state) ? workflowNodeStateFromJSON(object.state) : 0,
+      executionCount: isSet(object.executionCount)
+        ? StepExecutionCount.fromJSON(object.executionCount)
+        : isSet(object.execution_count)
+        ? StepExecutionCount.fromJSON(object.execution_count)
+        : undefined,
+      startedAt: isSet(object.startedAt)
+        ? fromJsonTimestamp(object.startedAt)
+        : isSet(object.started_at)
+        ? fromJsonTimestamp(object.started_at)
+        : undefined,
+      activeChildren: globalThis.Array.isArray(object?.activeChildren)
+        ? object.activeChildren.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.active_children)
+        ? object.active_children.map((e: any) => globalThis.String(e))
+        : [],
+      logIndex: isSet(object.logIndex)
+        ? globalThis.Number(object.logIndex)
+        : isSet(object.log_index)
+        ? globalThis.Number(object.log_index)
+        : undefined,
+    };
+  },
+
+  toJSON(message: WorkflowProgressNode): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.state !== 0) {
+      obj.state = workflowNodeStateToJSON(message.state);
+    }
+    if (message.executionCount !== undefined) {
+      obj.executionCount = StepExecutionCount.toJSON(message.executionCount);
+    }
+    if (message.startedAt !== undefined) {
+      obj.startedAt = message.startedAt.toISOString();
+    }
+    if (message.activeChildren?.length) {
+      obj.activeChildren = message.activeChildren;
+    }
+    if (message.logIndex !== undefined) {
+      obj.logIndex = Math.round(message.logIndex);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WorkflowProgressNode>, I>>(base?: I): WorkflowProgressNode {
+    return WorkflowProgressNode.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WorkflowProgressNode>, I>>(object: I): WorkflowProgressNode {
+    const message = createBaseWorkflowProgressNode();
+    message.name = object.name ?? "";
+    message.state = object.state ?? 0;
+    message.executionCount = (object.executionCount !== undefined && object.executionCount !== null)
+      ? StepExecutionCount.fromPartial(object.executionCount)
+      : undefined;
+    message.startedAt = object.startedAt ?? undefined;
+    message.activeChildren = object.activeChildren?.map((e) => e) || [];
+    message.logIndex = object.logIndex ?? undefined;
+    return message;
+  },
+};
+
+function createBaseWorkflowProgressEdge(): WorkflowProgressEdge {
+  return { source: "", target: "", ruleIndex: 0, traversals: undefined, backward: false };
+}
+
+export const WorkflowProgressEdge: MessageFns<WorkflowProgressEdge> = {
+  encode(message: WorkflowProgressEdge, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.source !== "") {
+      writer.uint32(10).string(message.source);
+    }
+    if (message.target !== "") {
+      writer.uint32(18).string(message.target);
+    }
+    if (message.ruleIndex !== 0) {
+      writer.uint32(24).uint32(message.ruleIndex);
+    }
+    if (message.traversals !== undefined) {
+      StepExecutionCount.encode(message.traversals, writer.uint32(34).fork()).join();
+    }
+    if (message.backward !== false) {
+      writer.uint32(40).bool(message.backward);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WorkflowProgressEdge {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseWorkflowProgressEdge();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.source = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.target = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.ruleIndex = reader.uint32();
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.traversals = StepExecutionCount.decode(reader, reader.uint32());
+            continue;
+          }
+          case 5: {
+            if (tag !== 40) {
+              break;
+            }
+
+            message.backward = reader.bool();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): WorkflowProgressEdge {
+    return {
+      source: isSet(object.source) ? globalThis.String(object.source) : "",
+      target: isSet(object.target) ? globalThis.String(object.target) : "",
+      ruleIndex: isSet(object.ruleIndex)
+        ? globalThis.Number(object.ruleIndex)
+        : isSet(object.rule_index)
+        ? globalThis.Number(object.rule_index)
+        : 0,
+      traversals: isSet(object.traversals) ? StepExecutionCount.fromJSON(object.traversals) : undefined,
+      backward: isSet(object.backward) ? globalThis.Boolean(object.backward) : false,
+    };
+  },
+
+  toJSON(message: WorkflowProgressEdge): unknown {
+    const obj: any = {};
+    if (message.source !== "") {
+      obj.source = message.source;
+    }
+    if (message.target !== "") {
+      obj.target = message.target;
+    }
+    if (message.ruleIndex !== 0) {
+      obj.ruleIndex = Math.round(message.ruleIndex);
+    }
+    if (message.traversals !== undefined) {
+      obj.traversals = StepExecutionCount.toJSON(message.traversals);
+    }
+    if (message.backward !== false) {
+      obj.backward = message.backward;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WorkflowProgressEdge>, I>>(base?: I): WorkflowProgressEdge {
+    return WorkflowProgressEdge.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WorkflowProgressEdge>, I>>(object: I): WorkflowProgressEdge {
+    const message = createBaseWorkflowProgressEdge();
+    message.source = object.source ?? "";
+    message.target = object.target ?? "";
+    message.ruleIndex = object.ruleIndex ?? 0;
+    message.traversals = (object.traversals !== undefined && object.traversals !== null)
+      ? StepExecutionCount.fromPartial(object.traversals)
+      : undefined;
+    message.backward = object.backward ?? false;
+    return message;
+  },
+};
+
+function createBaseWorkflowRepairLoop(): WorkflowRepairLoop {
+  return { source: "", target: "", steps: [], executionCount: undefined };
+}
+
+export const WorkflowRepairLoop: MessageFns<WorkflowRepairLoop> = {
+  encode(message: WorkflowRepairLoop, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.source !== "") {
+      writer.uint32(10).string(message.source);
+    }
+    if (message.target !== "") {
+      writer.uint32(18).string(message.target);
+    }
+    for (const v of message.steps) {
+      writer.uint32(26).string(v!);
+    }
+    if (message.executionCount !== undefined) {
+      StepExecutionCount.encode(message.executionCount, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WorkflowRepairLoop {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseWorkflowRepairLoop();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.source = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.target = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.steps.push(reader.string());
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.executionCount = StepExecutionCount.decode(reader, reader.uint32());
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): WorkflowRepairLoop {
+    return {
+      source: isSet(object.source) ? globalThis.String(object.source) : "",
+      target: isSet(object.target) ? globalThis.String(object.target) : "",
+      steps: globalThis.Array.isArray(object?.steps) ? object.steps.map((e: any) => globalThis.String(e)) : [],
+      executionCount: isSet(object.executionCount)
+        ? StepExecutionCount.fromJSON(object.executionCount)
+        : isSet(object.execution_count)
+        ? StepExecutionCount.fromJSON(object.execution_count)
+        : undefined,
+    };
+  },
+
+  toJSON(message: WorkflowRepairLoop): unknown {
+    const obj: any = {};
+    if (message.source !== "") {
+      obj.source = message.source;
+    }
+    if (message.target !== "") {
+      obj.target = message.target;
+    }
+    if (message.steps?.length) {
+      obj.steps = message.steps;
+    }
+    if (message.executionCount !== undefined) {
+      obj.executionCount = StepExecutionCount.toJSON(message.executionCount);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WorkflowRepairLoop>, I>>(base?: I): WorkflowRepairLoop {
+    return WorkflowRepairLoop.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WorkflowRepairLoop>, I>>(object: I): WorkflowRepairLoop {
+    const message = createBaseWorkflowRepairLoop();
+    message.source = object.source ?? "";
+    message.target = object.target ?? "";
+    message.steps = object.steps?.map((e) => e) || [];
+    message.executionCount = (object.executionCount !== undefined && object.executionCount !== null)
+      ? StepExecutionCount.fromPartial(object.executionCount)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseWorkflowProgressConnection(): WorkflowProgressConnection {
+  return { source: "", target: "", traversed: undefined };
+}
+
+export const WorkflowProgressConnection: MessageFns<WorkflowProgressConnection> = {
+  encode(message: WorkflowProgressConnection, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.source !== "") {
+      writer.uint32(10).string(message.source);
+    }
+    if (message.target !== "") {
+      writer.uint32(18).string(message.target);
+    }
+    if (message.traversed !== undefined) {
+      writer.uint32(24).bool(message.traversed);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WorkflowProgressConnection {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseWorkflowProgressConnection();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.source = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.target = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.traversed = reader.bool();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): WorkflowProgressConnection {
+    return {
+      source: isSet(object.source) ? globalThis.String(object.source) : "",
+      target: isSet(object.target) ? globalThis.String(object.target) : "",
+      traversed: isSet(object.traversed) ? globalThis.Boolean(object.traversed) : undefined,
+    };
+  },
+
+  toJSON(message: WorkflowProgressConnection): unknown {
+    const obj: any = {};
+    if (message.source !== "") {
+      obj.source = message.source;
+    }
+    if (message.target !== "") {
+      obj.target = message.target;
+    }
+    if (message.traversed !== undefined) {
+      obj.traversed = message.traversed;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WorkflowProgressConnection>, I>>(base?: I): WorkflowProgressConnection {
+    return WorkflowProgressConnection.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WorkflowProgressConnection>, I>>(object: I): WorkflowProgressConnection {
+    const message = createBaseWorkflowProgressConnection();
+    message.source = object.source ?? "";
+    message.target = object.target ?? "";
+    message.traversed = object.traversed ?? undefined;
+    return message;
+  },
+};
+
+function createBaseWorkflowProgress(): WorkflowProgress {
+  return {
+    initialStep: undefined,
+    definition: [],
+    nodes: [],
+    edges: [],
+    backbone: [],
+    loops: [],
+    otherSteps: [],
+    currentStep: undefined,
+    terminal: undefined,
+    currentPosition: undefined,
+    connections: [],
+  };
+}
+
+export const WorkflowProgress: MessageFns<WorkflowProgress> = {
+  encode(message: WorkflowProgress, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.initialStep !== undefined) {
+      writer.uint32(10).string(message.initialStep);
+    }
+    for (const v of message.definition) {
+      WorkflowDefinitionNode.encode(v!, writer.uint32(18).fork()).join();
+    }
+    for (const v of message.nodes) {
+      WorkflowProgressNode.encode(v!, writer.uint32(26).fork()).join();
+    }
+    for (const v of message.edges) {
+      WorkflowProgressEdge.encode(v!, writer.uint32(34).fork()).join();
+    }
+    for (const v of message.backbone) {
+      writer.uint32(42).string(v!);
+    }
+    for (const v of message.loops) {
+      WorkflowRepairLoop.encode(v!, writer.uint32(50).fork()).join();
+    }
+    for (const v of message.otherSteps) {
+      writer.uint32(58).string(v!);
+    }
+    if (message.currentStep !== undefined) {
+      writer.uint32(66).string(message.currentStep);
+    }
+    if (message.terminal !== undefined) {
+      writer.uint32(74).string(message.terminal);
+    }
+    if (message.currentPosition !== undefined) {
+      WorkflowPosition.encode(message.currentPosition, writer.uint32(82).fork()).join();
+    }
+    for (const v of message.connections) {
+      WorkflowProgressConnection.encode(v!, writer.uint32(90).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): WorkflowProgress {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseWorkflowProgress();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.initialStep = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.definition.push(WorkflowDefinitionNode.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.nodes.push(WorkflowProgressNode.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.edges.push(WorkflowProgressEdge.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 5: {
+            if (tag !== 42) {
+              break;
+            }
+
+            message.backbone.push(reader.string());
+            continue;
+          }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.loops.push(WorkflowRepairLoop.decode(reader, reader.uint32()));
+            continue;
+          }
+          case 7: {
+            if (tag !== 58) {
+              break;
+            }
+
+            message.otherSteps.push(reader.string());
+            continue;
+          }
+          case 8: {
+            if (tag !== 66) {
+              break;
+            }
+
+            message.currentStep = reader.string();
+            continue;
+          }
+          case 9: {
+            if (tag !== 74) {
+              break;
+            }
+
+            message.terminal = reader.string();
+            continue;
+          }
+          case 10: {
+            if (tag !== 82) {
+              break;
+            }
+
+            message.currentPosition = WorkflowPosition.decode(reader, reader.uint32());
+            continue;
+          }
+          case 11: {
+            if (tag !== 90) {
+              break;
+            }
+
+            message.connections.push(WorkflowProgressConnection.decode(reader, reader.uint32()));
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): WorkflowProgress {
+    return {
+      initialStep: isSet(object.initialStep)
+        ? globalThis.String(object.initialStep)
+        : isSet(object.initial_step)
+        ? globalThis.String(object.initial_step)
+        : undefined,
+      definition: globalThis.Array.isArray(object?.definition)
+        ? object.definition.map((e: any) => WorkflowDefinitionNode.fromJSON(e))
+        : [],
+      nodes: globalThis.Array.isArray(object?.nodes)
+        ? object.nodes.map((e: any) => WorkflowProgressNode.fromJSON(e))
+        : [],
+      edges: globalThis.Array.isArray(object?.edges)
+        ? object.edges.map((e: any) => WorkflowProgressEdge.fromJSON(e))
+        : [],
+      backbone: globalThis.Array.isArray(object?.backbone)
+        ? object.backbone.map((e: any) => globalThis.String(e))
+        : [],
+      loops: globalThis.Array.isArray(object?.loops)
+        ? object.loops.map((e: any) => WorkflowRepairLoop.fromJSON(e))
+        : [],
+      otherSteps: globalThis.Array.isArray(object?.otherSteps)
+        ? object.otherSteps.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.other_steps)
+        ? object.other_steps.map((e: any) => globalThis.String(e))
+        : [],
+      currentStep: isSet(object.currentStep)
+        ? globalThis.String(object.currentStep)
+        : isSet(object.current_step)
+        ? globalThis.String(object.current_step)
+        : undefined,
+      terminal: isSet(object.terminal) ? globalThis.String(object.terminal) : undefined,
+      currentPosition: isSet(object.currentPosition)
+        ? WorkflowPosition.fromJSON(object.currentPosition)
+        : isSet(object.current_position)
+        ? WorkflowPosition.fromJSON(object.current_position)
+        : undefined,
+      connections: globalThis.Array.isArray(object?.connections)
+        ? object.connections.map((e: any) => WorkflowProgressConnection.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: WorkflowProgress): unknown {
+    const obj: any = {};
+    if (message.initialStep !== undefined) {
+      obj.initialStep = message.initialStep;
+    }
+    if (message.definition?.length) {
+      obj.definition = message.definition.map((e) => WorkflowDefinitionNode.toJSON(e));
+    }
+    if (message.nodes?.length) {
+      obj.nodes = message.nodes.map((e) => WorkflowProgressNode.toJSON(e));
+    }
+    if (message.edges?.length) {
+      obj.edges = message.edges.map((e) => WorkflowProgressEdge.toJSON(e));
+    }
+    if (message.backbone?.length) {
+      obj.backbone = message.backbone;
+    }
+    if (message.loops?.length) {
+      obj.loops = message.loops.map((e) => WorkflowRepairLoop.toJSON(e));
+    }
+    if (message.otherSteps?.length) {
+      obj.otherSteps = message.otherSteps;
+    }
+    if (message.currentStep !== undefined) {
+      obj.currentStep = message.currentStep;
+    }
+    if (message.terminal !== undefined) {
+      obj.terminal = message.terminal;
+    }
+    if (message.currentPosition !== undefined) {
+      obj.currentPosition = WorkflowPosition.toJSON(message.currentPosition);
+    }
+    if (message.connections?.length) {
+      obj.connections = message.connections.map((e) => WorkflowProgressConnection.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<WorkflowProgress>, I>>(base?: I): WorkflowProgress {
+    return WorkflowProgress.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<WorkflowProgress>, I>>(object: I): WorkflowProgress {
+    const message = createBaseWorkflowProgress();
+    message.initialStep = object.initialStep ?? undefined;
+    message.definition = object.definition?.map((e) => WorkflowDefinitionNode.fromPartial(e)) || [];
+    message.nodes = object.nodes?.map((e) => WorkflowProgressNode.fromPartial(e)) || [];
+    message.edges = object.edges?.map((e) => WorkflowProgressEdge.fromPartial(e)) || [];
+    message.backbone = object.backbone?.map((e) => e) || [];
+    message.loops = object.loops?.map((e) => WorkflowRepairLoop.fromPartial(e)) || [];
+    message.otherSteps = object.otherSteps?.map((e) => e) || [];
+    message.currentStep = object.currentStep ?? undefined;
+    message.terminal = object.terminal ?? undefined;
+    message.currentPosition = (object.currentPosition !== undefined && object.currentPosition !== null)
+      ? WorkflowPosition.fromPartial(object.currentPosition)
+      : undefined;
+    message.connections = object.connections?.map((e) => WorkflowProgressConnection.fromPartial(e)) || [];
     return message;
   },
 };
