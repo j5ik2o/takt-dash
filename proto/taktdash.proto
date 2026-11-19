@@ -538,6 +538,7 @@ message ConversationMessage {
   google.protobuf.Timestamp occurred_at = 2;  // 発言の時刻
   ConversationSpeaker speaker = 3;            // 発話者
   string text = 4;                            // 本文
+  bool has_encoding_error = 5;                // 本文に一定数以上の置換文字がある
 }
 
 // 解釈できずスキップした行の理由と件数を表す。

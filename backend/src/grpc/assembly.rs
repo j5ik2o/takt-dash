@@ -183,10 +183,11 @@ pub(super) fn conversation_response(page: ConversationPage) -> GetConversationRe
       .messages
       .into_iter()
       .map(|message| v1::ConversationMessage {
-        seq:         message.seq,
-        occurred_at: Some(timestamp(message.occurred_at)),
-        speaker:     conversation_speaker(message.speaker) as i32,
-        text:        message.text,
+        seq:                message.seq,
+        occurred_at:        Some(timestamp(message.occurred_at)),
+        speaker:            conversation_speaker(message.speaker) as i32,
+        text:               message.text,
+        has_encoding_error: message.has_encoding_error,
       })
       .collect(),
     next_after_seq:     page.next_after_seq,

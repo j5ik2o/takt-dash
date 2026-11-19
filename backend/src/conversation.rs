@@ -19,6 +19,8 @@ use serde_json::Value;
 
 use crate::domain::ProjectName;
 
+mod display;
+
 /// 会話の保存先。conversations ディレクトリと opencode の DB のパスを持つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationPaths {
@@ -153,6 +155,7 @@ impl ConversationReader {
           seq: row.seq,
           occurred_at: DateTime::<Utc>::from_timestamp_millis(row.time_created).unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
           speaker,
+          has_encoding_error: display::has_encoding_error(&text),
           text,
         }),
         | Err(reason) => *skipped.entry(reason).or_insert(0) += 1,
@@ -345,7 +348,7 @@ fn classify(row: &MessageRow) -> Result<(ConversationSpeaker, String), String> {
     | "user" => {
       let value = parse_data(&row.data)?;
       let text = text_field(&value).ok_or_else(|| "本文が無い".to_owned())?;
-      Ok((ConversationSpeaker::User, text))
+      Ok((ConversationSpeaker::User, display::user_text(text)))
     },
     | "assistant" => {
       let value = parse_data(&row.data)?;
@@ -364,7 +367,7 @@ fn classify(row: &MessageRow) -> Result<(ConversationSpeaker, String), String> {
       if texts.is_empty() {
         return Err("本文が無い".to_owned());
       }
-      Ok((ConversationSpeaker::Manager, texts.join("\n")))
+      Ok((ConversationSpeaker::Manager, display::assistant_text(texts.join("\n"))))
     },
     | "system" => {
       let value = parse_data(&row.data)?;
@@ -443,10 +446,11 @@ pub struct ConversationQuery {
 /// 会話の1件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationMessage {
-  pub seq:         i64,
-  pub occurred_at: DateTime<Utc>,
-  pub speaker:     ConversationSpeaker,
-  pub text:        String,
+  pub seq:                i64,
+  pub occurred_at:        DateTime<Utc>,
+  pub speaker:            ConversationSpeaker,
+  pub text:               String,
+  pub has_encoding_error: bool,
 }
 
 /// 会話の発話者。

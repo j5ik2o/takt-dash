@@ -12,6 +12,7 @@ export type ConversationMessageView = {
   occurredAt?: Date;
   speaker: number;
   text: string;
+  hasEncodingError: boolean;
 };
 
 export type ConversationSkippedView = {
@@ -81,6 +82,7 @@ const toMessage = (raw: Record<string, unknown>): ConversationMessageView => ({
   occurredAt: toDate(raw.occurredAt),
   speaker: enumFromWireOrUnrecognizedName("ConversationSpeaker", raw.speaker),
   text: String(raw.text ?? ""),
+  hasEncodingError: raw.hasEncodingError === true,
 });
 
 const toSkipped = (raw: Record<string, unknown>): ConversationSkippedView => ({
