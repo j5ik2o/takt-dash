@@ -119,6 +119,7 @@ test("概要ヘッダーは未取得の空snapshotと正常取得したサーバ
     }));
     const head = text(required(page, ".page-head"));
     const runs = text(required(page, '[aria-labelledby="h-runs"]'));
+    assert.doesNotMatch(head, /まだ読めていないプロジェクトがあります/);
     if (snapshotLoaded) {
       assert.match(head, /0台のサーバーを集約/);
       assert.equal(runs.match(/走っている run はありません/g)?.length, 1);
@@ -129,5 +130,21 @@ test("概要ヘッダーは未取得の空snapshotと正常取得したサーバ
       assert.match(runs, /分かりません/);
       assert.doesNotMatch(runs, /run はありません/);
     }
+  }
+});
+
+test("取得済み概要の未読プロジェクト案内は全件未読と部分読み取りの両方で表示する", () => {
+  const base = createHealthyDashboardState();
+  for (const partiallyRead of [false, true]) {
+    const state = DashboardState.create({ ...base,
+      projects: base.projects.map((project, index) => ({ ...project,
+        lastReadAt: partiallyRead && index === 0 ? NOW : undefined,
+      })),
+    });
+    const view = buildOverviewView(state, NOW, true);
+    assert.equal(view.coverage, partiallyRead ? "partial" : "unread");
+    const page = documentOf(createElement(OverviewContent, { view, disconnected: false }));
+    assert.match(text(required(page, ".page-head")),
+      /まだ読めていないプロジェクトがあります。run・判断待ち・ゴールの件数には未読の分を含めていません。/);
   }
 });

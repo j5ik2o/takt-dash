@@ -88,7 +88,7 @@ export function OverviewContent({
               </>
             ) : "サーバーの台数は不明です。実行中の run は不明です。"}
           </p>
-          {view.coverage !== "complete" ? (
+          {view.snapshotLoaded && view.coverage !== "complete" ? (
             <p className="stale-note">まだ読めていないプロジェクトがあります。run・判断待ち・ゴールの件数には未読の分を含めていません。</p>
           ) : null}
           {partialRead && (view.coverage !== "complete" || knownEmptyRuns) ? (
