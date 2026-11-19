@@ -96,6 +96,7 @@ fn sample_overview_goals() -> Vec<v1::Goal> {
 fn sample_overview_runs() -> Vec<v1::Run> {
   vec![
     v1::Run {
+      progress:                None,
       run_slug:                "run-1".to_owned(),
       session_id:              "session-1".to_owned(),
       server_id:               "mini".to_owned(),
@@ -117,6 +118,7 @@ fn sample_overview_runs() -> Vec<v1::Run> {
     },
     // 実行中でない run を混ぜ、実行中の件数が全 run の件数と取り違えられないようにする。
     v1::Run {
+      progress:                None,
       run_slug:                "run-2".to_owned(),
       session_id:              "session-2".to_owned(),
       server_id:               "studio".to_owned(),

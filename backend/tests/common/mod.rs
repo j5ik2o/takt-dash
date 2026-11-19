@@ -175,6 +175,7 @@ pub fn notification(id: &str, kind: &str, recorded_at: DateTime<Utc>) -> Notific
 
 pub fn run(run_slug: &str, task_name: &str, last_log_at: DateTime<Utc>) -> RunEntry {
   RunEntry {
+    progress:                None,
     run_slug:                run_slug.to_owned(),
     session_id:              String::new(),
     task_name:               TaskName::try_from(task_name).expect("テストのタスク名は有効です"),

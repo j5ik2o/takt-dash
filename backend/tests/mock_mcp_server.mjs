@@ -463,14 +463,11 @@ const handleToolCall = (name, args) => {
       }
       return asText({ items: value });
     }
-    case "takt_get_workflow":
-      return asText(
-        paged(
-          ((state.workflows ?? {})[args.workflow] ?? []).map((name) => ({ name })),
-          "steps",
-          args.offset,
-        ),
-      );
+    case "takt_get_workflow": {
+      const definition = (state.workflows ?? {})[args.workflow] ?? [];
+      const steps = Array.isArray(definition) ? definition.map((name) => ({ name })) : definition.steps;
+      return asText({ ...paged(steps, "steps", args.offset), initialStep: definition.initialStep });
+    }
     case "takt_answer_goal_question":
       return asText({ goalId: args.goalId, questionId: args.questionId, answer: args.answer });
     case "takt_list_goal_registration_proposals":

@@ -38,6 +38,7 @@ fn goal_with_pause(id: &str, reason: &str) -> takt_dash_backend::model::GoalEntr
 
 fn run_entry(run_slug: &str) -> RunEntry {
   RunEntry {
+    progress:                None,
     run_slug:                run_slug.to_owned(),
     session_id:              "sess-1".to_owned(),
     task_name:               TaskName::try_from("implement").expect("テストのタスク名は有効です"),

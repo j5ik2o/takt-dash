@@ -6,7 +6,11 @@ use super::{
   parse_remote_run, step_entries, step_log_entries, step_log_next_offset, Page, RemoteRun, ToolError, ToolSet,
   MAX_PAGES,
 };
-use crate::{domain::RunSlug, model::RunEntry};
+use crate::{
+  domain::RunSlug,
+  model::RunEntry,
+  workflow_progress::{build_progress, DefinitionNode, ExecutionEvidence, WorkflowDefinition},
+};
 
 impl ToolSet<'_> {
   /// takt_get_run から run を読む。stepLogs は先頭のウィンドウだけが返るため、
@@ -48,14 +52,33 @@ impl ToolSet<'_> {
     Ok(run)
   }
 
+  /// 概要・詳細が消費する進行証拠を補完する。ログ追記取得はこの操作を呼ばない。
+  pub(crate) async fn enrich_remote_progress(&mut self, run_slug: &RunSlug, remote: &mut RemoteRun) {
+    match crate::remote_run::read_evidence(self.client.config(), &self.cwd, run_slug, &remote.step_logs).await {
+      | Ok(Some(evidence)) => remote.evidence = evidence,
+      | Ok(None) => {},
+      | Err(error) => {
+        tracing::warn!(run_slug = %run_slug.as_str(), error = %error, "SSH から進行情報を読めませんでした。取得済みの run を返します。")
+      },
+    }
+  }
+
   /// workflow の step 名一覧から、run の現在ステップの位置と全ステップ数を補う。
   ///
   /// workflow を読めないときや現在ステップが一覧に無いときは、位置と総数を設定しません。
   /// 道具エラー・解析不能な応答は位置不明として扱い、run 一覧全体を失敗させません。
-  pub(super) async fn enrich_step_progress(&mut self, run: &mut RunEntry, workflow: &str) -> Result<(), ToolError> {
-    let Some(steps) = self.workflow_steps(workflow).await? else {
+  pub(super) async fn enrich_step_progress(
+    &mut self,
+    run: &mut RunEntry,
+    workflow: &str,
+    evidence: &ExecutionEvidence,
+  ) -> Result<(), ToolError> {
+    let Some(definition) = self.workflow_definition(workflow).await? else {
       return Ok(());
     };
+    run.progress =
+      Some(build_progress(definition.clone(), evidence, workflow, run.current_step.as_deref(), run.status));
+    let steps: Vec<_> = definition.nodes.iter().map(|node| &node.name).collect();
     // meta.json の currentStep は takt_get_workflow が返す workflow の step 名に対応する。
     // ステップの記録の末尾は入れ子 workflow の内側の step になり得るため、位置の算出には使わない。
     // currentStep が無い run だけ、従来どおりステップの記録の末尾で補う。
@@ -67,7 +90,7 @@ impl ToolSet<'_> {
     else {
       return Ok(());
     };
-    let Some(index) = steps.iter().position(|name| name == current) else {
+    let Some(index) = steps.iter().position(|name| name.as_str() == current) else {
       return Ok(());
     };
     let Some(step_number) = i32::try_from(index + 1).ok() else {
@@ -82,11 +105,11 @@ impl ToolSet<'_> {
   }
 
   /// workflow の step 名一覧を取得する。同じ workflow の結果は道具のまとまりの中で再利用します。
-  async fn workflow_steps(&mut self, workflow: &str) -> Result<Option<Vec<String>>, ToolError> {
+  pub async fn workflow_definition(&mut self, workflow: &str) -> Result<Option<WorkflowDefinition>, ToolError> {
     if let Some(cached) = self.workflows.get(workflow) {
       return Ok(cached.clone());
     }
-    let steps = match self.fetch_workflow_steps(workflow).await {
+    let steps = match self.fetch_workflow_definition(workflow).await {
       | Ok(steps) => steps,
       | Err(ToolError::Transport(error)) => return Err(ToolError::Transport(error)),
       | Err(_) => None,
@@ -95,19 +118,23 @@ impl ToolSet<'_> {
     Ok(steps)
   }
 
-  async fn fetch_workflow_steps(&mut self, workflow: &str) -> Result<Option<Vec<String>>, ToolError> {
+  async fn fetch_workflow_definition(&mut self, workflow: &str) -> Result<Option<WorkflowDefinition>, ToolError> {
     let mut steps = Vec::new();
+    let mut initial_step = None;
     let mut offset = 0;
     let mut total_count = None;
     for _ in 0..MAX_PAGES {
       let value = self.call_json("takt_get_workflow", json!({ "workflow": workflow, "offset": offset })).await?;
+      if initial_step.is_none() {
+        initial_step = value.get("initialStep").and_then(Value::as_str).map(str::to_owned);
+      }
       total_count = total_count.or_else(|| value.get("totalCount").and_then(Value::as_u64).map(|count| count as usize));
       let page = Page::from_value(&value, "steps")?;
       for item in &page.items {
-        let Some(name) = item.get("name").and_then(Value::as_str) else {
+        let Some(node) = DefinitionNode::from_value(item) else {
           return Ok(None);
         };
-        steps.push(name.to_owned());
+        steps.push(node);
       }
       match page.next_offset {
         | Some(next) => offset = next,
@@ -115,7 +142,7 @@ impl ToolSet<'_> {
           if total_count.is_some_and(|total| total != steps.len()) {
             return Ok(None);
           }
-          return Ok(if steps.is_empty() { None } else { Some(steps) });
+          return Ok(if steps.is_empty() { None } else { Some(WorkflowDefinition { initial_step, nodes: steps }) });
         },
       }
     }

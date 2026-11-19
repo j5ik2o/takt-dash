@@ -27,6 +27,7 @@ const LOG_TAIL_RECORDS: usize = 20;
 /// takt_get_run から読んだ run。stepLogs は全ページを集めたものです。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRun {
+  pub evidence: crate::workflow_progress::ExecutionEvidence,
   pub run_slug: RunSlug,
   pub session_id: String,
   /// 応答の summary。無ければ taskText の1行目（takt のタスク要約と同じ規則）です。
@@ -55,6 +56,7 @@ impl RemoteRun {
   pub fn run_entry(&self, task: &TaskEntry) -> RunEntry {
     let started_at = self.started_at(Some(task));
     RunEntry {
+      progress: None,
       run_slug: self.run_slug.as_str().to_owned(),
       session_id: self.session_id.clone(),
       task_name: task.name.clone(),
@@ -138,6 +140,7 @@ pub(super) fn parse_remote_run(
     | None => parse_time(value.get("startTime"))?,
   };
   Ok(RemoteRun {
+    evidence: crate::workflow_progress::ExecutionEvidence::default(),
     run_slug,
     session_id: optional_string(value, "sessionId").unwrap_or_default(),
     summary,
