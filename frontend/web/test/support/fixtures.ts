@@ -16,6 +16,7 @@ import {
   PendingDecisionType,
   RunStatus,
   TaskStatus,
+  WorkflowProgress,
   type ActivityEvent,
   type ConversationMessage,
   type DailySummary,
@@ -114,6 +115,7 @@ export function createDashboardState(): DashboardState {
     runs: [
       {
         runSlug: "run-aaa",
+        progress: createWorkflowProgress(),
         sessionId: "session-aaa",
         serverId: "mini",
         project: "corporate-site",
@@ -212,6 +214,7 @@ export function createNestedStepDashboardState(): DashboardState {
       ...run,
       steps: [{ stepName: "write_tests", model: "glm-5.3", startedAt: minutesAgo(20) }],
       currentStepName: "develop",
+      progress: WorkflowProgress.create({ initialStep: "develop", definition: [{ name: "develop", kind: "workflow_call" }], backbone: ["develop"], currentStep: "develop", currentPosition: { value: 1 } }),
       currentStepNumber: 1,
       totalSteps: 1,
       currentIteration: 3,
@@ -434,6 +437,7 @@ export function createConversationResponse(
 
 export function createRunDetailResponse(runSlug = "run-aaa"): GetRunDetailResponse {
   return {
+    progress: undefined,
     runSlug,
     sessionId: "session-aaa",
     serverId: "mini",
@@ -477,6 +481,16 @@ export function createRunDetailResponse(runSlug = "run-aaa"): GetRunDetailRespon
     serverConnected: true,
     serverLastReadAt: minutesAgo(1),
   };
+}
+
+export function createWorkflowProgress(): WorkflowProgress {
+  return WorkflowProgress.create({
+    initialStep: "plan",
+    definition: ["plan", "implement", "review", "supervise"].map((name) => ({ name, kind: "agent" })),
+    backbone: ["plan", "implement", "review", "supervise"],
+    currentStep: "implement",
+    currentPosition: { value: 2 },
+  });
 }
 
 export function createGoal(overrides: Partial<Goal> = {}): Goal {

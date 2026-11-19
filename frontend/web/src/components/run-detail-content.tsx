@@ -3,6 +3,7 @@ import type { GetRunDetailResponse } from "../proto/taktdash";
 import { formatClock, formatDateTime, formatDuration } from "../state/format";
 import { LiveRunLog } from "./live-run-log";
 import { RunContentToggle } from "./run-content-toggle";
+import { WorkflowProgress } from "./workflow-progress";
 
 type RunDetailContentProps = {
   detail: GetRunDetailResponse;
@@ -13,6 +14,9 @@ type RunDetailContentProps = {
 // ログは末尾（logTail）から示し、開いている間は LiveRunLog が追記分を足す。JSONL の生ログは表示しない。レポートと指示書は一覧だけを
 // 描画し、本文は利用者が項目を開いたときに RunContentToggle が取得する。
 export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactElement {
+  const currentCount = detail.progress === undefined
+    ? detail.currentStepExecutionCount
+    : detail.progress.nodes.find((node) => node.name === detail.currentStep)?.executionCount?.value;
   const elapsed =
     detail.startedAt !== undefined ? formatDuration((now.getTime() - detail.startedAt.getTime()) / 1000) : undefined;
   return (
@@ -52,7 +56,7 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
             <div className="k">今のステップ</div>
             <div className="v">
               {detail.currentStep !== undefined ? <span className="mono">{detail.currentStep}</span> : "なし"}
-              {detail.currentIteration !== undefined ? `（反復 ${detail.currentIteration} 回目）` : ""}
+              {currentCount !== undefined ? `（${currentCount} 回目）` : ""}
             </div>
           </div>
           <div className="f">
@@ -82,13 +86,15 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
         </div>
       </section>
 
+      {detail.progress !== undefined ? <WorkflowProgress progress={detail.progress} now={now} /> : null}
+
       <section aria-labelledby="h-steps">
         <h2 className="sec" id="h-steps">
           ステップ
         </h2>
         <ul className="steps">
           {detail.stepLogs.map((step, index) => (
-            <li key={`${step.stepName}-${index}`}>
+            <li id={`run-step-log-${index}`} key={`${step.stepName}-${index}`}>
               <div className="step-head">
                 <b>{step.stepName}</b>
                 <span>{step.persona}</span>

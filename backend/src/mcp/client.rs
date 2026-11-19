@@ -71,6 +71,12 @@ pub struct McpClientConfig {
   pub tool_timeouts:   BTreeMap<String, Duration>,
 }
 
+impl McpClientConfig {
+  pub(crate) fn is_ssh(&self) -> bool {
+    std::path::Path::new(&self.command).file_name().and_then(|name| name.to_str()) == Some("ssh")
+  }
+}
+
 /// 起動と初期化だけに使う期限。道具の呼び出しの期限とは分けます。高負荷のときは
 /// 子プロセスの起動と initialize の往復だけで呼び出しの期限（15秒）を超えるため、
 /// 呼び出しと同じ期限で初期化を打ち切ると、起動が永久に終わらなくなります。
@@ -124,6 +130,10 @@ struct McpProcess {
 }
 
 impl McpClient {
+  pub(crate) fn config(&self) -> &McpClientConfig {
+    &self.config
+  }
+
   /// まだ子プロセスを起動しないクライアントを作る。最初の呼び出しで起動します。
   pub fn new(config: McpClientConfig) -> Self {
     McpClient { config, process: None, next_id: 1, consecutive_spawn_failures: 0, next_spawn_at: None }
@@ -197,7 +207,10 @@ impl McpClient {
       .map_err(|_| TransportError::Spawn("起動の許可を待つ間にセマフォが閉じました".to_owned()))?;
     let mut command = Command::new(&self.config.command);
     command.args(&self.config.args);
-    command.current_dir(&self.config.cwd);
+    // SSH の cwd は接続先のパスであり、このホストに存在するとは限らない。
+    if !self.config.is_ssh() {
+      command.current_dir(&self.config.cwd);
+    }
     for (key, value) in &self.config.env {
       command.env(key, value);
     }

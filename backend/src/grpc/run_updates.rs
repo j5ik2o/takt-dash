@@ -30,17 +30,21 @@ pub(super) fn parse_log_cursor(epoch: Option<i64>, after_sequence: Option<i64>) 
 /// GetRunUpdates の応答を作る。
 ///
 /// ローカルの保存場所から続きを読むのが基本です。保存場所が残っていない run はエラーにせず、
-/// ログが残っていないことを返します。保存場所の対応表に無い run と、対応表を読めない run
-/// （SSH 越しに扱うリモートのサーバーのプロジェクトなど）は、GetRunDetail と同じく
-/// takt_get_run から行を組み立てます。takt_get_run でも読めなければ、保存場所の読み取りの
-/// 失敗を返します。
+/// ログが残っていないことを返します。SSH 接続の run、およびローカルの対応表に無い run
+/// と、対応表を読めない run は、GetRunDetail と同じく takt_get_run
+/// から行を組み立てます。takt_get_run でも読めなければ、保存場所の読み取りの 失敗を返します。
 pub(super) async fn read_updates_response(
   run_logs: &RunLogHandle,
   resolved: &ResolvedProject,
   run_slug: RunSlug,
   after: Option<LogCursor>,
 ) -> Result<GetRunUpdatesResponse, Status> {
-  match read_run_updates(run_logs, run_slug.clone(), after).await {
+  let local = if resolved.client_config.is_ssh() {
+    Err(RunReadFailure::NotListed)
+  } else {
+    read_run_updates(run_logs, run_slug.clone(), after).await
+  };
+  match local {
     | Ok(updates) => Ok(run_updates_response(&run_slug, updates)),
     | Err(RunReadFailure::Missing) => {
       Ok(GetRunUpdatesResponse { run_slug: run_slug.as_str().to_owned(), logs_removed: true, ..Default::default() })

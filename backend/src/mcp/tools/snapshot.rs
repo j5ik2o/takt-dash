@@ -219,8 +219,9 @@ impl ToolSet<'_> {
 
   /// running なタスクの run を、run の保存場所（`meta.json` と本体ログ）から集める。
   ///
-  /// 保存場所の対応表に無い run（[`RunReadFailure::NotListed`]）と、対応表を読めない run
-  /// （[`RunReadFailure::Unreadable`]。SSH 越しに扱うリモートのサーバーのプロジェクトなど）は、
+  /// SSH 接続の run、およびローカルの対応表に無い
+  /// run（[`RunReadFailure::NotListed`]）と、対応表を読めない run
+  /// （[`RunReadFailure::Unreadable`]）は、
   /// takt-mcp の takt_get_run から作ります。保存場所で読めた run には takt_get_run を呼びません。
   ///
   /// どちらからも読めなかった run
@@ -242,11 +243,19 @@ impl ToolSet<'_> {
         continue;
       };
       running.push(run_slug.clone());
-      let (mut run, workflow) = match read_run(handle, run_slug.clone()).await {
-        | Ok(view) => (view.run_entry(&run_slug, task), view.workflow),
+      let local = if self.client.config().is_ssh() {
+        Err(RunReadFailure::NotListed)
+      } else {
+        read_run(handle, run_slug.clone()).await
+      };
+      let (mut run, workflow, evidence) = match local {
+        | Ok(view) => (view.run_entry(&run_slug, task), view.workflow, view.evidence),
         | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
           match self.read_remote_run(&run_slug).await {
-            | Ok(remote) => (remote.run_entry(task), remote.workflow),
+            | Ok(mut remote) => {
+              self.enrich_remote_progress(&run_slug, &mut remote).await;
+              (remote.run_entry(task), remote.workflow, remote.evidence)
+            },
             | Err(error) if matches!(error, ToolError::Parse(_)) || degrades_to_previous(&error) => {
               tracing::warn!(run_slug = %run_slug.as_str(), local = %failure, error = %error, "run を保存場所からも takt_get_run からも読めませんでした。前回の値を使います。");
               runs.extend(previous_run(prev, &run_slug));
@@ -262,7 +271,7 @@ impl ToolSet<'_> {
         },
       };
       let enriched = match workflow.as_deref().filter(|workflow| !workflow.is_empty()) {
-        | Some(workflow) => self.enrich_step_progress(&mut run, workflow).await,
+        | Some(workflow) => self.enrich_step_progress(&mut run, workflow, &evidence).await,
         | None => Ok(()),
       };
       match enriched {

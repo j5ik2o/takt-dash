@@ -1,8 +1,8 @@
 //! GetRunDetail の応答のうち run の状態を表す部分を、読み取り元ごとに組み立てる。
 //!
 //! 読み取り元は2つです。ローカルで読める run は run の保存場所の集計（[`RunLogView`]）から、
-//! 保存場所の対応表に無い run と対応表を読めない run（SSH 越しに扱うリモートのサーバーの
-//! プロジェクトなど）は takt-mcp の takt_get_run（[`RemoteRun`]）から組み立てます。どちらも
+//! SSH 接続の run、およびローカルの対応表に無い run と対応表を読めない run は
+//! takt-mcp の takt_get_run（[`RemoteRun`]）から組み立てます。どちらも
 //! 最終ログ時刻を返し、ログの無音の判定は呼び出し側が状態ストアの閾値で行います。
 //!
 //! 詳細では、要約に含まれない指示書の一覧とタスク本文も takt_get_run の view から読みます。
@@ -93,7 +93,42 @@ pub(super) async fn fill_from_takt_get_run(
   response.reports = run_reports(&remote.reports);
   response.instructions = remote.instructions.iter().map(run_instruction).collect();
   response.last_log_at = optional_timestamp(last_log_at);
+  fill_progress(response, resolved, &remote.evidence).await;
   Ok(last_log_at)
+}
+
+pub(super) async fn fill_progress(
+  response: &mut GetRunDetailResponse,
+  resolved: &ResolvedProject,
+  evidence: &crate::workflow_progress::ExecutionEvidence,
+) {
+  if response.workflow.is_empty() {
+    return;
+  }
+  let mut client = McpClient::new(resolved.client_config.clone());
+  let result = ToolSet::new(&mut client, resolved.cwd.clone()).workflow_definition(&response.workflow).await;
+  client.shutdown().await;
+  match result {
+    | Ok(Some(definition)) => {
+      let status = match crate::takt_dash::v1::RunStatus::try_from(response.status) {
+        | Ok(crate::takt_dash::v1::RunStatus::Running) => crate::model::RunStatus::Running,
+        | Ok(crate::takt_dash::v1::RunStatus::Completed) => crate::model::RunStatus::Completed,
+        | Ok(crate::takt_dash::v1::RunStatus::Aborted) => crate::model::RunStatus::Aborted,
+        | Ok(crate::takt_dash::v1::RunStatus::Failed) => crate::model::RunStatus::Failed,
+        | _ => return,
+      };
+      let progress = crate::workflow_progress::build_progress(
+        definition,
+        evidence,
+        &response.workflow,
+        response.current_step.as_deref(),
+        status,
+      );
+      response.progress = Some(super::workflow_progress::progress(&progress));
+    },
+    | Ok(None) => {},
+    | Err(error) => tracing::warn!(error = %error, "進行図の定義を読めませんでした。取得済みの詳細を返します。"),
+  }
 }
 
 /// ログ更新では要約用の本文取得を避け、ステップログを読んで子プロセスを終了する。
@@ -115,6 +150,7 @@ async fn read_remote_run_detail(resolved: &ResolvedProject, run_slug: &RunSlug) 
   let result = async {
     let mut toolset = ToolSet::new(&mut client, resolved.cwd.clone());
     let mut remote = toolset.read_remote_run(run_slug).await?;
+    toolset.enrich_remote_progress(run_slug, &mut remote).await;
     remote.instructions = toolset.read_remote_instructions(run_slug).await?;
     if remote.task_text.is_empty() {
       remote.task_text = toolset.read_remote_task_text(run_slug).await?;
