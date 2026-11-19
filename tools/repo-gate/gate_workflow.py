@@ -1,5 +1,6 @@
 """taktdash-change の develop → machine_gate → 公開 → aislop_gate の配線を検査する。"""
 from gate_aislop import AISLOP_FAILURE_NOTE, runs_aislop_gate
+from gate_aislop_accepted import check_aislop_accepted
 from gate_common import GATE_TARGETS, GateError, read_workflow
 from gate_machine_gate_rules import check_machine_gate_five_checks
 from gate_publish import (
@@ -62,6 +63,8 @@ def check_workflow_machine_gate(root):
         check_publish_success_rule(publish_rules, publish_name, aislop_name)
         check_publish_retry_rule(retry, publish_failure_next, publish_name)
 
+    accepted = check_aislop_accepted(root)
+
     return {
         "gates": ["machine_gate", aislop_name],
         "checks": list(GATE_TARGETS),
@@ -70,4 +73,5 @@ def check_workflow_machine_gate(root):
         "publish": publish_name,
         "publish_failure_step": publish_failure_next,
         "max_steps": workflow.get("max_steps"),
+        "aislop_accepted": accepted,
     }
