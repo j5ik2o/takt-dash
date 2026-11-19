@@ -73,6 +73,16 @@ def check_gate_rule_order(gate_rules, name):
         raise GateError(f"{name} に失敗時の遷移（when(true)）がありません")
     if fallbacks != [len(gate_rules) - 1]:
         raise GateError(f"{name} の when(true) が規則列の最後に 1 つだけではありません")
+    zero_excluding = re.compile(
+        rf"when\(\s*context\.{re.escape(name)}\.result\.exit_code\s*"
+        r"(?:(==)\s*(-?\d+)|(!=)\s*0)\s*\)"
+    )
+    for rule in gate_rules:
+        if rule is successes[0]:
+            break
+        match = zero_excluding.fullmatch(str(rule.get("condition", "")).strip())
+        if match is None or (match.group(1) == "==" and int(match.group(2)) == 0):
+            raise GateError(f"{name} の成功規則より前の条件が終了コード0を除外していません")
     failure_next = gate_rules[-1].get("next")
     if failure_next == "ABORT":
         raise GateError(

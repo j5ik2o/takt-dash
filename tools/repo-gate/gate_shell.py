@@ -24,24 +24,27 @@ SHELL_OPERATOR_CHARS = ";&|\n()"
 def strip_shell_comments(command):
     """シェルのコメントを、クォートとバックスラッシュを考慮して除去する。
 
-    未クォート・未エスケープの # から行末までを除去する。行の区切りを保つため改行は
+    未クォート・未エスケープで語頭にある # から行末までを除去する。行の区切りを保つため改行は
     残す。単一引用符の内側ではバックスラッシュと # をそのまま扱い、二重引用符の
-    内側ではバックスラッシュで次の 1 文字をエスケープする。shlex の comments=True と
-    同じく、語の途中にある未クォートの # もコメントの開始とみなす。
+    内側ではバックスラッシュで次の 1 文字をエスケープする。語中の # は保持する。
     """
     result = []
     quote = None
     escaped = False
     in_comment = False
+    word_start = True
     for char in str(command):
         if in_comment:
             if char == "\n":
                 in_comment = False
+                word_start = True
                 result.append(char)
             continue
         if escaped:
             result.append(char)
             escaped = False
+            if char != "\n":
+                word_start = False
             continue
         if quote == "'":
             result.append(char)
@@ -61,12 +64,14 @@ def strip_shell_comments(command):
             continue
         if char in ("'", '"'):
             quote = char
+            word_start = False
             result.append(char)
             continue
-        if char == "#":
+        if char == "#" and word_start:
             in_comment = True
             continue
         result.append(char)
+        word_start = char in " \t\r\n;&|()<>"
     return "".join(result)
 
 
