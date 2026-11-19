@@ -260,6 +260,25 @@ test("ゴールの見出しは1行に収めてあふれを省略記号にし、�
   assert.equal(minWidth, "0", "ゴール行の最小幅を0にしてカードの幅に収める");
 });
 
+// ゴール一覧のカードの題名は、長い目的文でも1行に収め、あふれを省略記号にする（issue #148）。
+// 題名の h3 は .card-head（display:flex）の flex 項目であり、flex 基底幅を 0 にしないと
+// 内容幅のままで縮まない。省略の3宣言に加えて flex の基底幅も検査する。
+test("ゴール一覧のカードの題名は1行に収めてあふれを省略記号にする", async () => {
+  const css = await readCss();
+
+  const selector = /^\.goal-card-head\s+h3$/;
+  assert.equal(requireDeclaration(css, selector, "white-space", ".goal-card-head h3"), "nowrap");
+  assert.equal(requireDeclaration(css, selector, "overflow", ".goal-card-head h3"), "hidden");
+  assert.equal(requireDeclaration(css, selector, "text-overflow", ".goal-card-head h3"), "ellipsis");
+  assert.equal(requireDeclaration(css, selector, "min-width", ".goal-card-head h3"), "0");
+  // flex 基底幅を 0 にして、題名が行の余白へ縮めることを検査する（issue #148）。
+  assert.match(
+    requireDeclaration(css, selector, "flex", ".goal-card-head h3"),
+    /(^|\s)0(\s|$)/,
+    "題名の flex 基底幅を 0 にして縮める",
+  );
+});
+
 test("PR リンクは本文と区別できるリンク色を持ち、hover で下線を付ける", async () => {
   const css = await readCss();
 
