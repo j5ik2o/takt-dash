@@ -5,13 +5,14 @@
   },
   "accepted": [
     {
-      "reason": "prod_check.py の https://example.invalid は、書き込みの境界検査で別オリジンの Origin として送るための試験用の値である。example.invalid は RFC 2606 の予約ドメインで実在しない接続先であり、環境の URL ではないため、理由付きで受け入れる。",
+      "reason": "prod_check.py の https://example.invalid は、書き込みの境界検査で別オリジンの Origin として送るための試験用の値である。example.invalid は RFC 2606 の予約ドメインで実在しない接続先であり、環境の URL ではないため、理由付きで受け入れる。 解消は https://github.com/j5ik2o/takt-dash/issues/291 で追跡し、issue が閉じたらこのエントリを削除する。",
       "findings": [
         {
           "engine": "ai-slop",
           "rule": "ai-slop/hardcoded-url",
           "file": "tools/prod-check/prod_check.py",
-          "message": "Hardcoded environment URL in production code"
+          "message": "Hardcoded environment URL in production code",
+          "maxLines": 417
         }
       ]
     }
