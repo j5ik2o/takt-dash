@@ -12,6 +12,7 @@ import { createConversationMessages, createConversationResponse } from "../suppo
 import { formatDateTime } from "../../src/state/format.ts";
 import { restoreConversationResponse, type ConversationPage } from "../../src/state/conversation.ts";
 import { ConversationContent } from "../../src/components/conversation-content.tsx";
+import { JSDOM } from "jsdom";
 
 const restore = (overrides: Parameters<typeof createConversationResponse>[0] = {}): ConversationPage =>
   restoreConversationResponse(GetConversationResponse.toJSON(createConversationResponse(overrides)));
@@ -112,4 +113,28 @@ test("会話の表示は送信・返信の操作要素を持たない", () => {
   assert.doesNotMatch(html, /<button/i);
   assert.doesNotMatch(html, /<textarea/i);
   assert.doesNotMatch(html, /送信/);
+});
+
+test("文字化けの印を復元し、該当する発言だけに説明を添えて本文を保持する", () => {
+  const [user, manager] = createConversationMessages();
+  assert.ok(user && manager);
+  const damaged = `読める部分${"�".repeat(87)}`;
+  const messages = [
+    { ...user, seq: 8, text: damaged, hasEncodingError: true },
+    { ...user, seq: 22, text: "正常な再送", hasEncodingError: false },
+    { ...manager, seq: 23, text: "公開しました", hasEncodingError: false },
+  ];
+  const document = new JSDOM(render(restore({ messages }))).window.document;
+  const rows = [...document.querySelectorAll("ol.conversation > li")];
+  const row = (seq: number): Element => {
+    const found = rows.find((item) => item.querySelector(".conversation-seq")?.textContent === `seq ${seq}`);
+    assert.ok(found, `seq ${seq} の発言を描画する`);
+    return found;
+  };
+  assert.equal(row(8).querySelector(".conversation-text")?.textContent, damaged);
+  assert.ok(row(8).textContent?.includes("元の記録に文字化けがあります。"));
+  assert.equal(row(22).querySelector(".conversation-text")?.textContent, "正常な再送");
+  assert.ok(!row(22).textContent?.includes("元の記録に文字化けがあります。"));
+  assert.equal(row(23).querySelector(".conversation-text")?.textContent, "公開しました");
+  assert.ok(!row(23).textContent?.includes("元の記録に文字化けがあります。"));
 });

@@ -25,6 +25,19 @@ CREATE TABLE session_message (
 CREATE UNIQUE INDEX session_message_session_seq_idx ON session_message (session_id, seq);
 ";
 
+pub fn current_manager_user_wrapper(input: &str) -> String {
+  format!("## このターンの入力\nこのターンは人の発言から始まりました。\n{input}")
+}
+
+pub fn manager_user_wrapper(input: &str) -> String {
+  format!(
+    "## 前のターンで受け取った人の発言\n{{\"speaker\":\"user\",\"text\":\"前回の依頼\"}}\n\
+     ## このターンの入力\n{input}\n\
+     ## 応答形式\n{{\"text\":\"JSON で応答してください\"}}\n\
+     ## Business context\n{{\"text\":\"内部メモ\"}}"
+  )
+}
+
 /// 実ホームの代わりに使う、manager の記録と opencode の DB の一時的な置き場所。
 pub struct ConversationFixture {
   pub home:          PathBuf,

@@ -66,6 +66,9 @@ export function ConversationContent({
               </time>
             </p>
             <p className="conversation-text">{message.text}</p>
+            {message.hasEncodingError ? (
+              <p className="note">元の記録に文字化けがあります。</p>
+            ) : null}
           </li>
         ))}
       </ol>

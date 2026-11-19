@@ -397,18 +397,21 @@ export function createConversationMessages(): ConversationMessage[] {
       occurredAt: minutesAgo(6),
       speaker: ConversationSpeaker.CONVERSATION_SPEAKER_USER,
       text: "採用ページの見出しを直してください。",
+      hasEncodingError: false,
     },
     {
       seq: 2,
       occurredAt: minutesAgo(5),
       speaker: ConversationSpeaker.CONVERSATION_SPEAKER_MANAGER,
       text: "見出しの文言を確認しています。",
+      hasEncodingError: false,
     },
     {
       seq: 3,
       occurredAt: minutesAgo(4),
       speaker: ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM,
       text: "作業を開始しました。",
+      hasEncodingError: false,
     },
   ];
 }
