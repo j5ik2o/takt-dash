@@ -42,7 +42,11 @@ def starts_command_list_item(preceding):
     `||` の直後の改行（行継続）を含めて偽とする。改行を挟まずに語が続く場合は、
     その語の引数（echo の引数や ! の否定対象）なので偽とする。先行する各単純コマンドも
     検査し、終了・評価・シェル設定の変更や、解析対象外の制御構文は受理しない。
+    ヒアドキュメントは解析しないため、開始演算子を含む先行トークンは受理しない。
+    ヒアドキュメントの本文や区切り行はコマンドとして実行されないためである。
     """
+    if any("<<" in token for token in preceding):
+        return False
     index = len(preceding)
     while (
         index > 0
