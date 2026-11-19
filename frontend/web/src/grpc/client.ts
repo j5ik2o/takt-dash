@@ -28,7 +28,7 @@ import {
 import type { TimingSink } from "../telemetry/timing";
 import type { InstructionId, ReportFilename, RunSlug } from "../state/domain-primitives";
 import type { RunLogCursor } from "../state/run-log-stream";
-import { BackendUnavailableError, markBackendResponded } from "./backend-availability";
+import { expectFound, timedUnary, unary } from "./unary";
 
 export const BACKEND_ADDR_ENV = "TAKTDASH_BACKEND_ADDR";
 
@@ -126,97 +126,34 @@ export type CreateBackendClientOptions = {
   deadlineMs?: number;
 };
 
+type CallOptionsFactory = () => grpc.CallOptions;
+
+type ReadOperations = Pick<
+  BackendClient,
+  "getOverview" | "getProjects" | "getPendingDecisions" | "getActivity" | "getConversation"
+>;
+
+type RunOperations = Pick<BackendClient, "getRunDetail" | "getRunContent" | "getRunUpdates">;
+
+type DetailOperations = Pick<BackendClient, "getGoalDetail" | "getTaskDetail">;
+
+type WriteOperations = Pick<
+  BackendClient,
+  "answerInquiry" | "approveGoalMerge" | "approveGoalRegistration" | "rejectGoalRegistration"
+>;
+
 // unary RPC に付ける既定の deadline。backend 側の取得上限より長く、かつ有限にする。
 const DEFAULT_UNARY_DEADLINE_MS = 30_000;
 
-const isConnectionFailure = (error: grpc.ServiceError): boolean =>
-  error.code === grpc.status.UNAVAILABLE || error.code === grpc.status.DEADLINE_EXCEEDED;
-
-// server が応答として UNAVAILABLE を返した場合は応答ヘッダが metadata に載る。
-// 接続自体が成立しない transport 失敗では metadata が空になる。この差で分類する。
-const hasResponseMetadata = (error: grpc.ServiceError): boolean => {
-  const metadata = error.metadata;
-  if (metadata === undefined || metadata === null) {
-    return false;
-  }
-  return Object.keys(metadata.getMap()).length > 0;
-};
-
-const toBackendUnavailable = (error: grpc.ServiceError): BackendUnavailableError =>
-  new BackendUnavailableError(
-    error,
-    hasResponseMetadata(error) ? "server" : "transport",
-    typeof error.details === "string" ? error.details : "",
-    error.code === grpc.status.DEADLINE_EXCEEDED ? "no-response" : "unreachable",
-  );
-
-const unary = <Request, Response>(
-  invoke: (
-    request: Request,
-    metadata: grpc.Metadata,
-    options: grpc.CallOptions,
-    callback: (error: grpc.ServiceError | null, response: Response) => void,
-  ) => unknown,
-  request: Request,
-  options: grpc.CallOptions,
-): Promise<Response> =>
-  new Promise<Response>((resolve, reject) => {
-    invoke(request, new grpc.Metadata(), options, (error, response) => {
-      if (error) {
-        reject(isConnectionFailure(error) ? toBackendUnavailable(error) : error);
-        return;
-      }
-      markBackendResponded();
-      resolve(response);
-    });
-  });
-
-const timedUnary = async <Response>(
-  timing: TimingSink | undefined,
-  rpc: string,
-  run: () => Promise<Response>,
-): Promise<Response> => {
-  if (timing === undefined) {
-    return run();
-  }
-  const startedAt = performance.now();
-  try {
-    return await run();
-  } finally {
-    timing.recordRpc({ rpc, durationMs: performance.now() - startedAt });
-  }
-};
-
-// run を対象にする RPC の結果から「run が見つからない」を作る。backend の NOT_FOUND と、要求と違う
-// runSlug の応答を RunNotFoundError にし、backend を利用できない失敗はそのまま投げる。
-const expectRun = async <Response extends { runSlug: string }>(
+// run を対象にする RPC の結果から「run が見つからない」を作る。
+const expectRun = <Response extends { runSlug: string }>(
   runSlug: string,
   call: () => Promise<Response>,
-): Promise<Response> => {
-  const response = await call().catch((error: unknown) => {
-    if (error instanceof BackendUnavailableError) {
-      throw error;
-    }
-    if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
-      throw new RunNotFoundError(runSlug);
-    }
-    throw error;
-  });
-  if (response.runSlug !== runSlug) {
-    throw new RunNotFoundError(runSlug);
-  }
-  return response;
-};
+): Promise<Response> =>
+  expectFound(call, () => new RunNotFoundError(runSlug), (response) => response.runSlug === runSlug);
 
-export function createBackendClient(options: CreateBackendClientOptions = {}): BackendClient {
-  const env = options.env ?? process.env;
-  const address = resolveBackendAddress(env);
-  const deadlineMs = options.deadlineMs ?? DEFAULT_UNARY_DEADLINE_MS;
-  const readOptions = (): grpc.CallOptions => ({ deadline: Date.now() + deadlineMs });
-  const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
-  const writeDeadlineMs = options.writeDeadlineMs ?? DEFAULT_WRITE_DEADLINE_MS;
-  const writeOptions = (): grpc.CallOptions => ({ deadline: Date.now() + writeDeadlineMs });
 
+function createReadOperations(client: TaktDashServiceClient, readOptions: CallOptionsFactory): ReadOperations {
   return {
     getOverview: (timing) =>
       timedUnary(timing, "GetOverview", () =>
@@ -256,51 +193,6 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
           readOptions(),
         ),
       ),
-    getRunDetail: (runSlug, timing) =>
-      expectRun(runSlug, () =>
-        timedUnary(timing, "GetRunDetail", () =>
-          unary<{ runSlug: string }, GetRunDetailResponse>(
-            (request, metadata, callOptions, callback) =>
-              client.getRunDetail(request, metadata, callOptions, callback),
-            { runSlug },
-            readOptions(),
-          ),
-        ),
-      ),
-    getRunContent: async (runSlug, target) => {
-      const request: GetRunContentRequest =
-        "report" in target ? { runSlug, reportFilename: target.report } : { runSlug, instructionId: target.instruction };
-      const content = await unary<GetRunContentRequest, GetRunContentResponse>(
-        (unaryRequest, metadata, callOptions, callback) =>
-          client.getRunContent(unaryRequest, metadata, callOptions, callback),
-        request,
-        readOptions(),
-      ).catch((error: unknown) => {
-        if (error instanceof BackendUnavailableError) {
-          throw error;
-        }
-        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
-          throw new RunContentNotFoundError(runSlug);
-        }
-        throw error;
-      });
-      if (content.runSlug !== runSlug) {
-        throw new RunContentNotFoundError(runSlug);
-      }
-      return content;
-    },
-    getRunUpdates: (runSlug, cursor) => {
-      const request: GetRunUpdatesRequest =
-        cursor === undefined ? { runSlug } : { runSlug, epoch: cursor.epoch, afterSequence: cursor.sequence };
-      return expectRun(runSlug, () =>
-        unary<GetRunUpdatesRequest, GetRunUpdatesResponse>(
-          (unaryRequest, metadata, callOptions, callback) =>
-            client.getRunUpdates(unaryRequest, metadata, callOptions, callback),
-          request,
-          readOptions(),
-        ),
-      );
-    },
     getConversation: (request, timing) =>
       timedUnary(timing, "GetConversation", () =>
         unary<GetConversationRequest, GetConversationResponse>(
@@ -315,55 +207,95 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
           readOptions(),
         ),
       ),
-    getGoalDetail: async (goalId, timing) => {
-      const detail = await timedUnary(timing, "GetGoalDetail", () =>
-        unary<{ goalId: string }, GetGoalDetailResponse>(
-          (request, metadata, callOptions, callback) => client.getGoalDetail(request, metadata, callOptions, callback),
-          { goalId },
-          readOptions(),
+  };
+}
+
+// runSlug で1件の run を引く読み取り。NOT_FOUND と runSlug の不一致を、run か本文の「見つからない」エラーへ写す。
+function createRunOperations(client: TaktDashServiceClient, readOptions: CallOptionsFactory): RunOperations {
+  return {
+    getRunDetail: (runSlug, timing) =>
+      expectRun(runSlug, () =>
+        timedUnary(timing, "GetRunDetail", () =>
+          unary<{ runSlug: string }, GetRunDetailResponse>(
+            (request, metadata, callOptions, callback) =>
+              client.getRunDetail(request, metadata, callOptions, callback),
+            { runSlug },
+            readOptions(),
+          ),
         ),
-      ).catch((error: unknown) => {
-        if (error instanceof BackendUnavailableError) {
-          throw error;
-        }
-        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
-          throw new GoalNotFoundError(goalId);
-        }
-        throw error;
-      });
-      if (detail.goalId !== goalId) {
-        throw new GoalNotFoundError(goalId);
-      }
-      return detail;
+      ),
+    getRunContent: (runSlug, target) => {
+      const request: GetRunContentRequest =
+        "report" in target ? { runSlug, reportFilename: target.report } : { runSlug, instructionId: target.instruction };
+      return expectFound(
+        () =>
+          unary<GetRunContentRequest, GetRunContentResponse>(
+            (unaryRequest, metadata, callOptions, callback) =>
+              client.getRunContent(unaryRequest, metadata, callOptions, callback),
+            request,
+            readOptions(),
+          ),
+        () => new RunContentNotFoundError(runSlug),
+        (content) => content.runSlug === runSlug,
+      );
     },
-    getTaskDetail: async (project, taskName, goalId, timing) => {
-      const request: GetTaskDetailRequest =
-        goalId === undefined ? { project, taskName } : { project, taskName, goalId };
-      const detail = await timedUnary(timing, "GetTaskDetail", () =>
-        unary<GetTaskDetailRequest, GetTaskDetailResponse>(
+    getRunUpdates: (runSlug, cursor) => {
+      const request: GetRunUpdatesRequest =
+        cursor === undefined ? { runSlug } : { runSlug, epoch: cursor.epoch, afterSequence: cursor.sequence };
+      return expectRun(runSlug, () =>
+        unary<GetRunUpdatesRequest, GetRunUpdatesResponse>(
           (unaryRequest, metadata, callOptions, callback) =>
-            client.getTaskDetail(unaryRequest, metadata, callOptions, callback),
+            client.getRunUpdates(unaryRequest, metadata, callOptions, callback),
           request,
           readOptions(),
         ),
-      ).catch((error: unknown) => {
-        if (error instanceof BackendUnavailableError) {
-          throw error;
-        }
-        if ((error as grpc.ServiceError).code === grpc.status.NOT_FOUND) {
-          throw new TaskNotFoundError(project, taskName);
-        }
-        throw error;
-      });
-      if (detail.project !== project || detail.taskName !== taskName) {
-        throw new TaskNotFoundError(project, taskName);
-      }
-      if (goalId !== undefined && detail.goalId !== goalId) {
-        throw new TaskNotFoundError(project, taskName);
-      }
-      return detail;
+      );
     },
-    watchState: () => client.watchState({} satisfies WatchStateRequest),
+  };
+}
+
+// 1件を識別子で引く読み取り。NOT_FOUND と識別子の不一致を、対象ごとの「見つからない」エラーへ写す。
+function createDetailOperations(client: TaktDashServiceClient, readOptions: CallOptionsFactory): DetailOperations {
+  return {
+    getGoalDetail: (goalId, timing) =>
+      expectFound(
+        () =>
+          timedUnary(timing, "GetGoalDetail", () =>
+            unary<{ goalId: string }, GetGoalDetailResponse>(
+              (request, metadata, callOptions, callback) =>
+                client.getGoalDetail(request, metadata, callOptions, callback),
+              { goalId },
+              readOptions(),
+            ),
+          ),
+        () => new GoalNotFoundError(goalId),
+        (detail) => detail.goalId === goalId,
+      ),
+    getTaskDetail: (project, taskName, goalId, timing) => {
+      const request: GetTaskDetailRequest =
+        goalId === undefined ? { project, taskName } : { project, taskName, goalId };
+      return expectFound(
+        () =>
+          timedUnary(timing, "GetTaskDetail", () =>
+            unary<GetTaskDetailRequest, GetTaskDetailResponse>(
+              (unaryRequest, metadata, callOptions, callback) =>
+                client.getTaskDetail(unaryRequest, metadata, callOptions, callback),
+              request,
+              readOptions(),
+            ),
+          ),
+        () => new TaskNotFoundError(project, taskName),
+        (detail) =>
+          detail.project === project &&
+          detail.taskName === taskName &&
+          (goalId === undefined || detail.goalId === goalId),
+      );
+    },
+  };
+}
+
+function createWriteOperations(client: TaktDashServiceClient, writeOptions: CallOptionsFactory): WriteOperations {
+  return {
     answerInquiry: (request) =>
       unary<AnswerInquiryRequest, AnswerInquiryResponse>(
         (req, metadata, callOptions, callback) => client.answerInquiry(req, metadata, callOptions, callback),
@@ -390,6 +322,24 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
         request,
         writeOptions(),
       ),
+  };
+}
+
+export function createBackendClient(options: CreateBackendClientOptions = {}): BackendClient {
+  const env = options.env ?? process.env;
+  const address = resolveBackendAddress(env);
+  const deadlineMs = options.deadlineMs ?? DEFAULT_UNARY_DEADLINE_MS;
+  const readOptions = (): grpc.CallOptions => ({ deadline: Date.now() + deadlineMs });
+  const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
+  const writeDeadlineMs = options.writeDeadlineMs ?? DEFAULT_WRITE_DEADLINE_MS;
+  const writeOptions = (): grpc.CallOptions => ({ deadline: Date.now() + writeDeadlineMs });
+
+  return {
+    ...createReadOperations(client, readOptions),
+    ...createRunOperations(client, readOptions),
+    ...createDetailOperations(client, readOptions),
+    watchState: () => client.watchState({} satisfies WatchStateRequest),
+    ...createWriteOperations(client, writeOptions),
     close: () =>
       new Promise<void>((resolve) => {
         client.close();

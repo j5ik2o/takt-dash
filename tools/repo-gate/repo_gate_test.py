@@ -2547,8 +2547,303 @@ def test_repository_frontend_passes_frontend_style() -> None:
     assert "app/globals.css" in detail["css_files"], f"globals.css を走査していません: {detail!r}"
 
 
+def test_aislop_check_accepts_leading_newlines() -> None:
+    with Sandbox() as sandbox:
+        assert sandbox.module.invokes_aislop_check("\n\n" + AISLOP_CHECK)
+
+
+def test_aislop_check_rejects_quoted_empty_arguments() -> None:
+    with Sandbox() as sandbox:
+        for empty in ("''", '""'):
+            command = f"echo {empty} {AISLOP_CHECK}"
+            assert not sandbox.module.invokes_aislop_check(command), command
+
+
+def test_workflow_aislop_check_must_be_reachable() -> None:
+    for prefix in ("npm ci && ", "npm ci\n", "exit 0\n", "exit 0; ", "exit 0; echo ready; "):
+        command = prefix + AISLOP_CHECK
+        step = AISLOP_GATE_STEP.replace(
+            f"command: npm ci && {AISLOP_CHECK}",
+            "command: |\n" + "\n".join("          " + line for line in command.splitlines()),
+        )
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=WORKFLOW.replace(AISLOP_GATE_STEP, step))
+            stub_external_tools(sandbox)
+            if prefix.startswith("exit"):
+                assert_gate_rejects(sandbox, command)
+            else:
+                assert_success(sandbox, command)
+
+
+def test_ci_aislop_check_must_be_reachable() -> None:
+    for prefix in ("npm ci && ", "npm ci\n", "exit 0\n", "exit 0; ", "exit 0; echo ready; "):
+        command = prefix + AISLOP_CHECK
+        run = "      - run: |\n" + "".join("          " + line + "\n" for line in command.splitlines())
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=CI.replace(f"      - run: {AISLOP_CHECK}\n", run))
+            stub_external_tools(sandbox)
+            if prefix.startswith("exit"):
+                assert_gate_rejects(sandbox, command, "ci-runs-make-done")
+            else:
+                assert_success(sandbox, command)
+
+
+def test_aislop_success_result_must_belong_to_check() -> None:
+    for check_alias, other_alias, accepted in (
+        ("result", "preparation", True),
+        ("check_result", "result", False),
+        ("result", "result", False),
+    ):
+        step = AISLOP_GATE_STEP.replace("as: result", f"as: {check_alias}").replace(
+            "    rules:\n",
+            "      - type: command\n"
+            f"        as: {other_alias}\n"
+            "        command: 'true'\n"
+            "    rules:\n",
+        )
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=WORKFLOW.replace(AISLOP_GATE_STEP, step))
+            stub_external_tools(sandbox)
+            if accepted:
+                assert_success(sandbox, "チェック自身の result を参照する")
+            else:
+                assert_gate_rejects(sandbox, "チェック以外が result を生成する")
+
+
+def test_ci_required_steps_accept_default_failure_behavior() -> None:
+    for setting in (
+        "",
+        "        continue-on-error: false\n",
+        "        continue-on-error: ${{ false }}\n",
+        "        continue-on-error: ${{false}}\n",
+    ):
+        for command in ("make done", AISLOP_CHECK):
+            line = f"      - run: {command}\n"
+            with Sandbox() as sandbox:
+                repository(sandbox, ci=CI.replace(line, line + setting))
+                stub_external_tools(sandbox)
+                assert_success(sandbox, f"失敗を許容しない必須起動: {command}, {setting!r}")
+
+
+def test_ci_make_done_must_not_allow_failure() -> None:
+    for setting in ("true", "${{ true }}", "${{ matrix.allow_failure }}"):
+        ci = CI.replace("    steps:\n", "    strategy:\n      matrix:\n        allow_failure: [true, false]\n    steps:\n")
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=ci.replace(
+                "      - run: make done\n",
+                f"      - run: make done\n        continue-on-error: {setting}\n",
+            ))
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, f"make done の失敗を許容する: {setting}", "ci-runs-make-done")
+
+
+def test_ci_aislop_must_not_allow_failure() -> None:
+    line = f"      - run: {AISLOP_CHECK}\n"
+    for setting in ("true", "${{ true }}", "${{ matrix.allow_failure }}"):
+        ci = CI.replace("    steps:\n", "    strategy:\n      matrix:\n        allow_failure: [true, false]\n    steps:\n")
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=ci.replace(line, line + f"        continue-on-error: {setting}\n"))
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, f"aislop の失敗を許容する: {setting}", "ci-runs-make-done")
+
+
+def test_ci_setup_comments_do_not_count_as_actions() -> None:
+    for setup in (
+        "      - uses: dtolnay/rust-toolchain@stable\n        with:\n          components: clippy\n",
+        "      - uses: dtolnay/rust-toolchain@nightly\n        with:\n          components: rustfmt\n",
+        "      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n",
+    ):
+        commented = "".join("# " + line + "\n" for line in setup.splitlines())
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=CI.replace(setup, commented))
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, setup, "ci-runs-make-done")
+
+
+def test_ci_setup_options_must_belong_to_matching_action() -> None:
+    for uses, option in (
+        ("dtolnay/rust-toolchain@nightly", "components: rustfmt"),
+        ("actions/setup-node@v4", "node-version: 22"),
+    ):
+        setup = f"      - uses: {uses}\n        with:\n          {option}\n"
+        misplaced = (
+            f"      - uses: {uses}\n"
+            "      - uses: example/unrelated-action@v1\n"
+            "        with:\n"
+            f"          {option}\n"
+        )
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=CI.replace(setup, misplaced))
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, misplaced, "ci-runs-make-done")
+
+
+def test_machine_gate_fix_return_must_precede_unconditional_abort() -> None:
+    for original in FIX_MACHINE_GATE_STEPS:
+        header, _ = original.split("    rules:\n", 1)
+        return_rule = "      - condition: 修正して検証した\n        next: machine_gate\n"
+        abort_rule = "      - condition: when(true)\n        next: ABORT\n"
+        for rules, accepted in ((return_rule + abort_rule, True), (abort_rule + return_rule, False)):
+            step = header + "    rules:\n" + rules
+            with Sandbox() as sandbox:
+                repository(sandbox, workflow=WORKFLOW.replace(original, step))
+                stub_external_tools(sandbox)
+                if accepted:
+                    assert_success(sandbox, step)
+                else:
+                    assert_gate_rejects(sandbox, step)
+
+
+def test_aislop_fix_return_must_precede_unconditional_abort() -> None:
+    header, _ = FIX_AISLOP_GATE_STEP.split("    rules:\n", 1)
+    return_rule = "      - condition: 修正して検証した\n        next: machine_gate\n"
+    abort_rule = "      - condition: when(true)\n        next: ABORT\n"
+    for rules, accepted in ((return_rule + abort_rule, True), (abort_rule + return_rule, False)):
+        step = header + "    rules:\n" + rules
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=WORKFLOW.replace(FIX_AISLOP_GATE_STEP, step))
+            stub_external_tools(sandbox)
+            if accepted:
+                assert_success(sandbox, step)
+            else:
+                assert_gate_rejects(sandbox, step)
+
+
+def test_publish_fix_must_reject_additional_complete_transition() -> None:
+    extra = "      - condition: 公開を省略する\n        next: COMPLETE\n"
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=PUBLISH_WORKFLOW + extra)
+        stub_external_tools(sandbox)
+        assert_gate_rejects(sandbox, "再試行を残したまま COMPLETE へ抜ける")
+
+
+def test_shell_comments_preserve_newline() -> None:
+    from gate_shell import strip_shell_comments
+
+    command = f"echo ok # note\n{AISLOP_CHECK}"
+    assert strip_shell_comments(command) == f"echo ok \n{AISLOP_CHECK}"
+    continued = "echo \\\n# note\n" + AISLOP_CHECK
+    assert strip_shell_comments(continued) == "echo \\\n\n" + AISLOP_CHECK
+
+
+def test_shell_comments_preserve_hash_inside_words() -> None:
+    from gate_shell import strip_shell_comments
+
+    for command in ("echo '#'", 'echo "#"', r"echo \#", "echo tag#v", "echo tag#v '#' \"#\" \\#"):
+        actual = strip_shell_comments(command)
+        assert actual == command, f"{command!r} が {actual!r} に変化しました"
+
+
+def test_aislop_success_must_not_be_shadowed_by_zero_matching_rule() -> None:
+    success = "      - condition: when(context.aislop_gate.result.exit_code == 0)\n"
+    for operator, accepted in (("!=", True), (">=", False)):
+        preceding = (
+            f"      - condition: when(context.aislop_gate.result.exit_code {operator} 0)\n"
+            "        next: fix_aislop_gate\n"
+        )
+        step = AISLOP_GATE_STEP.replace(success, preceding + success)
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=WORKFLOW.replace(AISLOP_GATE_STEP, step))
+            stub_external_tools(sandbox)
+            if accepted:
+                assert_success(sandbox, "0 に一致しない先行規則")
+            else:
+                assert_gate_rejects(sandbox, "0 にも一致する先行規則")
+
+
+def test_aislop_rejects_shell_control_before_check() -> None:
+    with Sandbox() as sandbox:
+        for prefix in (
+            "exit 0; echo ready; ",
+            "command exit 0; ",
+            "exec true; ",
+            "time exit 0; ",
+            "eval 'exit 0'; ",
+            "set -n; ",
+            ">/dev/null exit 0; ",
+            "ex\\\nit 0; ",
+            "if false; then ",
+        ):
+            command = prefix + AISLOP_CHECK
+            assert not sandbox.module.invokes_aislop_check(command), command
+
+
+
+def test_aislop_check_rejects_heredoc_before_check() -> None:
+    with Sandbox() as sandbox:
+        for command in (
+            "cat <<'node scripts/aislop-check-bootstrap.mjs check'\n" + AISLOP_CHECK,
+            "cat <<EOF\nbody\nEOF\n" + AISLOP_CHECK,
+            "cat <<-EOF\n" + AISLOP_CHECK + "\nEOF",
+        ):
+            assert not sandbox.module.invokes_aislop_check(command), command
+
+
+def test_aislop_check_accepts_quoted_heredoc_operator() -> None:
+    with Sandbox() as sandbox:
+        for command in (
+            "echo '<< ready'\n" + AISLOP_CHECK,
+            'echo "<< ready"\n' + AISLOP_CHECK,
+            "echo \\<< ready\n" + AISLOP_CHECK,
+        ):
+            assert sandbox.module.invokes_aislop_check(command), command
+
+
+def test_workflow_aislop_reachability_with_adjacent_redirection() -> None:
+    for separator in ("\n", "; "):
+        for head in ("echo</dev/null", "echo 'exit</dev/null'", "exit</dev/null"):
+            command = head + separator + AISLOP_CHECK
+            step = AISLOP_GATE_STEP.replace(
+                f"command: npm ci && {AISLOP_CHECK}",
+                "command: |\n" + "\n".join("          " + line for line in command.splitlines()),
+            )
+            with Sandbox() as sandbox:
+                repository(sandbox, workflow=WORKFLOW.replace(AISLOP_GATE_STEP, step))
+                stub_external_tools(sandbox)
+                if head == "exit</dev/null":
+                    assert_gate_rejects(sandbox, command)
+                else:
+                    assert_success(sandbox, command)
+
+
+def test_ci_aislop_reachability_with_adjacent_redirection() -> None:
+    for separator in ("\n", "; "):
+        for head in ("echo</dev/null", "echo 'exit</dev/null'", "exit</dev/null"):
+            command = head + separator + AISLOP_CHECK
+            run = "      - run: |\n" + "".join("          " + line + "\n" for line in command.splitlines())
+            with Sandbox() as sandbox:
+                repository(sandbox, ci=CI.replace(f"      - run: {AISLOP_CHECK}\n", run))
+                stub_external_tools(sandbox)
+                if head == "exit</dev/null":
+                    assert_gate_rejects(sandbox, command, "ci-runs-make-done")
+                else:
+                    assert_success(sandbox, command)
+
+
+
 def main() -> int:
     tests = [
+        test_workflow_aislop_reachability_with_adjacent_redirection,
+        test_ci_aislop_reachability_with_adjacent_redirection,
+        test_aislop_check_accepts_leading_newlines,
+        test_aislop_check_rejects_quoted_empty_arguments,
+        test_workflow_aislop_check_must_be_reachable,
+        test_ci_aislop_check_must_be_reachable,
+        test_aislop_success_result_must_belong_to_check,
+        test_ci_required_steps_accept_default_failure_behavior,
+        test_ci_make_done_must_not_allow_failure,
+        test_ci_aislop_must_not_allow_failure,
+        test_ci_setup_comments_do_not_count_as_actions,
+        test_ci_setup_options_must_belong_to_matching_action,
+        test_machine_gate_fix_return_must_precede_unconditional_abort,
+        test_aislop_fix_return_must_precede_unconditional_abort,
+        test_publish_fix_must_reject_additional_complete_transition,
+        test_shell_comments_preserve_newline,
+        test_shell_comments_preserve_hash_inside_words,
+        test_aislop_success_must_not_be_shadowed_by_zero_matching_rule,
+        test_aislop_rejects_shell_control_before_check,
+        test_aislop_check_rejects_heredoc_before_check,
+        test_aislop_check_accepts_quoted_heredoc_operator,
         test_correct_repository_passes,
         test_workspace_members_must_be_backend_and_cli,
         test_backend_must_have_lib_and_cli_must_have_bin,
