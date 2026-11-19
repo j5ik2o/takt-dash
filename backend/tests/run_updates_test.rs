@@ -20,7 +20,8 @@ use takt_dash_backend::{
   domain::GoalId,
   model::{ExecutionStatus, GoalStatus, ProjectSnapshot},
   takt_dash::v1::{
-    takt_dash_service_client::TaktDashServiceClient, GetRunDetailRequest, GetRunUpdatesRequest, GetRunUpdatesResponse,
+    takt_dash_service_client::TaktDashServiceClient, GetOverviewRequest, GetRunDetailRequest, GetRunUpdatesRequest,
+    GetRunUpdatesResponse,
   },
 };
 use tonic::transport::Channel;
@@ -110,6 +111,57 @@ fn request(run_slug: &str, cursor: Option<(i64, i64)>) -> GetRunUpdatesRequest {
     run_slug:       run_slug.to_owned(),
     epoch:          cursor.map(|(epoch, _)| epoch),
     after_sequence: cursor.map(|(_, sequence)| sequence),
+  }
+}
+
+#[tokio::test]
+async fn run_responses_keep_marked_logs_and_tool_names_without_prompt_values() {
+  for length in [511, 512, 513] {
+    let harness = seeded_harness();
+    let fixture = running_run_files(&harness);
+    let step = "あ".repeat(length);
+    fixture.append_records("run-1", &[json!({ "type": "step_complete", "step": step, "iteration": 1,
+        "nested": [{ "systemPrompt": "秘密A", "content": "秘密B" }] })]);
+    append_text(&phase1_dir(&fixture, "run-1").join("implement.jsonl"), &tool_use_line(&step));
+    let mut poller = takt_dash_backend::poller::Poller::new(
+      harness.config_path().to_path_buf(),
+      harness.activity.clone(),
+      harness.store.clone(),
+      harness.changes.clone(),
+      harness.registry.clone(),
+    );
+    poller.read_cycle_once().await.expect("本体ログを一覧の状態へ取り込みます");
+    poller.shutdown().await;
+    let server = start_server(&harness).await;
+    let mut api = client(server.address).await;
+    let update = updates(&mut api, "run-1", None).await;
+    let detail = api
+      .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+      .await
+      .expect("詳細を取得できます")
+      .into_inner();
+    let listed = api.get_overview(GetOverviewRequest {}).await.expect("一覧を取得できます").into_inner();
+    server.stop().await;
+
+    let expected = if length > 512 { format!("{}…", "あ".repeat(511)) } else { step };
+    assert_eq!(listed.runs[0].steps.last().expect("一覧のステップがあります").step_name, expected);
+    for bytes in [
+      prost::Message::encode_to_vec(&listed),
+      prost::Message::encode_to_vec(&detail),
+      prost::Message::encode_to_vec(&update),
+    ] {
+      for secret in ["秘密A", "秘密B"] {
+        assert!(!bytes.windows(secret.len()).any(|window| window == secret.as_bytes()));
+      }
+    }
+    assert_eq!(update.activity.expect("活動があります").latest_tool.as_deref(), Some(expected.as_str()));
+    assert!(update.lines.iter().any(|line| line.text == format!("step_complete {expected}")));
+    assert!(detail.log_tail.contains(&format!("step_complete {expected}")));
+    assert_eq!(detail.step_logs.last().expect("ステップがあります").step_name, expected);
+    for line in update.lines {
+      assert!(!line.text.contains("秘密A") && !line.text.contains("秘密B"));
+    }
+    assert!(!detail.log_tail.contains("秘密A") && !detail.log_tail.contains("秘密B"));
   }
 }
 
@@ -529,6 +581,35 @@ fn seeded_remote_harness() -> GrpcHarness {
   };
   harness.store.record_success("takt-dash", snapshot, time("2026-11-13T12:00:00Z"));
   harness
+}
+
+#[tokio::test]
+async fn remote_updates_do_not_read_task_text_for_a_missing_summary() {
+  for truncated in [false, true] {
+    let harness = seeded_remote_harness();
+    let mut state = remote_run_state();
+    state["runs"]["run-1"]["taskOmission"] = json!({ "truncated": truncated, "totalBytes": 70000 });
+    harness.rewrite_state(state);
+    let server = start_server(&harness).await;
+    let mut api = client(server.address).await;
+    let first = updates(&mut api, "run-1", None).await;
+    let cursor = next_cursor(&first, None);
+    let second = updates(&mut api, "run-1", Some(cursor)).await;
+    server.stop().await;
+
+    assert!(first.reset);
+    assert_eq!(texts(&first), vec![
+      "2026-11-13T09:10:00Z step_complete remote-plan",
+      "2026-11-13T09:30:00Z step_complete remote-implement",
+    ]);
+    assert_eq!(cursor, (first.epoch, 2));
+    assert_eq!(second.epoch, first.epoch);
+    assert!(!second.reset);
+    assert!(second.lines.is_empty());
+    let calls = harness.recorded_calls();
+    assert_eq!(calls.iter().filter(|call| call.name == "takt_get_run").count(), 2);
+    assert!(calls.iter().all(|call| call.arguments["view"] != "task"), "{calls:?}");
+  }
 }
 
 #[tokio::test]

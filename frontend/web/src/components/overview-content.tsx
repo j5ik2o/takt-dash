@@ -258,7 +258,7 @@ export function OverviewContent({
                         </a>
                       </td>
                       <td className="run-goal">
-                        {runView.goalName ? <span className="g">{goalDisplayName(runView.goalName)}</span> : null}
+                        {runView.goalName ? <span className="g">{goalDisplayName(runView.goalName, runView.goalNameTruncated)}</span> : null}
                         <div className="task">タスク「{runView.run.summary || runView.run.taskName}」</div>
                       </td>
                       <td className="run-step">

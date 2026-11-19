@@ -795,6 +795,49 @@ fn keeps_values_that_mention_prompt_keys() {
 }
 
 #[test]
+fn body_log_strings_mark_only_actual_character_truncation() {
+  for character in ['a', 'あ', '🦀'] {
+    for length in [511, 512, 513] {
+      let fixture = Fixture::new();
+      let run_dir = fixture.create_run(&fixture.project_cwd, "run-boundary");
+      let text = character.to_string().repeat(length);
+      append_record(&body_log(&run_dir), &json!({ "type": "step_start", "step": text }));
+
+      let read = fixture.reader().read_body_log(&run_dir);
+
+      let expected = if length > MAX_SUMMARY_CHARS {
+        format!("{}…", character.to_string().repeat(MAX_SUMMARY_CHARS - 1))
+      } else {
+        text
+      };
+      assert_eq!(read.records[0]["step"].as_str(), Some(expected.as_str()), "{character}: {length}文字");
+    }
+  }
+}
+
+#[test]
+fn removes_prompt_fields_inside_arrays_but_keeps_public_values() {
+  let fixture = Fixture::new();
+  let run_dir = fixture.create_run(&fixture.project_cwd, "run-array");
+  append_record(
+    &body_log(&run_dir),
+    &json!({
+      "type": "step_start", "step": "systemPrompt を確認",
+      "nested": [{ "systemPrompt": "秘密A", "content": "秘密B", "keep": "公開値" }]
+    }),
+  );
+
+  let read = fixture.reader().read_body_log(&run_dir);
+
+  assert_eq!(
+    read.records[0],
+    json!({
+      "type": "step_start", "step": "systemPrompt を確認", "nested": [{ "keep": "公開値" }]
+    })
+  );
+}
+
+#[test]
 fn reports_missing_body_log_without_error() {
   let fixture = Fixture::new();
   let run_dir = fixture.project_cwd.join(".takt").join("runs").join("run-no-logs");

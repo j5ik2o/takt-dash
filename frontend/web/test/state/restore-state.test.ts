@@ -41,6 +41,15 @@ const restoreError = (payload: unknown, stage: Stage): void => {
 
 const wireOf = (state: DashboardState): unknown => JSON.parse(JSON.stringify(DashboardState.toJSON(state)));
 
+test("旧応答の省略フラグ欠落はfalseにし、新応答のtrueを保持する", () => {
+  const state = createDashboardState();
+  const goal = state.goals[0]!;
+  const oldGoal = { ...goal };
+  Reflect.deleteProperty(oldGoal, "nameTruncated");
+  assert.equal(restoreDashboardState({ ...state, goals: [oldGoal] }).goals[0]?.nameTruncated, false);
+  assert.equal(restoreDashboardState({ ...state, goals: [{ ...goal, nameTruncated: true }] }).goals[0]?.nameTruncated, true);
+});
+
 test("proto の完全な JSON 表現から専用型の値と既知の状態を復元する", () => {
   const restored = restoreDashboardState(wireOf(createDashboardState()));
 

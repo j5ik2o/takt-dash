@@ -216,6 +216,7 @@ const toGoal = (raw: unknown): DashboardGoal => {
   const value = recordOf(raw);
   return {
     goalId: toGoalId(value.goalId),
+    nameTruncated: value.nameTruncated === true,
     serverId: toServerId(value.serverId),
     project: toProjectName(value.project),
     name: String(value.name ?? ""),

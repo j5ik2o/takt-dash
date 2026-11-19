@@ -62,6 +62,7 @@ type RunView = {
   label: string;
   note: string;
   goalName?: string;
+  goalNameTruncated: boolean;
   currentStepName?: string;
   stepNumber?: number;
   totalSteps?: number;
@@ -177,7 +178,8 @@ export function toRunView(
 ): RunView {
   const server = serverById.get(run.serverId);
   const lastStep = run.steps.at(-1);
-  const goalName = run.goalId !== undefined ? goalsById?.get(run.goalId)?.name : undefined;
+  const goal = run.goalId !== undefined ? goalsById?.get(run.goalId) : undefined;
+  const goalName = goal?.name;
   const elapsedSeconds = run.lastLogAt
     ? Math.max(0, Math.floor((now.getTime() - run.lastLogAt.getTime()) / 1_000))
     : undefined;
@@ -185,6 +187,7 @@ export function toRunView(
     run,
     server,
     goalName: goalName !== undefined && goalName !== "" ? goalName : undefined,
+    goalNameTruncated: goal?.nameTruncated === true,
     currentStepName:
       run.currentStepName !== undefined && run.currentStepName !== "" ? run.currentStepName : undefined,
     model: lastStep?.model !== undefined && lastStep.model !== "" ? lastStep.model : undefined,

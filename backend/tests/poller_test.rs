@@ -1214,7 +1214,7 @@ async fn run_summary_is_the_first_line_of_the_meta_task() {
   let run = stored_run(&harness, "r1").expect("running の run が一覧にあります");
   poller.shutdown().await;
 
-  assert_eq!(run.summary, "認証処理を実装する");
+  assert_eq!(run.summary, "認証処理を実装する…");
 }
 
 #[tokio::test]

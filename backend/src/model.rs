@@ -128,6 +128,8 @@ pub struct GoalEntry {
   pub status:              GoalStatus,
   pub execution_status:    ExecutionStatus,
   pub objective:           String,
+  /// 受信前に objective の続きが省略されているか。
+  pub objective_truncated: bool,
   pub integration_branch:  String,
   pub pull_request_number: Option<PullRequestNumber>,
   pub pull_request_url:    Option<String>,
@@ -150,6 +152,16 @@ pub struct TaskEntry {
   pub current_step:    Option<String>,
   /// ゴールの仕上げタスクかどうか。
   pub merge_task:      bool,
+}
+
+impl GoalEntry {
+  pub(crate) fn objective_display(&self) -> String {
+    if self.objective_truncated {
+      format!("{}…", self.objective)
+    } else {
+      self.objective.clone()
+    }
+  }
 }
 
 /// takt_get_goal から得たゴールの詳細。

@@ -625,7 +625,11 @@ export interface Goal {
     | Date
     | undefined;
   /** 仕上げタスクの最後の状態（なければ人のマージ待ち） */
-  mergeTaskLast?: TaskStatus | undefined;
+  mergeTaskLast?:
+    | TaskStatus
+    | undefined;
+  /** 名前の原文から続きが省かれているか */
+  nameTruncated: boolean;
 }
 
 /** ゴールの実行で通ったステップを表す。 */
@@ -1988,6 +1992,7 @@ function createBaseGoal(): Goal {
     pullRequest: undefined,
     awaitingMergeAt: undefined,
     mergeTaskLast: undefined,
+    nameTruncated: false,
   };
 }
 
@@ -2025,6 +2030,9 @@ export const Goal: MessageFns<Goal> = {
     }
     if (message.mergeTaskLast !== undefined) {
       writer.uint32(88).int32(message.mergeTaskLast);
+    }
+    if (message.nameTruncated !== false) {
+      writer.uint32(96).bool(message.nameTruncated);
     }
     return writer;
   },
@@ -2130,6 +2138,14 @@ export const Goal: MessageFns<Goal> = {
             message.mergeTaskLast = reader.int32() as any;
             continue;
           }
+          case 12: {
+            if (tag !== 96) {
+              break;
+            }
+
+            message.nameTruncated = reader.bool();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -2187,6 +2203,11 @@ export const Goal: MessageFns<Goal> = {
         : isSet(object.merge_task_last)
         ? taskStatusFromJSON(object.merge_task_last)
         : undefined,
+      nameTruncated: isSet(object.nameTruncated)
+        ? globalThis.Boolean(object.nameTruncated)
+        : isSet(object.name_truncated)
+        ? globalThis.Boolean(object.name_truncated)
+        : false,
     };
   },
 
@@ -2225,6 +2246,9 @@ export const Goal: MessageFns<Goal> = {
     if (message.mergeTaskLast !== undefined) {
       obj.mergeTaskLast = taskStatusToJSON(message.mergeTaskLast);
     }
+    if (message.nameTruncated !== false) {
+      obj.nameTruncated = message.nameTruncated;
+    }
     return obj;
   },
 
@@ -2248,6 +2272,7 @@ export const Goal: MessageFns<Goal> = {
       : undefined;
     message.awaitingMergeAt = object.awaitingMergeAt ?? undefined;
     message.mergeTaskLast = object.mergeTaskLast ?? undefined;
+    message.nameTruncated = object.nameTruncated ?? false;
     return message;
   },
 };

@@ -150,8 +150,8 @@ impl RunLogView {
         .completions
         .iter()
         .map(|completion| RunStepEntry {
-          step_name:  completion.step.clone(),
-          model:      completion.model.clone().unwrap_or_default(),
+          step_name:  crate::run_log::log_text_preview(&completion.step),
+          model:      completion.model.as_deref().map(crate::run_log::log_text_preview).unwrap_or_default(),
           started_at: completion.timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
           ended_at:   None,
         })
@@ -166,9 +166,9 @@ impl RunLogView {
       .completions
       .iter()
       .map(|completion| StepLogEntry {
-        step_name: completion.step.clone(),
-        persona:   completion.persona.clone(),
-        status:    completion.status.clone(),
+        step_name: crate::run_log::log_text_preview(&completion.step),
+        persona:   crate::run_log::log_text_preview(&completion.persona),
+        status:    crate::run_log::log_text_preview(&completion.status),
         content:   String::new(),
         timestamp: completion.timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
         iteration: completion.iteration,
@@ -213,7 +213,13 @@ impl RunLogView {
 /// takt は UTF-16 の単位で 80 を数えますが、ここでは文字（Unicode のスカラー値）で数えます。
 /// 差が出るのは BMP の外の文字（絵文字など）を含むときだけです。
 pub(crate) fn task_summary(task_text: &str) -> String {
-  task_text.trim().lines().next().unwrap_or_default().chars().take(TASK_SUMMARY_CHARS).collect()
+  let text = task_text.trim();
+  let first = text.lines().next().unwrap_or_default();
+  let mut summary: String = first.chars().take(TASK_SUMMARY_CHARS).collect();
+  if summary.len() < text.len() {
+    summary.push('…');
+  }
+  summary
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,11 +359,11 @@ impl RunProgress {
     // 集計は、新しく作った取っ手が読む結果と同じになる。
     let tail = matches!(self.initial_read, InitialRead::Tail(_));
     let had_positions = self.reader.has_body_log_positions();
-    let mut body_log = self.reader.read_body_log(run_dir);
+    let mut body_log = self.reader.read_body_log_for_progress(run_dir);
     if tail && body_log.restarted && had_positions {
       self.reader.forget_body_log_positions();
       let first_bytes = body_log.bytes_read;
-      body_log = self.reader.read_body_log(run_dir);
+      body_log = self.reader.read_body_log_for_progress(run_dir);
       body_log.bytes_read += first_bytes;
     }
     if tail && body_log.restarted {
@@ -451,6 +457,7 @@ impl RunProgress {
       [record.get("timestamp").and_then(Value::as_str), Some(kind), record.get("step").and_then(Value::as_str)]
         .into_iter()
         .flatten()
+        .map(crate::run_log::log_text_preview)
         .collect::<Vec<_>>()
         .join(" ");
     if self.log_tail.len() == LOG_TAIL_RECORDS {

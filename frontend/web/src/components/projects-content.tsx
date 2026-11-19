@@ -23,14 +23,15 @@ function GoalRow({ goal }: { goal: Goal }): ReactElement {
   const pullRequest = goal.pullRequest;
   return (
     <li>
-      <h4 className="goal-head">{goalListHeading(goal.name)}</h4>
+      <h4 className="goal-head">{goalListHeading(goal.name, goal.nameTruncated)}</h4>
       <span className={`goal-badge ${badge.tone}`}>{badge.label}</span>
       {badge.kind === "paused" && goal.pausedReason !== undefined ? (
         <p className="goal-why">一時停止の理由: {goal.pausedReason}</p>
       ) : null}
       <details className="goal-full">
-        <summary>このゴールの目的の全文を表示します。</summary>
-        <p className="goal-text">{goalDisplayName(goal.name)}</p>
+        <summary>{goal.nameTruncated ? "このゴールの目的の一部を表示します。" : "このゴールの目的の全文を表示します。"}</summary>
+        <p className="goal-text">{goalDisplayName(goal.name, goal.nameTruncated)}</p>
+        {goal.nameTruncated ? <a href={`/goals/${encodeURIComponent(goal.goalId)}`}>目的の全文を詳細で表示します。</a> : null}
       </details>
       {progress.total === 0 ? (
         <p className="goal-progress">タスクはまだ登録されていません。</p>

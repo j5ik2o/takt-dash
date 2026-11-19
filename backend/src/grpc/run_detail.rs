@@ -39,6 +39,9 @@ pub(super) fn fill_from_run_log(
   let started_at = view.started_at(task);
   let last_log_at = view.resolve_last_log_at(started_at);
   response.task_text = view.task_text.clone().unwrap_or_default();
+  if response.summary.is_empty() {
+    response.summary = crate::run_progress::task_summary(&response.task_text);
+  }
   response.workflow = view.workflow.clone().unwrap_or_default();
   response.status = run_status(view.status) as i32;
   response.started_at = optional_timestamp(started_at);
@@ -74,6 +77,9 @@ pub(super) async fn fill_from_takt_get_run(
   let started_at = remote.started_at(task);
   let last_log_at = remote.resolve_last_log_at(started_at);
   response.task_text = remote.task_text.clone();
+  if response.summary.is_empty() {
+    response.summary = remote.summary.clone();
+  }
   response.workflow = remote.workflow.clone().unwrap_or_default();
   response.status = run_status(remote.status) as i32;
   response.started_at = optional_timestamp(started_at);
@@ -90,10 +96,10 @@ pub(super) async fn fill_from_takt_get_run(
   Ok(last_log_at)
 }
 
-/// 対象サーバーの takt-mcp を起動して takt_get_run から run を読み、子プロセスを終了する。
-async fn read_remote_run(resolved: &ResolvedProject, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
+/// ログ更新では要約用の本文取得を避け、ステップログを読んで子プロセスを終了する。
+async fn read_remote_run_logs(resolved: &ResolvedProject, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
   let mut client = McpClient::new(resolved.client_config.clone());
-  let result = ToolSet::new(&mut client, resolved.cwd.clone()).read_remote_run(run_slug).await;
+  let result = ToolSet::new(&mut client, resolved.cwd.clone()).read_remote_run_logs(run_slug).await;
   client.shutdown().await;
   result
 }
@@ -134,7 +140,7 @@ pub(super) async fn remote_run_updates(
   after: Option<LogCursor>,
   failure: RunReadFailure,
 ) -> Result<RunUpdates, Status> {
-  let remote = match read_remote_run(resolved, run_slug).await {
+  let remote = match read_remote_run_logs(resolved, run_slug).await {
     | Ok(remote) => remote,
     | Err(error) => {
       tracing::warn!(run_slug = %run_slug.as_str(), local = %failure, error = %error, "run の追記分を保存場所からも takt_get_run からも読めませんでした。");

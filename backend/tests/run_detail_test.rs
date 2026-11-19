@@ -556,6 +556,65 @@ fn remote_run_state() -> Value {
   state
 }
 
+#[tokio::test]
+async fn local_detail_fills_only_an_empty_summary_and_keeps_the_full_task() {
+  for saved_summary in [None, Some("実装の run")] {
+    let harness = seeded_harness(mcp_state());
+    if saved_summary.is_none() {
+      let mut task = task("implement", TaskStatus::Completed);
+      task.run_slug = Some(RunSlug::try_from("run-1").expect("有効なslugです"));
+      harness.store.record_success(
+        "takt-dash",
+        ProjectSnapshot { tasks: vec![task], ..ProjectSnapshot::empty() },
+        time("2026-11-13T12:00:00Z"),
+      );
+    }
+    let fixture = running_run_files(&harness);
+    let mut meta = running_meta("implement", 3, WORKFLOW, "2026-11-13T09:00:00Z");
+    meta["task"] = json!("確認する。\n末尾");
+    fixture.write_meta("run-1", &meta);
+
+    let detail = request_detail(&harness, "run-1").await.expect("ローカル詳細を取得できます");
+
+    assert_eq!(detail.summary, saved_summary.unwrap_or("確認する。…"));
+    assert_eq!(detail.task_text, "確認する。\n末尾");
+  }
+}
+
+#[tokio::test]
+async fn remote_detail_fills_only_an_empty_summary_and_keeps_all_task_pages() {
+  let full = format!("確認する。\n{}末尾", "あ".repeat(3000));
+  for saved_summary in [None, Some("実装の run")] {
+    let mut state = remote_run_state();
+    state["runs"]["run-1"]["taskText"] = json!(full);
+    state["runs"]["run-1"]["taskOmission"] = json!({ "truncated": true, "totalBytes": full.len(), "returnedBytes": 0 });
+    let harness = seeded_harness(state);
+    if saved_summary.is_none() {
+      let mut task = task("implement", TaskStatus::Completed);
+      task.run_slug = Some(RunSlug::try_from("run-1").expect("有効なslugです"));
+      harness.store.record_success(
+        "takt-dash",
+        ProjectSnapshot { tasks: vec![task], ..ProjectSnapshot::empty() },
+        time("2026-11-13T12:00:00Z"),
+      );
+    }
+
+    let detail = request_detail(&harness, "run-1").await.expect("リモート詳細を取得できます");
+
+    assert_eq!(detail.summary, saved_summary.unwrap_or("確認する。…"));
+    assert_eq!(detail.task_text, full);
+    let offsets: Vec<_> = harness
+      .recorded_calls()
+      .into_iter()
+      .filter(|call| call.name == "takt_get_run" && call.arguments["view"] == "task")
+      .map(|call| call.arguments["offset"].as_u64().expect("本文のoffsetがあります"))
+      .collect();
+    assert!(offsets.len() > 1);
+    assert_eq!(offsets[0], 0);
+    assert!(offsets.windows(2).all(|pair| pair[0] < pair[1]));
+  }
+}
+
 /// takt_get_run の値で組み立てた詳細であることを確かめる。
 fn assert_detail_from_takt_get_run(detail: &GetRunDetailResponse, harness: &GrpcHarness) {
   assert_eq!(detail.status, RunStatus::Running as i32);

@@ -90,6 +90,21 @@ fn goals_command_lists_all_servers_and_projects() {
 }
 
 #[test]
+fn goal_preview_flag_reaches_goals_and_overview_output() {
+  for truncated in [false, true] {
+    let mut goals = sample_goals();
+    goals[0].name = "確認。".to_owned();
+    goals[0].name_truncated = truncated;
+    let expected = if truncated { "「確認。…」" } else { "「確認。」" };
+    let listed = crate::render::render_goals(&v1::GetGoalsResponse { goals: goals.clone() });
+    assert!(listed.lines().any(|line| line.contains("goal-cli") && line.contains(expected)));
+    let state = DashboardState { goals, ..DashboardState::default() };
+    let overview = crate::render::render_overview(&state).expect("概要を表示できます");
+    assert!(overview.lines().any(|line| line.contains("goal-cli") && line.contains(expected)));
+  }
+}
+
+#[test]
 fn goals_command_marks_empty_list() {
   let runtime =
     tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
