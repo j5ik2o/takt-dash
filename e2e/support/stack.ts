@@ -22,7 +22,7 @@ const BACKEND_BIN = path.join(REPO_ROOT, "target", "debug", "takt-dash-backend")
 const MOCK_SERVER_SCRIPT = path.join(REPO_ROOT, "backend", "tests", "mock_mcp_server.mjs");
 const MOCK_PROXY_SCRIPT = path.join(REPO_ROOT, "e2e", "support", "mock-proxy.mjs");
 const WEB_DIR = path.join(REPO_ROOT, "frontend", "web");
-const NEXT_BIN = path.join(WEB_DIR, "node_modules", ".bin", "next");
+const WEB_LOG_START = path.join(WEB_DIR, "scripts", "web-log-start.mjs");
 
 export type ToolCall = {
   name: string;
@@ -480,8 +480,8 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     await waitForPort(backendPort, 30_000, "backend", () => backendExited);
 
     web = spawnWithLog(
-      NEXT_BIN,
-      ["start", "-H", "0.0.0.0", "-p", String(webPort)],
+      process.execPath,
+      [WEB_LOG_START, "start", "-H", "0.0.0.0", "-p", String(webPort)],
       WEB_DIR,
       webLog,
       // 空きポートは既定の許可ホストに含まれないため、利用する URL のホストだけを許可する。
