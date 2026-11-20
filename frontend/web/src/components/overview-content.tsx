@@ -222,9 +222,11 @@ export function OverviewContent({
                 <span className="kind">機種: {server.kind}</span>
               </span>
               <span className="read-at">
-                {server.lastReadAt
-                  ? `takt-mcp から ${formatClock(server.lastReadAt)} に読みました。`
-                  : "takt-mcp からまだ読めていません。"}
+                {server.writeOnly
+                  ? "書き込み専用のため、takt-mcp からは読み取りません。"
+                  : server.lastReadAt
+                    ? `takt-mcp から ${formatClock(server.lastReadAt)} に読みました。`
+                    : "takt-mcp からまだ読めていません。"}
               </span>
               <span className={`big-badge ${state}`}>{stateLabel}</span>
               {state === "down" ? (

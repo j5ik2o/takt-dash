@@ -100,7 +100,7 @@ test("概要のサーバーカードは書き込み専用サーバーに「応�
   const writeOnly = base.servers.find((server) => server.serverId === "down")!;
   const state = DashboardState.create({
     ...base,
-    servers: [read, { ...writeOnly, lastReadAt: NOW, writeOnly: true }],
+    servers: [read, { ...writeOnly, writeOnly: true }],
     projects: base.projects.map((project) => ({ ...project, serverId: read.serverId })),
   });
   const page = documentOf(createElement(OverviewContent, {
@@ -110,7 +110,12 @@ test("概要のサーバーカードは書き込み専用サーバーに「応�
   const line = required(page, "#server-down");
 
   assert.equal(text(required(line, ".big-badge")), "書き込み専用");
-  assert.doesNotMatch(text(line), /応答がありません|最後に読めた時点の状態/);
+  assert.match(
+    text(required(line, ".read-at")),
+    /書き込み専用のため、takt-mcp からは読み取りません/,
+    "読み取り時刻の文言も、読めていないという言い方にしない",
+  );
+  assert.doesNotMatch(text(line), /応答がありません|最後に読めた時点の状態|まだ読めていません/);
 });
 
 test("削除前のゴールURLは正常応答の対象なしと実在する未読対象を区別する", () => {

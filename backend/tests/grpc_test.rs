@@ -17,6 +17,7 @@ use takt_dash_backend::{
     ActivityEvent, EventKind, ExecutionStatus, GoalStatus, InquiryEntry, InquiryKind, ProjectSnapshot, RunEntry,
     TaskEntry, TaskStatus,
   },
+  poller::Poller,
   takt_dash::v1::{
     ActivityKind, AnomalyThresholds, ConnectionState as ProtoConnectionState, ExecutionStatus as ProtoExecutionStatus,
     GetActivityRequest, GetOverviewRequest, GetPendingDecisionsRequest, GetProjectsRequest,
@@ -554,5 +555,47 @@ async fn プロジェクトごとの接続状態と最後に読めた時刻を�
 
   assert!(state.servers[0].connected, "サーバー単位の接続状態は健常なプロジェクトがあれば真です");
 
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_overview_marks_only_write_only_servers() {
+  // 書き込み専用の印は、読み取りプロジェクトを持たず、書き込み先として使われている
+  // サーバーにだけ立つことを、設定から GetOverview の応答までの経路で観測する。
+  // 読み取りも書き込みも担わない登録には立たない。
+  let harness = seeded_harness();
+  // 書き込み先のサーバーは、表示情報（servers）だけでなく接続先（mcpServers）にも
+  // 登録しなければ設定の検証を通らないため、設定ファイルごと書き換える。
+  let config_path = harness.config_path().to_path_buf();
+  let text = std::fs::read_to_string(&config_path).expect("設定を読めます");
+  let mut config: serde_json::Value = serde_json::from_str(&text).expect("設定を解析できます");
+  config["servers"]["write-only"] = json!({ "name": "書き込み専用サーバー", "kind": "Mac mini" });
+  config["servers"]["unused"] = json!({ "name": "未使用サーバー", "kind": "Mac mini" });
+  config["mcpServers"]["write-only"] = config["mcpServers"]["mac-mini"].clone();
+  let cwd = harness.project_dir().display().to_string();
+  config["projects"] = json!([
+    { "name": "alpha", "server": "mac-mini", "writeServer": "write-only", "cwd": cwd },
+    { "name": "beta", "server": "mac-mini", "cwd": cwd },
+  ]);
+  std::fs::write(&config_path, config.to_string()).expect("設定ファイルを書けます");
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+    harness.registry.clone(),
+  );
+  poller.read_cycle_once().await.expect("書き換えた設定の読み取りサイクルを実行できます");
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let state = client.get_overview(GetOverviewRequest {}).await.expect("概要を取得できます").into_inner();
+  let write_only_of =
+    |server_id: &str| state.servers.iter().find(|server| server.server_id == server_id).map(|server| server.write_only);
+  assert_eq!(write_only_of("mac-mini"), Some(false), "読み取りプロジェクトを持つサーバーは書き込み専用ではありません");
+  assert_eq!(write_only_of("write-only"), Some(true), "書き込み先としてだけ使われるサーバーは書き込み専用です");
+  assert_eq!(write_only_of("unused"), Some(false), "読み取りも書き込みも担わない登録は書き込み専用ではありません");
+
+  poller.shutdown().await;
   server.stop().await;
 }
