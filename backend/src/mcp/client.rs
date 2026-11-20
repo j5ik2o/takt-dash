@@ -32,6 +32,10 @@ pub enum TransportError {
   Backoff(u64),
   #[error("takt-mcp の応答が JSON として不正です: {0}")]
   InvalidJson(String),
+  #[error("takt-mcp の HTTP サーバーとのやり取りに失敗しました: {0}")]
+  Http(String),
+  #[error("takt-mcp の HTTP 応答が MCP の契約に合いません: {0}")]
+  Protocol(String),
   #[error("takt-mcp が JSON-RPC のエラーを返しました（コード {code}）: {message}")]
   Rpc { code: i64, message: String },
   #[error("takt-mcp の子プロセスが終了しました")]
@@ -54,6 +58,42 @@ pub enum CallError {
   Transport(#[from] TransportError),
   #[error(transparent)]
   Tool(#[from] ToolCallError),
+}
+
+/// 道具を呼び出せる接続の抽象。stdio の子プロセスとの往復（[`McpClient`]）と、常駐する HTTP
+/// サーバーとの往復（[`crate::mcp::HttpReadHandle`]）の両方を [`crate::mcp::ToolSet`] が
+/// 同じ形で扱えるようにします。`async fn` をトレイトオブジェクトにするため、返り値は
+/// ボックス化した `Future` にします。
+pub trait ToolCaller: Send {
+  fn call_tool<'a>(
+    &'a mut self,
+    name: &'a str,
+    arguments: Value,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, CallError>> + Send + 'a>>;
+
+  /// 呼び出しの前に接続の開始を済ませる。stdio の子プロセスはここで起動と初期化を
+  /// 済ませます。HTTP のハンドルはセッションを呼び出しの中で作るため、何もしません。
+  fn ensure_started<'a>(
+    &'a mut self,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TransportError>> + Send + 'a>> {
+    Box::pin(async { Ok(()) })
+  }
+}
+
+impl ToolCaller for McpClient {
+  fn call_tool<'a>(
+    &'a mut self,
+    name: &'a str,
+    arguments: Value,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, CallError>> + Send + 'a>> {
+    Box::pin(McpClient::call_tool(self, name, arguments))
+  }
+
+  fn ensure_started<'a>(
+    &'a mut self,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TransportError>> + Send + 'a>> {
+    Box::pin(McpClient::ensure_started(self))
+  }
 }
 
 /// 子プロセスをどのように起動するか。
@@ -303,7 +343,12 @@ impl McpProcess {
         continue;
       }
       if let Some(error) = incoming.error {
-        return Err(TransportError::Rpc { code: error.code, message: error.message });
+        // 中断した呼び出しのエラー応答が残っていても、それはこの要求の失敗では
+        // ありません。ID が一致するエラーと、ID を持たないプロトコルのエラーだけを返します。
+        if incoming.id.is_none() || incoming.id.as_ref().and_then(Value::as_u64) == Some(id) {
+          return Err(TransportError::Rpc { code: error.code, message: error.message });
+        }
+        continue;
       }
       if incoming.id.as_ref().and_then(Value::as_u64) == Some(id) {
         return Ok(incoming.result.unwrap_or(Value::Null));
@@ -326,7 +371,7 @@ impl McpProcess {
 
 /// tools/call の result から本文テキストを取り出す。isError
 /// は輸送エラーではなく道具エラーとして返す。
-fn extract_tool_text(tool: &str, result: &Value) -> Result<String, ToolCallError> {
+pub(super) fn extract_tool_text(tool: &str, result: &Value) -> Result<String, ToolCallError> {
   if result.get("isError").and_then(Value::as_bool) == Some(true) {
     let text = result
       .get("content")

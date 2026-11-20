@@ -2,11 +2,15 @@
 
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::{
+  path::{Path, PathBuf},
+  process::{Child, Command, Stdio},
+  time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
 use takt_dash_backend::{
-  config::{McpServer, Project, ServerMeta, Thresholds},
+  config::{HttpMcpServer, HttpServerEndpoint, McpConnection, Project, ServerMeta, StdioMcpServer, Thresholds},
   domain::{GoalId, InquiryId, PullRequestNumber, SilentMinutes, StaleMinutes, TaskName},
   mcp::{McpClient, McpClientConfig, ReadToolSet, WriteToolSet},
   model::{
@@ -218,16 +222,151 @@ pub fn server_meta() -> ServerMeta {
 
 pub fn project(name: &str, cwd: &Path) -> Project {
   Project {
-    name:        name.to_owned(),
-    server:      "mac-mini".to_owned(),
-    about:       format!("{name} の説明"),
-    cwd:         cwd.to_path_buf(),
-    concurrency: 1,
+    name:         name.to_owned(),
+    server:       "mac-mini".to_owned(),
+    write_server: "mac-mini".to_owned(),
+    about:        format!("{name} の説明"),
+    cwd:          cwd.to_path_buf(),
+    concurrency:  1,
   }
 }
 
-pub fn mcp_server() -> McpServer {
-  McpServer { command: "node".to_owned(), args: vec!["server.mjs".to_owned()], env: Default::default() }
+/// mock HTTP MCP サーバのスクリプトへの絶対パス。
+pub fn mcp_server() -> StdioMcpServer {
+  StdioMcpServer { command: "node".to_owned(), args: vec!["server.mjs".to_owned()], env: Default::default() }
+}
+
+pub fn mock_http_script() -> PathBuf {
+  Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("mock_mcp_http_server.mjs")
+}
+
+/// テスト用の接続先とトークンを持つ HTTP 接続設定。
+pub fn http_connection(url: &str, token: &str) -> McpConnection {
+  McpConnection::Http(HttpMcpServer {
+    endpoint:      HttpServerEndpoint::try_from(url).expect("テストの HTTP 接続先は 127.0.0.1 の url です"),
+    authorization: format!("Bearer {token}"),
+  })
+}
+
+/// mock HTTP MCP サーバの起動に必要な入力。
+pub struct HttpMockServer {
+  child:      Child,
+  url:        String,
+  token:      String,
+  calls:      PathBuf,
+  sessions:   PathBuf,
+  _directory: tempfile::TempDir,
+}
+
+impl HttpMockServer {
+  /// mock HTTP MCP サーバを空きポートで起動し、待ち受ける URL を返す。
+  ///
+  /// `--state` で読み取り道具の応答になる状態ファイルを渡します。起動待ちは ready ファイルが
+  /// 書かれるまで行い、固定の sleep では待ち合わせません。
+  pub fn start(state: &Path, behavior: Option<&str>) -> Self {
+    Self::start_with_token(state, behavior, "test-token")
+  }
+
+  /// 期待する Authorization のトークンを指定して mock HTTP MCP サーバを起動する。
+  pub fn start_with_token(state: &Path, behavior: Option<&str>, token: &str) -> Self {
+    Self::start_on_port_with_token(state, behavior, token, 0)
+  }
+
+  /// 指定したポートで mock HTTP MCP サーバを起動する。`port` が 0 なら空きポートを選びます。
+  ///
+  /// サーバー再起動を再現し、同じ接続先で新しいプロセスを立ち上げるために使います。
+  pub fn start_on_port(state: &Path, behavior: Option<&str>, port: u16) -> Self {
+    Self::start_on_port_with_token(state, behavior, "test-token", port)
+  }
+
+  fn start_on_port_with_token(state: &Path, behavior: Option<&str>, token: &str, port: u16) -> Self {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let ready = directory.path().join("ready.json");
+    let calls = directory.path().join("calls.jsonl");
+    let sessions = directory.path().join("sessions.log");
+    let script = mock_http_script();
+    let mut command = Command::new("node");
+    command
+      .arg(&script)
+      .arg("--state")
+      .arg(state)
+      .arg("--ready-file")
+      .arg(&ready)
+      .arg("--calls")
+      .arg(&calls)
+      .arg("--session-log")
+      .arg(&sessions)
+      .arg("--require-auth")
+      .arg(format!("Bearer {token}"))
+      .arg("--port")
+      .arg(port.to_string())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    if let Some(behavior) = behavior {
+      command.arg("--behavior").arg(behavior);
+    }
+    let mut child = command.spawn().expect("mock HTTP MCP サーバを起動できます");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+      if ready.exists() {
+        let text = std::fs::read_to_string(&ready).expect("ready ファイルを読めます");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("ready ファイルは JSON です");
+        let url = value["url"].as_str().expect("ready ファイルに url があります").to_owned();
+        return HttpMockServer { child, url, token: token.to_owned(), calls, sessions, _directory: directory };
+      }
+      std::thread::sleep(Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("mock HTTP MCP サーバが 10 秒以内に起動しませんでした");
+  }
+
+  pub fn url(&self) -> &str {
+    &self.url
+  }
+
+  pub fn token(&self) -> &str {
+    &self.token
+  }
+
+  /// mock サーバに対する takt-mcp の HTTP 接続設定。
+  pub fn connection(&self) -> McpConnection {
+    http_connection(&self.url, &self.token)
+  }
+
+  /// 受け取った tools/call を JSONL から読む。記録が無ければ空です。
+  pub fn recorded_calls(&self) -> Vec<serde_json::Value> {
+    let Ok(text) = std::fs::read_to_string(&self.calls) else {
+      return Vec::new();
+    };
+    text
+      .lines()
+      .filter(|line| !line.trim().is_empty())
+      .map(|line| serde_json::from_str(line).expect("記録した道具呼び出しを解析できます"))
+      .collect()
+  }
+
+  /// セッションの採番と再利用の記録（"new ..." / "reuse ..."）を読む。
+  pub fn session_events(&self) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(&self.sessions) else {
+      return Vec::new();
+    };
+    text.lines().filter(|line| !line.trim().is_empty()).map(str::to_owned).collect()
+  }
+
+  /// 接続を確認できるまで待つために、テストから URL のポート番号を返す。
+  pub fn port(&self) -> u16 {
+    let without_scheme = self.url.trim_start_matches("http://");
+    let authority = without_scheme.trim_end_matches('/');
+    authority.rsplit(':').next().and_then(|port| port.parse().ok()).expect("url からポート番号を取れます")
+  }
+}
+
+impl Drop for HttpMockServer {
+  fn drop(&mut self) {
+    let _ = self.child.kill();
+    let _ = self.child.wait();
+  }
 }
 
 /// takt がプロジェクトの `.takt` へ書く run の保存形式（`tasks.yaml` の対応表、`meta.json`、

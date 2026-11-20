@@ -652,6 +652,32 @@ a {
   font-weight: 600;
 }
 
+/* 狭い画面では run の表のセルを縦に積み、ゴールの文が1文字ずつに潰れて読めなくならないようにする。 */
+@media (max-width: 860px) {
+  .runs-table table,
+  .runs-table tbody,
+  .runs-table tr,
+  .runs-table td {
+    display: block;
+  }
+
+  .runs-table thead {
+    display: none;
+  }
+
+  .runs-table td {
+    border-bottom: 0;
+  }
+
+  .runs-table tbody tr {
+    border-bottom: 1px solid var(--line2);
+  }
+
+  .runs-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+}
+
 .bar {
   height: 8px;
   background: var(--track);
@@ -1363,6 +1389,10 @@ ol.log-tail li {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .callout li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .sum-grid .f.wide {
     grid-column: auto;
   }
@@ -1454,6 +1484,12 @@ ol.log-tail li {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.conversation-notice {
+  margin: 0 0 6px;
+  color: var(--warn);
+  font-size: 12px;
 }
 
 .conversation-skipped {

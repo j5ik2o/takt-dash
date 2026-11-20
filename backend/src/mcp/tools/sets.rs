@@ -14,7 +14,7 @@ use crate::{
     GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ReportFilename,
     RunSlug, TaskName,
   },
-  mcp::{metrics::ToolCallMetrics, McpClient},
+  mcp::{client::ToolCaller, metrics::ToolCallMetrics},
   model::{GoalDetail, ProjectSnapshot, RegistrationProposalEntry, TaskDetail},
   run_log::{Instruction, RunContent},
   run_progress::RunLogHandle,
@@ -29,7 +29,7 @@ pub struct ReadToolSet<'a> {
 }
 
 impl<'a> ReadToolSet<'a> {
-  pub fn new(client: &'a mut McpClient, cwd: PathBuf) -> Self {
+  pub fn new(client: &'a mut dyn ToolCaller, cwd: PathBuf) -> Self {
     ReadToolSet { core: ToolSetCore::new(client, cwd) }
   }
 
@@ -112,7 +112,7 @@ pub struct WriteToolSet<'a> {
 }
 
 impl<'a> WriteToolSet<'a> {
-  pub fn new(client: &'a mut McpClient, cwd: PathBuf) -> Self {
+  pub fn new(client: &'a mut dyn ToolCaller, cwd: PathBuf) -> Self {
     WriteToolSet { core: ToolSetCore::new(client, cwd) }
   }
 

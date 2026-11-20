@@ -413,6 +413,20 @@ export function createConversationMessages(): ConversationMessage[] {
   ];
 }
 
+// 元記録が置換文字で壊れている発言。backend が整形した本文と印を返した状態を表す。
+export function createGarbledConversationMessage(
+  overrides: Partial<ConversationMessage> = {},
+): ConversationMessage {
+  return {
+    seq: 4,
+    occurredAt: minutesAgo(3),
+    speaker: ConversationSpeaker.CONVERSATION_SPEAKER_USER,
+    text: "この発言は元記録で壊れています。\uFFFD\uFFFD\uFFFD",
+    notice: "元記録で文字化けしています（置換文字 3 個）",
+    ...overrides,
+  };
+}
+
 export function createConversationResponse(
   overrides: Partial<GetConversationResponse> = {},
 ): GetConversationResponse {

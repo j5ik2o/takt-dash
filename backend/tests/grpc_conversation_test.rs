@@ -10,7 +10,7 @@ mod grpc_harness;
 use std::path::Path;
 
 use common::{project, server_meta};
-use conversation_fixture::ConversationFixture;
+use conversation_fixture::{fenced_assistant_data, garbled_user_data, wrapped_user_data, ConversationFixture};
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::takt_dash::v1::{ConversationSpeaker, GetConversationRequest, GetConversationResponse};
@@ -55,6 +55,10 @@ fn seed_messages(fixture: &ConversationFixture, project_cwd: &Path) {
 
 fn texts(response: &GetConversationResponse) -> Vec<String> {
   response.messages.iter().map(|message| message.text.clone()).collect()
+}
+
+fn notices(response: &GetConversationResponse) -> Vec<Option<String>> {
+  response.messages.iter().map(|message| message.notice.clone()).collect()
 }
 
 #[tokio::test]
@@ -242,6 +246,42 @@ async fn get_conversation_does_not_return_a_session_owned_by_another_configured_
     response.unavailable_reason.as_deref(),
     Some("manager の記録のセッションが別のプロジェクトに属しています")
   );
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_conversation_returns_presented_bodies_and_a_garbled_notice() {
+  let harness = harness();
+  let fixture = ConversationFixture::under(harness.home());
+  let project_cwd = harness.project_dir();
+  fixture.write_manager("alpha", "ses_alpha", project_cwd, "opencode");
+  fixture.insert_session("ses_alpha", project_cwd, 2_000);
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &wrapped_user_data("前のターンの本文", "見出しを直してください。", FIRST_MESSAGE_AT),
+  );
+  fixture.insert_message(
+    "ses_alpha",
+    4,
+    "assistant",
+    1_794_613_222_000,
+    &fenced_assistant_data("確認しました。", Some("README を追加する"), 1_794_613_222_000),
+  );
+  fixture.insert_message("ses_alpha", 7, "user", 1_794_613_223_000, &garbled_user_data(12, 1_794_613_223_000));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let response = client.get_conversation(request(None, 0, 50)).await.expect("会話を取得できます").into_inner();
+
+  let bodies = texts(&response);
+  assert_eq!(bodies[0], "見出しを直してください。", "包み付きの user の行は人の発言だけを返す必要があります");
+  assert_eq!(bodies[1], "確認しました。", "fenced JSON の assistant の行は message だけを返す必要があります");
+  assert_eq!(bodies[2].matches('\u{FFFD}').count(), 12, "本文の置換文字はそのまま残す必要があります");
+  assert_eq!(notices(&response), vec![None, None, Some("元記録で文字化けしています（置換文字 12 個）".to_owned()),]);
 
   server.stop().await;
 }

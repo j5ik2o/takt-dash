@@ -24,7 +24,11 @@ fn studio_meta() -> ServerMeta {
 
 fn two_project_harness() -> GrpcHarness {
   let takt_dash = project("takt-dash", Path::new("/abs/takt-dash"));
-  let esa = Project { server: "mac-studio".to_owned(), ..project("esa", Path::new("/abs/esa")) };
+  let esa = Project {
+    server: "mac-studio".to_owned(),
+    write_server: "mac-studio".to_owned(),
+    ..project("esa", Path::new("/abs/esa"))
+  };
   let harness = GrpcHarness::builder()
     .single_project(takt_dash, server_meta(), json!({}))
     .single_project(esa, studio_meta(), json!({}))

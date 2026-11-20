@@ -3,10 +3,15 @@
 //! 設定は .mcp.json と同じ mcpServers 形式を基にした1ファイルで、takt-mcp の起動方法・
 //! サーバー・プロジェクト・読み取り間隔・異常判定の閾値を同じファイルに持ちます。
 //! 値の解決はこの境界で一度だけ行い、以降の内部処理は解決済みの値だけを使います。
+//!
+//! mcpServers の各エントリは、子プロセスを起動する stdio 接続と、常駐する takt-mcp の
+//! HTTP サーバーへつなぐ http 接続のどちらかです。stdio は書き込み操作が使う起動方法で、
+//! http は読み取り専用の常駐サーバーの接続先です。読み取りは http、書き込みは stdio を
+//! それぞれの経路が選び、同じ mcpServers に対象サーバーごとのエントリを登録します。
 
 use std::{
   collections::BTreeMap,
-  net::SocketAddr,
+  net::{IpAddr, SocketAddr},
   path::{Path, PathBuf},
 };
 
@@ -28,6 +33,8 @@ pub const DEFAULT_CONNECTION_DELAY_SECONDS: u32 = 120;
 pub const DEFAULT_SQLITE_PATH: &str = "data/taktdash.sqlite";
 /// gRPC サーバーの待ち受けアドレスの既定値。
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50051";
+/// takt-mcp の HTTP サーバーが待ち受けるホスト。実機の transport は 127.0.0.1 固定です。
+pub const HTTP_LOOPBACK_HOST: &str = "127.0.0.1";
 /// プロジェクトの同時実行上限の既定値。プロジェクトの .takt/config.yaml に
 /// concurrency キーが無い場合の takt 自身の既定値に合わせる。
 pub const DEFAULT_PROJECT_CONCURRENCY: i32 = 1;
@@ -63,12 +70,101 @@ pub struct Config {
   pub listen:            SocketAddr,
 }
 
-/// takt-mcp の起動方法。
+/// takt-mcp への接続方法。stdio は子プロセスを起動する起動方法、http は常駐サーバーの接続先です。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpServer {
+pub enum McpServer {
+  Stdio(StdioMcpServer),
+  Http(HttpMcpServer),
+}
+
+impl McpServer {
+  /// この接続方法を、接続先の種類ごとの [`McpConnection`] へ写す。
+  pub fn connection(&self) -> McpConnection {
+    match self {
+      | McpServer::Stdio(server) => McpConnection::Stdio(server.clone()),
+      | McpServer::Http(server) => McpConnection::Http(server.clone()),
+    }
+  }
+}
+
+/// 接続方法を、その種類だけを持つ接続に解決したもの。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpConnection {
+  Stdio(StdioMcpServer),
+  Http(HttpMcpServer),
+}
+
+/// 子プロセスとして起動する takt-mcp の起動方法。書き込み操作がこの起動方法を使います。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StdioMcpServer {
   pub command: String,
   pub args:    Vec<String>,
   pub env:     BTreeMap<String, String>,
+}
+
+/// 常駐する takt-mcp の HTTP サーバーへの接続先。読み取り専用の読み取り経路がこれを使います。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpMcpServer {
+  pub endpoint:      HttpServerEndpoint,
+  /// `Authorization` ヘッダにそのまま設定する値（`Bearer <token>`）。
+  pub authorization: String,
+}
+
+/// takt-mcp の HTTP サーバーの接続先。ループバック `127.0.0.1` の `http://` だけを表せます。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpServerEndpoint {
+  port: u16,
+}
+
+impl HttpServerEndpoint {
+  pub fn port(&self) -> u16 {
+    self.port
+  }
+
+  /// `http://127.0.0.1:<port>/` の URL を組み立てる。
+  pub fn url(&self) -> String {
+    format!("http://{HTTP_LOOPBACK_HOST}:{}/", self.port)
+  }
+}
+
+impl TryFrom<&str> for HttpServerEndpoint {
+  type Error = ConfigError;
+
+  fn try_from(url: &str) -> Result<Self, Self::Error> {
+    let rest = url
+      .strip_prefix("http://")
+      .ok_or_else(|| ConfigError::Invalid(format!("HTTP 接続先 {url} は http:// で始まる必要があります。")))?;
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.is_empty() {
+      return Err(ConfigError::Invalid(format!("HTTP 接続先 {url} にホストとポートがありません。")));
+    }
+    let (host, port_text) = authority
+      .rsplit_once(':')
+      .ok_or_else(|| ConfigError::Invalid(format!("HTTP 接続先 {url} にポート番号がありません。")))?;
+    let host: IpAddr = host.parse().map_err(|_| {
+      ConfigError::Invalid(format!(
+        "HTTP 接続先 {url} のホストを解釈できませんでした。ホストは {HTTP_LOOPBACK_HOST} である必要があります。"
+      ))
+    })?;
+    if !host.is_loopback() || host.to_string() != HTTP_LOOPBACK_HOST {
+      return Err(ConfigError::Invalid(format!(
+        "HTTP 接続先 {url} のホストは {HTTP_LOOPBACK_HOST} である必要があります。実機の takt-mcp は 127.0.0.1 のみで待ち受けます。"
+      )));
+    }
+    let port: u16 = port_text.parse().map_err(|_| {
+      ConfigError::Invalid(format!("HTTP 接続先 {url} のポート番号 {port_text} を解釈できませんでした。"))
+    })?;
+    if port == 0 {
+      return Err(ConfigError::Invalid(format!("HTTP 接続先 {url} のポート番号は 1 以上である必要があります。")));
+    }
+    let path = &rest[authority.len()..];
+    if !path.is_empty() && path != "/" {
+      return Err(ConfigError::Invalid(format!(
+        "HTTP 接続先 {url} のパス {path} はサポートしません。実機の takt-mcp は / だけを公開します。"
+      )));
+    }
+    Ok(HttpServerEndpoint { port })
+  }
 }
 
 /// サーバーの表示情報。同時実行の上限はサーバー単位には存在しないため持たない。
@@ -81,14 +177,17 @@ pub struct ServerMeta {
 /// 集約対象のプロジェクト。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
-  pub name:        String,
-  pub server:      String,
-  pub about:       String,
-  pub cwd:         PathBuf,
+  pub name:         String,
+  /// 読み取り接続先（`mcpServers` の id）。画面と定期読み取りが使います。
+  pub server:       String,
+  /// 書き込み接続先（`mcpServers` の id）。未設定なら `server` と同じ。stdio の起動方法に限ります。
+  pub write_server: String,
+  pub about:        String,
+  pub cwd:          PathBuf,
   /// 同時実行の上限。プロジェクトの .takt/config.yaml の concurrency から解決し、
   /// キーが無い場合は takt の既定値にする。parse_config では既定値を入れ、
   /// load_config がファイルから解決した値で置き換える。
-  pub concurrency: i32,
+  pub concurrency:  i32,
 }
 
 /// 異常判定の閾値。
@@ -121,11 +220,16 @@ struct RawConfig {
 
 #[derive(Debug, Deserialize)]
 struct RawMcpServer {
-  command: String,
+  #[serde(rename = "type")]
+  kind:    Option<String>,
+  command: Option<String>,
   #[serde(default)]
   args:    Vec<String>,
   #[serde(default)]
   env:     BTreeMap<String, String>,
+  url:     Option<String>,
+  #[serde(default)]
+  headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,10 +240,12 @@ struct RawServerMeta {
 
 #[derive(Debug, Deserialize)]
 struct RawProject {
-  name:   String,
-  server: String,
-  about:  Option<String>,
-  cwd:    String,
+  name:         String,
+  server:       String,
+  #[serde(rename = "writeServer")]
+  write_server: Option<String>,
+  about:        Option<String>,
+  cwd:          String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -410,7 +516,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   let mut servers = BTreeMap::new();
   for (id, server) in raw.mcp_servers {
     validate_server_id(&id)?;
-    servers.insert(id, McpServer { command: server.command, args: server.args, env: server.env });
+    servers.insert(id.clone(), resolve_mcp_server(&id, server)?);
   }
   if servers.is_empty() {
     return Err(ConfigError::Invalid("mcpServers が空です。takt-mcp の起動方法を1つ以上指定してください。".to_owned()));
@@ -440,6 +546,20 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
         project.name
       )));
     }
+    let write_server = project.write_server.unwrap_or_else(|| project.server.clone());
+    validate_server_id(&write_server)?;
+    let write_connection = servers.get(&write_server).ok_or_else(|| {
+      ConfigError::Invalid(format!(
+        "プロジェクト {} が参照する書き込み用サーバー {} は mcpServers にありません。",
+        project.name, write_server
+      ))
+    })?;
+    if !matches!(write_connection, McpServer::Stdio(_)) {
+      return Err(ConfigError::Invalid(format!(
+        "プロジェクト {} の書き込み用サーバー {} は stdio の起動方法である必要があります。HTTP 接続先は読み取り専用です。",
+        project.name, write_server
+      )));
+    }
     let cwd = PathBuf::from(&project.cwd);
     if !cwd.is_absolute() {
       return Err(ConfigError::Invalid(format!(
@@ -450,6 +570,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
     projects.push(Project {
       name: project.name,
       server: project.server,
+      write_server,
       about: project.about.unwrap_or_default(),
       cwd,
       concurrency: DEFAULT_PROJECT_CONCURRENCY,
@@ -486,6 +607,33 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
     ConfigError::Invalid(format!("listen {listen_raw} を待ち受けアドレスとして解釈できませんでした: {error}"))
   })?;
   Ok(Config { servers, server_meta, projects, interval_seconds, screen_read_lanes, thresholds, sqlite_path, listen })
+}
+
+/// 1 件の mcpServers のエントリを、stdio 起動方法か HTTP 接続先のどちらかへ解決する。
+///
+/// `type` が `http` のときは HTTP 接続先として `url` と `Authorization` ヘッダを必須にし、
+/// `command` などの起動方法は使わない。`type` がない、または `stdio` のときは起動方法として
+/// `command` を必須にします。
+fn resolve_mcp_server(id: &str, server: RawMcpServer) -> Result<McpServer, ConfigError> {
+  let is_http = matches!(server.kind.as_deref(), Some("http"));
+  if is_http {
+    let url =
+      server.url.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の type: http には url が必須です。")))?;
+    let endpoint = HttpServerEndpoint::try_from(url.as_str())?;
+    let authorization = server.headers.get("Authorization").cloned().ok_or_else(|| {
+      ConfigError::Invalid(format!("サーバー {id} の HTTP 接続先には headers.Authorization が必須です。"))
+    })?;
+    if !authorization.starts_with("Bearer ") || authorization.len() <= "Bearer ".len() {
+      return Err(ConfigError::Invalid(format!(
+        "サーバー {id} の headers.Authorization は \"Bearer <token>\" である必要があります。"
+      )));
+    }
+    return Ok(McpServer::Http(HttpMcpServer { endpoint, authorization }));
+  }
+  let command = server.command.ok_or_else(|| {
+    ConfigError::Invalid(format!("サーバー {id} の command がありません。stdio の起動方法には command が必須です。"))
+  })?;
+  Ok(McpServer::Stdio(StdioMcpServer { command, args: server.args, env: server.env }))
 }
 
 fn validate_server_id(id: &str) -> Result<(), ConfigError> {

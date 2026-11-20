@@ -149,12 +149,17 @@ impl ConversationReader {
     let mut skipped: BTreeMap<String, u32> = BTreeMap::new();
     for row in examined {
       match classify(row) {
-        | Ok((speaker, text)) => page.messages.push(ConversationMessage {
-          seq: row.seq,
-          occurred_at: DateTime::<Utc>::from_timestamp_millis(row.time_created).unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-          speaker,
-          text,
-        }),
+        | Ok((speaker, raw_text)) => {
+          let presented = present_body(speaker, raw_text);
+          page.messages.push(ConversationMessage {
+            seq: row.seq,
+            occurred_at: DateTime::<Utc>::from_timestamp_millis(row.time_created)
+              .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+            speaker,
+            text: presented.text,
+            notice: presented.notice,
+          });
+        },
         | Err(reason) => *skipped.entry(reason).or_insert(0) += 1,
       }
     }
@@ -375,6 +380,77 @@ fn classify(row: &MessageRow) -> Result<(ConversationSpeaker, String), String> {
   }
 }
 
+/// 置換文字（U+FFFD）がこの個数以上なら、元記録の文字化けとして印を付ける。
+const GARBLED_NOTICE_THRESHOLD: usize = 10;
+
+/// 表示用に整形した本文と、本文に添える注意書き。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PresentedBody {
+  text:   String,
+  notice: Option<String>,
+}
+
+/// 話者ごとに保存形式から人が読める本文を取り出し、文字化けの印を決める。
+///
+/// 包みや fenced JSON を解釈できないときは、元の本文をそのまま使います。
+fn present_body(speaker: ConversationSpeaker, raw_text: String) -> PresentedBody {
+  let text = match speaker {
+    | ConversationSpeaker::User => unwrap_user_input(&raw_text).unwrap_or(raw_text),
+    | ConversationSpeaker::Manager => unwrap_assistant_message(&raw_text).unwrap_or(raw_text),
+    | ConversationSpeaker::System => raw_text,
+  };
+  let notice = garbled_notice(&text);
+  PresentedBody { text, notice }
+}
+
+/// `## このターンの入力` の包みから、`speaker` を持つ JSON の `text` を取り出す。
+///
+/// 見出しより後だけを対象にし、行単位で JSON を解釈します。`speaker` を持たない
+/// JSON や、包みの無い本文は対象にしません。前のターンの本文に同じ見出しが
+/// 含まれていても、現在の包みは行頭の見出しのうち最後のものです。
+fn unwrap_user_input(raw: &str) -> Option<String> {
+  const MARKER: &str = "## このターンの入力";
+  let start = raw
+    .match_indices(MARKER)
+    .filter(|(index, _)| *index == 0 || raw.as_bytes()[index - 1] == b'\n')
+    .last()
+    .map(|(index, _)| index + MARKER.len())?;
+  for line in raw[start..].lines() {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+      continue;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+      continue;
+    };
+    if value.get("speaker").is_none() {
+      continue;
+    }
+    if let Some(text) = value.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+      return Some(text.to_owned());
+    }
+  }
+  None
+}
+
+/// 本文全体が `message` を持つ単一の fenced JSON block のとき、`message` を取り出す。
+///
+/// 解釈できない、または `message` が無い・空のときは `None` を返します。
+fn unwrap_assistant_message(raw: &str) -> Option<String> {
+  let trimmed = raw.trim();
+  let inner = trimmed.strip_prefix("```json")?.strip_suffix("```")?;
+  let value = serde_json::from_str::<Value>(inner.trim()).ok()?;
+  value.get("message").and_then(Value::as_str).filter(|message| !message.is_empty()).map(str::to_owned)
+}
+
+/// 本文の置換文字を数え、しきい値以上なら元記録の文字化けを示す印を返す。
+///
+/// 本文そのものは変更しません。
+fn garbled_notice(text: &str) -> Option<String> {
+  let count = text.chars().filter(|character| *character == '\u{FFFD}').count();
+  (count >= GARBLED_NOTICE_THRESHOLD).then(|| format!("元記録で文字化けしています（置換文字 {count} 個）"))
+}
+
 fn parse_data(data: &str) -> Result<Value, String> {
   serde_json::from_str(data).map_err(|_| "data を解釈できません".to_owned())
 }
@@ -447,6 +523,7 @@ pub struct ConversationMessage {
   pub occurred_at: DateTime<Utc>,
   pub speaker:     ConversationSpeaker,
   pub text:        String,
+  pub notice:      Option<String>,
 }
 
 /// 会話の発話者。

@@ -333,7 +333,7 @@ pub(super) fn conversation_message(
   speaker: v1::ConversationSpeaker,
   text: &str,
 ) -> ConversationMessage {
-  ConversationMessage { seq, occurred_at: Some(ts(secs)), speaker: speaker as i32, text: text.to_owned() }
+  ConversationMessage { seq, occurred_at: Some(ts(secs)), speaker: speaker as i32, text: text.to_owned(), notice: None }
 }
 
 /// 会話の1ページを組み立てる。

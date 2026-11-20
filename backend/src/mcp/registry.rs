@@ -79,7 +79,7 @@ type ProjectKey = (String, String);
 /// [`tokio::sync::Mutex`] で行います。
 pub type ClientHandle = Arc<AsyncMutex<McpClient>>;
 
-/// 定期読み取りへ渡す、同じ取得時点の読取先と書き込みの通し番号。
+/// 定期読み取りへ渡す、同じ取得時点の読取先と、書き込み先の通し番号。
 pub(crate) struct ClientRead {
   pub(crate) client:         ClientHandle,
   pub(crate) cwd:            std::path::PathBuf,
@@ -251,13 +251,16 @@ impl McpClientRegistry {
   ///
   /// RPC が別レーンを置き換えても、準備済みの poller の読取先と比較基準は変えません。
   /// 取得した cwd は道具とローカル run の両方に使い、周期冒頭の設定との混在を防ぎます。
-  pub(crate) fn take_for_read(&self, server_id: &str, project: &str) -> Option<ClientRead> {
+  pub(crate) fn take_for_read(&self, server_id: &str, project: &str, write_server_id: &str) -> Option<ClientRead> {
     let key = (server_id.to_owned(), project.to_owned());
     let lane_key = (server_id.to_owned(), project.to_owned(), LaneKey::Poller);
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
     let entry = inner.clients.get(&lane_key).map(|entry| (entry.client.clone(), entry.config.cwd.clone()));
     let rebuilt = inner.rebuilt.remove(&key);
-    let write_sequence = inner.write_counts.get(&key).copied().unwrap_or(0);
+    // 通し番号は書き込み先（`write_server_id`）のものです。読み取り先と書き込み先が
+    // 分かれる設定でも、書き込みゲートと同じ通し番号で読み取り結果の採用を判断します。
+    let write_key = (write_server_id.to_owned(), project.to_owned());
+    let write_sequence = inner.write_counts.get(&write_key).copied().unwrap_or(0);
     entry.map(|(client, cwd)| ClientRead { client, cwd, rebuilt, write_sequence })
   }
 
@@ -392,7 +395,7 @@ mod tests {
     registry.client("local", "proj", Lane::Screen, || changed.clone());
     registry.record_write("local", "proj");
 
-    let read = registry.take_for_read("local", "proj").expect("poller があります");
+    let read = registry.take_for_read("local", "proj", "local").expect("poller があります");
     let (poller, _) = registry.client("local", "proj", Lane::Poller, config);
     assert!(Arc::ptr_eq(&read.client, &poller), "書き込みレーンのハンドルを読み取りに使いません");
     assert_eq!(read.cwd, config().cwd);
@@ -402,19 +405,19 @@ mod tests {
     assert_eq!(read.write_sequence, 1, "取得済みの通し番号は取得後の書き込みでは変わりません");
 
     registry.client("local", "proj", Lane::Poller, || changed.clone());
-    let read = registry.take_for_read("local", "proj").expect("新しい poller があります");
+    let read = registry.take_for_read("local", "proj", "local").expect("新しい poller があります");
     assert_eq!(read.cwd, changed.cwd);
     assert!(read.rebuilt);
     assert_eq!(read.write_sequence, 2);
-    assert!(!registry.take_for_read("local", "proj").expect("poller があります").rebuilt);
+    assert!(!registry.take_for_read("local", "proj", "local").expect("poller があります").rebuilt);
   }
 
   #[test]
   fn read_acquisition_requires_a_poller_lane() {
     let registry = McpClientRegistry::new();
-    assert!(registry.take_for_read("local", "proj").is_none());
+    assert!(registry.take_for_read("local", "proj", "local").is_none());
     registry.client("local", "proj", Lane::Write, config);
-    assert!(registry.take_for_read("local", "proj").is_none(), "書き込みレーンだけでは読み取りできません");
+    assert!(registry.take_for_read("local", "proj", "local").is_none(), "書き込みレーンだけでは読み取りできません");
   }
 
   /// プロジェクトの画面読み取りレーンの番号の一覧。レジストリの中身を直接観測します。
@@ -437,12 +440,12 @@ mod tests {
     let registry = McpClientRegistry::new();
     registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), config);
     assert!(
-      !registry.take_for_read("local", "proj").expect("poller があります").rebuilt,
+      !registry.take_for_read("local", "proj", "local").expect("poller があります").rebuilt,
       "初回のそろえでは作り直しとして記録しません"
     );
     registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(2), config);
     assert!(
-      !registry.take_for_read("local", "proj").expect("poller があります").rebuilt,
+      !registry.take_for_read("local", "proj", "local").expect("poller があります").rebuilt,
       "画面レーンの増設だけでは差分基準をリセットしません"
     );
   }
@@ -452,14 +455,14 @@ mod tests {
     let registry = McpClientRegistry::new();
     registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), config);
     assert!(
-      !registry.take_for_read("local", "proj").expect("poller があります").rebuilt,
+      !registry.take_for_read("local", "proj", "local").expect("poller があります").rebuilt,
       "同じ設定のそろえでは作り直しとして記録しません"
     );
     let mut changed = config();
     changed.command = "node-changed".to_owned();
     registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), move || changed.clone());
     assert!(
-      registry.take_for_read("local", "proj").expect("poller があります").rebuilt,
+      registry.take_for_read("local", "proj", "local").expect("poller があります").rebuilt,
       "設定が変わって置き換えた場合は作り直しとして記録します"
     );
   }

@@ -14,11 +14,11 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use super::{
-  client::{CallError, McpClient, McpClientConfig, TransportError},
+  client::{CallError, McpClientConfig, ToolCaller, TransportError},
   metrics::{ToolCallMetrics, ToolCallOutcome},
 };
 use crate::{
-  config::McpServer,
+  config::StdioMcpServer,
   domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   model::{
     ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
@@ -55,9 +55,10 @@ const LIST_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// takt-mcp 子プロセスの起動設定を作る。
 ///
-/// poller の定期読み取りと、書き込み・詳細の RPC が要求時に使う子プロセスが、同じ起動条件
-/// （タイムアウトを含む）を共有するために公開します。
-pub fn client_config(server: &McpServer, cwd: &std::path::Path) -> McpClientConfig {
+/// poller の定期読み取りと、書き込み・詳細の RPC が要求時に使う stdio 子プロセスが、同じ
+/// 起動条件（タイムアウトを含む）を共有するために公開します。読み取りが HTTP 接続先の
+/// プロジェクトは常駐 HTTP サーバーを使うため、この起動設定は使いません。
+pub fn client_config(server: &StdioMcpServer, cwd: &std::path::Path) -> McpClientConfig {
   McpClientConfig {
     command:         server.command.clone(),
     args:            server.args.clone(),
@@ -115,7 +116,7 @@ fn degrades_to_previous(error: &ToolError) -> bool {
 /// 外へは [`ReadToolSet`] と [`WriteToolSet`] だけを公開し、読み取り専用の接続からは
 /// 書き込みの道具を、書き込み専用の接続からは読み取りの道具を呼べない形にします。
 struct ToolSetCore<'a> {
-  client:    &'a mut McpClient,
+  client:    &'a mut dyn ToolCaller,
   cwd:       PathBuf,
   metrics:   ToolCallMetrics,
   workflows: HashMap<String, Option<Vec<String>>>,
@@ -128,7 +129,7 @@ const MAX_PAGES: usize = 100;
 const SPECIFICATION_NOTATIONS: [&str; 3] = ["gherkin", "quint", "alloy"];
 
 impl<'a> ToolSetCore<'a> {
-  pub fn new(client: &'a mut McpClient, cwd: PathBuf) -> Self {
+  pub fn new(client: &'a mut dyn ToolCaller, cwd: PathBuf) -> Self {
     ToolSetCore { client, cwd, metrics: ToolCallMetrics::default(), workflows: HashMap::new() }
   }
 

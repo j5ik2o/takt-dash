@@ -153,3 +153,120 @@ impl ConversationFixture {
     file.set_modified(modified).expect("manager の記録の更新時刻を設定できます");
   }
 }
+
+/// `## このターンの入力` の包みを持つ user の `data` を、実データと同じ形で組み立てる。
+pub fn wrapped_user_data(previous_text: &str, human_text: &str, time: i64) -> String {
+  let speech = serde_json::to_string(&serde_json::json!({
+    "speaker": { "namespace": "local", "id": "operator" },
+    "text": human_text,
+  }))
+  .expect("人の発言の JSON を組み立てられます");
+  let text = format!(
+    r#"
+## 前のターンで受け取った人の発言
+
+{previous_text}
+
+## このターンの入力
+
+このターンは人の発言から始まりました。発言者と本文を示します。本人の依頼と引用を分けて読み、対象に沿って反映します。
+
+{speech}
+
+Business context (not approval): {{"assignment":{{"kind":"repository","repositoryDirectory":"/tmp/takt-dash"}},"pending":null,"goals":[]}}
+
+次の JSON schema に一致する fenced JSON block をちょうど1つ返してください:
+
+```json
+{{
+  "type": "object",
+  "properties": {{
+    "message": {{ "type": "string", "minLength": 1 }},
+    "summary": {{ "type": ["object", "null"] }}
+  }},
+  "required": ["message", "summary"]
+}}
+```
+
+JSON block の前後に余計なテキストを含めないでください。
+
+StructuredOutput ツールは呼び出さないでください。このリクエストでは利用できません。
+"#
+  );
+  serde_json::to_string(&serde_json::json!({ "time": { "created": time }, "text": text }))
+    .expect("user の data を組み立てられます")
+}
+
+/// `## このターンの入力` の見出しだけを持ち、`speaker` を持たない JSON を含む user の `data`。
+pub fn wrapped_user_without_speaker_data(internal_text: &str, time: i64) -> String {
+  let draft = serde_json::to_string(&serde_json::json!({ "text": internal_text }))
+    .expect("speaker を持たない JSON を組み立てられます");
+  let text = format!(
+    "\n## このターンの入力\n\nこのターンはイベントから始まりました。\n\n{draft}\n\nBusiness context (not approval): {{}}\n"
+  );
+  serde_json::to_string(&serde_json::json!({ "time": { "created": time }, "text": text }))
+    .expect("user の data を組み立てられます")
+}
+
+/// 包みを持たない user の `data`。
+pub fn plain_user_data(text: &str, time: i64) -> String {
+  serde_json::to_string(&serde_json::json!({ "text": text, "time": time }))
+    .expect("包みのない user の data を組み立てられます")
+}
+
+/// `message` と `summary` を持つ単一の fenced JSON block を本文に置く assistant の `data`。
+pub fn fenced_assistant_data(message: &str, summary_objective: Option<&str>, time: i64) -> String {
+  let summary = match summary_objective {
+    | Some(objective) => serde_json::json!({ "objective": objective }),
+    | None => serde_json::Value::Null,
+  };
+  let document = serde_json::json!({ "message": message, "summary": summary });
+  let text =
+    format!("```json\n{}\n```", serde_json::to_string_pretty(&document).expect("fenced JSON block を組み立てられます"));
+  serde_json::to_string(&serde_json::json!({
+    "content": [{ "type": "text", "text": text }],
+    "time": { "created": time },
+  }))
+  .expect("assistant の data を組み立てられます")
+}
+
+/// `message` を持たない fenced JSON block を本文に置く assistant の `data`。
+pub fn fenced_assistant_without_message_data(reason: &str, time: i64) -> String {
+  let document = serde_json::json!({ "step": 2, "reason": reason });
+  let text =
+    format!("```json\n{}\n```", serde_json::to_string(&document).expect("fenced JSON block を組み立てられます"));
+  serde_json::to_string(&serde_json::json!({
+    "content": [{ "type": "text", "text": text }],
+    "time": { "created": time },
+  }))
+  .expect("assistant の data を組み立てられます")
+}
+
+/// 解釈できない fenced JSON block を本文に置く assistant の `data`。
+pub fn invalid_fenced_assistant_data(time: i64) -> String {
+  let text = "```json\n{not json\n```";
+  serde_json::to_string(&serde_json::json!({
+    "content": [{ "type": "text", "text": text }],
+    "time": { "created": time },
+  }))
+  .expect("assistant の data を組み立てられます")
+}
+
+/// 包み付きの user の人の発言へ、指定個数の置換文字（U+FFFD）を含めた `data`。
+pub fn garbled_user_data(replacement_count: usize, time: i64) -> String {
+  let mut human_text = String::from("この発言は元記録で壊れています。");
+  human_text.push_str(&"\u{FFFD}".repeat(replacement_count));
+  wrapped_user_data("前のターンの本文", &human_text, time)
+}
+
+/// `data` の `text` をそのまま取り出す。
+pub fn data_text(data: &str) -> String {
+  let value: serde_json::Value = serde_json::from_str(data).expect("data を解釈できます");
+  value.get("text").and_then(serde_json::Value::as_str).expect("text を持ちます").to_owned()
+}
+
+/// assistant の `data.content` の最初の text 要素をそのまま取り出す。
+pub fn assistant_text(data: &str) -> String {
+  let value: serde_json::Value = serde_json::from_str(data).expect("data を解釈できます");
+  value["content"][0]["text"].as_str().expect("content の text を持ちます").to_owned()
+}

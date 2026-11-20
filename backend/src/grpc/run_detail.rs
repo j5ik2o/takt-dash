@@ -19,11 +19,12 @@ use tonic::Status;
 
 use super::{
   mapping::{optional_timestamp, run_status, step_log},
-  run_instruction, run_read_failure_status, ResolvedProject,
+  resolve::ReadSource,
+  run_instruction, run_read_failure_status,
 };
 use crate::{
   domain::RunSlug,
-  mcp::{McpClientRegistry, ReadToolSet, RemoteRun, ToolError},
+  mcp::RemoteRun,
   model::{ReportEntry, TaskEntry},
   run_log::SessionActivity,
   run_progress::{LogCursor, LogLine, RunLogView, RunReadFailure, RunUpdates},
@@ -59,13 +60,13 @@ pub(super) fn fill_from_run_log(
 /// takt_get_run でも読めなければ、保存場所の読み取りの失敗 `failure` のステータスを返します。
 pub(super) async fn fill_from_takt_get_run(
   response: &mut GetRunDetailResponse,
-  registry: &McpClientRegistry,
-  resolved: &ResolvedProject,
+  source: &mut ReadSource,
+  cwd: &std::path::Path,
   run_slug: &RunSlug,
   task: Option<&TaskEntry>,
   failure: RunReadFailure,
 ) -> Result<Option<DateTime<Utc>>, Status> {
-  let remote = match read_remote_run_detail(registry, resolved, run_slug).await {
+  let remote = match source.read_remote_run_detail(cwd, run_slug).await {
     | Ok(remote) => remote,
     | Err(error) => {
       tracing::warn!(run_slug = %run_slug.as_str(), local = %failure, error = %error, "run 詳細を保存場所からも takt_get_run からも読めませんでした。");
@@ -91,45 +92,6 @@ pub(super) async fn fill_from_takt_get_run(
   Ok(last_log_at)
 }
 
-/// 画面読み取りレーンの接続で takt_get_run から run を読む。
-async fn read_remote_run(
-  registry: &McpClientRegistry,
-  resolved: &ResolvedProject,
-  run_slug: &RunSlug,
-) -> Result<RemoteRun, ToolError> {
-  let handle =
-    registry.screen_client(resolved.server_id.as_str(), resolved.project.as_str(), resolved.screen_read_lanes, || {
-      resolved.client_config.clone()
-    });
-  let mut client = handle.lock().await;
-  ReadToolSet::new(&mut client, resolved.cwd.clone()).read_remote_run(run_slug).await
-}
-
-/// 詳細用に、指示書の一覧とタスク本文まで takt_get_run から読む。
-///
-/// 要約の応答は指示書の一覧を含まず、タスク本文も含みません（taskOmission だけを返します）。
-/// ローカルの読み取りが要約の値で詳細を組み立てるのと同じ値を返すため、同じ接続で
-/// view instructions と view task から取り直します。一覧の読み取り（poller）はこの形を
-/// 使いません。
-async fn read_remote_run_detail(
-  registry: &McpClientRegistry,
-  resolved: &ResolvedProject,
-  run_slug: &RunSlug,
-) -> Result<RemoteRun, ToolError> {
-  let handle =
-    registry.screen_client(resolved.server_id.as_str(), resolved.project.as_str(), resolved.screen_read_lanes, || {
-      resolved.client_config.clone()
-    });
-  let mut client = handle.lock().await;
-  let mut toolset = ReadToolSet::new(&mut client, resolved.cwd.clone());
-  let mut remote = toolset.read_remote_run(run_slug).await?;
-  remote.instructions = toolset.read_remote_instructions(run_slug).await?;
-  if remote.task_text.is_empty() {
-    remote.task_text = toolset.read_remote_task_text(run_slug).await?;
-  }
-  Ok(remote)
-}
-
 /// GetRunUpdates の追記分を takt_get_run から組み立てる。
 ///
 /// ローカルで本体ログの続きを読めない run のための経路です。ステップの記録から作った行の
@@ -139,13 +101,13 @@ async fn read_remote_run_detail(
 ///
 /// takt_get_run でも読めなければ、保存場所の読み取りの失敗 `failure` のステータスを返します。
 pub(super) async fn remote_run_updates(
-  registry: &McpClientRegistry,
-  resolved: &ResolvedProject,
+  source: &mut ReadSource,
+  cwd: &std::path::Path,
   run_slug: &RunSlug,
   after: Option<LogCursor>,
   failure: RunReadFailure,
 ) -> Result<RunUpdates, Status> {
-  let remote = match read_remote_run(registry, resolved, run_slug).await {
+  let remote = match source.read_remote_run(cwd, run_slug).await {
     | Ok(remote) => remote,
     | Err(error) => {
       tracing::warn!(run_slug = %run_slug.as_str(), local = %failure, error = %error, "run の追記分を保存場所からも takt_get_run からも読めませんでした。");
