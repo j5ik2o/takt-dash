@@ -254,7 +254,7 @@ export function OverviewContent({
       <section className="l-section" aria-labelledby="h-runs">
         <h2 id="h-runs">実行中の run</h2>
         {view.runs.length > 0 ? (
-          <div className="l-table">
+          <div className="l-table runs-table">
             <table>
               <thead>
                 <tr>

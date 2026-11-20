@@ -652,6 +652,32 @@ a {
   font-weight: 600;
 }
 
+/* 狭い画面では run の表のセルを縦に積み、ゴールの文が1文字ずつに潰れて読めなくならないようにする。 */
+@media (max-width: 860px) {
+  .runs-table table,
+  .runs-table tbody,
+  .runs-table tr,
+  .runs-table td {
+    display: block;
+  }
+
+  .runs-table thead {
+    display: none;
+  }
+
+  .runs-table td {
+    border-bottom: 0;
+  }
+
+  .runs-table tbody tr {
+    border-bottom: 1px solid var(--line2);
+  }
+
+  .runs-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+}
+
 .bar {
   height: 8px;
   background: var(--track);

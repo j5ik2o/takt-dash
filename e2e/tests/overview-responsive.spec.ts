@@ -37,7 +37,7 @@ async function measureText(locator: Locator) {
       node = walker.nextNode();
     }
     const box = element.getBoundingClientRect();
-    const card = element.closest(".scard, .callout");
+    const card = element.closest(".scard, .callout, .run-row");
     if (card === null) throw new Error("表示項目のカードが見つかりません");
     const cardBox = card.getBoundingClientRect();
     const left = Math.max(0, box.left, cardBox.left);
