@@ -551,7 +551,11 @@ export interface Server {
   /** 応答の有無 */
   connected: boolean;
   /** 最後に読めた時刻 */
-  lastReadAt: Date | undefined;
+  lastReadAt:
+    | Date
+    | undefined;
+  /** 書き込み専用（読み取りプロジェクトを持たず、書き込み先としてだけ使われる） */
+  writeOnly: boolean;
 }
 
 /** 集約対象のプロジェクトを表す。 */
@@ -1391,7 +1395,7 @@ export interface ListGoalRegistrationProposalsResponse {
 }
 
 function createBaseServer(): Server {
-  return { serverId: "", name: "", kind: "", connected: false, lastReadAt: undefined };
+  return { serverId: "", name: "", kind: "", connected: false, lastReadAt: undefined, writeOnly: false };
 }
 
 export const Server: MessageFns<Server> = {
@@ -1410,6 +1414,9 @@ export const Server: MessageFns<Server> = {
     }
     if (message.lastReadAt !== undefined) {
       Timestamp.encode(toTimestamp(message.lastReadAt), writer.uint32(42).fork()).join();
+    }
+    if (message.writeOnly !== false) {
+      writer.uint32(56).bool(message.writeOnly);
     }
     return writer;
   },
@@ -1467,6 +1474,14 @@ export const Server: MessageFns<Server> = {
             message.lastReadAt = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
             continue;
           }
+          case 7: {
+            if (tag !== 56) {
+              break;
+            }
+
+            message.writeOnly = reader.bool();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -1494,6 +1509,11 @@ export const Server: MessageFns<Server> = {
         : isSet(object.last_read_at)
         ? fromJsonTimestamp(object.last_read_at)
         : undefined,
+      writeOnly: isSet(object.writeOnly)
+        ? globalThis.Boolean(object.writeOnly)
+        : isSet(object.write_only)
+        ? globalThis.Boolean(object.write_only)
+        : false,
     };
   },
 
@@ -1514,6 +1534,9 @@ export const Server: MessageFns<Server> = {
     if (message.lastReadAt !== undefined) {
       obj.lastReadAt = message.lastReadAt.toISOString();
     }
+    if (message.writeOnly !== false) {
+      obj.writeOnly = message.writeOnly;
+    }
     return obj;
   },
 
@@ -1527,6 +1550,7 @@ export const Server: MessageFns<Server> = {
     message.kind = object.kind ?? "";
     message.connected = object.connected ?? false;
     message.lastReadAt = object.lastReadAt ?? undefined;
+    message.writeOnly = object.writeOnly ?? false;
     return message;
   },
 };

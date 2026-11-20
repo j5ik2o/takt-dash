@@ -237,6 +237,7 @@ impl StateStore {
           name: project.name.clone(),
           about: project.about.clone(),
           server_id: project.server.clone(),
+          write_server_id: project.write_server.clone(),
           concurrency: project.concurrency,
           connected: slot.is_connected(),
           connection_state: slot.connection_state,

@@ -24,6 +24,7 @@ const server = (serverId: string, kind: string): Server => ({
   kind,
   connected: true,
   lastReadAt: minutesAgo(1),
+  writeOnly: false,
 });
 
 const run = (serverId: string): Run => ({

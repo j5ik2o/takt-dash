@@ -619,6 +619,9 @@ struct ProjectSignature {
   connection_state: Option<ConnectionState>,
   snapshot:         Option<ProjectSnapshot>,
   silent_runs:      Vec<(String, bool)>,
+  // 書き込み先は、サーバーの「書き込み専用」の印を決める。書き込み先だけが変わる
+  // 設定変更でも画面の表示が変わるため、指紋に含める。
+  write_server_id:  String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -644,6 +647,7 @@ impl StoreSignature {
             .snapshot
             .map(|snapshot| ProjectSnapshot { terminal_reads: TerminalReads::default(), ..snapshot }),
           silent_runs,
+          write_server_id: view.write_server_id,
         }
       })
       .collect();
