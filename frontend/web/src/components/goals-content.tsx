@@ -43,9 +43,9 @@ export function GoalsContent({ state, project }: GoalsContentProps): ReactElemen
           {goals.map((goal) => (
             <li className="card" key={goal.goalId}>
               <div className="card-head">
-                <h3>
+                <h2>
                   <a href={`/goals/${encodeURIComponent(goal.goalId)}`}>{goal.name}</a>
-                </h3>
+                </h2>
                 <span className="about">{goal.project}</span>
               </div>
               <p>

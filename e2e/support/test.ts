@@ -21,9 +21,20 @@ const twoProjectStack = async ({}, use: (stack: Stack) => Promise<void>): Promis
   }
 };
 
+// 長いサーバー名を表示する検証用のスタック。サイドバーのサーバー名が1行に収まるかを
+// 測るため、既定より長い名前で専用に起動する。
+const longServerStack = async ({}, use: (stack: Stack) => Promise<void>): Promise<void> => {
+  const stack = await startStack({ serverName: "E2E Mac mini とても長いサーバーの名前" });
+  try {
+    await use(stack);
+  } finally {
+    await stack.stop();
+  }
+};
+
 // スタックはワーカーごとに1回だけ起動し、spec が失敗しても teardown で必ず止める。
 export const test = base.extend<
-  { isolatedStack: Stack; twoProjectStack: Stack },
+  { isolatedStack: Stack; twoProjectStack: Stack; longServerStack: Stack },
   { stack: Stack }
 >({
   stack: [
@@ -48,6 +59,7 @@ export const test = base.extend<
     }
   },
   twoProjectStack,
+  longServerStack,
 });
 
 export { expect } from "@playwright/test";

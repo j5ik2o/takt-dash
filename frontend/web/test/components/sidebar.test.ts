@@ -1,14 +1,16 @@
-// サイドバーのページ遷移とビルド情報の契約（issue #73 / AC1 / AC2）。
+// サイドバーのページ遷移とビルド情報の契約（issue #73 / AC1 / AC2 / issue #317 D26）。
 //
 // 会話ページは既存のナビゲーションから到達できる必要があり、既存のページの
 // リンクと表示は壊さない。リンクの href と表示名を HTML から観測する。
 // サイドバー下端には frontend と backend のビルド元（短縮 SHA とブランチ名）を表示し、
-// 両方のコミットが取得できていて異なるときだけ不一致を示す。
+// 両方のコミットが取得できていて異なるときだけ不一致を示す。狭い幅で本文を押し下げない
+// よう、下端は折りたためる区画として描画する。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Sidebar } from "../../src/components/sidebar.tsx";
+import { createDashboardState, NOW } from "../support/fixtures.ts";
 
 type BuildInfo = { commit: string; branch: string };
 
@@ -20,20 +22,24 @@ const renderSidebar = (
     frontend: FRONTEND_BUILD,
     backend: BACKEND_BUILD,
   },
+  extra: { servers?: Parameters<typeof Sidebar>[0]["servers"]; readAt?: Date } = {},
 ): string =>
   renderToStaticMarkup(
     createElement(Sidebar, {
-      servers: [],
+      servers: extra.servers ?? [],
       pendingCount: 0,
+      readAt: extra.readAt,
       frontendBuild: builds.frontend,
       backendBuild: builds.backend,
     }),
   );
 
 // サイドバー下端（.side-foot）の中身だけを取り出す。ビルド情報がナビや本文ではなく
-// 下端に出ていることを、位置の契約として観測する。
+// 下端に出ていることを、位置の契約として観測する。issue #317 D26 で狭い幅では
+// 折りたたむため、要素は details（開閉可能な区画）でもよい。閉じた状態でも中身は
+// DOM に残り、開くと読める。
 const sideFoot = (html: string): string => {
-  const match = /<div class="side-foot">([\s\S]*?)<\/div>/.exec(html);
+  const match = /<(?:div|details)\b[^>]*\bclass="side-foot"[^>]*>([\s\S]*?)<\/(?:div|details)>/.exec(html);
   assert.ok(match, `サイドバー下端（.side-foot）が描画されていません: ${html}`);
   return match[1]!;
 };
@@ -99,4 +105,26 @@ test("片方のコミットが unknown のときは不一致を示さない", ()
 
   assert.match(foot, /unknown/, "取得できない側は unknown を表示する");
   assert.doesNotMatch(foot, /不一致/, "差の有無を判定できないときは不一致を出さない");
+});
+
+// issue #317 D26: 390px でサイドバー下端の情報は折りたたまれる。閉じた状態でも
+// 中身は DOM に残り、開けば同じ内容が読める。
+test("サイドバー下端は折りたためる区画として描画し、開けば内容を読める", () => {
+  const html = renderSidebar(
+    { frontend: FRONTEND_BUILD, backend: BACKEND_BUILD },
+    { servers: createDashboardState().servers, readAt: NOW },
+  );
+
+  assert.match(
+    html,
+    /<details\b[^>]*\bclass="side-foot"[^>]*>/,
+    "サイドバー下端は details で折りたためる（狭い幅で閉じた状態を出す）",
+  );
+  const summary = /<details\b[^>]*class="side-foot"[^>]*>\s*<summary\b[^>]*>([\s\S]*?)<\/summary>/.exec(html);
+  assert.ok(summary, "折りたたみの要約（summary）があり、閉じた状態でも何の区画か分かる");
+
+  const foot = sideFoot(html);
+  assert.match(foot, /最終読み取り時刻/, "開けば最終読み取り時刻を読める");
+  assert.match(foot, /2台中1台から読めています/, "開けば読めている台数を読める");
+  assert.match(foot, /a1b2c3d/, "開けば frontend のビルド情報を読める");
 });

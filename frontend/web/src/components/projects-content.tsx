@@ -22,7 +22,7 @@ function GoalRow({ goal }: { goal: Goal }): ReactElement {
   const pullRequest = goal.pullRequest;
   return (
     <li>
-      <h4 className="goal-head">{goalHeading(goal.name)}</h4>
+      <h3 className="goal-head">{goalHeading(goal.name)}</h3>
       <span className={`goal-badge ${badge.tone}`}>{badge.label}</span>
       {badge.kind === "paused" && goal.pausedReason !== undefined ? (
         <p className="goal-why">一時停止の理由: {goal.pausedReason}</p>
@@ -76,7 +76,7 @@ export function ProjectsContent({ response, now }: ProjectsContentProps): ReactE
           return (
             <article className="card" id={projectAnchorId(project.name)} key={project.name}>
               <div className="card-head">
-                <h3>{project.name}</h3>
+                <h2>{project.name}</h2>
                 <span className="about">{project.about}</span>
               </div>
               <p className="k">判断待ち {projectPending.length}件</p>
