@@ -37,6 +37,10 @@ pub enum Lane {
   Screen,
   /// 書き込み RPC。プロジェクトごとに1本で固定します。
   Write,
+  /// manager 用の接続。終了依頼（`takt_finish_goal`）だけを投函します。`manager: true` を
+  /// 付けた stdio エントリが設定されているときだけ使い、読み取り・書き込みのレーンとは
+  /// 子プロセスを共有しません。
+  Manager,
 }
 
 impl Lane {
@@ -46,6 +50,7 @@ impl Lane {
       | Lane::Poller => "poller",
       | Lane::Screen => "screen",
       | Lane::Write => "write",
+      | Lane::Manager => "manager",
     }
   }
 }
@@ -56,6 +61,7 @@ enum LaneKey {
   Poller,
   Screen(u32),
   Write,
+  Manager,
 }
 
 impl LaneKey {
@@ -65,6 +71,7 @@ impl LaneKey {
       | LaneKey::Poller => "poller".to_owned(),
       | LaneKey::Screen(index) => format!("screen-{index}"),
       | LaneKey::Write => "write".to_owned(),
+      | LaneKey::Manager => "manager".to_owned(),
     }
   }
 }
@@ -141,6 +148,7 @@ impl McpClientRegistry {
     let lane_key = match lane {
       | Lane::Poller => LaneKey::Poller,
       | Lane::Write => LaneKey::Write,
+      | Lane::Manager => LaneKey::Manager,
       // 画面読み取りを本数で選ぶ場合は screen_client を使います。ここでは1本目を返します。
       | Lane::Screen => LaneKey::Screen(0),
     };

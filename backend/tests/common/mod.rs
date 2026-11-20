@@ -233,7 +233,12 @@ pub fn project(name: &str, cwd: &Path) -> Project {
 
 /// mock HTTP MCP サーバのスクリプトへの絶対パス。
 pub fn mcp_server() -> StdioMcpServer {
-  StdioMcpServer { command: "node".to_owned(), args: vec!["server.mjs".to_owned()], env: Default::default() }
+  StdioMcpServer {
+    command: "node".to_owned(),
+    args:    vec!["server.mjs".to_owned()],
+    env:     Default::default(),
+    manager: false,
+  }
 }
 
 pub fn mock_http_script() -> PathBuf {

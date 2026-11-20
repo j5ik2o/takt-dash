@@ -183,6 +183,9 @@ const TOOL_ARGUMENTS = {
   takt_approve_goal_registration: { required: ["cwd", "revision"], optional: [] },
   takt_reject_goal_registration: { required: ["cwd", "revision"], optional: [] },
   takt_merge_goal_pr: { required: ["cwd", "goalId", "prNumber", "until"], optional: [] },
+  // manager 専用の終了依頼。実機の takt-mcp の入力契約（reason 必須）は、窓口が takt-custom の
+  // dist の実物で確認済みです。backend が投函する {cwd, goalId, reason} を受け付けます。
+  takt_finish_goal: { required: ["cwd", "goalId", "reason"], optional: [] },
 };
 
 // 引数の検証。実契約と同じく cwd 必須・絶対パス、未知キーは拒否する。
@@ -464,6 +467,9 @@ const handleToolCall = (name, args) => {
         workflow: "merge-goal-pr",
         until: args.until,
       });
+    case "takt_finish_goal":
+      // 依頼を受け付けたことを表す最小の応答。実 takt-mcp の応答形は未確認。
+      return asText({ goalId: args.goalId, status: "finished" });
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };
   }
