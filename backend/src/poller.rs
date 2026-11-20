@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, watch};
 use crate::{
   activity::ActivityStore,
   config::{load_config, Config, HttpMcpServer, McpServer, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
-  domain::{PullRequestNumber, PullRequestState},
+  domain::PullRequestNumber,
   events::{detect, detect_with_terminations},
   mcp::{client_config, HttpReadHandle, McpClientRegistry, ReadToolSet, ToolCallMetrics, ToolError},
   model::{
@@ -237,6 +237,10 @@ impl Poller {
         | None => handles.push(None),
       }
     }
+    // このサイクルで読み取りを採用したプロジェクトと、採用時点の書き込み通し番号。
+    // 終了依頼は、採用したプロジェクトについてだけ、通し番号が変わっていない条件で
+    // 行います。
+    let mut adopted_sequences: BTreeMap<String, u64> = BTreeMap::new();
     for (project, handle) in config.projects.iter().zip(handles) {
       let prev = self.previous.get(&project.name).cloned();
       let Some((handle, write_sequence_at_start)) = handle else {
@@ -279,6 +283,11 @@ impl Poller {
                 outage = Some(read_at - *lost_at);
               }
               let transition = self.notified_transition(&project.name, ConnectionState::Connected, outage);
+              // 判断待ちの表示補正のため、この snapshot のマージ待ちゴールの PR 状態を
+              // 確認して記録します。出来事の検出と判断待ちの投影は、この記録を使って判定
+              // します。確認は書き込みゲートの保持中に行い、確認と反映の間に書き込みが
+              // 割り込まないようにします。
+              self.refresh_pull_request_states(project, &snapshot).await;
               let terminations = self.store.terminations(&project.name);
               let events = detect_with_terminations(
                 &project.server,
@@ -294,6 +303,7 @@ impl Poller {
                   // 記録に成功したサイクルだけ、snapshot と差分基準を進めます。
                   self.store.record_success(&project.name, snapshot.clone(), read_at);
                   self.previous.insert(project.name.clone(), snapshot);
+                  adopted_sequences.insert(project.name.clone(), write_sequence);
                   // 記録済みの接続の出来事への照会がまだ成功していないプロジェクトは、
                   // 空の出来事群の記録が成功しても接続状態の比較基準を確定しません。
                   // 確定すると以後のサイクルで照会を試し直せず、未対応の切断に対応する
@@ -322,9 +332,9 @@ impl Poller {
         },
       }
     }
-    // snapshot の反映の後に、中止済みのマージ待ちゴールの PR が閉じているかを確認し、
-    // manager へ終了依頼を投函します。設定が false のときは gh も依頼も行いません。
-    self.auto_terminate_closed_goals(&config).await;
+    // snapshot の反映の後に、PR が閉じていると確認できた中止済みゴールへ、manager 経由の
+    // 終了依頼を投函します。表示補正のための PR 状態の確認は、反映の前に済ませています。
+    self.auto_terminate_closed_goals(&config, &adopted_sequences).await;
     let after = StoreSignature::capture(&self.store, now);
     let changed = after != before;
     self.last_signature = Some(after);
@@ -349,14 +359,48 @@ impl Poller {
     }
   }
 
-  /// 中止済みのマージ待ちゴールの PR が閉じているかを確認し、manager へ終了依頼を投函する。
+  /// マージ待ちゴールの PR 状態を確認し、判断待ちの表示補正の記録へ反映する。
   ///
-  /// 対象は、`awaiting_merge` かつ実行状態が `aborted` で、仕上げタスクの条件が人のマージ待ち
-  /// と同じゴールに限ります。PR が `CLOSED`/`MERGED` と確認できたときだけ manager 用エントリへ
-  /// `takt_finish_goal` を1回投函し、依頼済みのゴールは再投函しません。状態を確認できない場合と
-  /// manager 用エントリが未設定の場合は投函せず、表示を維持します。設定
-  /// `autoTerminateClosedGoals` が false のときは gh を起動せず依頼もしません。
-  async fn auto_terminate_closed_goals(&mut self, config: &Config) {
+  /// 対象は、人のマージ待ちの条件を満たし、PR 番号を持つゴールです。自動終了の対象である
+  /// 中止済みゴールに限りません。確認できた状態だけを記録し、確認できない場合は記録を
+  /// 変えません（誤って隠しません）。終了依頼は行いません。依頼済みのゴールは、状態が
+  /// 変わっても表示へ影響しないため確認を省きます。この確認は、採用した snapshot への
+  /// 出来事の検出より前に行います。今回の確認結果が、出来事の検出と判断待ちの投影の
+  /// 両方へ同じ周期で効くためです。
+  async fn refresh_pull_request_states(&mut self, project: &Project, snapshot: &ProjectSnapshot) {
+    let merge_tasks: Vec<&TaskEntry> = snapshot.tasks.iter().filter(|task| task.merge_task).collect();
+    for goal in &snapshot.goals {
+      if goal.status != GoalStatus::AwaitingMerge {
+        continue;
+      }
+      let Some(pull_request) = goal.pull_request_number else {
+        continue;
+      };
+      if !is_human_merge_wait(goal.status, &goal.goal_id, &merge_tasks) {
+        continue;
+      }
+      let already_requested = self
+        .store
+        .termination(&project.name, &goal.goal_id)
+        .is_some_and(|record| record.finish_request == FinishRequest::Requested);
+      if already_requested {
+        continue;
+      }
+      let probe = probe_pull_request_with(&self.gh_program, &project.cwd, pull_request).await;
+      if let PullRequestProbe::Confirmed(state) = probe {
+        self.store.record_pull_request(&project.name, goal.goal_id.clone(), Some(state));
+      }
+    }
+  }
+
+  /// 中止済みのマージ待ちゴールへ、manager 経由の終了依頼を投函する。
+  ///
+  /// 対象は、PR が閉じていると確認済みで、まだ依頼していない（または前回の依頼が失敗した）
+  /// ゴールに限ります。依頼は、このサイクルで読み取りを採用したプロジェクトについてだけ
+  /// 行います。設定 `autoTerminateClosedGoals` が false の場合と、manager 用エントリが
+  /// 未設定の場合は依頼を行いません。表示補正は [`Poller::refresh_pull_request_states`] が
+  /// 設定に依存せず担います。
+  async fn auto_terminate_closed_goals(&mut self, config: &Config, adopted_sequences: &BTreeMap<String, u64>) {
     if !config.auto_terminate_closed_goals {
       return;
     }
@@ -368,6 +412,9 @@ impl Poller {
     };
     let manager = manager.clone();
     for project in &config.projects {
+      let Some(adopted_sequence) = adopted_sequences.get(&project.name) else {
+        continue;
+      };
       let Some(snapshot) = self.previous.get(&project.name).cloned() else {
         continue;
       };
@@ -379,7 +426,7 @@ impl Poller {
         if !self.is_auto_termination_candidate(project, goal, &merge_tasks) {
           continue;
         }
-        self.terminate_goal_if_closed(project, &manager, goal, pull_request).await;
+        self.terminate_goal_if_closed(project, &manager_server, &manager, goal, pull_request, *adopted_sequence).await;
       }
     }
   }
@@ -393,9 +440,8 @@ impl Poller {
       return false;
     }
     match self.store.termination(&project.name, &goal.goal_id) {
-      // 依頼済み（Requested）は再投函しません。失敗（Failed）はそのサイクルでは再試行せず、
-      // 次の読み取りサイクルで再評価します（例: 1ゴールにつき1回だけ候補として列挙します）。
-      // 判断待ちの表示は維持します。
+      // 依頼済み（Requested）は再投函しません。失敗（Failed）はこのサイクルでは再試行せず、
+      // 次の読み取りサイクルで再評価します。表示は PR の確認状態で決まります。
       | Some(record) => {
         record.finish_request == FinishRequest::NotRequested
           || matches!(record.finish_request, FinishRequest::Failed(_))
@@ -404,25 +450,44 @@ impl Poller {
     }
   }
 
-  /// 1ゴールの PR 状態を確認し、閉じていれば manager へ終了依頼を投函する。
+  /// 1ゴールの終了依頼を、書き込みとの競合を避けて投函する。
+  ///
+  /// 書き込みゲートを保持し、読み取りの採用時点の書き込み通し番号が変わっていないことを
+  /// 確かめます。変わっている場合は、マージ承認などの書き込みが割り込んだ可能性があるため、
+  /// このサイクルでは依頼せず、次のサイクルの読み取りで再評価します。PR の状態も依頼の
+  /// 直前に確認し直し、閉じていると再確認できた場合だけ、manager 用エントリへ
+  /// `takt_finish_goal` を1回投函します。manager のクライアントは manager 用エントリの
+  /// ID で登録します。読み取り先の ID で登録すると、manager 用エントリを設定から外しても
+  /// 子プロセスが残り続けます。
   async fn terminate_goal_if_closed(
     &mut self,
     project: &Project,
+    manager_server: &str,
     manager: &crate::config::StdioMcpServer,
     goal: &GoalEntry,
     pull_request: PullRequestNumber,
+    adopted_sequence: u64,
   ) {
+    let write_gate = self.registry.write_gate(&project.write_server, &project.name);
+    let _write_gate = write_gate.lock().await;
+    if self.registry.write_sequence(&project.write_server, &project.name) != adopted_sequence {
+      tracing::info!(
+        project = %project.name,
+        goal_id = %goal.goal_id,
+        "読み取りの採用後に書き込みがあったため、このサイクルの終了依頼を見送ります。"
+      );
+      return;
+    }
     let probe = probe_pull_request_with(&self.gh_program, &project.cwd, pull_request).await;
     let confirmed = match probe {
-      | PullRequestProbe::Confirmed(PullRequestState::Open) => {
-        self.store.record_pull_request(&project.name, goal.goal_id.clone(), Some(PullRequestState::Open));
-        return;
-      },
-      | PullRequestProbe::Confirmed(state) if state.is_closed() => {
+      | PullRequestProbe::Confirmed(state) => {
         self.store.record_pull_request(&project.name, goal.goal_id.clone(), Some(state));
+        if !state.is_closed() {
+          return;
+        }
         state
       },
-      | PullRequestProbe::Confirmed(_) | PullRequestProbe::Unknown => return,
+      | PullRequestProbe::Unknown => return,
     };
     // 終了の理由は、確認したプルリクエストの状態を含む文にします（takt_finish_goal の必須入力）。
     let reason = format!(
@@ -430,7 +495,7 @@ impl Poller {
     );
     let handle = self
       .registry
-      .client(&project.server, &project.name, crate::mcp::Lane::Manager, || client_config(manager, &project.cwd));
+      .client(manager_server, &project.name, crate::mcp::Lane::Manager, || client_config(manager, &project.cwd));
     let finish_request = {
       let mut client = handle.0.lock().await;
       request_finish_goal(&mut client, &project.cwd, &goal.goal_id, &reason).await
@@ -442,7 +507,7 @@ impl Poller {
           project = %project.name,
           goal_id = %goal.goal_id,
           reason = %reason,
-          "終了依頼 (takt_finish_goal) に失敗しました。判断待ちの表示を維持し、次の読み取りサイクルで再評価します。"
+          "終了依頼 (takt_finish_goal) に失敗しました。プルリクエストが閉じているためゴールは判断待ちに出しません。依頼は次の読み取りサイクルで再試行します。"
         );
         FinishRequest::Failed(reason)
       },
