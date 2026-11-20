@@ -17,6 +17,28 @@ use crate::{
 // ----------------------------------------------------------------------------
 
 #[test]
+fn overview_command_labels_a_write_only_server_as_write_only() {
+  let runtime =
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");
+  let mut state = sample_overview();
+  state.servers[1].write_only = true;
+  let server = runtime.block_on(start_dummy_server(state));
+
+  let (code, stdout, stderr) = run_cli(&["overview".to_owned()], server.addr);
+  runtime.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_OK, "閲覧コマンドは成功する必要があります。stderr: {stderr}");
+  assert!(
+    stdout.contains("j5ik2o-mac-studio（Mac Studio、書き込み専用）"),
+    "書き込み専用のサーバーは書き込み専用と表示する必要があります: {stdout}"
+  );
+  assert!(
+    !stdout.contains("j5ik2o-mac-studio（Mac Studio、応答なし）"),
+    "書き込み専用のサーバーを応答なしと表示してはいけません: {stdout}"
+  );
+}
+
+#[test]
 fn overview_command_prints_fetched_summary_to_stdout() {
   let runtime =
     tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");

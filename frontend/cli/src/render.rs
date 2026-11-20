@@ -41,7 +41,13 @@ pub(crate) fn render_overview(state: &DashboardState) -> Result<String, domain::
     .servers
     .iter()
     .map(|server| {
-      let state_label = if server.connected { "接続中" } else { "応答なし" };
+      let state_label = if server.connected {
+        "接続中"
+      } else if server.write_only {
+        "書き込み専用"
+      } else {
+        "応答なし"
+      };
       format!("- {}（{}、{}）", server.name, server.kind, state_label)
     })
     .collect();
