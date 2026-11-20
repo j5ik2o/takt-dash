@@ -4,9 +4,7 @@
 //! レーンを使います。レーンごとに子プロセスが分かれるため、重い読み取りが
 //! 書き込みを待たせることはありません。
 
-use tonic::Status;
-
-use super::{resolve::write_client_config, ResolvedProject, TaktDashServiceImpl};
+use super::{ResolvedProject, TaktDashServiceImpl};
 use crate::{
   config::McpConnection,
   mcp::{client_config, ClientHandle, Lane},
@@ -28,15 +26,13 @@ impl TaktDashServiceImpl {
     )
   }
 
-  /// 書き込みレーンのクライアントを返す。呼び出し側がロックして使います。
-  pub(super) fn write_handle(&self, resolved: &ResolvedProject) -> Result<ClientHandle, Status> {
-    let config = write_client_config(&resolved.write_connection, &resolved.cwd)?;
-    Ok(
-      self
-        .registry
-        .client(resolved.write_server_id.as_str(), resolved.project.as_str(), Lane::Write, || config.clone())
-        .0,
-    )
+  /// 書き込みレーンのクライアントを返す。stdio 接続先専用です。呼び出し側がロックして使います。
+  pub(super) fn write_handle(&self, resolved: &ResolvedProject) -> ClientHandle {
+    let McpConnection::Stdio(server) = &resolved.write_connection else {
+      panic!("書き込みレーンは stdio 接続先だけにあります。HTTP 接続先の書き込みは WriteSource 経由で行います。");
+    };
+    let config = client_config(server, &resolved.cwd);
+    self.registry.client(resolved.write_server_id.as_str(), resolved.project.as_str(), Lane::Write, || config.clone()).0
   }
 
   /// プロジェクトの書き込みゲートを取得する。

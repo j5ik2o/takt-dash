@@ -270,6 +270,23 @@ const handleToolCall = (name, args) => {
     }
     case "takt_list_goal_registration_proposals":
       return asText({ proposals: state.proposals ?? [] });
+    // 書き込み系。応答の形は stdio 版モック（mock_mcp_server.mjs）と同じにします。
+    case "takt_answer_goal_question":
+      return asText({ goalId: args.goalId, questionId: args.questionId, answer: args.answer });
+    case "takt_approve_goal_registration":
+      return asText({ revision: args.revision, goal: { id: `approved-${args.revision}` } });
+    case "takt_reject_goal_registration":
+      return asText({ revision: args.revision, notice: "却下しました" });
+    case "takt_merge_goal_pr":
+      return asText({
+        taskName: "merge",
+        status: "enqueued",
+        goalId: args.goalId,
+        prNumber: args.prNumber,
+        mergeTask: "merge",
+        workflow: "merge-goal-pr",
+        until: args.until,
+      });
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };
   }

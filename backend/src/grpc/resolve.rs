@@ -11,8 +11,14 @@ use tonic::Status;
 use super::{TaktDashServiceImpl, READ_TIMEOUT};
 use crate::{
   config::{load_config, Config, McpConnection},
-  domain::{GoalId, ProjectName, RunSlug, ScreenReadLanes, ServerId, TaskName},
-  mcp::{client_config, ClientHandle, HttpReadHandle, ReadToolSet, RemoteRun, ToolError},
+  domain::{
+    GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, ScreenReadLanes,
+    ServerId, TaskName,
+  },
+  mcp::{
+    ApproveGoalRegistrationResult, ClientHandle, HttpReadHandle, MergeGoalPrResult, ReadToolSet, RemoteRun, ToolError,
+    WriteToolSet,
+  },
   model::{GoalDetail, ProjectView, TaskDetail},
 };
 
@@ -23,7 +29,7 @@ pub(super) struct ResolvedProject {
   pub(super) project:           ProjectName,
   /// 読み取り接続先（`server` の接続方法）。
   pub(super) connection:        McpConnection,
-  /// 書き込み接続先（`write_server` の接続方法）。書き込みは stdio に限ります。
+  /// 書き込み接続先（`write_server` の接続方法）。
   pub(super) write_connection:  McpConnection,
   pub(super) cwd:               PathBuf,
   /// 画面読み取りレーンの本数。設定から解決します。
@@ -116,6 +122,17 @@ impl TaktDashServiceImpl {
         ReadSource::Http(Box::new(HttpReadHandle::new(resolved.connection.clone(), READ_TIMEOUT)))
       },
       | McpConnection::Stdio(_) => ReadSource::Stdio(self.screen_handle(resolved)),
+    }
+  }
+
+  /// 書き込み RPC 用の書き込み元を作る。HTTP 接続先は常駐サーバーのハンドル、stdio 接続先は
+  /// 書き込みレーンのクライアントを使います。
+  pub(super) fn write_source(&self, resolved: &ResolvedProject) -> WriteSource {
+    match &resolved.write_connection {
+      | McpConnection::Http(_) => {
+        WriteSource::Http(Box::new(HttpReadHandle::new(resolved.write_connection.clone(), READ_TIMEOUT)))
+      },
+      | McpConnection::Stdio(_) => WriteSource::Stdio(self.write_handle(resolved)),
     }
   }
 }
@@ -235,15 +252,85 @@ impl ReadSource {
   }
 }
 
-/// 書き込み RPC 用の stdio 起動設定を取り出す。書き込みは stdio の子プロセスだけを使います。
-pub(super) fn write_client_config(
-  connection: &McpConnection,
-  cwd: &std::path::Path,
-) -> Result<crate::mcp::McpClientConfig, Status> {
-  match connection {
-    | McpConnection::Stdio(server) => Ok(client_config(server, cwd)),
-    | McpConnection::Http(_) => {
-      Err(Status::unavailable("このサーバーは読み取り専用の HTTP 接続先のため、書き込みには使えません。"))
-    },
+/// 画面の要求時の書き込み用の書き込み元。
+///
+/// HTTP 接続先は常駐サーバーのハンドルへ書き、stdio 接続先は書き込みレーンの
+/// 子プロセスへ書きます。どちらの接続でも、書き込みの道具のまとまりは同じです。
+pub(super) enum WriteSource {
+  Http(Box<HttpReadHandle>),
+  Stdio(ClientHandle),
+}
+
+impl WriteSource {
+  /// takt_answer_goal_question で managerからの質問へ回答する。
+  pub(super) async fn answer_goal_question(
+    &mut self,
+    cwd: &std::path::Path,
+    goal_id: &GoalId,
+    question_id: &InquiryId,
+    answer: serde_json::Value,
+  ) -> Result<InquiryId, ToolError> {
+    match self {
+      | WriteSource::Http(handle) => {
+        WriteToolSet::new(&mut **handle, cwd.to_path_buf()).answer_goal_question(goal_id, question_id, answer).await
+      },
+      | WriteSource::Stdio(handle) => {
+        let mut client = handle.lock().await;
+        WriteToolSet::new(&mut *client, cwd.to_path_buf()).answer_goal_question(goal_id, question_id, answer).await
+      },
+    }
+  }
+
+  /// takt_approve_goal_registration でゴール登録案を承認する。
+  pub(super) async fn approve_goal_registration(
+    &mut self,
+    cwd: &std::path::Path,
+    revision: RegistrationRevision,
+  ) -> Result<ApproveGoalRegistrationResult, ToolError> {
+    match self {
+      | WriteSource::Http(handle) => {
+        WriteToolSet::new(&mut **handle, cwd.to_path_buf()).approve_goal_registration(revision).await
+      },
+      | WriteSource::Stdio(handle) => {
+        let mut client = handle.lock().await;
+        WriteToolSet::new(&mut *client, cwd.to_path_buf()).approve_goal_registration(revision).await
+      },
+    }
+  }
+
+  /// takt_reject_goal_registration でゴール登録案を却下する。
+  pub(super) async fn reject_goal_registration(
+    &mut self,
+    cwd: &std::path::Path,
+    revision: RegistrationRevision,
+  ) -> Result<RegistrationRevision, ToolError> {
+    match self {
+      | WriteSource::Http(handle) => {
+        WriteToolSet::new(&mut **handle, cwd.to_path_buf()).reject_goal_registration(revision).await
+      },
+      | WriteSource::Stdio(handle) => {
+        let mut client = handle.lock().await;
+        WriteToolSet::new(&mut *client, cwd.to_path_buf()).reject_goal_registration(revision).await
+      },
+    }
+  }
+
+  /// takt_merge_goal_pr でゴールのプルリクエストをマージする。
+  pub(super) async fn merge_goal_pr(
+    &mut self,
+    cwd: &std::path::Path,
+    goal_id: &GoalId,
+    pr_number: PullRequestNumber,
+    until: MergeUntil,
+  ) -> Result<MergeGoalPrResult, ToolError> {
+    match self {
+      | WriteSource::Http(handle) => {
+        WriteToolSet::new(&mut **handle, cwd.to_path_buf()).merge_goal_pr(goal_id, pr_number, until).await
+      },
+      | WriteSource::Stdio(handle) => {
+        let mut client = handle.lock().await;
+        WriteToolSet::new(&mut *client, cwd.to_path_buf()).merge_goal_pr(goal_id, pr_number, until).await
+      },
+    }
   }
 }

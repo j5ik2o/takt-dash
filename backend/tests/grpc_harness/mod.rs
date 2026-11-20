@@ -50,6 +50,7 @@ pub struct GrpcHarnessBuilder {
   interval:   u64,
   thresholds: Thresholds,
   http_read:  bool,
+  http_write: bool,
 }
 
 impl Default for GrpcHarnessBuilder {
@@ -66,6 +67,7 @@ impl Default for GrpcHarnessBuilder {
         connection_delay_seconds:       120,
       },
       http_read:  false,
+      http_write: false,
     }
   }
 }
@@ -94,6 +96,13 @@ impl GrpcHarnessBuilder {
   /// 経由で返ることを観測するテストで使います。書き込み用の stdio 接続先は別 id で併存させます。
   pub fn http_read(mut self) -> Self {
     self.http_read = true;
+    self
+  }
+
+  /// 書き込み先も、読み取りと同じ常駐 HTTP サーバーへ向ける。書き込み道具が HTTP
+  /// サーバーへ渡ることを観測するテストで使います。`http_read` と組み合わせて使います。
+  pub fn http_write(mut self) -> Self {
+    self.http_write = true;
     self
   }
 
@@ -143,11 +152,12 @@ impl GrpcHarnessBuilder {
     let calls_path = directory.path().join("tool-calls.jsonl");
     let processes_path = directory.path().join("mcp-processes.txt");
     let config_path = directory.path().join("taktdash.config.json");
-    // HTTP 読み取りのテストでは、読み取り接続先だけを常駐 HTTP サーバーへ変える。書き込みは
-    // stdio のまま維持するため、同じ id の stdio 起動方法を別 id（`<id>-write`）で登録し、
-    // 各プロジェクトの `writeServer` に指す。これで config の「書き込み先は
-    // stdio」の検証を満たしつつ、 読み取りは HTTP 経由になる。
+    // HTTP 読み取りのテストでは、読み取り接続先を常駐 HTTP サーバーへ変える。書き込みは
+    // 既定では stdio のまま維持するため、stdio 起動方法を別 id（`<id>-write`）で登録し、
+    // 各プロジェクトの `writeServer` に指す。`http_write` を指定したテストでは、
+    // `writeServer` も読み取りと同じ HTTP サーバーへ指す。
     let http = if self.http_read { Some(common::HttpMockServer::start(&state_path, None)) } else { None };
+    let http_write = self.http_write;
     let stdio_entry = |backing: &Path| {
       json!({
         "command": "node",
@@ -177,7 +187,9 @@ impl GrpcHarnessBuilder {
       }
     }
     let write_server_of = |project: &Project| {
-      if http.is_some() {
+      if http_write {
+        project.server.clone()
+      } else if http.is_some() {
         format!("{}-write", project.server)
       } else {
         project.write_server.clone()
