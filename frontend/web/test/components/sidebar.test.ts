@@ -193,6 +193,56 @@ test("応答していないプロジェクトがあるサーバーはサイド�
   assert.match(foot, /2台中1台から読めています/, "読めている台数の表示は残す");
 });
 
+test("接続済みで run が無いサーバーは、配下が無くてもサイドバーでは「接続中」のままにする", () => {
+  const state = createDashboardState();
+  const html = renderToStaticMarkup(
+    createElement(Sidebar, {
+      snapshotLoaded: true,
+      servers: state.servers.map((server) => ({ ...server, connected: true })),
+      projects: state.projects,
+      runs: [],
+      pendingCount: 0,
+      frontendBuild: FRONTEND_BUILD,
+      backendBuild: BACKEND_BUILD,
+    }),
+  );
+
+  assert.deepEqual(
+    serverRow(html, "Mac Studio"),
+    { dot: "idle", state: "接続中" },
+    "接続済みと分かるサーバーを書き込み専用と決めつけない",
+  );
+});
+
+test("読み取りプロジェクトを持たない書き込み専用サーバーはサイドバーで応答なしと表示しない", () => {
+  const state = createDashboardState();
+  const readServer = state.servers[0]!;
+  const writeOnly = state.servers[1]!;
+  const readProjects = state.projects.map((project) => ({ ...project, serverId: readServer.serverId }));
+  const html = renderToStaticMarkup(
+    createElement(Sidebar, {
+      snapshotLoaded: true,
+      servers: [{ ...writeOnly, connected: false, writeOnly: true }, readServer],
+      projects: readProjects,
+      runs: [],
+      pendingCount: 0,
+      frontendBuild: FRONTEND_BUILD,
+      backendBuild: BACKEND_BUILD,
+    }),
+  );
+
+  assert.deepEqual(
+    serverRow(html, "Mac Studio"),
+    { dot: "writeOnly", state: "書き込み専用" },
+    "読み取り先に指定されていないサーバーは応答なしにせず、書き込み専用と示す",
+  );
+  assert.deepEqual(
+    serverRow(html, "Mac mini"),
+    { dot: "idle", state: "接続中" },
+    "読み取りを行うサーバーの表示は従来どおりにする",
+  );
+});
+
 test("まだ読めていないプロジェクトはサイドバーでも正常に見せず、下端で未読と分かる", () => {
   const state = createDashboardState();
   const projects = state.projects.map((project) =>

@@ -56,12 +56,11 @@ for (const populated of [false, true]) {
   });
 }
 
-test("サーバー行は配下なし、未読、既読ゼロを区別して接続表示を保つ", () => {
-  const server = Server.create({ serverId: "mini", name: "Mac mini", connected: false });
-  const unread = Project.create({ name: "esa", serverId: "mini" });
+test("読み取りプロジェクトを持つサーバー行は、未読・既読ゼロを区別して「応答なし」を保つ", () => {
+  const server = Server.create({ serverId: "read", name: "Mac mini read", connected: false });
+  const unread = Project.create({ name: "esa", serverId: "read" });
   const build = { commit: "test", branch: "test" };
   for (const [projects, countPattern] of [
-    [[], /run\s*対象なし/],
     [[unread], /run\s*不明/],
     [[{ ...unread, lastReadAt: NOW }], /run\s*0件/],
   ] satisfies Array<[Project[], RegExp]>) {
@@ -72,13 +71,46 @@ test("サーバー行は配下なし、未読、既読ゼロを区別して接�
     const row = required(page, ".srv-list li");
     assert.match(text(required(row, ".cnt")), countPattern);
     assert.equal(text(required(row, ".srv-state")), "応答なし");
-    assert.ok(row.querySelector('a[href="/#server-mini"]'));
+    assert.ok(row.querySelector('a[href="/#server-read"]'));
   }
   const omitted = documentOf(createElement(Sidebar, {
     snapshotLoaded: true,
     servers: [server], runs: [], pendingCount: 0, frontendBuild: build, backendBuild: build,
   }));
   assert.match(text(required(omitted, ".cnt")), /run\s*不明/);
+});
+
+test("書き込み専用サーバーの行は「対象なし」とリンクを保ち、応答なしと表示しない", () => {
+  const server = Server.create({ serverId: "mini", name: "Mac mini", connected: false, writeOnly: true });
+  const build = { commit: "test", branch: "test" };
+  const page = documentOf(createElement(Sidebar, {
+    snapshotLoaded: true,
+    servers: [server], projects: [], runs: [], pendingCount: 0, frontendBuild: build, backendBuild: build,
+  }));
+  const row = required(page, ".srv-list li");
+
+  assert.match(text(required(row, ".cnt")), /run\s*対象なし/);
+  assert.equal(text(required(row, ".srv-state")), "書き込み専用");
+  assert.ok(row.querySelector('a[href="/#server-mini"]'));
+});
+
+test("概要のサーバーカードは書き込み専用サーバーに「応答なし」の注記を出さない", () => {
+  const base = createDashboardState();
+  const read = base.servers.find((server) => server.serverId === "mini")!;
+  const writeOnly = base.servers.find((server) => server.serverId === "down")!;
+  const state = DashboardState.create({
+    ...base,
+    servers: [read, { ...writeOnly, lastReadAt: NOW, writeOnly: true }],
+    projects: base.projects.map((project) => ({ ...project, serverId: read.serverId })),
+  });
+  const page = documentOf(createElement(OverviewContent, {
+    view: buildOverviewView(state, NOW, true),
+    disconnected: false,
+  }));
+  const line = required(page, "#server-down");
+
+  assert.equal(text(required(line, ".big-badge")), "書き込み専用");
+  assert.doesNotMatch(text(line), /応答がありません|最後に読めた時点の状態/);
 });
 
 test("削除前のゴールURLは正常応答の対象なしと実在する未読対象を区別する", () => {

@@ -39,12 +39,18 @@ fn assemble_servers(
         views.iter().filter(|view| &view.server_id == server_id).collect();
       let connected = server_projects.iter().any(|view| view.connected);
       let last_read_at = server_projects.iter().filter_map(|view| view.last_read_at).max();
+      // 書き込み専用は、読み取りプロジェクトを持たず、書き込み先として使われている
+      // サーバーである。読み取りの応答を期待されていないため、frontend はこの印を
+      // 見て「応答なし」と表示しない。読み取りも書き込みも担わない登録は対象外であり、
+      // 従来どおり応答なしとして扱う。
+      let write_only = server_projects.is_empty() && views.iter().any(|view| &view.write_server_id == server_id);
       Server {
         server_id: server_id.clone(),
         name: meta.name.clone(),
         kind: meta.kind.clone(),
         connected,
         last_read_at: optional_timestamp(last_read_at),
+        write_only,
       }
     })
     .collect()

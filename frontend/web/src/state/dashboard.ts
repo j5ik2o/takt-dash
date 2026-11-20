@@ -72,7 +72,7 @@ type PendingCounts = {
 
 type OverviewServerView = {
   server: Server;
-  state: "live" | "idle" | "down" | "warn";
+  state: "live" | "idle" | "down" | "warn" | "writeOnly";
   stateLabel: string;
   // 配下で応答していないプロジェクト。サーバー単位の読み取り時刻（配下の最新）だけでは
   // 正常に見えてしまうため、サーバーの1行にプロジェクトごとの状態を併記する（issue #264）。
@@ -175,11 +175,26 @@ export const serverStateFrom = (
 // 配下のプロジェクトが応答していないと、サーバー単位の表示が全体が正常であるかの
 // ように見えてしまう（issue #264）。概要のサーバーカードとサイドバーはこの関数で
 // 同じ状態を使い、表示を食い違わせない（issue #188）。
+// 書き込み専用のサーバーは、読み取りの応答を期待されていない。HTTP 化の適用後は、
+// 全プロジェクトの読み取り先が読み取り専用のサーバーへ分かれ、書き込み先だけが
+// 残ったサーバーがこの形になる。そのサーバーへ「応答なし」と表示すると、読み取りが
+// 止まっているかのように見えるため、状態を分ける。書き込み先であるかどうかは
+// 設定を知っている backend が Server.writeOnly で示し、frontend はその印だけで
+// 判定する。読み取りプロジェクトが無いことだけでは判定しない。読み取りも書き込みも
+// 担わない登録は、従来どおり応答なしとして扱うためである。接続が確立している
+// サーバーは、印があっても従来どおり接続状態で表示する。
+export function isWriteOnlyServer(server: Server): boolean {
+  return server.writeOnly && !server.connected;
+}
+
 export function serverDisplayState(
   server: Server,
   runCount: RunCount,
   projects: readonly Project[],
 ): OverviewServerView["state"] {
+  if (isWriteOnlyServer(server)) {
+    return "writeOnly";
+  }
   const base = serverStateFrom(server.connected, runCount);
   if (base === "down") {
     return base;
@@ -202,6 +217,8 @@ export const serverStateLabel = (state: OverviewServerView["state"]): string => 
       return "接続中";
     case "warn":
       return "一部応答なし";
+    case "writeOnly":
+      return "書き込み専用";
   }
 };
 
@@ -257,7 +274,8 @@ export function buildOverviewView(state: OverviewStateInput, now: Date, snapshot
   const runs = state.runs.map((run) =>
     toRunView(run, serverById, thresholds, now, goalsById, projectByKey),
   );
-  const unresponsiveServers = state.servers.filter((server) => !server.connected);
+  // 書き込み専用のサーバーは読み取りの応答を期待されていないため、応答なしに数えない。
+  const unresponsiveServers = state.servers.filter((server) => !server.connected && !server.writeOnly);
   const unresponsiveProjects = state.projects.filter(isUnresponsiveProject);
   const servers = state.servers.map((server) => {
     const serverRuns = state.runs.filter((run) => run.serverId === server.serverId);

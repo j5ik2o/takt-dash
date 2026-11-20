@@ -410,6 +410,8 @@ pub struct ProjectView {
   pub name:             String,
   pub about:            String,
   pub server_id:        String,
+  /// 書き込み先のサーバー。サーバーが書き込み専用かどうかを組み立てで判定するために使う。
+  pub write_server_id:  String,
   /// 同時実行の上限（プロジェクトの .takt/config.yaml 由来）。
   pub concurrency:      i32,
   pub connected:        bool,
