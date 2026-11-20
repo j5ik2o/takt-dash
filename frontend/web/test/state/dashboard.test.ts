@@ -506,17 +506,21 @@ test("全体の上限はプロジェクトの concurrency の合計で、run と
   assert.equal(view.pendingCounts.total, 2, "判断待ちを数える");
 });
 
-test("応答なしの読み取り時刻が1件も無いときは partialReadAt を捏造しない", () => {
-  const base = createDashboardState();
+test("読み取りを行うサーバーの応答なしは unresponsiveServers に残し、読めた時刻は捏造しない", () => {
+  const base = createHealthyDashboardState();
   const state = {
     ...base,
     servers: base.servers.map((server) =>
-      server.serverId === "down" ? { ...server, lastReadAt: undefined } : server,
+      server.serverId === "mini" ? { ...server, connected: false, lastReadAt: undefined } : server,
     ),
   };
   const view = buildOverviewView(state, NOW, true);
 
-  assert.equal(view.unresponsiveServers.length, 1, "応答なしのサーバーは異常として残す");
+  assert.deepEqual(
+    view.unresponsiveServers.map((server) => server.serverId),
+    ["mini"],
+    "読み取りプロジェクトを持つ応答なしのサーバーは異常として残す",
+  );
   assert.equal(view.partialReadAt, undefined, "読めた時刻が無ければ now で補わない");
 });
 
@@ -845,6 +849,24 @@ test("接続済みで run があるサーバーは概要カードで「動作中
   assert.equal(mini?.stateLabel, "動作中", "カードの文言は動作中である");
 });
 
+test("接続済みで run が無いサーバーは、run 対象なしでも従来どおり「接続中」になる", () => {
+  const base = createDashboardState();
+  const connectedEmpty = {
+    ...base,
+    servers: [
+      ...base.servers.filter((server) => server.serverId === "mini"),
+      { ...base.servers[1]!, connected: true },
+    ],
+    projects: base.projects.filter((project) => project.serverId === "mini"),
+    runs: [],
+  };
+  const overview = buildOverviewView(connectedEmpty, NOW, true);
+
+  const connected = overview.servers.find((item) => item.server.serverId === "down");
+  assert.equal(connected?.state, "idle", "配下が無くても接続済みのサーバーは idle である");
+  assert.equal(connected?.stateLabel, "接続中", "接続できていることを書き込み専用と混同しない");
+});
+
 // main のこのテストは、全体の上限に加えて、サーバーカードの下端に出す view.servers[].runLimit（配下の
 // プロジェクトの concurrency の合計。プロジェクトが無いサーバーは0）を確かめていた。概要はサーバーを1行で
 // 出す形（issue #120）に変わり、OverviewServerView はサーバーごとの上限を持たない。サーバーごとの上限の
@@ -954,7 +976,6 @@ test("応答していないプロジェクトの文言は応答なしと未読�
 test("配下のプロジェクトが応答していないサーバーは表示状態が warn になる", () => {
   const state = createDashboardState();
   const mini = state.servers[0]!;
-  const down = state.servers[1]!;
   const failed = state.projects.map((project) =>
     project.name === "esa"
       ? {
@@ -981,11 +1002,75 @@ test("配下のプロジェクトが応答していないサーバーは表示�
     "全プロジェクトが正常なら基本状態のままにする",
   );
   assert.equal(
-    serverDisplayState(down, toRunCount(0), failed),
-    "down",
-    "サーバー自体の応答なしを優先する",
+    serverDisplayState({ ...state.servers[1]!, writeOnly: true }, toRunCount(1), failed),
+    "writeOnly",
+    "読み取りプロジェクトを持たないサーバーは、他サーバーの応答なしを引き継がず書き込み専用にする",
   );
   assert.equal(serverStateLabel("warn"), "一部応答なし", "warn の文言は一部応答なしにする");
+});
+
+test("読み取りプロジェクトを持たない書き込み専用サーバーは応答なしにせず、専用の文言にする", () => {
+  const state = createDashboardState();
+  const read = state.servers[0]!;
+  const writeOnly = { ...state.servers[1]!, writeOnly: true };
+  const readProjects = state.projects;
+
+  assert.equal(
+    serverDisplayState(writeOnly, toRunCount(0), readProjects),
+    "writeOnly",
+    "配下の読み取りプロジェクトが1件もないサーバーは応答なしにしない",
+  );
+  assert.equal(
+    serverStateLabel(serverDisplayState(writeOnly, toRunCount(0), readProjects)),
+    "書き込み専用",
+    "書き込み専用のサーバーは応答なしとは別の文言で示す",
+  );
+  assert.equal(
+    serverDisplayState({ ...read, connected: false }, toRunCount(0), readProjects),
+    "down",
+    "読み取りプロジェクトを持つ未接続サーバーの応答なしは変えない",
+  );
+  assert.equal(
+    serverDisplayState(read, toRunCount(3), readProjects),
+    "live",
+    "読み取りプロジェクトを持つ接続済みサーバーの動作中は変えない",
+  );
+});
+
+test("配下を持たなくても接続済みと分かるサーバーは従来どおり接続中にする", () => {
+  const state = createDashboardState();
+  const connectedEmpty = { ...state.servers[1]!, connected: true };
+
+  assert.equal(
+    serverDisplayState(connectedEmpty, toRunCount(0), state.projects),
+    "idle",
+    "接続済みの事実があるときは書き込み専用と決めつけない",
+  );
+});
+
+test("書き込み専用サーバーは概要バナーの応答なしに数えない", () => {
+  const base = createDashboardState();
+  const view = buildOverviewView(
+    {
+      ...base,
+      servers: base.servers.map((server) =>
+        server.serverId === "down" ? { ...server, writeOnly: true } : server,
+      ),
+    },
+    NOW,
+    true,
+  );
+
+  const writeOnly = view.servers.find((item) => item.server.serverId === "down");
+  assert.ok(writeOnly, "配下を持たないサーバーのカードがある");
+  assert.equal(writeOnly.state, "writeOnly", "カードの状態も応答なしにしない");
+  assert.equal(writeOnly.stateLabel, "書き込み専用", "カードの文言は書き込み専用にする");
+  assert.deepEqual(
+    view.unresponsiveServers.map((server) => server.serverId),
+    [],
+    "読み取りを行わないサーバーを「から応答がありません」の対象にしない",
+  );
+  assert.equal(view.hasAnomalies, true, "判断待ち・失敗の異常は従来どおり知らせる");
 });
 
 test("まだ読めていないプロジェクトがあるサーバーも表示状態が warn になる", () => {

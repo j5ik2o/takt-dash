@@ -131,6 +131,7 @@ fn generated_dashboard_state_carries_the_read_state() {
       kind:         "Mac mini".to_owned(),
       connected:    false,
       last_read_at: None,
+      write_only:   false,
     }],
     thresholds: Some(v1::AnomalyThresholds { pending_decision_stale_minutes: 240, run_log_silent_minutes: 10 }),
     ..Default::default()

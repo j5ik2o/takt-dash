@@ -53,7 +53,10 @@ export function Sidebar({
   frontendBuild,
   backendBuild,
 }: SidebarProps): ReactElement {
-  const connectedCount = servers.filter((server) => server.connected).length;
+  // 書き込み専用のサーバーは読み取りの対象ではないため、読めている台数の母数に
+  // 入れない。入れると、読み取りが止まっているかのように見える。
+  const readableServers = servers.filter((server) => !server.writeOnly);
+  const connectedCount = readableServers.filter((server) => server.connected).length;
   const notResponding = notRespondingProjects(projects ?? []);
   return (
     <nav className="sidebar" aria-label="画面と集約対象のサーバー">
@@ -113,7 +116,7 @@ export function Sidebar({
         <p>最終読み取り時刻 {readAt ? formatClock(readAt) : "不明"}</p>
         <p>
           {snapshotLoaded
-            ? `${servers.length}台中${connectedCount}台から読めています`
+            ? `${readableServers.length}台中${connectedCount}台から読めています`
             : "サーバーの総数・接続台数は不明です。"}
         </p>
         {notResponding.map((project) => (

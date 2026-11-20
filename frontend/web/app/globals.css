@@ -756,6 +756,10 @@ a {
   background: var(--orange);
 }
 
+.dot.writeOnly {
+  background: var(--idle);
+}
+
 .run-row .dot.idle {
   background: var(--down);
 }
@@ -836,6 +840,11 @@ a {
   background: var(--orange-soft);
   color: var(--orange-d);
   border-color: var(--orange-line);
+}
+
+.big-badge.writeOnly {
+  background: var(--gray-soft);
+  color: var(--muted);
 }
 
 .tray {

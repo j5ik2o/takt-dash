@@ -142,7 +142,7 @@ test("サーバー ID が既存の見出し id と衝突してもサーバーの
   const base = createDashboardState();
   const state = {
     ...base,
-    servers: [{ serverId: "h-servers", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW }],
+    servers: [{ serverId: "h-servers", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, writeOnly: false }],
     runs: [],
   };
   const sidebar = renderSidebarWithState(state);
@@ -278,7 +278,7 @@ test("ID に % を含むサーバーでもサイドバーのリンクが該当�
   const base = createDashboardState();
   const state = {
     ...base,
-    servers: [{ serverId: "100%", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW }],
+    servers: [{ serverId: "100%", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, writeOnly: false }],
     runs: [],
   };
   const sidebar = renderSidebarWithState(state);
