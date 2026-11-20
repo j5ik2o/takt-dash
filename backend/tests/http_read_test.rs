@@ -1,4 +1,5 @@
-//! 読み取り専用の常駐 takt-mcp HTTP サーバーへ backend の読み取り経路を向ける契約を検証する。
+//! 常駐 takt-mcp HTTP サーバーへ backend
+//! の読み取り経路を向ける契約と、書き込み用ハンドルの再試行の契約を検証する。
 //!
 //! mock HTTP MCP サーバー（`mock_mcp_http_server.mjs`）は実機 dist の HTTP transport と同じく、
 //! `Authorization` の完全一致・`127.0.0.1` の待ち受け・`Mcp-Session-Id` の採番と再利用・
@@ -208,4 +209,55 @@ async fn tool_error_is_distinguished_from_transport_failure() {
 
   let error = handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect_err("道具エラーは読み取り失敗です");
   assert!(matches!(error, ToolError::Tool(_)), "道具の isError は道具エラーに分類します: {error}");
+}
+
+#[tokio::test]
+async fn read_handle_retries_once_when_the_connection_drops_during_a_call() {
+  // 読み取りでは、tools/call の応答が届く前に接続が切れても、セッションを作り直して
+  // 1 回だけ再試行し、読み取りを成功させる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let server = HttpMockServer::start(&state, Some("drop-connection-once"));
+  let cwd = project_dir(directory.path());
+  let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
+
+  let snapshot = handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("接続断から再試行して読めます");
+
+  assert_eq!(snapshot.goals.len(), 0, "再試行した読み取りの結果を返します");
+  let calls = server.recorded_calls();
+  let first = calls.first().expect("呼び出しが記録されます");
+  assert_eq!(
+    calls.iter().filter(|call| call["name"] == first["name"]).count(),
+    2,
+    "切れた呼び出しは 1 回だけ送り直されます: {calls:?}"
+  );
+}
+
+#[tokio::test]
+async fn write_handle_never_retries_a_write_when_the_connection_drops_during_a_call() {
+  // 書き込みでは、tools/call の応答が届く前に接続が切れた場合、サーバーが書き込みを
+  // 適用した後かもしれないため再試行しない。失敗として表面化し、書き込み道具は
+  // 1 回だけサーバーへ渡る。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let server = HttpMockServer::start(&state, Some("drop-connection-once"));
+  let cwd = project_dir(directory.path());
+  let mut handle = HttpReadHandle::new_for_write(server.connection(), std::time::Duration::from_secs(10));
+  let goal_id =
+    takt_dash_backend::domain::GoalId::try_from("11111111-1111-4111-8111-111111111111").expect("ゴール ID を作れます");
+  let question_id =
+    takt_dash_backend::domain::InquiryId::try_from("8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e").expect("質問 ID を作れます");
+
+  let error = takt_dash_backend::mcp::WriteToolSet::new(&mut handle, cwd.clone())
+    .answer_goal_question(&goal_id, &question_id, json!({ "text": "はい" }))
+    .await
+    .expect_err("接続断した書き込みは失敗として表面化します");
+
+  assert!(matches!(error, ToolError::Transport(_)), "輸送エラーです: {error}");
+  let calls = server.recorded_calls();
+  assert_eq!(
+    calls.iter().filter(|call| call["name"] == "takt_answer_goal_question").count(),
+    1,
+    "書き込み道具は 1 回だけサーバーへ渡ります: {calls:?}"
+  );
 }

@@ -130,7 +130,7 @@ impl TaktDashServiceImpl {
   pub(super) fn write_source(&self, resolved: &ResolvedProject) -> WriteSource {
     match &resolved.write_connection {
       | McpConnection::Http(_) => {
-        WriteSource::Http(Box::new(HttpReadHandle::new(resolved.write_connection.clone(), READ_TIMEOUT)))
+        WriteSource::Http(Box::new(HttpReadHandle::new_for_write(resolved.write_connection.clone(), READ_TIMEOUT)))
       },
       | McpConnection::Stdio(_) => WriteSource::Stdio(self.write_handle(resolved)),
     }

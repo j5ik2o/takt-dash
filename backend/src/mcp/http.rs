@@ -1,9 +1,12 @@
 //! 常駐する takt-mcp HTTP サーバーとの JSON-RPC（MCP）通信。
 //!
-//! 読み取り専用の読み取り経路が、home ごとに常駐する takt-mcp の HTTP サーバーへ
+//! 読み取り経路と書き込み経路が、home ごとに常駐する takt-mcp の HTTP サーバーへ
 //! `tools/call` を送ります。子プロセスは起動せず、`initialize` で作った 1 つのセッションを
-//! 使い回します。未知セッション（サーバー再起動などで消えた場合の 404）だけは、セッションを
-//! 作り直して 1 回だけ再試行します。それ以外の失敗は輸送エラーとして表面化させ、空の結果へ
+//! 使い回します。未知セッション（サーバー再起動などで消えた場合の 404）は、要求が処理されて
+//! いないことが分かるため、セッションを作り直して 1 回だけ再試行します。読み取りでは、
+//! 接続の失敗（I/O エラー）でも同じ再試行をします。書き込みでは、サーバーが書き込みを
+//! 適用した後で接続が切れた場合と区別できないため、I/O エラーでは再試行せず、輸送エラー
+//! として表面化させます。それ以外の失敗も輸送エラーとして表面化させ、空の結果へ
 //! 縮退しません。
 
 use std::time::Duration;
@@ -34,11 +37,14 @@ use crate::config::HttpMcpServer;
 /// 未知セッション（404）は、セッションが消えたとみなして作り直し、同じ要求を 1 回だけ
 /// 再試行します。ハンドルは自分が保持するセッションを高々 1 つに保ちます。
 pub struct HttpReadHandle {
-  server:          HttpMcpServer,
-  request_timeout: Duration,
-  session_id:      Option<String>,
-  next_id:         u64,
-  client:          Client<HttpConnector, Full<Bytes>>,
+  server:                   HttpMcpServer,
+  request_timeout:          Duration,
+  session_id:               Option<String>,
+  next_id:                  u64,
+  client:                   Client<HttpConnector, Full<Bytes>>,
+  /// 接続の失敗（I/O エラー）でセッションが消えた場合に再試行するか。読み取りは再試行し、
+  /// 書き込みは再試行しません（適用済みの書き込みを重複送信しないため）。
+  retry_on_io_session_loss: bool,
 }
 
 impl HttpReadHandle {
@@ -47,6 +53,22 @@ impl HttpReadHandle {
   /// HTTP 接続先だけを受け付けます。stdio の起動方法を渡した場合は、常駐サーバーへ読み取りを
   /// 向ける前提が崩れているため、パニックではなく MCP の契約違反として扱えるようエラーにします。
   pub fn new(connection: crate::config::McpConnection, request_timeout: Duration) -> Self {
+    Self::create(connection, request_timeout, true)
+  }
+
+  /// 書き込み用のハンドルを作る。接続の失敗（I/O エラー）では再試行しません。サーバーが
+  /// 書き込みを適用した後で接続が切れた場合と区別できず、再試行すると書き込みを重複して
+  /// 送信するためです。未知セッション（404）の再試行は、要求が処理されていないことが
+  /// 分かるため、書き込みでも行います。
+  pub fn new_for_write(connection: crate::config::McpConnection, request_timeout: Duration) -> Self {
+    Self::create(connection, request_timeout, false)
+  }
+
+  fn create(
+    connection: crate::config::McpConnection,
+    request_timeout: Duration,
+    retry_on_io_session_loss: bool,
+  ) -> Self {
     let server = match connection {
       | crate::config::McpConnection::Http(server) => server,
       | crate::config::McpConnection::Stdio(_) => {
@@ -59,6 +81,7 @@ impl HttpReadHandle {
       session_id: None,
       next_id: 1,
       client: Client::builder(TokioExecutor::new()).build(HttpConnector::new()),
+      retry_on_io_session_loss,
     }
   }
 
@@ -105,9 +128,11 @@ impl HttpReadHandle {
     Ok(session)
   }
 
-  /// 1 回の tools/call を送る。未知セッション（404）か、既存セッションへの接続失敗だけ、
-  /// セッションを作り直して 1 回再試行します。サーバー再起動では保持していた接続とセッションが
-  /// 同時に失効するためです。それ以外の失敗は読み取り失敗として表面化させます。
+  /// 1 回の tools/call を送る。未知セッション（404）は、要求が処理されていないことが
+  /// 分かるため、セッションを作り直して 1 回再試行します。接続の失敗（I/O エラー）も
+  /// セッションの消失として再試行しますが、書き込み用のハンドルでは再試行しません
+  /// （`retry_on_io_session_loss`）。サーバー再起動では保持していた接続とセッションが
+  /// 同時に失効するためです。それ以外の失敗は輸送エラーとして表面化させます。
   async fn tools_call(&mut self, name: &str, arguments: Value) -> Result<Value, TransportError> {
     let session = self.ensure_session().await?;
     let id = self.take_id();
@@ -115,7 +140,7 @@ impl HttpReadHandle {
       json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
     match self.exchange(request.clone(), Some(&session)).await {
       | Ok((_, incoming)) => self.unwrap_result(name, incoming),
-      | Err(error) if error.session_lost() => {
+      | Err(error) if error.session_lost() && (self.retry_on_io_session_loss || error.unknown_session()) => {
         // セッションが消えた（サーバー再起動など）。セッションを作り直して 1 回だけ再試行します。
         self.session_id = None;
         let session = self.ensure_session().await?;
@@ -381,6 +406,12 @@ impl ExchangeError {
       | ExchangeError::Transport(TransportError::Io(_)) => true,
       | ExchangeError::Transport(_) => false,
     }
+  }
+
+  /// 未知セッション（404）かどうか。この応答を受けた要求はサーバーに処理されていない
+  /// ことが分かるため、再試行しても操作を重複して実行しません。
+  fn unknown_session(&self) -> bool {
+    matches!(self, ExchangeError::Status(status) if *status == StatusCode::NOT_FOUND)
   }
 
   fn into_transport(self) -> TransportError {

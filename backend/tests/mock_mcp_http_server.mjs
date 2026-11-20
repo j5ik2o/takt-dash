@@ -29,6 +29,8 @@ const option = (name) => {
 };
 
 const behavior = option("--behavior") ?? "ok";
+// drop-connection-once で、最初の tools/call だけ応答を返さずに接続を切ったかどうか。
+let connectionDropped = false;
 const statePath = option("--state");
 const callsPath = option("--calls");
 const sessionLogPath = option("--session-log");
@@ -379,6 +381,16 @@ const server = createServer((request, response) => {
     }
     if (message.method === "tools/call") {
       const { name, arguments: args } = message.params ?? {};
+      if (behavior === "drop-connection-once" && !connectionDropped) {
+        // 最初の tools/call は、サーバーが要求を受け取った後で応答が届く前に接続が
+        // 切れた状態を再現する。呼び出しの記録は残し、応答は返さずに接続を切る。
+        connectionDropped = true;
+        if (callsPath !== undefined) {
+          appendFileSync(callsPath, `${JSON.stringify({ name, arguments: args })}\n`);
+        }
+        request.socket.destroy();
+        return;
+      }
       if (behavior === "drop-session-on-call") {
         // initialize は成功してセッションが採番されるが、tools/call の時点では
         // セッションが消えている状態を再現する。呼び出しの記録は残す。
