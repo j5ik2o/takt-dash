@@ -567,7 +567,7 @@ fn write_server_defaults_to_the_read_server() {
 }
 
 #[test]
-fn write_server_that_is_an_http_endpoint_is_rejected() {
+fn write_server_that_is_an_http_endpoint_is_accepted() {
   let text = format!(
     r#"{{
       "mcpServers": {{
@@ -576,13 +576,15 @@ fn write_server_that_is_an_http_endpoint_is_rejected() {
       }},
       "projects": [ {{ "name": "takt-dash", "server": "mini-read", "writeServer": "mini-http-write", "cwd": "/abs/takt-dash" }} ]
     }}"#,
-    http_entry("http://127.0.0.1:7801/", "Bearer read-token"),
-    http_entry("http://127.0.0.1:7802/", "Bearer write-token"),
+    http_entry("http://127.0.0.1:7801/", "Bearer <redacted>"),
+    http_entry("http://127.0.0.1:7802/", "Bearer <redacted>"),
   );
-  let error = parse_config(&text, Path::new("/base")).expect_err("HTTP 接続先を書き込み先に指す設定は拒否します");
+  let config = parse_config(&text, Path::new("/base")).expect("HTTP 接続先を書き込み先に指す設定を読み込めます");
+  let dash = config.projects.iter().find(|project| project.name == "takt-dash").expect("takt-dash があります");
+  assert_eq!(dash.write_server, "mini-http-write", "書き込み先は writeServer です");
   assert!(
-    matches!(&error, ConfigError::Invalid(message) if message.contains("stdio")),
-    "stdio を求める検証エラーになります: {error}"
+    matches!(config.servers.get("mini-http-write"), Some(takt_dash_backend::config::McpServer::Http(_))),
+    "書き込み先は HTTP 接続先です"
   );
 }
 

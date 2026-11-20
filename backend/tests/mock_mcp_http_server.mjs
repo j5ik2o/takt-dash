@@ -29,6 +29,8 @@ const option = (name) => {
 };
 
 const behavior = option("--behavior") ?? "ok";
+// drop-connection-once で、最初の tools/call だけ応答を返さずに接続を切ったかどうか。
+let connectionDropped = false;
 const statePath = option("--state");
 const callsPath = option("--calls");
 const sessionLogPath = option("--session-log");
@@ -270,6 +272,23 @@ const handleToolCall = (name, args) => {
     }
     case "takt_list_goal_registration_proposals":
       return asText({ proposals: state.proposals ?? [] });
+    // 書き込み系。応答の形は stdio 版モック（mock_mcp_server.mjs）と同じにします。
+    case "takt_answer_goal_question":
+      return asText({ goalId: args.goalId, questionId: args.questionId, answer: args.answer });
+    case "takt_approve_goal_registration":
+      return asText({ revision: args.revision, goal: { id: `approved-${args.revision}` } });
+    case "takt_reject_goal_registration":
+      return asText({ revision: args.revision, notice: "却下しました" });
+    case "takt_merge_goal_pr":
+      return asText({
+        taskName: "merge",
+        status: "enqueued",
+        goalId: args.goalId,
+        prNumber: args.prNumber,
+        mergeTask: "merge",
+        workflow: "merge-goal-pr",
+        until: args.until,
+      });
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };
   }
@@ -362,6 +381,16 @@ const server = createServer((request, response) => {
     }
     if (message.method === "tools/call") {
       const { name, arguments: args } = message.params ?? {};
+      if (behavior === "drop-connection-once" && !connectionDropped) {
+        // 最初の tools/call は、サーバーが要求を受け取った後で応答が届く前に接続が
+        // 切れた状態を再現する。呼び出しの記録は残し、応答は返さずに接続を切る。
+        connectionDropped = true;
+        if (callsPath !== undefined) {
+          appendFileSync(callsPath, `${JSON.stringify({ name, arguments: args })}\n`);
+        }
+        request.socket.destroy();
+        return;
+      }
       if (behavior === "drop-session-on-call") {
         // initialize は成功してセッションが採番されるが、tools/call の時点では
         // セッションが消えている状態を再現する。呼び出しの記録は残す。

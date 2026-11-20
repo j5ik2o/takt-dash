@@ -152,13 +152,62 @@ impl Harness {
   }
 
   fn poller(&self) -> Poller {
-    Poller::new(
-      self.config_path.clone(),
-      self.activity.clone(),
-      self.store.clone(),
-      self.changes.clone(),
-      McpClientRegistry::new(),
-    )
+    self.poller_with_registry(McpClientRegistry::new())
+  }
+
+  /// 呼び出し側が用意したレジストリで Poller を作る。レジストリに残る書き込みの
+  /// 通し番号やゲートを、テスト側から観測するために使います。
+  fn poller_with_registry(&self, registry: McpClientRegistry) -> Poller {
+    Poller::new(self.config_path.clone(), self.activity.clone(), self.store.clone(), self.changes.clone(), registry)
+  }
+
+  /// 読み取りと書き込みの両方を 1 つの常駐 HTTP サーバーへ向ける設定を作る。
+  fn with_http_write_server(server_url: &str, token: &str, state: Value) -> Self {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let config_path = directory.path().join("taktdash.config.json");
+    let state_path = directory.path().join("state.json");
+    write_json(&state_path, &state);
+    let project_dir = directory.path().join("takt-dash");
+    std::fs::create_dir_all(&project_dir).expect("プロジェクトの cwd を作れます");
+    let cwd = std::fs::canonicalize(&project_dir).expect("cwd の実パスを解決できます").display().to_string();
+    write_json(
+      &config_path,
+      &json!({
+        "mcpServers": {
+          "mac-mini-read": {
+            "type": "http",
+            "url": server_url,
+            "headers": { "Authorization": format!("Bearer {token}") },
+          },
+        },
+        "servers": {
+          "mac-mini-read": { "name": "j5ik2o-mac-mini", "kind": "Mac mini", "concurrency": 4 },
+        },
+        "projects": [ {
+          "name": "takt-dash",
+          "server": "mac-mini-read",
+          "writeServer": "mac-mini-read",
+          "about": "takt-dash の説明",
+          "cwd": cwd,
+        } ],
+        "intervalSeconds": 30,
+        "thresholds": { "pendingDecisionStaleMinutes": 240, "runLogSilentMinutes": 10 },
+        "sqlite": { "path": "data/taktdash.sqlite" },
+      }),
+    );
+    let mut servers = BTreeMap::new();
+    servers.insert("mac-mini-read".to_owned(), server_meta());
+    let projects = vec![common::project("takt-dash", &directory.path().join("takt-dash"))];
+    let store = Arc::new(StateStore::new(servers, projects, Thresholds {
+      pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
+      run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
+      connection_failure_count:       3,
+      connection_delay_seconds:       120,
+    }));
+    let activity_db_path = directory.path().join("events.sqlite");
+    let activity = Arc::new(ActivityStore::open(&activity_db_path).expect("SQLite を開けます"));
+    let (changes, _) = tokio::sync::broadcast::channel(16);
+    Harness { _directory: directory, config_path, activity, store, changes }
   }
 }
 
@@ -297,4 +346,30 @@ async fn switching_the_read_server_from_http_to_stdio_resets_the_diff_baseline()
   let snapshot = slot.snapshot.expect("snapshot があります");
   assert_eq!(snapshot.goals.len(), 1);
   assert_eq!(snapshot.goals[0].status, GoalStatus::Completed, "切り替え後の読み取り先から状態を読みます");
+}
+
+#[tokio::test]
+async fn http_write_project_keeps_its_write_sequence_across_read_cycles() {
+  // 書き込み先も HTTP のプロジェクトでは、定期読み取りが書き込みの通し番号を保持する。
+  // sync_clients の保持対象から書き込み先が外れると、サイクルのたびに通し番号が消え、
+  // 書き込み前の読み取り結果が書き込み後の状態を上書きする事故を防げなくなる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = directory.path().join("state.json");
+  write_json(&state, &state_with_goal("g1"));
+  let server = HttpMockServer::start(&state, None);
+  let harness = Harness::with_http_write_server(server.url(), server.token(), state_with_goal("g1"));
+  let registry = McpClientRegistry::new();
+  let mut poller = harness.poller_with_registry(registry.clone());
+
+  registry.record_write("mac-mini-read", "takt-dash");
+  assert_eq!(registry.write_sequence("mac-mini-read", "takt-dash"), 1, "書き込みを通し番号に記録します");
+
+  let report = poller.read_cycle_once().await.expect("1 サイクルを実行できます");
+  assert_eq!(report.projects_failed, 0, "読み取りは失敗しません");
+  assert_eq!(
+    registry.write_sequence("mac-mini-read", "takt-dash"),
+    1,
+    "読み取りサイクルを跨いでも書き込みの通し番号を保持します"
+  );
+  poller.shutdown().await;
 }

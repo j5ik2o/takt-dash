@@ -47,7 +47,7 @@ use crate::{
     GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ReportFilename,
     RunSlug, ServerId, TaskName,
   },
-  mcp::{McpClientRegistry, ToolError, WriteToolSet},
+  mcp::{McpClientRegistry, ToolError},
   model::{self},
   run_log::{ContentRead, InitialRead, Instruction},
   run_progress::{read_run, read_run_instructions, RunLogHandle, RunLogHandles, RunReadFailure},
@@ -801,12 +801,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
     let _write_gate = self.write_gate(&resolved).await;
-    let handle = self.write_handle(&resolved)?;
-    let mut client = handle.lock().await;
-    WriteToolSet::new(&mut *client, resolved.cwd.clone())
-      .answer_goal_question(&goal_id, &question_id, answer)
-      .await
-      .map_err(tool_error_status)?;
+    let mut source = self.write_source(&resolved);
+    source.answer_goal_question(&resolved.cwd, &goal_id, &question_id, answer).await.map_err(tool_error_status)?;
     self.record_write(&resolved);
     // 回答したゴールは、終端でも次の周期で質問を読み直させて判断待ちから外します。
     self.store.invalidate_goal_questions(resolved.project.as_str(), goal_id);
@@ -845,12 +841,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
     let _write_gate = self.write_gate(&resolved).await;
-    let handle = self.write_handle(&resolved)?;
-    let mut client = handle.lock().await;
-    let result = WriteToolSet::new(&mut *client, resolved.cwd.clone())
-      .merge_goal_pr(&goal_id, pr_number, until)
-      .await
-      .map_err(tool_error_status)?;
+    let mut source = self.write_source(&resolved);
+    let result = source.merge_goal_pr(&resolved.cwd, &goal_id, pr_number, until).await.map_err(tool_error_status)?;
     self.record_write(&resolved);
     Ok(Response::new(ApproveGoalMergeResponse {
       task_name: result.task_name.as_str().to_owned(),
@@ -880,12 +872,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
     let _write_gate = self.write_gate(&resolved).await;
-    let handle = self.write_handle(&resolved)?;
-    let mut client = handle.lock().await;
-    let result = WriteToolSet::new(&mut *client, resolved.cwd.clone())
-      .approve_goal_registration(revision)
-      .await
-      .map_err(tool_error_status)?;
+    let mut source = self.write_source(&resolved);
+    let result = source.approve_goal_registration(&resolved.cwd, revision).await.map_err(tool_error_status)?;
     self.record_write(&resolved);
     Ok(Response::new(ApproveGoalRegistrationResponse {
       revision: result.revision.get(),
@@ -915,12 +903,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
     let _write_gate = self.write_gate(&resolved).await;
-    let handle = self.write_handle(&resolved)?;
-    let mut client = handle.lock().await;
-    let rejected = WriteToolSet::new(&mut *client, resolved.cwd.clone())
-      .reject_goal_registration(revision)
-      .await
-      .map_err(tool_error_status)?;
+    let mut source = self.write_source(&resolved);
+    let rejected = source.reject_goal_registration(&resolved.cwd, revision).await.map_err(tool_error_status)?;
     self.record_write(&resolved);
     Ok(Response::new(RejectGoalRegistrationResponse { revision: rejected.get() }))
   }

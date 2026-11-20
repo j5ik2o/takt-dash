@@ -5,9 +5,9 @@
 //! 値の解決はこの境界で一度だけ行い、以降の内部処理は解決済みの値だけを使います。
 //!
 //! mcpServers の各エントリは、子プロセスを起動する stdio 接続と、常駐する takt-mcp の
-//! HTTP サーバーへつなぐ http 接続のどちらかです。stdio は書き込み操作が使う起動方法で、
-//! http は読み取り専用の常駐サーバーの接続先です。読み取りは http、書き込みは stdio を
-//! それぞれの経路が選び、同じ mcpServers に対象サーバーごとのエントリを登録します。
+//! HTTP サーバーへつなぐ http 接続のどちらかです。読み取りと書き込みは、それぞれの接続先
+//! （`server` と `writeServer`）が指すエントリの接続方法を使います。同じ mcpServers に
+//! 対象サーバーごとのエントリを登録します。
 
 use std::{
   collections::BTreeMap,
@@ -94,7 +94,7 @@ pub enum McpConnection {
   Http(HttpMcpServer),
 }
 
-/// 子プロセスとして起動する takt-mcp の起動方法。書き込み操作がこの起動方法を使います。
+/// 子プロセスとして起動する takt-mcp の起動方法。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdioMcpServer {
   pub command: String,
@@ -180,7 +180,7 @@ pub struct Project {
   pub name:         String,
   /// 読み取り接続先（`mcpServers` の id）。画面と定期読み取りが使います。
   pub server:       String,
-  /// 書き込み接続先（`mcpServers` の id）。未設定なら `server` と同じ。stdio の起動方法に限ります。
+  /// 書き込み接続先（`mcpServers` の id）。未設定なら `server` と同じ。
   pub write_server: String,
   pub about:        String,
   pub cwd:          PathBuf,
@@ -548,18 +548,12 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
     }
     let write_server = project.write_server.unwrap_or_else(|| project.server.clone());
     validate_server_id(&write_server)?;
-    let write_connection = servers.get(&write_server).ok_or_else(|| {
+    servers.get(&write_server).ok_or_else(|| {
       ConfigError::Invalid(format!(
         "プロジェクト {} が参照する書き込み用サーバー {} は mcpServers にありません。",
         project.name, write_server
       ))
     })?;
-    if !matches!(write_connection, McpServer::Stdio(_)) {
-      return Err(ConfigError::Invalid(format!(
-        "プロジェクト {} の書き込み用サーバー {} は stdio の起動方法である必要があります。HTTP 接続先は読み取り専用です。",
-        project.name, write_server
-      )));
-    }
     let cwd = PathBuf::from(&project.cwd);
     if !cwd.is_absolute() {
       return Err(ConfigError::Invalid(format!(

@@ -471,19 +471,22 @@ impl Poller {
   }
 
   fn sync_clients(&self, config: &Config) {
-    // レジストリは、読み取りと書き込みが使う stdio の子プロセスを管理する。読み取り先
-    // （`server`）と書き込み先（`write_server`、未設定なら `server`）が異なる stdio
-    // エントリを指す場合は、双方へレーンを用意する。書き込み先だけを残すと、読み取りが
-    // 「子プロセスがありません」で毎回失敗する。読み取りが HTTP 接続先のプロジェクト
-    // では、読み取り用の子プロセスは起動しない。
+    // レジストリは、読み取りと書き込みが使う stdio の子プロセスに加えて、書き込みゲートと
+    // 書き込みの通し番号も（サーバー、プロジェクト）の組ごとに管理する。保持対象は
+    // 接続方法によらず、設定にあるプロジェクトの読み取り先（`server`）と書き込み先
+    // （`write_server`、未設定なら `server`）の組すべてにする。書き込み先が HTTP 接続先の
+    // プロジェクトで保持対象から外すと、定期読み取りのたびに書き込みゲートと通し番号が
+    // 消え、書き込み前の読み取り結果が書き込み後の状態を上書きする事故を防げなくなる。
+    // 子プロセスの用意は、この後の処理が stdio の組だけに行う。読み取り先と書き込み先が
+    // 異なる stdio エントリを指す場合は、双方へレーンを用意する。書き込み先だけを残すと、
+    // 読み取りが「子プロセスがありません」で毎回失敗する。読み取りが HTTP 接続先の
+    // プロジェクトでは、読み取り用の子プロセスは起動しない。
     let mut wanted: Vec<(String, String)> = Vec::new();
     for project in &config.projects {
       for server_id in [&project.server, &project.write_server] {
-        if matches!(config.servers.get(server_id), Some(McpServer::Stdio(_))) {
-          let key = (server_id.clone(), project.name.clone());
-          if !wanted.contains(&key) {
-            wanted.push(key);
-          }
+        let key = (server_id.clone(), project.name.clone());
+        if !wanted.contains(&key) {
+          wanted.push(key);
         }
       }
     }
