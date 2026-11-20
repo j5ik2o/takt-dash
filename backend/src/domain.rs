@@ -110,6 +110,89 @@ impl fmt::Display for RunSlug {
   }
 }
 
+/// run のレポートの名前。`reports/` からの `/` 区切りの相対パスで、名前は `.md` で終わります。
+///
+/// 絶対パス、`\`、空の区切り、`.` と `..` の区切りは受け付けません。この型は名前の書式だけを
+/// 保証し、実在と `reports/` の下に収まることは読み取り時に実パスで確かめます。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReportFilename(String);
+
+/// レポートの名前の長さの上限（バイト）。一般的なファイルシステムのパス長の上限に合わせます。
+const MAX_REPORT_FILENAME_BYTES: usize = 1024;
+const REPORT_FILENAME_SUFFIX: &str = ".md";
+
+impl ReportFilename {
+  /// 保持している相対パスを返す。
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+}
+
+impl TryFrom<&str> for ReportFilename {
+  type Error = DomainError;
+
+  fn try_from(value: &str) -> Result<Self, Self::Error> {
+    const LABEL: &str = "レポートの名前";
+    if value.len() > MAX_REPORT_FILENAME_BYTES {
+      return Err(DomainError::Size(LABEL));
+    }
+    validate_text(LABEL, value)?;
+    if value.contains('\\') || value.starts_with('/') {
+      return Err(DomainError::Syntax(LABEL));
+    }
+    if value.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
+      return Err(DomainError::Syntax(LABEL));
+    }
+    if !value.ends_with(REPORT_FILENAME_SUFFIX) {
+      return Err(DomainError::Semantics(LABEL));
+    }
+    Ok(ReportFilename(value.to_owned()))
+  }
+}
+
+impl fmt::Display for ReportFilename {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(&self.0)
+  }
+}
+
+/// run への指示書の ID。takt が 1 から順に振る正の整数です。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InstructionId(i32);
+
+impl InstructionId {
+  /// 保持している数値を返す。
+  pub fn get(self) -> i32 {
+    self.0
+  }
+}
+
+impl TryFrom<i32> for InstructionId {
+  type Error = DomainError;
+
+  fn try_from(value: i32) -> Result<Self, Self::Error> {
+    if value <= 0 {
+      return Err(DomainError::Size("指示書の ID"));
+    }
+    Ok(InstructionId(value))
+  }
+}
+
+impl TryFrom<i64> for InstructionId {
+  type Error = DomainError;
+
+  fn try_from(value: i64) -> Result<Self, Self::Error> {
+    let value = i32::try_from(value).map_err(|_| DomainError::Size("指示書の ID"))?;
+    InstructionId::try_from(value)
+  }
+}
+
+impl fmt::Display for InstructionId {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}", self.0)
+  }
+}
+
 /// プルリクエスト番号。1 以上です。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PullRequestNumber(i64);
@@ -229,6 +312,44 @@ impl fmt::Display for TaskCount {
   }
 }
 
+/// 画面読み取りレーンの本数。1〜3 本です。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ScreenReadLanes(u32);
+
+impl ScreenReadLanes {
+  /// 本数の上限。子プロセスの増加を抑えるために設けます。
+  pub const MAX: u32 = 3;
+  /// 本数の下限。
+  pub const MIN: u32 = 1;
+
+  /// 保持している本数を返す。
+  pub fn get(self) -> u32 {
+    self.0
+  }
+
+  /// 範囲外の値を下限〜上限へ丸めて作る。設定ファイルの読み取り境界が使います。
+  pub fn clamped(value: u32) -> Self {
+    ScreenReadLanes(value.clamp(Self::MIN, Self::MAX))
+  }
+}
+
+impl TryFrom<u32> for ScreenReadLanes {
+  type Error = DomainError;
+
+  fn try_from(value: u32) -> Result<Self, Self::Error> {
+    if !(Self::MIN..=Self::MAX).contains(&value) {
+      return Err(DomainError::Size("画面読み取りレーンの本数"));
+    }
+    Ok(ScreenReadLanes(value))
+  }
+}
+
+impl fmt::Display for ScreenReadLanes {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}", self.0)
+  }
+}
+
 /// JST の日次集計の日付。`YYYY-MM-DD` の実在する日付です。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DailyDate(String);
@@ -323,7 +444,7 @@ impl fmt::Display for MergeUntil {
 mod tests {
   use super::{
     DailyDate, DomainError, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision,
-    RunSlug, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
+    RunSlug, ScreenReadLanes, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
   };
 
   #[test]
@@ -352,6 +473,15 @@ mod tests {
     assert!(matches!(SilentMinutes::try_from(i32::MAX as u32 + 1), Err(DomainError::Size(_))));
     assert!(matches!(TaskCount::try_from(-1), Err(DomainError::Size(_))));
     assert_eq!(TaskCount::try_from(3).expect("有効です").get(), 3);
+  }
+
+  #[test]
+  fn screen_read_lanes_guarantees_the_range() {
+    assert!(matches!(ScreenReadLanes::try_from(0), Err(DomainError::Size(_))));
+    assert!(matches!(ScreenReadLanes::try_from(4), Err(DomainError::Size(_))));
+    assert_eq!(ScreenReadLanes::try_from(2).expect("有効です").get(), 2);
+    assert_eq!(ScreenReadLanes::clamped(0).get(), 1, "下限未満は下限へ丸めます");
+    assert_eq!(ScreenReadLanes::clamped(9).get(), 3, "上限超は上限へ丸めます");
   }
 
   #[test]

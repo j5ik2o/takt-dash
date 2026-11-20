@@ -286,7 +286,7 @@ test("プルリクエストの URL、自由文、時刻は生のまま復元す�
   assert.deepEqual(restored.pendingDecisions[0]?.options, ["今週", "来週"]);
   assert.equal(restored.goals[1]?.pausedReason, "公開の日取りが決まるまで止めています。");
   assert.equal(restored.runs[0]?.summary, "レイアウトを直しています。");
-  assert.equal(restored.servers[0]?.concurrency, 4);
+  assert.equal(restored.projects[0]?.concurrency, 4);
   assert.ok(restored.readAt instanceof Date);
   assert.equal(restored.readAt?.toISOString(), NOW.toISOString());
 });

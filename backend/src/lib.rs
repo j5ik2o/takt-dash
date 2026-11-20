@@ -5,6 +5,9 @@
 //! proto/taktdash.proto の TaktDashService（読み取り系 API と状態ストリーミング）は
 //! [`grpc`] モジュールが実装します。
 
+#[cfg(test)]
+extern crate self as takt_dash_backend;
+
 pub mod activity;
 pub mod build_info;
 pub mod config;
@@ -16,6 +19,7 @@ pub mod mcp;
 pub mod model;
 pub mod poller;
 pub mod run_log;
+pub mod run_progress;
 pub mod store;
 
 pub mod takt_dash {

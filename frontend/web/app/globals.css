@@ -25,6 +25,37 @@
   --warn-bg: var(--orange-soft);
   --live: var(--teal);
   --down: var(--idle);
+
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-10: 10px;
+  --space-12: 12px;
+  --space-14: 14px;
+  --space-16: 16px;
+  --space-18: 18px;
+  --space-20: 20px;
+  --space-22: 22px;
+  --space-24: 24px;
+  --space-36: 36px;
+  --font-size-12: 12px;
+  --font-size-13: 13px;
+  --font-size-14: 14px;
+  --font-size-15: 15px;
+  --font-size-16: 16px;
+  --radius-4: 4px;
+  --radius-6: 6px;
+  --radius-8: 8px;
+  --radius-12: 12px;
+  --radius-pill: 999px;
+
+  --layout-aside-width: 320px;
+  /* 概要の本文の上限。幅 2560px の画面でも本文（2560 − サイドバー 252 − 左右の余白 72 = 2236px）を
+     埋め切れる値にし、右に大きな空白を残さない（issue #120）。 */
+  --layout-overview-max-width: 2240px;
+  /* 判断待ちの本文の1行の上限。全幅に置いても長い行で読みにくくならない幅にする（issue #121）。 */
+  --layout-decision-body-max-width: 80ch;
 }
 
 html {
@@ -43,7 +74,7 @@ body {
   background: var(--bg);
   font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN",
     "Noto Sans JP", "Yu Gothic", Meiryo, sans-serif;
-  font-size: 15px;
+  font-size: var(--font-size-15);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
@@ -72,15 +103,15 @@ a {
 .sidebar {
   border-right: 1px solid var(--line);
   background: var(--surface);
-  padding: 20px 14px 16px;
+  padding: var(--space-20) var(--space-14) var(--space-16);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-16);
   overflow-y: auto;
 }
 
 .brand {
-  padding: 0 8px;
+  padding: 0 var(--space-8);
   font-weight: 700;
   font-size: 21px;
   color: var(--text);
@@ -96,20 +127,20 @@ a {
 }
 
 .side-title {
-  font-size: 12px;
+  font-size: var(--font-size-12);
   letter-spacing: 0.08em;
   color: var(--faint);
-  margin: 0 8px 6px;
+  margin: 0 var(--space-8) var(--space-6);
   font-weight: 700;
 }
 
 .srv-list li {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px;
-  border-radius: 8px;
-  font-size: 14px;
+  gap: var(--space-8);
+  padding: var(--space-8);
+  border-radius: var(--radius-8);
+  font-size: var(--font-size-14);
 }
 
 .srv-list li:hover {
@@ -123,7 +154,7 @@ a {
 
 .srv-state {
   margin-left: auto;
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -140,17 +171,17 @@ a {
 .nav li {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 14px;
+  gap: var(--space-8);
+  font-size: var(--font-size-14);
 }
 
 .nav a {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
   flex: 1;
-  padding: 8px;
-  border-radius: 8px;
+  padding: var(--space-8);
+  border-radius: var(--radius-8);
   color: var(--text);
 }
 
@@ -175,48 +206,48 @@ a {
   background: var(--orange-soft);
   color: var(--orange-d);
   border: 1px solid var(--orange-line);
-  border-radius: 999px;
-  padding: 0 8px;
-  font-size: 12px;
+  border-radius: var(--radius-pill);
+  padding: 0 var(--space-8);
+  font-size: var(--font-size-12);
   font-weight: 700;
 }
 
 .content {
-  padding: 28px 36px 48px;
+  padding: 28px var(--space-36) 48px;
   min-width: 0;
 }
 
 .page {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: var(--space-24);
   max-width: 1200px;
 }
 
 .page-head {
   display: flex;
   justify-content: space-between;
-  gap: 12px 24px;
+  gap: var(--space-12) var(--space-24);
   align-items: flex-start;
   flex-wrap: wrap;
 }
 
 .page-head h1 {
   font-size: 26px;
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2);
 }
 
 .page-head p {
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .banner {
-  padding: 10px 14px;
-  border-radius: 8px;
+  padding: var(--space-10) var(--space-14);
+  border-radius: var(--radius-8);
   border: 1px solid var(--line);
-  margin-bottom: 16px;
-  font-size: 14px;
+  margin-bottom: var(--space-16);
+  font-size: var(--font-size-14);
 }
 
 .banner.warn {
@@ -227,20 +258,28 @@ a {
 
 .tiles,
 .cards,
-.scards {
+.overview-cards {
   display: grid;
-  gap: 18px;
+  gap: var(--space-18);
 }
 
+/* 数字1個のタイルは伸ばさず、220px までの幅で左に詰める（issue #120）。 */
 .tiles {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 220px));
 }
 
 .cards {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.cards > li {
+/* 概要のプロジェクトのカードは列数を固定せず、1件なら全幅、2件なら半分ずつに広げる（issue #120）。
+   .cards はほかのページと共有しているため、概要だけこのクラスで並べる。 */
+.overview-cards {
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+}
+
+.cards > li,
+.overview-cards > li {
   display: flex;
   flex-direction: column;
 }
@@ -260,27 +299,12 @@ a {
   outline-offset: 2px;
 }
 
-.scards {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .tile,
 .card {
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 18px 20px;
+  padding: var(--space-18) var(--space-20);
   background: var(--surface);
-  min-width: 0;
-}
-
-.scard {
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 18px 20px;
-  background: var(--surface);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
   min-width: 0;
 }
 
@@ -288,43 +312,43 @@ a {
 .card .k,
 .tile .kv span {
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .tile .num {
   font-size: 32px;
   font-weight: 700;
   line-height: 1.25;
-  margin: 4px 0 6px;
+  margin: var(--space-4) 0 var(--space-6);
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
 .tile .num small {
-  font-size: 16px;
+  font-size: var(--font-size-16);
   font-weight: 500;
-  margin-left: 4px;
+  margin-left: var(--space-4);
   color: var(--muted);
 }
 
 .tile .num.word {
   font-size: 22px;
   line-height: 1.5;
-  padding: 6px 0;
+  padding: var(--space-6) 0;
 }
 
 .t-note {
-  font-size: 14px;
+  font-size: var(--font-size-14);
   color: var(--muted);
-  margin-top: 6px;
+  margin-top: var(--space-6);
 }
 
 .kv li {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  font-size: 14px;
-  padding: 2px 0;
+  gap: var(--space-8);
+  font-size: var(--font-size-14);
+  padding: var(--space-2) 0;
 }
 
 .kv li b {
@@ -333,48 +357,86 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
-.sec {
-  font-size: 16px;
-  margin-bottom: 12px;
+/* ゴール一覧のタスク件数は、項目どうしを余白で区切って並べる（issue #232）。 */
+.task-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
 }
 
-.card-head,
-.sc-head {
+/* 失敗・上限超過・PR 失敗の件数は、要対応として他の件数と区別して目立たせる（issue #148）。 */
+.task-counts .warn {
+  color: var(--orange-d);
+  font-weight: 600;
+}
+
+/* ゴール一覧のカードの題名は長い目的文でも1行に収め、あふれを省略記号にする（issue #148）。
+   h3 は .card-head（display:flex）の flex 項目であり、flex 基底幅を 0 にしないと内容幅の
+   ままになって縮まず、overflow の省略が効かない。 */
+.goal-card-head h3 {
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+.sec {
+  font-size: var(--font-size-16);
+  margin-bottom: var(--space-12);
+}
+
+.card-head {
   display: flex;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-10);
   align-items: flex-start;
   flex-wrap: wrap;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-4);
 }
 
-.sc-head h3 {
-  font-size: 18px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  overflow-wrap: anywhere;
+/* 概要のサーバーは見出しの横の1行に並べる（issue #120）。表示名を主、サーバー ID と機種を副として
+   区別して見せる（issue #63）。応答なしの注記だけは1行の下へ折り返す。 */
+.server-strip > h2 {
+  font-size: var(--font-size-16);
+}
+
+.server-line {
+  gap: var(--space-8) var(--space-12);
   min-width: 0;
 }
 
-/* サーバーカード見出しは表示名を主、サーバー ID と機種を副として縦に積む（issue #63）。 */
-.sc-head h3 .srv-id,
-.sc-head h3 .kind {
-  display: block;
-  font-size: 13px;
+.server-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.server-name .srv-id,
+.server-name .kind {
+  margin-left: var(--space-8);
+  font-size: var(--font-size-13);
   font-weight: 400;
   color: var(--muted);
 }
 
+.server-line .big-badge {
+  font-size: var(--font-size-14);
+  padding: var(--space-2) var(--space-12);
+}
+
+.server-line .stale-note {
+  flex-basis: 100%;
+}
+
 .about,
 .read-at {
-  font-size: 14px;
+  font-size: var(--font-size-14);
   color: var(--muted);
 }
 
 .goals,
 .mini-runs,
-.runs,
 .steps,
 .reports,
 .instructions,
@@ -384,27 +446,33 @@ a {
 .counts {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-8);
 }
 
 .mini-runs li {
   display: flex;
-  gap: 8px;
+  gap: var(--space-8);
   align-items: baseline;
   flex-wrap: wrap;
   border-top: 1px solid var(--line2);
   padding: 7px 0;
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .mini-runs li:first-child {
   border-top: none;
 }
 
+/* run のスラッグは長い識別子のため、行の中で折り返して全文を見せる（issue #153）。 */
+.mini-runs .view {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .goals li {
   min-width: 0;
   border-top: 1px solid var(--line2);
-  padding: 8px 0;
+  padding: var(--space-8) 0;
 }
 
 .goals li:first-child {
@@ -412,7 +480,7 @@ a {
 }
 
 .goal-head {
-  font-size: 15px;
+  font-size: var(--font-size-15);
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -422,10 +490,10 @@ a {
 .goal-badge {
   display: inline-flex;
   align-items: center;
-  font-size: 12px;
+  font-size: var(--font-size-12);
   font-weight: 500;
-  padding: 1px 10px;
-  border-radius: 999px;
+  padding: 1px var(--space-10);
+  border-radius: var(--radius-pill);
   border: 1px solid var(--line);
   white-space: nowrap;
 }
@@ -450,14 +518,14 @@ a {
 
 .goal-why,
 .goal-progress {
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
-  margin-top: 4px;
+  margin-top: var(--space-4);
 }
 
 .goal-failed {
-  font-size: 13px;
-  margin-top: 4px;
+  font-size: var(--font-size-13);
+  margin-top: var(--space-4);
 }
 
 .goal-failed.warn {
@@ -466,8 +534,8 @@ a {
 }
 
 .goal-pr {
-  font-size: 13px;
-  margin-top: 4px;
+  font-size: var(--font-size-13);
+  margin-top: var(--space-4);
 }
 
 .goal-pr a {
@@ -479,48 +547,34 @@ a {
 }
 
 .goal-full {
-  margin-top: 4px;
+  margin-top: var(--space-4);
 }
 
 .goal-full > summary,
 .goal-done > summary {
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
   cursor: pointer;
 }
 
 .goal-full p {
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--muted);
-  margin-top: 6px;
+  margin-top: var(--space-6);
   overflow-wrap: anywhere;
 }
 
 .goal-done {
-  margin-top: 8px;
+  margin-top: var(--space-8);
   border-top: 1px solid var(--line2);
-  padding-top: 8px;
-}
-
-.runs .run-row {
-  display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) 200px;
-  gap: 4px 16px;
-  align-items: center;
-  padding: 11px 0;
-  border-top: 1px solid var(--line2);
-  font-size: 14px;
-}
-
-.runs .run-row:first-child {
-  border-top: none;
+  padding-top: var(--space-8);
 }
 
 .st {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 14px;
+  gap: var(--space-8);
+  font-size: var(--font-size-14);
   font-weight: 600;
   line-height: 1.35;
   white-space: nowrap;
@@ -538,59 +592,61 @@ a {
   color: var(--muted);
 }
 
-.st.delayed {
-  color: var(--orange-d);
-}
-
-.run-main {
-  min-width: 0;
-}
-
-.run-main .p {
+/* 実行中の run の表（issue #120、#149・#171・#193）。枠・罫線・セルの縦の揃えは部品の .l-table が受け持つ。 */
+.run-project .p {
+  display: block;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
-.run-main .g {
+/* 同名のプロジェクトが複数のサーバーにあるとき所属を示す、サーバー名の併記。 */
+.run-project .srv {
   display: block;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: var(--font-size-13);
 }
 
-.run-main .task {
-  font-size: 14px;
-  overflow-wrap: anywhere;
+.run-project .view {
+  font-size: var(--font-size-13);
 }
 
-.run-main .model {
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.run-prog {
+/* ゴールの文は列の中で折り返し、状態やステップの表示に重ならないようにする。 */
+.run-goal {
   min-width: 0;
-}
-
-.run-prog .stp {
-  font-size: 14px;
   overflow-wrap: anywhere;
 }
 
-.run-prog .stp b {
-  font-family: var(--mono);
-  font-size: 14px;
-}
-
-.run-prog .meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 13px;
+.run-goal .g {
+  display: block;
   color: var(--muted);
-  flex-wrap: wrap;
+  font-size: var(--font-size-13);
 }
 
-.run-prog .meta .warn,
+.run-step {
+  min-width: 180px;
+}
+
+.run-step .stp {
+  overflow-wrap: anywhere;
+}
+
+.run-step .stp b {
+  font-family: var(--mono);
+}
+
+.run-step .model,
+.run-elapsed {
+  font-size: var(--font-size-13);
+  color: var(--muted);
+}
+
+/* 経過と状態は折り返さず、ゴールの文の折り返しに巻き込まれないようにする。 */
+.run-elapsed,
+.run-status {
+  white-space: nowrap;
+}
+
+.run-elapsed .warn,
 .run-note.warn {
   color: var(--orange-d);
   font-weight: 600;
@@ -599,21 +655,21 @@ a {
 .bar {
   height: 8px;
   background: var(--track);
-  border-radius: 4px;
+  border-radius: var(--radius-4);
   overflow: hidden;
-  margin: 6px 0;
+  margin: var(--space-6) 0;
 }
 
 .bar > i {
   display: block;
   height: 100%;
   background: var(--live);
-  border-radius: 4px;
+  border-radius: var(--radius-4);
 }
 
 .bar.thick {
   height: 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-6);
 }
 
 .run-row .bar.live > i {
@@ -636,10 +692,6 @@ a {
 
 .bar.idle > i {
   background: var(--idle);
-}
-
-.bar.delayed > i {
-  background: var(--warn);
 }
 
 .dot {
@@ -680,11 +732,6 @@ a {
 
 .run-row .dot.idle {
   background: var(--down);
-}
-
-.dot.delayed,
-.run-row .dot.delayed {
-  background: var(--orange);
 }
 
 @keyframes pulse {
@@ -733,11 +780,11 @@ a {
 .big-badge {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 16px;
+  gap: var(--space-8);
+  font-size: var(--font-size-16);
   font-weight: 700;
-  padding: 5px 14px;
-  border-radius: 999px;
+  padding: 5px var(--space-14);
+  border-radius: var(--radius-pill);
   white-space: nowrap;
   border: 1px solid var(--line);
 }
@@ -765,81 +812,70 @@ a {
   border-color: var(--orange-line);
 }
 
-.scard.down {
-  border-color: var(--orange-line);
-  background: #fffcf9;
-}
-
-.scard.down .big-badge {
-  color: var(--orange-d);
-  border-color: var(--orange-line);
-}
-
 .tray {
   background: var(--surface);
   border: 1px solid var(--orange-line);
   border-left: 5px solid var(--orange);
-  border-radius: 12px;
-  padding: 18px 22px;
+  border-radius: var(--radius-12);
+  padding: var(--space-18) var(--space-22);
 }
 
+/* 判断待ちが0件のときは警告ではないため、橙の線をやめて通常の線にする（issue #121）。 */
+.tray.tray-empty {
+  border: 1px solid var(--line);
+}
+
+/* 項目は .l-stack で「見出し行 → 本文 → 回答ボタン」の3行に積み、列には分けない（issue #121）。 */
 .tray-item {
-  display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) 170px 100px;
-  gap: 8px 22px;
-  align-items: start;
-  padding: 14px 0;
+  padding: var(--space-14) 0;
   border-top: 1px solid var(--line);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .tray-item:first-child {
   border-top: none;
-  padding-top: 4px;
+  padding-top: var(--space-4);
 }
 
 .tray-item.stale {
   background: var(--orange-soft);
 }
 
-/* 見出し・本文・選択肢・待ち時間を縦に積み、行内で連結させない（issue #37 方針2）。 */
-.tray-item .proj,
-.tray-item .desc,
-.tray-item .opts,
-.tray-item .wait {
-  display: block;
-  width: 100%;
+/* 見出し行は、左にプロジェクト・種別・対象、右端に待ち時間と滞留の印を置く。 */
+.tray-item .decision-head {
+  justify-content: space-between;
 }
 
 .tray-item .proj {
-  grid-column: 1;
+  min-width: 0;
   font-weight: 700;
   overflow-wrap: anywhere;
 }
 
+.tray-item .proj .kind {
+  font-size: var(--font-size-14);
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.tray-item .wait {
+  margin-left: auto;
+  font-size: var(--font-size-14);
+  color: var(--muted);
+}
+
+/* 本文の行は全幅に置き、1行の長さだけを上限で抑える。改行は畳まない。 */
+.tray-item .decision-body {
+  max-width: var(--layout-decision-body-max-width);
+}
+
 .tray-item .desc {
-  grid-column: 2;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .tray-item .opts {
-  grid-column: 3;
-  font-size: 14px;
-  color: var(--muted);
-}
-
-.tray-item .wait {
-  grid-column: 4;
-  font-size: 14px;
-  color: var(--muted);
-}
-
-.tray-item .proj .srv,
-.tray-item .proj .kind {
-  display: block;
-  font-size: 14px;
-  font-weight: 400;
+  font-size: var(--font-size-14);
   color: var(--muted);
 }
 
@@ -848,11 +884,11 @@ a {
 }
 
 .tray-item .desc p + p {
-  margin-top: 6px;
+  margin-top: var(--space-6);
 }
 
 .tray-item .opts {
-  margin-top: 0;
+  margin-top: var(--space-8);
   padding-top: 0;
   border-top: none;
 }
@@ -862,13 +898,12 @@ a {
 }
 
 .tray-item .opts ul {
-  margin: 4px 0 0;
-  padding-left: 20px;
+  margin: var(--space-4) 0 0;
+  padding-left: var(--space-20);
 }
 
 .tray-item .wait b {
-  display: block;
-  font-size: 16px;
+  font-size: var(--font-size-16);
   color: var(--text);
 }
 
@@ -882,8 +917,8 @@ a {
 
 .stale-label {
   color: var(--orange-d);
-  margin-left: 8px;
-  font-size: 13px;
+  margin-left: var(--space-8);
+  font-size: var(--font-size-13);
   font-weight: 600;
 }
 
@@ -898,24 +933,25 @@ a {
   text-decoration: underline;
 }
 
-.cards > li > .view {
+.cards > li > .view,
+.overview-cards > li > .view {
   align-self: flex-start;
   margin-left: 0;
-  margin-top: 6px;
+  margin-top: var(--space-6);
 }
 
 .empty,
 .note {
   color: var(--muted);
-  font-size: 14px;
-  padding: 6px 0;
+  font-size: var(--font-size-14);
+  padding: var(--space-6) 0;
 }
 
 .daily li,
 .counts li {
   display: flex;
-  gap: 10px;
-  font-size: 14px;
+  gap: var(--space-10);
+  font-size: var(--font-size-14);
 }
 
 .daily li.warn {
@@ -925,11 +961,11 @@ a {
 .ev {
   display: grid;
   grid-template-columns: 56px 150px minmax(0, 1fr) 200px;
-  gap: 4px 14px;
-  padding: 10px 18px;
+  gap: var(--space-4) var(--space-14);
+  padding: var(--space-10) var(--space-18);
   border-top: 1px solid var(--line2);
   align-items: baseline;
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .ev:first-child {
@@ -944,7 +980,7 @@ a {
 .ev .kl {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-6);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -958,7 +994,7 @@ a {
 }
 
 .ev .msg {
-  font-size: 15px;
+  font-size: var(--font-size-15);
   overflow-wrap: anywhere;
 }
 
@@ -974,14 +1010,14 @@ a {
 .summary {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 18px 22px;
+  border-radius: var(--radius-12);
+  padding: var(--space-18) var(--space-22);
 }
 
 .sum-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px 24px;
+  gap: var(--space-12) var(--space-24);
 }
 
 .sum-grid .f {
@@ -994,17 +1030,17 @@ a {
 
 .sum-grid .k {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-12);
 }
 
 .sum-grid .v {
-  font-size: 15px;
+  font-size: var(--font-size-15);
   overflow-wrap: anywhere;
 }
 
 .sum-grid .v.mono {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--font-size-13);
 }
 
 .mono {
@@ -1019,6 +1055,20 @@ pre {
   line-height: 1.55;
   background: var(--surface);
   border: 1px solid var(--line2);
+  border-radius: var(--radius-8);
+  padding: var(--space-10) var(--space-12);
+  margin-top: var(--space-6);
+  max-height: 360px;
+  overflow: auto;
+}
+
+ol.log-tail {
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: var(--surface);
+  border: 1px solid var(--line2);
   border-radius: 8px;
   padding: 10px 12px;
   margin-top: 6px;
@@ -1026,16 +1076,16 @@ pre {
   overflow: auto;
 }
 
-.back {
-  display: inline-block;
-  margin-bottom: 10px;
-  color: var(--teal-d);
-  font-size: 14px;
-  font-weight: 600;
+ol.log-tail li {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
-.run-note.delayed {
-  color: var(--orange-d);
+.back {
+  display: inline-block;
+  margin-bottom: var(--space-10);
+  color: var(--teal-d);
+  font-size: var(--font-size-14);
   font-weight: 600;
 }
 
@@ -1043,19 +1093,19 @@ pre {
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-8);
   align-items: center;
   width: 100%;
 }
 
 .actions button {
   font: inherit;
-  font-size: 13px;
+  font-size: var(--font-size-13);
   color: var(--foreground);
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 4px 12px;
+  border-radius: var(--radius-6);
+  padding: var(--space-4) var(--space-12);
   cursor: pointer;
 }
 
@@ -1071,10 +1121,10 @@ pre {
 
 .actions input[type="text"] {
   font: inherit;
-  font-size: 13px;
-  padding: 4px 8px;
+  font-size: var(--font-size-13);
+  padding: var(--space-4) var(--space-8);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-6);
   min-width: 220px;
   flex: 1;
 }
@@ -1086,37 +1136,37 @@ pre {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: var(--space-16);
   z-index: 10;
 }
 
 .dialog {
   background: var(--background);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 16px;
+  border-radius: var(--radius-8);
+  padding: var(--space-16);
   width: min(420px, 100%);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-12);
 }
 
 .dialog-message {
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .decision-results ul {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
 }
 
 .decision-results .result {
   display: flex;
-  gap: 8px;
-  font-size: 13px;
-  border-radius: 6px;
-  padding: 6px 10px;
+  gap: var(--space-8);
+  font-size: var(--font-size-13);
+  border-radius: var(--radius-6);
+  padding: var(--space-6) var(--space-10);
 }
 
 .decision-results .result.ok {
@@ -1133,29 +1183,23 @@ pre {
   font-weight: 600;
 }
 
-/* 概要（issue #75）: 3タイル・異常バナー・判断待ちパネル・カード下端の集計をコンパクトに並べる。 */
+/* 概要（issue #75）: 3タイル・異常バナー・判断待ちパネルをコンパクトに並べる。
+   本文の上限は共有の .page（1200px）より広げる（issue #120）。 */
 .overview {
-  gap: 16px;
+  gap: var(--space-16);
+  max-width: var(--layout-overview-max-width);
 }
 
 .overview .tile {
-  padding: 14px 16px;
-}
-
-.overview .scard {
-  padding: 14px 16px;
-}
-
-.overview .runs .run-row {
-  padding: 8px 0;
+  padding: var(--space-14) var(--space-16);
 }
 
 .health {
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 10px 14px;
+  padding: var(--space-10) var(--space-14);
   max-width: 420px;
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .health p {
@@ -1177,9 +1221,9 @@ pre {
 .callout {
   border: 1px solid var(--orange-line);
   border-left: 5px solid var(--orange);
-  border-radius: 12px;
+  border-radius: var(--radius-12);
   background: var(--surface);
-  padding: 10px 16px;
+  padding: var(--space-10) var(--space-16);
 }
 
 .callout-list {
@@ -1190,11 +1234,11 @@ pre {
 .callout li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto auto;
-  gap: 6px 14px;
+  gap: var(--space-6) var(--space-14);
   align-items: center;
-  padding: 8px 0;
+  padding: var(--space-8) 0;
   border-top: 1px solid var(--line2);
-  font-size: 14px;
+  font-size: var(--font-size-14);
 }
 
 .callout li:first-child {
@@ -1226,73 +1270,32 @@ pre {
 }
 
 .stale-note {
-  margin-top: 6px;
-  font-size: 13px;
+  margin-top: var(--space-6);
+  font-size: var(--font-size-13);
   color: var(--orange-d);
 }
 
-.sc-foot {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 16px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line2);
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.sc-foot .cnt {
-  color: var(--text);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
 .srv-list .cnt {
-  font-size: 12px;
+  font-size: var(--font-size-12);
   color: var(--faint);
   white-space: nowrap;
 }
 
 .side-foot {
   margin-top: auto;
-  padding: 10px 8px 4px;
+  padding: var(--space-10) var(--space-8) var(--space-4);
   border-top: 1px solid var(--line);
-  font-size: 12px;
+  font-size: var(--font-size-12);
   color: var(--muted);
 }
 
 .side-foot p {
-  margin: 2px 0;
+  margin: var(--space-2) 0;
 }
 
 @media (max-width: 1280px) {
   .cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .scards {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .tray-item {
-    grid-template-columns: 170px minmax(0, 1fr) 140px;
-  }
-
-  .tray-item .proj {
-    grid-column: 1;
-  }
-
-  .tray-item .desc {
-    grid-column: 2;
-  }
-
-  .tray-item .opts {
-    grid-column: 3;
-  }
-
-  .tray-item .wait {
-    grid-column: 2 / 4;
   }
 
   .sum-grid {
@@ -1317,14 +1320,14 @@ pre {
     overflow-x: auto;
     border-right: none;
     border-bottom: 1px solid var(--line);
-    gap: 8px;
-    padding: 12px 14px 8px;
+    gap: var(--space-8);
+    padding: var(--space-12) var(--space-14) var(--space-8);
   }
 
   .side-block {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-8);
     flex-wrap: wrap;
   }
 
@@ -1337,13 +1340,13 @@ pre {
   .nav {
     flex-direction: row;
     display: flex;
-    gap: 4px;
+    gap: var(--space-4);
   }
 
   .srv-list li {
     flex: none;
     border: 1px solid var(--line);
-    padding: 6px 10px;
+    padding: var(--space-6) var(--space-10);
   }
 
   .nav li {
@@ -1351,13 +1354,16 @@ pre {
   }
 
   .nav a {
-    padding: 6px 10px;
+    padding: var(--space-6) var(--space-10);
   }
 
   .tiles,
   .cards,
-  .scards,
   .sum-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .callout li {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1365,39 +1371,13 @@ pre {
     grid-column: auto;
   }
 
-  .runs .run-row {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
-  }
-
-  .callout li {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .tray {
-    padding: 14px 16px;
-  }
-
-  .tray-item {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
-  }
-
-  .tray-item .proj,
-  .tray-item .desc,
-  .tray-item .opts,
-  .tray-item .wait {
-    grid-column: auto;
-  }
-
-  .tray-item .wait b {
-    display: inline;
-    margin-right: 6px;
+    padding: var(--space-14) var(--space-16);
   }
 
   .ev {
     grid-template-columns: 48px minmax(0, 1fr);
-    padding: 10px 14px;
+    padding: var(--space-10) var(--space-14);
   }
 
   .ev .kl {
@@ -1411,11 +1391,11 @@ pre {
   }
 
   .summary {
-    padding: 16px;
+    padding: var(--space-16);
   }
 
   .content {
-    padding: 18px 14px 36px;
+    padding: var(--space-18) var(--space-14) var(--space-36);
   }
 }
 
@@ -1423,25 +1403,25 @@ pre {
 .conversation-picker {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 16px;
-  font-size: 13px;
+  gap: var(--space-10);
+  margin-bottom: var(--space-16);
+  font-size: var(--font-size-13);
 }
 
 .conversation-picker select {
   background: var(--surface);
   color: inherit;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 13px;
+  border-radius: var(--radius-6);
+  padding: var(--space-4) var(--space-8);
+  font-size: var(--font-size-13);
 }
 
 .conversation {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-12);
   margin: 0;
   padding: 0;
 }
@@ -1449,17 +1429,17 @@ pre {
 .conversation-message {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: var(--radius-8);
+  padding: var(--space-10) var(--space-12);
 }
 
 .conversation-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 10px;
-  margin: 0 0 6px;
-  font-size: 12px;
+  gap: var(--space-10);
+  margin: 0 0 var(--space-6);
+  font-size: var(--font-size-12);
 }
 
 .conversation-seq {
@@ -1487,8 +1467,78 @@ pre {
 }
 
 .conversation-skipped {
-  margin: 0 0 16px;
-  padding-left: 20px;
+  margin: 0 0 var(--space-16);
+  padding-left: var(--space-20);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-12);
+}
+
+/* レイアウトの基本部品（使い方は docs/layout.md）。
+   画面への適用は後続のタスクで行う。部品は @media に入れず、列数は折り返しで決める。 */
+
+.l-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  min-width: 0;
+}
+
+.l-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.l-split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-24);
+}
+
+.l-split > :first-child {
+  flex: 999 1 0;
+  min-width: 50%;
+}
+
+.l-split > :last-child {
+  flex: 1 1 var(--layout-aside-width);
+  min-width: 0;
+}
+
+.l-table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-12);
+}
+
+.l-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.l-table th,
+.l-table td {
+  padding: var(--space-8) var(--space-12);
+  font-size: var(--font-size-14);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line2);
+}
+
+.l-table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.l-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+
+.l-section > h2 {
+  font-size: var(--font-size-16);
 }

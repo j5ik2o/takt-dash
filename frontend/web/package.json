@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
+    "typecheck:test": "next typegen && tsc -p tsconfig.test.json --noEmit",
     "test": "node --experimental-transform-types --import ./test/support/register.mjs --test --test-reporter=spec 'test/**/*.test.ts'",
     "proto:generate": "protoc -I ../../proto --plugin=protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=src/proto --ts_proto_opt=outputServices=grpc-js,esModuleInterop=true,annotateFilesWithVersion=false ../../proto/taktdash.proto"
   },
@@ -19,11 +20,13 @@
     "react-dom": "19.3.0"
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
+    "jsdom": "^31.0.1",
     "ts-proto": "2.20.0",
     "typescript": "^5"
   }

@@ -48,9 +48,9 @@ async fn pending_decision_inquiry_id_is_the_identifier_used_for_answering() {
   harness.store.record_success(
     "takt-dash",
     ProjectSnapshot {
-      goals:         vec![],
-      tasks:         vec![],
-      inquiries:     vec![InquiryEntry {
+      goals: vec![],
+      tasks: vec![],
+      inquiries: vec![InquiryEntry {
         inquiry_id: InquiryId::try_from("8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e")
           .expect("テストの inquiry ID は有効です"),
         goal_id:    Some(
@@ -62,9 +62,10 @@ async fn pending_decision_inquiry_id_is_the_identifier_used_for_answering() {
         answered:   false,
         created_at: time("2026-11-13T07:00:00Z"),
       }],
-      runs:          vec![],
+      runs: vec![],
       notifications: vec![],
-      proposals:     vec![],
+      proposals: vec![],
+      ..ProjectSnapshot::empty()
     },
     time("2026-11-13T12:00:00Z"),
   );
@@ -117,9 +118,9 @@ async fn answered_inquiry_is_absent_from_pending_decisions() {
   harness.store.record_success(
     "takt-dash",
     ProjectSnapshot {
-      goals:         vec![],
-      tasks:         vec![],
-      inquiries:     vec![InquiryEntry {
+      goals: vec![],
+      tasks: vec![],
+      inquiries: vec![InquiryEntry {
         inquiry_id: InquiryId::try_from("answered-id").expect("テストの inquiry ID は有効です"),
         goal_id:    Some(
           GoalId::try_from("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11").expect("テストのゴール ID は有効です"),
@@ -130,9 +131,10 @@ async fn answered_inquiry_is_absent_from_pending_decisions() {
         answered:   true,
         created_at: time("2026-11-13T07:00:00Z"),
       }],
-      runs:          vec![],
+      runs: vec![],
       notifications: vec![],
-      proposals:     vec![],
+      proposals: vec![],
+      ..ProjectSnapshot::empty()
     },
     time("2026-11-13T12:00:00Z"),
   );
@@ -1234,10 +1236,28 @@ fn process_exists(pid: u32) -> bool {
     .unwrap_or(false)
 }
 
+/// 記録された子プロセスが `expected` 件になるまで短い間隔で待ち、その記録を返す。
+///
+/// 書き込みレーンの温めは読み取りサイクルの裏で進むため、件数の観測は完了を待ってから
+/// 行います。待ちは最大で約5秒です。
+async fn wait_for_processes(harness: &GrpcHarness, expected: usize) -> Vec<u32> {
+  for _ in 0..100 {
+    let processes = harness.recorded_processes();
+    if processes.len() >= expected {
+      return processes;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
+  harness.recorded_processes()
+}
+
 #[tokio::test]
-async fn write_rpcs_reuse_the_poller_mcp_process() {
-  // 読み取り1サイクルで起動した子プロセスを、続く AnswerInquiry がそのまま使う。
-  // pid の記録が増えないことで、書き込みごとに新しい接続を作っていないことを観測する。
+async fn write_rpcs_use_a_dedicated_write_lane_process() {
+  // 読み取りは定期読み取りレーンの子プロセスを使い、書き込みは書き込みレーンの
+  // 子プロセスを使う。書き込みレーンは読み取りサイクルのセットアップで温められ、
+  // 続く AnswerInquiry はその子プロセスをそのまま使う。pid の記録が増えないことで、
+  // 書き込みごとに新しい接続を作っていないことと、読み取りと接続を共有していない
+  // ことを観測する。
   let harness = harness_with(json!({}));
   let mut poller = Poller::new(
     harness.config_path().to_path_buf(),
@@ -1249,9 +1269,12 @@ async fn write_rpcs_reuse_the_poller_mcp_process() {
   harness.rewrite_state(state_with_goal_inquiry("question"));
   poller.read_cycle_once().await.expect("状態を取り込むサイクルを実行できます");
 
-  let processes_after_read = harness.recorded_processes();
-  assert_eq!(processes_after_read.len(), 1, "読み取りで takt-mcp を1つ起動します");
-  let pid = processes_after_read[0];
+  let processes_after_read = wait_for_processes(&harness, 2).await;
+  assert_eq!(
+    processes_after_read.len(),
+    2,
+    "読み取りレーンと温めた書き込みレーンで takt-mcp を2つ起動します: {processes_after_read:?}"
+  );
 
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
@@ -1265,18 +1288,20 @@ async fn write_rpcs_reuse_the_poller_mcp_process() {
       report:     None,
     })
     .await
-    .expect("同じ子プロセスで回答できます");
+    .expect("書き込みレーンの子プロセスで回答できます");
 
   let calls = calls_named(&harness, "takt_answer_goal_question");
   assert_eq!(calls.len(), 1, "回答の道具を1回だけ呼びます: {calls:?}");
   assert_eq!(
     harness.recorded_processes(),
     processes_after_read,
-    "書き込みでも読み取りと同じ takt-mcp の子プロセスを使います"
+    "書き込みは温めた書き込みレーンの子プロセスをそのまま使います"
   );
 
   poller.shutdown().await;
-  assert!(!process_exists(pid), "停止後は共有していた子プロセスが残りません");
+  for pid in processes_after_read {
+    assert!(!process_exists(pid), "停止後はレーンの子プロセスが残りません");
+  }
 
   server.stop().await;
 }
@@ -1378,6 +1403,9 @@ async fn write_rpc_rebuild_resets_the_baseline_before_the_next_poll_cycle() {
     harness.registry.clone(),
   );
   poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  // 定期読み取りレーンと、温めた書き込みレーンの2プロセスが立つまで待ちます。
+  let initial_processes = wait_for_processes(&harness, 2).await;
+  assert_eq!(initial_processes.len(), 2, "初回は読み取りレーンと書き込みレーンの2つです: {initial_processes:?}");
 
   let alternate_directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let alternate_state = alternate_directory.path().join("state-alternate.json");
@@ -1407,7 +1435,7 @@ async fn write_rpc_rebuild_resets_the_baseline_before_the_next_poll_cycle() {
     })
     .await
     .expect("設定変更後の書き込みは成功します");
-  assert_eq!(harness.recorded_processes().len(), 2, "書き込みが設定変更後の子プロセスを作ります");
+  assert_eq!(harness.recorded_processes().len(), 3, "書き込みが設定変更後の書き込みレーンの子プロセスを作ります");
 
   let report = poller.read_cycle_once().await.expect("設定変更後のサイクルを実行できます");
   poller.shutdown().await;
@@ -1420,6 +1448,144 @@ async fn write_rpc_rebuild_resets_the_baseline_before_the_next_poll_cycle() {
   let slot = harness.store.slot("takt-dash").expect("スロットがあります");
   let snapshot = slot.snapshot.expect("新しい設定で読み取った状態があります");
   assert_eq!(snapshot.goals[0].execution_status, ExecutionStatus::Paused, "新しい設定の状態を読み取ります");
+}
+
+/// 完了したゴールに、状態が `question_status` の問い合わせ1件を持つ mock の状態。
+fn state_with_completed_goal_inquiry(question_status: &str) -> serde_json::Value {
+  json!({
+    "goals": [
+      {
+        "id": "3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11",
+        "status": "completed",
+        "executionStatus": "active",
+        "objective": "完了したゴール",
+        "integrationBranch": "takt/completed"
+      }
+    ],
+    "goalQuestions": {
+      "3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11": [
+        {
+          "id": "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e",
+          "kind": "question",
+          "status": question_status,
+          "body": "完了の前の確認です",
+          "createdAt": "2026-11-13T07:00:00Z"
+        }
+      ]
+    }
+  })
+}
+
+/// 判断待ちの一覧にある問い合わせの識別子を返す。
+async fn pending_inquiry_ids(
+  client: &mut takt_dash_backend::takt_dash::v1::takt_dash_service_client::TaktDashServiceClient<
+    tonic::transport::Channel,
+  >,
+) -> Vec<String> {
+  client
+    .get_pending_decisions(GetPendingDecisionsRequest {})
+    .await
+    .expect("判断待ちを取得できます")
+    .into_inner()
+    .state
+    .expect("状態があります")
+    .pending_decisions
+    .into_iter()
+    .filter(|decision| decision.r#type == PendingDecisionType::Inquiry as i32)
+    .map(|decision| decision.inquiry_id)
+    .collect()
+}
+
+/// 呼び出しの記録のうち、`from` 件目より後の takt_list_goal_questions の件数を返す。
+fn goal_question_reads_since(harness: &GrpcHarness, from: usize) -> usize {
+  harness.recorded_calls().into_iter().skip(from).filter(|call| call.name == "takt_list_goal_questions").count()
+}
+
+#[tokio::test]
+async fn answered_question_of_a_terminal_goal_leaves_pending_decisions_on_the_next_cycle() {
+  // 完了したゴールの未回答の問い合わせに回答すると、次の周期でその問い合わせを読み直し、
+  // 判断待ちから消える。同じ poller と同じ状態ストアの上で、回答の前から後まで一続きに観測する。
+  // 回答の後も終端の読み取り済みの印を残す実装は、前回の未回答を引き継いでここで落ちる。
+  let inquiry_id = "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e";
+  let (harness, mut poller) = polled_harness(state_with_completed_goal_inquiry("pending")).await;
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  // 回答の前：2周期目は終端の読み取りを省き、未回答の問い合わせを引き継いで判断待ちに残す。
+  let before_second = harness.recorded_calls().len();
+  poller.read_cycle_once().await.expect("2周期目を実行できます");
+  assert_eq!(goal_question_reads_since(&harness, before_second), 0, "回答の前は完了ゴールの質問を読み直しません");
+  assert_eq!(pending_inquiry_ids(&mut client).await, vec![inquiry_id.to_owned()], "回答の前は判断待ちにあります");
+
+  client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "takt-dash".to_owned(),
+      goal_id:    None,
+      inquiry_id: inquiry_id.to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect("完了したゴールの問い合わせに回答できます");
+  // mock の回答は状態を変えないため、takt が問い合わせを回答済みにしたことを状態の書き換えで模す。
+  harness.rewrite_state(state_with_completed_goal_inquiry("answered"));
+
+  // 回答の後の周期：完了ゴールでも質問を読み直し、判断待ちから消える。
+  let before_refresh = harness.recorded_calls().len();
+  poller.read_cycle_once().await.expect("回答の後の周期を実行できます");
+  assert_eq!(
+    goal_question_reads_since(&harness, before_refresh),
+    1,
+    "回答の後の周期では完了ゴールの質問を読み直します"
+  );
+  assert!(pending_inquiry_ids(&mut client).await.is_empty(), "回答した問い合わせは判断待ちから消えます");
+
+  // その次の周期：読み直した完了ゴールは、従来どおり読み取りを省く。
+  let before_steady = harness.recorded_calls().len();
+  poller.read_cycle_once().await.expect("その次の周期を実行できます");
+  assert_eq!(goal_question_reads_since(&harness, before_steady), 0, "読み直した後の周期では再び読み取りを省きます");
+  assert!(pending_inquiry_ids(&mut client).await.is_empty(), "回答した問い合わせは判断待ちに戻りません");
+
+  poller.shutdown().await;
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn failed_answer_to_a_terminal_goal_question_does_not_force_a_reread() {
+  // 回答が takt で失敗したときは、完了ゴールの質問の読み取りを省いたままにする。
+  // 回答を送る前、または失敗した回答でも読み直させる実装はここで落ちる。
+  let inquiry_id = "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e";
+  let (harness, mut poller) = polled_harness(state_with_completed_goal_inquiry("pending")).await;
+  let mut failing = state_with_completed_goal_inquiry("pending");
+  failing["isError"] = json!(["takt_answer_goal_question"]);
+  harness.rewrite_state(failing);
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "takt-dash".to_owned(),
+      goal_id:    None,
+      inquiry_id: inquiry_id.to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect_err("takt が失敗した回答はエラーです");
+
+  let before_next = harness.recorded_calls().len();
+  poller.read_cycle_once().await.expect("失敗した回答の後の周期を実行できます");
+  assert_eq!(goal_question_reads_since(&harness, before_next), 0, "失敗した回答では完了ゴールの質問を読み直しません");
+  assert_eq!(
+    pending_inquiry_ids(&mut client).await,
+    vec![inquiry_id.to_owned()],
+    "未回答の問い合わせは判断待ちに残ります"
+  );
+
+  poller.shutdown().await;
+  server.stop().await;
 }
 
 #[tokio::test]

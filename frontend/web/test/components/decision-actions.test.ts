@@ -47,7 +47,7 @@ const stateWith = (items: PendingDecision[]): DashboardState => ({
 });
 
 const renderDecisions = (state: DashboardState): string =>
-  renderToStaticMarkup(createElement(DecisionsContent, { state, now: NOW }));
+  renderToStaticMarkup(createElement(DecisionsContent, { snapshotLoaded: true, state, now: NOW, disconnected: false }));
 
 const noop = (): void => {};
 
@@ -81,6 +81,42 @@ test("判断待ち一覧は種別ごとの操作要素を描画する", () => {
   assert.match(html, /<button[^>]*>マージを承認<\/button>/);
   assert.match(html, /<button[^>]*>承認<\/button>/);
   assert.match(html, /<button[^>]*>却下<\/button>/);
+});
+
+test("判断待ち一覧はまだ読めていないサーバーがあるとき0件でも「判断待ちはありません」と断定しない", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    pendingDecisions: [],
+    servers: base.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
+  });
+  assert.doesNotMatch(html, /判断待ちはありません/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /判断待ちがあるかどうかは分かりません/);
+});
+
+test("判断待ち一覧はサーバーが既読でも未読のプロジェクトがあるとき0件でも「判断待ちはありません」と断定しない", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    pendingDecisions: [],
+    projects: base.projects.map((project, index) =>
+      index === 0 ? { ...project, lastReadAt: undefined } : project,
+    ),
+  });
+  assert.doesNotMatch(html, /判断待ちはありません/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /判断待ちがあるかどうかは分かりません/);
+});
+
+test("判断待ち一覧はまだ読めていないサーバーがあっても読めた分の一覧はそのまま描画する", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    servers: base.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
+  });
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /リリースの日取りはどうしますか/);
 });
 
 test("作業の依頼には実施結果の2択だけを描画し、テキスト入力を出さない", () => {
@@ -492,6 +528,22 @@ test("一覧の操作要素と入力欄は対象を識別できる name を持�
   );
   assert.match(textHtml, /aria-label="回答（[^"]*inquiry-text[^"]*）"/);
   assert.match(textHtml, /aria-label="回答する（[^"]*inquiry-text[^"]*）"/);
+});
+
+test("同じ inquiryId でもゴールが違う問い合わせは別の項目として描画し、操作要素の name も区別する", () => {
+  const base = findDecision((decision) => decision.inquiryId === "inquiry-options");
+  const first: PendingDecision = { ...base, goalId: "goal-2" };
+  const second: PendingDecision = { ...base, goalId: "goal-3" };
+
+  const html = renderDecisions(stateWith([first, second]));
+
+  assert.equal((html.match(/class="tray-item/g) ?? []).length, 2);
+
+  const labels = [...html.matchAll(/aria-label="今週（([^"]*)）"/g)].map((match) => match[1]!);
+  assert.equal(labels.length, 2);
+  assert.equal(new Set(labels).size, 2);
+  assert.ok(labels.some((label) => label.includes("goal-2")));
+  assert.ok(labels.some((label) => label.includes("goal-3")));
 });
 
 test("操作の結果は成功を status、失敗を alert として表示する", () => {

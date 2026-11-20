@@ -8,11 +8,15 @@
 
 mod client;
 mod http;
+mod metrics;
 mod protocol;
 mod registry;
 pub mod tools;
 
 pub use client::{CallError, McpClient, McpClientConfig, ToolCallError, ToolCaller, TransportError};
 pub use http::HttpReadHandle;
-pub use registry::McpClientRegistry;
-pub use tools::{client_config, ApproveGoalRegistrationResult, MergeGoalPrResult, ToolError, ToolSet};
+pub use metrics::{ToolCallMetrics, ToolCallOutcome, ToolCallStat};
+pub use registry::{ClientHandle, Lane, McpClientRegistry};
+pub use tools::{
+  client_config, ApproveGoalRegistrationResult, MergeGoalPrResult, ReadToolSet, RemoteRun, ToolError, WriteToolSet,
+};

@@ -24,7 +24,6 @@ const server = (serverId: string, kind: string): Server => ({
   kind,
   connected: true,
   lastReadAt: minutesAgo(1),
-  concurrency: 4,
 });
 
 const run = (serverId: string): Run => ({
@@ -41,6 +40,7 @@ const run = (serverId: string): Run => ({
   totalSteps: 1,
   currentIteration: 1,
   lastLogAt: minutesAgo(1),
+  reports: [],
   status: RunStatus.RUN_STATUS_RUNNING,
   logSilent: false,
 });
@@ -74,18 +74,34 @@ const createSharedNameState = (
     thresholds: createThresholds(),
   });
 
-test("同名プロジェクトでも遅延中のサーバーの run だけが遅延表示になる", () => {
+test("同名プロジェクトの集計は登録済みの実行中runだけを自サーバーへ数え、設定と履歴を保つ", () => {
+  const base = createSharedNameState(ConnectionState.CONNECTION_STATE_CONNECTED, ConnectionState.CONNECTION_STATE_CONNECTED);
+  const state = DashboardState.create({ ...base,
+    servers: base.servers.filter((server) => server.serverId === "a"),
+    projects: base.projects.map((project, index) => ({ ...project, concurrency: index + 2, completedTasks24h: index + 3 })),
+    runs: [...base.runs, { ...run("a"), runSlug: "completed", status: RunStatus.RUN_STATUS_COMPLETED }],
+  });
+  const view = buildOverviewView(state, NOW, true);
+  assert.equal(view.runningRuns, 1);
+  assert.deepEqual(view.projects.map(({ serverId, runningRuns }) => [serverId, runningRuns]), [["a", 1], ["b", 0]]);
+  assert.equal(view.runLimit, 5);
+  assert.equal(view.completedTasks24h, 7);
+  assert.equal(view.runs.length, 3, "未登録と完了済みのrunも詳細表示用に保持する");
+});
+
+test("同名プロジェクトでも遅延中のサーバーの run は遅延表示にならず、他サーバーへ波及しない", () => {
   const view = buildOverviewView(
     createSharedNameState(ConnectionState.CONNECTION_STATE_DELAYED, ConnectionState.CONNECTION_STATE_CONNECTED),
-    NOW,
+    NOW, true,
   );
   const delayed = view.runs.find((item) => item.run.serverId === "a");
   const healthy = view.runs.find((item) => item.run.serverId === "b");
   assert.ok(delayed !== undefined, "サーバー a の run がある");
   assert.ok(healthy !== undefined, "サーバー b の run がある");
 
-  assert.equal(delayed.state, "delayed", "遅延中のサーバー a の run だけが遅延表示になる");
+  assert.equal(delayed.state, "live", "遅延中でもログが出続けている run は実行中のままになる");
   assert.equal(delayed.connected, true, "遅延中は接続中として扱う");
+  assert.equal(delayed.note, "", "読み取り時刻の注記は付けない");
   assert.equal(healthy.state, "live", "同じ名前でもサーバー b の run は実行中のままになる");
   assert.equal(healthy.connected, true);
 });
@@ -96,7 +112,7 @@ test("同名プロジェクトでも応答なしのサーバーの run だけが
       ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
       ConnectionState.CONNECTION_STATE_CONNECTED,
     ),
-    NOW,
+    NOW, true,
   );
   const unresponsive = view.runs.find((item) => item.run.serverId === "a");
   const healthy = view.runs.find((item) => item.run.serverId === "b");

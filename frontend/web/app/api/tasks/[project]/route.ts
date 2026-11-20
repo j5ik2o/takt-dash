@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { createBackendClient, TaskNotFoundError } from "../../../../src/grpc/client";
+import { getBackendClient, TaskNotFoundError } from "../../../../src/grpc/client";
 import { GetTaskDetailResponse } from "../../../../src/proto/taktdash";
 import { toBackendUnavailableResponse } from "../../error-response";
 
@@ -15,11 +15,11 @@ const badRequest = (): Response => Response.json({ error: "タスク名が指定
 export async function GET(request: NextRequest, context: TaskDetailRouteContext): Promise<Response> {
   const { project } = await context.params;
   const taskName = request.nextUrl.searchParams.get("task");
-  if (taskName === null || taskName === "") {
+  if (taskName === null || taskName.trim() === "") {
     return badRequest();
   }
   const goalId = request.nextUrl.searchParams.get("goal") ?? undefined;
-  const client = createBackendClient();
+  const client = getBackendClient();
   try {
     const response = await client.getTaskDetail(project, taskName, goalId);
     return Response.json(GetTaskDetailResponse.toJSON(response));
@@ -28,7 +28,5 @@ export async function GET(request: NextRequest, context: TaskDetailRouteContext)
       return notFound();
     }
     return toBackendUnavailableResponse(error);
-  } finally {
-    await client.close();
   }
 }

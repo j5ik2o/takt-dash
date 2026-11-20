@@ -12,15 +12,18 @@ import { POST as postAnswer } from "../../app/api/decisions/answer/route.ts";
 import { POST as postMerge } from "../../app/api/decisions/merge/route.ts";
 import { POST as postApproveRegistration } from "../../app/api/decisions/goal-registration/approve/route.ts";
 import { POST as postRejectRegistration } from "../../app/api/decisions/goal-registration/reject/route.ts";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 
 type RouteHandler = (request: NextRequest) => Promise<Response>;
 
 const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {
@@ -631,6 +634,79 @@ test("許可ホストの環境変数はリクエストのたびに読む", async
   });
 });
 
+test("既定ポートを明示した許可ホストは、Host と Origin がポートを省略しても許可する", async () => {
+  await withAllowedHostsEnv("localhost:80", async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "localhost",
+        origin: "http://localhost",
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(server.requests.length, 1);
+    });
+  });
+});
+
+test("既定ポートを明示した Host と Origin は、許可ホストがポートを省略していても許可する", async () => {
+  await withAllowedHostsEnv("localhost", async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "localhost:80",
+        origin: "http://localhost:80",
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(server.requests.length, 1);
+    });
+  });
+});
+
+test("https の既定ポート 443 を明示した許可ホストは、Host と Origin がポートを省略しても許可する", async () => {
+  await withAllowedHostsEnv("taktdash.example:443", async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "taktdash.example",
+        origin: "https://taktdash.example",
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(server.requests.length, 1);
+    });
+  });
+});
+
+test("https の既定ポート 443 を明示した Host と Origin は、許可ホストがポートを省略していても許可する", async () => {
+  await withAllowedHostsEnv("taktdash.example", async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "taktdash.example:443",
+        origin: "https://taktdash.example:443",
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(server.requests.length, 1);
+    });
+  });
+});
+
+test("パスや userinfo 等を含む許可ホストの設定値は、既定ポートの明示があっても無効とする", async () => {
+  const invalidValues = ["localhost:80/path", "user@localhost:80", "localhost:80?query=1", "localhost:80#fragment"];
+  for (const value of invalidValues) {
+    await withAllowedHostsEnv(value, async () => {
+      await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+        const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+          host: "localhost",
+          origin: "http://localhost",
+        });
+
+        assert.equal(response.status, 403, value);
+        assert.equal(server.requests.length, 0, value);
+      });
+    });
+  }
+});
+
 test("Origin の無い CLI の要求は許可する", async () => {
   for (const [label, handler, path, body, behavior] of writeRoutes) {
     await withServer(behavior, async (server) => {
@@ -667,6 +743,62 @@ test("Sec-Fetch-Site が cross-site なら、許可ホストの Host と Origin 
 
       assert.equal(response.status, 403);
       assert.equal(server.requests.length, 0);
+    });
+  });
+});
+
+test("許可ホストが 443 を明示し、Origin が http（既定ポート 80）でも、Host の 443 とは一致扱いにしない", async () => {
+  await withAllowedHostsEnv("taktdash.example:443", async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "taktdash.example:443",
+        origin: "http://taktdash.example",
+      });
+
+      assert.equal(response.status, 403);
+      assert.equal(server.requests.length, 0);
+    });
+  });
+});
+
+test("許可ホストが 80 を明示し、Origin が https（既定ポート 443）でも、Host の 80 とは一致扱いにしない", async () => {
+  await withAllowedHostsEnv("taktdash.example:80", async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "taktdash.example:80",
+        origin: "https://taktdash.example",
+      });
+
+      assert.equal(response.status, 403);
+      assert.equal(server.requests.length, 0);
+    });
+  });
+});
+
+test("http の Origin が 443 を明示し、Host と許可ホストも 443 で一致する書き込みは許可する", async () => {
+  await withAllowedHostsEnv("taktdash.example:443", async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "taktdash.example:443",
+        origin: "http://taktdash.example:443",
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(server.requests.length, 1);
+    });
+  });
+});
+
+test("https の Origin が 80 を明示し、Host と許可ホストも 80 で一致する書き込みは許可する", async () => {
+  await withAllowedHostsEnv("taktdash.example:80", async () => {
+    await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
+      const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
+        host: "taktdash.example:80",
+        origin: "https://taktdash.example:80",
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(server.requests.length, 1);
     });
   });
 });

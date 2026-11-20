@@ -11,6 +11,10 @@ next-env.d.ts
 *.tsbuildinfo
 .vercel
 
+# Python（tools/project-status のスクリプト）
+__pycache__/
+*.pyc
+
 # 環境変数・ローカル設定
 .env
 .env*.local
@@ -30,3 +34,6 @@ next-env.d.ts
 
 # takt-dash のローカル設定（環境依存のため追跡しない）
 taktdash.config.json
+
+# E2E の撮影の出力（docs/layout.md の「撮影」）。撮影の結果はコミットしない
+/e2e/screenshots/

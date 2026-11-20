@@ -20,6 +20,14 @@ fn write_state(directory: &std::path::Path, state: serde_json::Value) -> std::pa
   path
 }
 
+/// snapshot の読み取りに渡す run ログの取っ手。テストのプロジェクトの cwd は空のため、
+/// ローカルな run ログの補完は何も見つけません。
+fn run_logs(cwd: &std::path::Path) -> takt_dash_backend::run_progress::RunLogHandle {
+  let project = takt_dash_backend::domain::ProjectName::try_from("http-test").expect("プロジェクト名を作れます");
+  let mut handles = takt_dash_backend::run_progress::RunLogHandles::default();
+  handles.handle_for(&project, cwd)
+}
+
 fn project_dir(directory: &std::path::Path) -> std::path::PathBuf {
   let path = directory.join("project");
   std::fs::create_dir_all(&path).expect("プロジェクトの cwd を作れます");
@@ -42,7 +50,7 @@ async fn http_handle_reads_tools_over_the_resident_server() {
   let cwd = project_dir(directory.path());
   let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
 
-  let snapshot = handle.read_snapshot(&cwd, None).await.expect("読み取れます");
+  let snapshot = handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("読み取れます");
 
   assert_eq!(snapshot.goals.len(), 1, "HTTP 経由でゴールを読めます");
   assert_eq!(snapshot.tasks.first().expect("タスクがあります").status, TaskStatus::Running);
@@ -64,12 +72,12 @@ async fn http_handle_sends_the_authorization_header_from_the_connection() {
   let cwd = project_dir(directory.path());
 
   let mut wrong = HttpReadHandle::new(http_connection(server.url(), "wrong-token"), std::time::Duration::from_secs(10));
-  let error = wrong.read_snapshot(&cwd, None).await.expect_err("トークン不一致は読み取り失敗です");
+  let error = wrong.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect_err("トークン不一致は読み取り失敗です");
   assert!(matches!(error, ToolError::Transport(_)), "認証失敗は輸送エラーの分類で表面化します: {error}");
 
   let mut correct =
     HttpReadHandle::new(http_connection(server.url(), server.token()), std::time::Duration::from_secs(10));
-  correct.read_snapshot(&cwd, None).await.expect("正しいトークンでは読み取れます");
+  correct.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("正しいトークンでは読み取れます");
 }
 
 #[tokio::test]
@@ -81,8 +89,8 @@ async fn http_handle_reuses_one_session_across_calls() {
   let cwd = project_dir(directory.path());
   let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
 
-  handle.read_snapshot(&cwd, None).await.expect("1 回目を読み取れます");
-  handle.read_snapshot(&cwd, None).await.expect("2 回目を読み取れます");
+  handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("1 回目を読み取れます");
+  handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("2 回目を読み取れます");
 
   let events = server.session_events();
   assert_eq!(
@@ -104,7 +112,7 @@ async fn unknown_session_is_recovered_by_creating_a_new_session() {
   let mut handle = HttpReadHandle::new(healthy.connection(), std::time::Duration::from_secs(10));
 
   // 1 回目はセッションを作り、以降は同じセッションを再利用する。
-  handle.read_snapshot(&cwd, None).await.expect("初回の読み取りは成功します");
+  handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("初回の読み取りは成功します");
   assert_eq!(handle.session_count(), 1, "初回に 1 セッションだけ作ります");
 
   // サーバーを再起動してセッションを失わせる。同じ接続先・同じハンドルのまま次の読み取りを行う。
@@ -112,7 +120,10 @@ async fn unknown_session_is_recovered_by_creating_a_new_session() {
   let port = healthy.port();
   drop(healthy);
   let restarted = HttpMockServer::start_on_port(&state, None, port);
-  handle.read_snapshot(&cwd, None).await.expect("セッション消失後の読み取りは新セッションで回復します");
+  handle
+    .read_snapshot(&cwd, None, &run_logs(&cwd))
+    .await
+    .expect("セッション消失後の読み取りは新セッションで回復します");
   assert_eq!(handle.session_count(), 1, "再試行後もハンドルが保持するセッションは 1 つだけです");
   let events = restarted.session_events();
   assert!(
@@ -130,7 +141,8 @@ async fn a_server_that_keeps_returning_404_fails_instead_of_looping() {
   let cwd = project_dir(directory.path());
   let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(2));
 
-  let error = handle.read_snapshot(&cwd, None).await.expect_err("404 が続くサーバーは読み取り失敗です");
+  let error =
+    handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect_err("404 が続くサーバーは読み取り失敗です");
   assert!(matches!(error, ToolError::Transport(_)), "セッション消失の失敗は輸送エラーです: {error}");
 }
 
@@ -145,7 +157,10 @@ async fn session_loss_on_tools_call_retries_once_then_surfaces_failure() {
   let cwd = project_dir(directory.path());
   let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
 
-  let error = handle.read_snapshot(&cwd, None).await.expect_err("tools/call が 404 を返し続ける場合は読み取り失敗です");
+  let error = handle
+    .read_snapshot(&cwd, None, &run_logs(&cwd))
+    .await
+    .expect_err("tools/call が 404 を返し続ける場合は読み取り失敗です");
   assert!(matches!(error, ToolError::Transport(_)), "セッション消失の失敗は輸送エラーです: {error}");
 
   let events = server.session_events();
@@ -175,7 +190,7 @@ async fn connection_refused_is_a_transport_error_not_an_empty_snapshot() {
   let url = format!("http://127.0.0.1:{server}/");
   let mut handle = HttpReadHandle::new(http_connection(&url, "test-token"), std::time::Duration::from_secs(2));
 
-  let error = handle.read_snapshot(&cwd, None).await.expect_err("接続拒否は読み取り失敗です");
+  let error = handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect_err("接続拒否は読み取り失敗です");
   assert!(
     matches!(error, ToolError::Transport(_)),
     "接続拒否は輸送エラーに分類します（空 snapshot に縮退しません）: {error}"
@@ -191,6 +206,6 @@ async fn tool_error_is_distinguished_from_transport_failure() {
   let cwd = project_dir(directory.path());
   let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
 
-  let error = handle.read_snapshot(&cwd, None).await.expect_err("道具エラーは読み取り失敗です");
+  let error = handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect_err("道具エラーは読み取り失敗です");
   assert!(matches!(error, ToolError::Tool(_)), "道具の isError は道具エラーに分類します: {error}");
 }

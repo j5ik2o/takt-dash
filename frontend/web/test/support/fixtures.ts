@@ -57,7 +57,6 @@ export function createDashboardState(): DashboardState {
         kind: "Mac mini",
         connected: true,
         lastReadAt: minutesAgo(1),
-        concurrency: 4,
       },
       {
         serverId: "down",
@@ -65,7 +64,6 @@ export function createDashboardState(): DashboardState {
         kind: "Mac Studio",
         connected: false,
         lastReadAt: minutesAgo(21),
-        concurrency: 4,
       },
     ],
     projects: [
@@ -74,6 +72,7 @@ export function createDashboardState(): DashboardState {
         about: "採用ページを管理する",
         serverId: "mini",
         completedTasks24h: 3,
+        concurrency: 4,
         connected: true,
         connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
         lastReadAt: minutesAgo(1),
@@ -83,6 +82,7 @@ export function createDashboardState(): DashboardState {
         about: "イベントストアの実装",
         serverId: "mini",
         completedTasks24h: 1,
+        concurrency: 4,
         connected: true,
         connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
         lastReadAt: minutesAgo(1),
@@ -232,7 +232,6 @@ export function createActionableDashboardState(): DashboardState {
         kind: "Mac mini",
         connected: true,
         lastReadAt: minutesAgo(1),
-        concurrency: 4,
       },
     ],
     projects: [
@@ -377,12 +376,14 @@ export function createServerEventCounts(): ServerEventCount[] {
 }
 
 export function createProjectsResponse(): GetProjectsResponse {
-  return { state: createDashboardState(), recentEvents: createActivityEvents() };
+  // backend は状態を GetOverview で別に返すため、GetProjects の state は空のまま返す。
+  return { state: undefined, recentEvents: createActivityEvents() };
 }
 
 export function createActivityResponse(): GetActivityResponse {
+  // backend は状態を GetOverview で別に返すため、GetActivity の state は空のまま返す。
   return {
-    state: createDashboardState(),
+    state: undefined,
     events: createActivityEvents(),
     dailySummaries: createDailySummaries(),
     todayCountsByServer: createServerEventCounts(),
@@ -479,12 +480,11 @@ export function createRunDetailResponse(runSlug = "run-aaa"): GetRunDetailRespon
       },
     ],
     logTail: "2026-11-13T07:29:59Z 最後のログの行です。",
-    reports: [{ filename: "review.md", content: "指摘はありません。", sizeBytes: 1200 }],
-    instructions: [
-      { instructionId: 7, issuedAt: minutesAgo(10), state: "accepted", content: "サマリーを短くしてください。" },
-    ],
+    reports: [{ filename: "review.md", sizeBytes: 1200 }],
+    instructions: [{ instructionId: 7, issuedAt: minutesAgo(10), state: "deliveredNextStep" }],
     lastLogAt: minutesAgo(1),
     logSilent: false,
+    logsRemoved: false,
     serverConnected: true,
     serverLastReadAt: minutesAgo(1),
   };

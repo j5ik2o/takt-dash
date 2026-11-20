@@ -1,177 +1,23 @@
-// 判断待ちの操作を組み立てる層。
+// 判断待ちの操作結果の保持、確認ダイアログの意図解決、送信、および分割したモジュールの公開面。
 //
-// 一覧の項目から、送信先の種類・対象の識別・回答の内容を決める。画面（View と Route
-// Handler）はこの層が作った値をそのまま使い、同じ判定を各所で作り直さない。
+// 識別子と表示ラベルは decision-labels、操作の形とアクション組み立ては
+// decision-action-builders が持つ。既存の利用元が同じ import 元を使えるよう、
+// ここから名前付きで re-export する。
 import type { PendingDecision } from "../proto/taktdash";
-import { INQUIRY_KIND, OPERATION_ANSWER_REPORT, PENDING_DECISION_TYPE } from "./proto-values";
+import type { DecisionAction, DecisionActionState } from "./decision-action-builders";
+import {
+  buildAnswerAction,
+  buildGoalRegistrationAction,
+  buildMergeAction,
+  decisionActionState,
+  isPositiveInteger,
+} from "./decision-action-builders";
+import { decisionKey, decisionLabel } from "./decision-labels";
 
-const inquiryKindLabel = (kind: number): string =>
-  kind === INQUIRY_KIND.OPERATION_REQUEST ? "作業の依頼" : "質問";
-
-const isPositiveInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isInteger(value) && value > 0;
-
-// 種別ごとの識別子。SSE の再描画で並び順が変わっても、同じ判断待ちに同じ結果を
-// 紐づけられるよう、種別と識別子だけから作る。
-type DecisionKeyBuilder = (decision: PendingDecision) => string;
-
-const DECISION_KEY_BY_TYPE: Partial<Record<number, DecisionKeyBuilder>> = {
-  [PENDING_DECISION_TYPE.AWAITING_MERGE]: (decision) =>
-    `merge:${decision.serverId}:${decision.project}:${decision.goalId ?? ""}`,
-  [PENDING_DECISION_TYPE.GOAL_REGISTRATION]: (decision) =>
-    `goal-registration:${decision.serverId}:${decision.project}:${decision.revision ?? ""}`,
-  [PENDING_DECISION_TYPE.INQUIRY]: (decision) =>
-    `inquiry:${decision.serverId}:${decision.project}:${decision.inquiryId}`,
-};
-
-export function decisionKey(decision: PendingDecision): string {
-  const build = DECISION_KEY_BY_TYPE[decision.type];
-  return build === undefined
-    ? `pending:${decision.serverId}:${decision.project}:${decision.type}`
-    : build(decision);
-}
-
-type DecisionTypeLabelResolver = (decision: PendingDecision) => string;
-
-const DECISION_TYPE_LABEL_BY_TYPE: Partial<Record<number, DecisionTypeLabelResolver>> = {
-  [PENDING_DECISION_TYPE.AWAITING_MERGE]: () => "人のマージ待ち",
-  [PENDING_DECISION_TYPE.GOAL_REGISTRATION]: () => "ゴール登録の承認待ち",
-  [PENDING_DECISION_TYPE.INQUIRY]: (decision) => `問い合わせ（${inquiryKindLabel(decision.inquiryKind)}）`,
-};
-
-export function decisionTypeLabel(decision: PendingDecision): string {
-  const resolve = DECISION_TYPE_LABEL_BY_TYPE[decision.type];
-  return resolve === undefined ? "判断待ち" : resolve(decision);
-}
-
-// 操作結果に出す項目名と、操作要素の accessible name・入力欄の label の共通部分。
-// 基本ラベル（サーバー・プロジェクト・種別）と、種別ごとの識別子を一箇所で作る。
-// 種別を増やすときの更新をここだけに閉じ込め、2つの表示がずれないようにする。
-type DecisionLabelParts = {
-  base: string;
-  identifier: string;
-};
-
-const decisionLabelIdentifier = (decision: PendingDecision): string => {
-  switch (decision.type) {
-    case PENDING_DECISION_TYPE.AWAITING_MERGE:
-      return `PR #${decision.pullRequest?.number ?? "不明"}`;
-    case PENDING_DECISION_TYPE.GOAL_REGISTRATION:
-      return `revision ${decision.revision ?? "不明"}`;
-    case PENDING_DECISION_TYPE.INQUIRY:
-      return decision.inquiryId;
-    default:
-      return "";
-  }
-};
-
-const decisionLabelParts = (decision: PendingDecision): DecisionLabelParts => ({
-  base: `${decision.serverId} / ${decision.project} の${decisionTypeLabel(decision)}`,
-  identifier: decisionLabelIdentifier(decision),
-});
-
-const composeDecisionLabel = ({ base, identifier }: DecisionLabelParts): string =>
-  identifier === "" ? base : `${base} ${identifier}`;
-
-export function decisionLabel(decision: PendingDecision): string {
-  return composeDecisionLabel(decisionLabelParts(decision));
-}
-
-// 操作要素の accessible name と入力欄の label に使う。一覧は全サーバー・全プロジェクトの
-// 判断待ちの和集合なので、同じ固定名の操作要素が複数並ぶ。種別と行固有の識別子を含めて
-// 対象を一意に識別できるようにする。問い合わせだけは本文も添えて区別する。
-export function decisionTargetLabel(decision: PendingDecision): string {
-  const parts = decisionLabelParts(decision);
-  if (decision.type === PENDING_DECISION_TYPE.INQUIRY) {
-    return `${parts.base} ${parts.identifier}（${decision.body}）`;
-  }
-  return composeDecisionLabel(parts);
-}
-
-// 一覧に出す操作の形。必要な値が欠けた項目は操作させず、理由を表示する。
-export type DecisionActionState =
-  | { kind: "question-options"; options: string[] }
-  | { kind: "question-text" }
-  | { kind: "operation" }
-  | { kind: "merge" }
-  | { kind: "goal-registration" }
-  | { kind: "unavailable"; reason: string };
-
-const unavailable = (reason: string): DecisionActionState => ({ kind: "unavailable", reason });
-
-const awaitingMergeActionState = (decision: PendingDecision): DecisionActionState => {
-  if (!decision.goalId) {
-    return unavailable("ゴール ID が無いため、マージを承認できません。");
-  }
-  if (!isPositiveInteger(decision.pullRequest?.number)) {
-    return unavailable("プルリクエストの番号が無いため、マージを承認できません。");
-  }
-  return { kind: "merge" };
-};
-
-const goalRegistrationActionState = (decision: PendingDecision): DecisionActionState => {
-  if (!isPositiveInteger(decision.revision)) {
-    return unavailable("revision が無いため、承認・却下できません。");
-  }
-  return { kind: "goal-registration" };
-};
-
-const inquiryActionState = (decision: PendingDecision): DecisionActionState => {
-  if (!decision.inquiryId) {
-    return unavailable("問い合わせの識別子が無いため、回答できません。");
-  }
-  if (!decision.goalId) {
-    return unavailable("ゴールに属さない問い合わせには回答できません。");
-  }
-  if (decision.inquiryKind === INQUIRY_KIND.OPERATION_REQUEST) {
-    return { kind: "operation" };
-  }
-  if (decision.options.length > 0) {
-    return { kind: "question-options", options: decision.options };
-  }
-  return { kind: "question-text" };
-};
-
-const DECISION_ACTION_STATE_BY_TYPE: Partial<Record<number, (decision: PendingDecision) => DecisionActionState>> = {
-  [PENDING_DECISION_TYPE.AWAITING_MERGE]: awaitingMergeActionState,
-  [PENDING_DECISION_TYPE.GOAL_REGISTRATION]: goalRegistrationActionState,
-  [PENDING_DECISION_TYPE.INQUIRY]: inquiryActionState,
-};
-
-export function decisionActionState(decision: PendingDecision): DecisionActionState {
-  const resolve = DECISION_ACTION_STATE_BY_TYPE[decision.type];
-  return resolve === undefined
-    ? unavailable("この種別の判断待ちには対応していません。")
-    : resolve(decision);
-}
-
-type AnswerPayload = {
-  serverId: string;
-  project: string;
-  goalId?: string;
-  inquiryId: string;
-  text?: string;
-  report?: number;
-};
-
-type MergePayload = {
-  serverId: string;
-  project: string;
-  goalId: string;
-  prNumber: number;
-};
-
-type GoalRegistrationPayload = {
-  serverId: string;
-  project: string;
-  revision: number;
-};
-
-export type DecisionAction =
-  | { kind: "answer"; payload: AnswerPayload }
-  | { kind: "merge"; payload: MergePayload }
-  | { kind: "approve-registration"; payload: GoalRegistrationPayload }
-  | { kind: "reject-registration"; payload: GoalRegistrationPayload };
+export type { DecisionAction, DecisionActionState };
+export { decisionActionState, buildAnswerAction, buildGoalRegistrationAction, buildMergeAction };
+export { decisionKey, decisionLabel };
+export { decisionTargetLabel, decisionTypeLabel } from "./decision-labels";
 
 export type DecisionOutcome = {
   ok: boolean;
@@ -197,89 +43,6 @@ export function toDecisionResult(decision: PendingDecision, outcome: DecisionOut
 // 結果一覧へ1件を追加する。同じ key の結果は置換し、別の key の結果は保持する。
 export function upsertDecisionResult(results: DecisionResult[], next: DecisionResult): DecisionResult[] {
   return [next, ...results.filter((result) => result.key !== next.key)];
-}
-
-const isAnswerable = (state: DecisionActionState): boolean =>
-  state.kind === "question-options" || state.kind === "question-text" || state.kind === "operation";
-
-export function buildAnswerAction(
-  decision: PendingDecision,
-  input: { text?: string; report?: number },
-): DecisionAction | undefined {
-  const state = decisionActionState(decision);
-  if (!isAnswerable(state)) {
-    return undefined;
-  }
-
-  const { text, report } = input;
-  if (text !== undefined && report !== undefined) {
-    return undefined;
-  }
-  if (text !== undefined && state.kind === "operation") {
-    return undefined;
-  }
-
-  if (report !== undefined) {
-    if (state.kind !== "operation") {
-      return undefined;
-    }
-    if (report !== OPERATION_ANSWER_REPORT.COMPLETED && report !== OPERATION_ANSWER_REPORT.UNABLE) {
-      return undefined;
-    }
-    return {
-      kind: "answer",
-      payload: {
-        serverId: decision.serverId,
-        project: decision.project,
-        goalId: decision.goalId,
-        inquiryId: decision.inquiryId,
-        report,
-      },
-    };
-  }
-
-  if (text === undefined || text.trim() === "") {
-    return undefined;
-  }
-
-  return {
-    kind: "answer",
-    payload: {
-      serverId: decision.serverId,
-      project: decision.project,
-      goalId: decision.goalId,
-      inquiryId: decision.inquiryId,
-      text,
-    },
-  };
-}
-
-export function buildMergeAction(decision: PendingDecision): DecisionAction | undefined {
-  const state = decisionActionState(decision);
-  const goalId = decision.goalId;
-  const prNumber = decision.pullRequest?.number;
-  if (state.kind !== "merge" || goalId === undefined || prNumber === undefined) {
-    return undefined;
-  }
-  return {
-    kind: "merge",
-    payload: { serverId: decision.serverId, project: decision.project, goalId, prNumber },
-  };
-}
-
-export function buildGoalRegistrationAction(
-  decision: PendingDecision,
-  operation: "approve" | "reject",
-): DecisionAction | undefined {
-  const state = decisionActionState(decision);
-  const revision = decision.revision;
-  if (state.kind !== "goal-registration" || revision === undefined) {
-    return undefined;
-  }
-  return {
-    kind: operation === "approve" ? "approve-registration" : "reject-registration",
-    payload: { serverId: decision.serverId, project: decision.project, revision },
-  };
 }
 
 // 画面から届く操作の意図。押下されたボタンと、入力中の本文だけを持ち、状態は持たない。

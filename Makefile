@@ -1,4 +1,4 @@
-.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-prod e2e-skip-only-check prod-check
+.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-build e2e-prod e2e-screenshots e2e-skip-only-check prod-check
 
 BASE_URL ?= http://127.0.0.1:3000
 
@@ -16,6 +16,7 @@ test:
 
 typecheck:
 	npm --prefix frontend/web run typecheck
+	npm --prefix frontend/web run typecheck:test
 
 lint:
 	npm --prefix frontend/web run lint
@@ -50,7 +51,7 @@ coverage:
 		--reporter text --extension .ts --extension .tsx npm run test
 	@echo "== tools/repo-gate (coverage.py) =="
 	mkdir -p target/coverage
-	python3 -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py' tools/repo-gate/repo_gate_test.py
+	python3 -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py,tools/repo-gate/gate_*.py' tools/repo-gate/repo_gate_test.py
 	python3 -m coverage report --data-file=target/coverage/.coverage --show-missing
 
 done:
@@ -65,13 +66,20 @@ done:
 e2e-skip-only-check:
 	! grep -RInE 'test\.(skip|only)([^A-Za-z0-9_]|$$)' e2e/tests e2e/smoke
 
-e2e:
+# startStack（e2e/support/stack.ts）で backend と web を起動する Playwright の実行に共通するビルドの前提。
+e2e-build:
 	test -d e2e/node_modules || npm --prefix e2e ci
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
 	cargo build -p takt-dash-backend
 	npm --prefix frontend/web run build
+
+e2e: e2e-build
 	$(MAKE) e2e-skip-only-check
 	npm --prefix e2e test
+
+# 撮影の手順（docs/layout.md の「撮影」）。make e2e とは別の入口で、e2e-build でビルドしてから撮る。
+e2e-screenshots: e2e-build
+	npm --prefix e2e run screenshots
 
 e2e-prod:
 	test -d e2e/node_modules || npm --prefix e2e ci

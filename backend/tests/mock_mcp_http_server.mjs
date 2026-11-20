@@ -109,6 +109,76 @@ const pagedBackward = (items, key, offsetRaw) => {
 
 const asText = (payload) => ({ content: [{ type: "text", text: JSON.stringify(payload) }] });
 
+// takt_get_run の view 応答は、実 takt-mcp と stdio 版モック（mock_mcp_server.mjs）と同じ形にします。
+const runReportMissing = () => ({
+  content: [{ type: "text", text: "Selected report does not exist" }],
+  isError: true,
+});
+
+const runInstructionMissing = () => ({
+  content: [{ type: "text", text: "Selected instruction does not exist" }],
+  isError: true,
+});
+
+const runReportResponse = (state, args) => {
+  const run = (state.runs ?? {})[args.runSlug];
+  const report = (run?.reports ?? []).find((entry) => entry.filename === args.report);
+  if (args.report === undefined || report === undefined) {
+    return runReportMissing();
+  }
+  return asText({
+    runSlug: args.runSlug,
+    report: { filename: report.filename, ...textPage(report.content ?? "", args.offset, args.maxBytes) },
+  });
+};
+
+const runInstructionsResponse = (state, args) => {
+  const run = (state.runs ?? {})[args.runSlug];
+  if (args.instructionId !== undefined) {
+    const instruction = (run?.instructions ?? []).find((entry) => entry.instructionId === Number(args.instructionId));
+    if (instruction === undefined) {
+      return runInstructionMissing();
+    }
+    return asText({
+      runSlug: args.runSlug,
+      instruction: {
+        instructionId: instruction.instructionId,
+        issuedAt: instruction.issuedAt,
+        state: instruction.state,
+        ...textPage(instruction.content ?? "", args.offset, args.maxBytes),
+      },
+    });
+  }
+  if (run === undefined) {
+    return asText({});
+  }
+  const instructions = run.instructions ?? [];
+  const offset = Number(args.offset ?? 0);
+  const limit = Number(args.limit ?? 50);
+  const window = instructions.slice(offset, offset + limit);
+  const nextOffset = offset + window.length < instructions.length ? offset + window.length : null;
+  return asText({
+    runSlug: args.runSlug,
+    instructions: window,
+    collection: "instructions",
+    totalCount: instructions.length,
+    returnedCount: window.length,
+    omittedCount: instructions.length - window.length,
+    offset,
+    nextOffset,
+    truncated: nextOffset !== null,
+  });
+};
+
+const runTaskResponse = (state, args) => {
+  const run = (state.runs ?? {})[args.runSlug];
+  if (run === undefined) {
+    return asText({});
+  }
+  return asText({ runSlug: args.runSlug, task: textPage(run.taskText ?? "", args.offset, args.maxBytes) });
+};
+
+
 // tools/call に応答する。mock_mcp_server.mjs と同じく、状態ファイルの内容を読み取り道具の応答にする。
 const handleToolCall = (name, args) => {
   const state = loadState();
@@ -159,6 +229,15 @@ const handleToolCall = (name, args) => {
       return asText({ items: value });
     }
     case "takt_get_run": {
+      if (args.view === "report") {
+        return runReportResponse(state, args);
+      }
+      if (args.view === "instructions") {
+        return runInstructionsResponse(state, args);
+      }
+      if (args.view === "task") {
+        return runTaskResponse(state, args);
+      }
       const run = (state.runs ?? {})[args.runSlug];
       if (run === undefined) {
         return asText({});

@@ -1,4 +1,4 @@
-import { createBackendClient, GoalNotFoundError } from "../../../../src/grpc/client";
+import { getBackendClient, GoalNotFoundError } from "../../../../src/grpc/client";
 import { GetGoalDetailResponse } from "../../../../src/proto/taktdash";
 import { toBackendUnavailableResponse } from "../../error-response";
 
@@ -12,7 +12,7 @@ const notFound = (): Response => Response.json({ error: "ゴールが見つか�
 
 export async function GET(_request: Request, context: GoalDetailRouteContext): Promise<Response> {
   const { goalId } = await context.params;
-  const client = createBackendClient();
+  const client = getBackendClient();
   try {
     const response = await client.getGoalDetail(goalId);
     return Response.json(GetGoalDetailResponse.toJSON(response));
@@ -21,7 +21,5 @@ export async function GET(_request: Request, context: GoalDetailRouteContext): P
       return notFound();
     }
     return toBackendUnavailableResponse(error);
-  } finally {
-    await client.close();
   }
 }

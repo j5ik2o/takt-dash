@@ -230,43 +230,101 @@ fn parse_incoming(body: &[u8], content_type: Option<&str>) -> Result<JsonRpcInco
 impl HttpReadHandle {
   /// 対象プロジェクトの cwd から読み取りの snapshot を組み立てる。
   ///
-  /// `ToolSet` は呼び出し先を [`ToolCaller`] として抽象化しているため、ハンドル自身を
+  /// 道具のまとまりは呼び出し先を [`ToolCaller`] として抽象化しているため、ハンドル自身を
   /// 呼び出し先として読み取り経路を共有します。
   pub async fn read_snapshot(
     &mut self,
     cwd: &std::path::Path,
     prev: Option<&crate::model::ProjectSnapshot>,
+    run_logs: &crate::run_progress::RunLogHandle,
   ) -> Result<crate::model::ProjectSnapshot, crate::mcp::ToolError> {
-    crate::mcp::ToolSet::new(self, cwd.to_path_buf()).read_snapshot(prev).await
+    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).read_snapshot(prev, run_logs).await
   }
 
-  /// 対象プロジェクトの cwd から run の詳細を読む。
-  pub async fn read_run_detail(
+  /// 対象プロジェクトの cwd から run の状態を読む。
+  pub async fn read_remote_run(
     &mut self,
     cwd: &std::path::Path,
     run_slug: &crate::domain::RunSlug,
-  ) -> Result<crate::model::RunDetail, crate::mcp::ToolError> {
-    crate::mcp::ToolSet::new(self, cwd.to_path_buf()).read_run_detail(run_slug).await
+  ) -> Result<crate::mcp::RemoteRun, crate::mcp::ToolError> {
+    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).read_remote_run(run_slug).await
+  }
+
+  /// 詳細用に、指示書の一覧とタスク本文まで読む。
+  pub async fn read_remote_run_detail(
+    &mut self,
+    cwd: &std::path::Path,
+    run_slug: &crate::domain::RunSlug,
+  ) -> Result<crate::mcp::RemoteRun, crate::mcp::ToolError> {
+    let mut toolset = crate::mcp::ReadToolSet::new(self, cwd.to_path_buf());
+    let mut remote = toolset.read_remote_run(run_slug).await?;
+    remote.instructions = toolset.read_remote_instructions(run_slug).await?;
+    if remote.task_text.is_empty() {
+      remote.task_text = toolset.read_remote_task_text(run_slug).await?;
+    }
+    Ok(remote)
+  }
+
+  /// takt_get_run の view instructions から指示書の一覧を読む。
+  pub async fn read_remote_instructions(
+    &mut self,
+    cwd: &std::path::Path,
+    run_slug: &crate::domain::RunSlug,
+  ) -> Result<Vec<crate::run_log::Instruction>, crate::mcp::ToolError> {
+    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).read_remote_instructions(run_slug).await
+  }
+
+  /// takt_get_run の view task からタスク本文を読む。
+  pub async fn read_remote_task_text(
+    &mut self,
+    cwd: &std::path::Path,
+    run_slug: &crate::domain::RunSlug,
+  ) -> Result<String, crate::mcp::ToolError> {
+    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).read_remote_task_text(run_slug).await
+  }
+
+  /// takt_get_run の view report からレポートの本文を読む。
+  pub async fn read_remote_report(
+    &mut self,
+    cwd: &std::path::Path,
+    run_slug: &crate::domain::RunSlug,
+    filename: &crate::domain::ReportFilename,
+    max_bytes: u64,
+  ) -> Result<crate::run_log::RunContent, crate::mcp::ToolError> {
+    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).read_remote_report(run_slug, filename, max_bytes).await
+  }
+
+  /// takt_get_run の view instructions から指示書の本文を読む。
+  pub async fn read_remote_instruction(
+    &mut self,
+    cwd: &std::path::Path,
+    run_slug: &crate::domain::RunSlug,
+    instruction_id: crate::domain::InstructionId,
+    max_bytes: u64,
+  ) -> Result<crate::run_log::RunContent, crate::mcp::ToolError> {
+    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf())
+      .read_remote_instruction(run_slug, instruction_id, max_bytes)
+      .await
   }
 
   /// 対象プロジェクトの cwd からゴールの詳細を読む。
   pub async fn read_goal_detail(
     &mut self,
     cwd: &std::path::Path,
-    goal_id: &str,
+    goal_id: &crate::domain::GoalId,
   ) -> Result<crate::model::GoalDetail, crate::mcp::ToolError> {
-    crate::mcp::ToolSet::new(self, cwd.to_path_buf()).read_goal_detail(goal_id).await
+    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).read_goal_detail(goal_id).await
   }
 
   /// 対象プロジェクトの cwd からタスクの詳細を読む。
   pub async fn read_task_detail(
     &mut self,
     cwd: &std::path::Path,
-    project: &str,
-    task_name: &str,
-    goal_id: Option<&str>,
+    project: &crate::domain::ProjectName,
+    task_name: &crate::domain::TaskName,
+    goal_id: Option<&crate::domain::GoalId>,
   ) -> Result<Option<crate::model::TaskDetail>, crate::mcp::ToolError> {
-    crate::mcp::ToolSet::new(self, cwd.to_path_buf()).read_task_detail(project, task_name, goal_id).await
+    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).read_task_detail(project, task_name, goal_id).await
   }
 }
 

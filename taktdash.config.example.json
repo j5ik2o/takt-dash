@@ -18,8 +18,7 @@
   "servers": {
     "mac-mini": {
       "name": "your-mac-mini",
-      "kind": "Mac mini",
-      "concurrency": 4
+      "kind": "Mac mini"
     }
   },
   "projects": [
@@ -49,6 +48,7 @@
     }
   ],
   "intervalSeconds": 30,
+  "screenReadLanes": 1,
   "thresholds": {
     "pendingDecisionStaleMinutes": 240,
     "runLogSilentMinutes": 10

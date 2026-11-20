@@ -9,17 +9,20 @@ import { renderToStaticMarkup } from "react-dom/server";
 import * as grpc from "@grpc/grpc-js";
 import { createRunDetailResponse } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 import RunDetailPage from "../../app/runs/[slug]/page.tsx";
 import { RunDetailLoader } from "../../src/components/run-detail-loader.tsx";
 
 const NOT_FOUND_DIGEST = "NEXT_HTTP_ERROR_FALLBACK;404";
 
 const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {
@@ -48,8 +51,71 @@ test("run 詳細ページは slug 付き params で本番経路を通り、メ�
     assert.match(html, /計画をまとめました。/);
     assert.match(html, /最後のログの行です。/);
     assert.match(html, /review\.md/);
-    assert.match(html, /サマリーを短くしてください。/);
+    assert.match(html, /#7/);
     assert.match(html, /implement/);
+  } finally {
+    await server.shutdown();
+  }
+});
+
+test("run 詳細ページはレポートと指示書の本文を最初の描画に含めず、項目ごとに本文を開く操作を持つ", async () => {
+  // 本文は開いたときに GetRunContent で取得する。最初の描画で backend へ本文を要求しないことを、
+  // ダミーサーバーが受けた RPC の記録で確かめる。
+  const calls: string[] = [];
+  const server = await startTaktDashServer({ runDetail: createRunDetailResponse("run-aaa"), calls });
+  try {
+    const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
+    assert.match(html, /review\.md（1200 バイト）/);
+    assert.match(html, /deliveredNextStep/);
+    assert.equal((html.match(/<details\b/g) ?? []).length, 2, "レポート1件と指示書1件にそれぞれ本文を開く操作がある");
+    assert.deepEqual(calls, ["GetRunDetail"], "最初の描画では GetRunContent を呼ばない");
+  } finally {
+    await server.shutdown();
+  }
+});
+
+test("ログの末尾は、log_tail の各行を「ログの行」の一覧の項目として描画し、追記を足せる形にする", async () => {
+  // 開いている間に届く追記分は、この一覧の末尾へ項目として足す。最初の描画は log_tail の行です。
+  const response = {
+    ...createRunDetailResponse("run-aaa"),
+    logTail: "2026-11-13T09:01:00Z step_complete plan\n2026-11-13T09:05:00Z step_start implement",
+  };
+  const server = await startTaktDashServer({ runDetail: response });
+  try {
+    const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
+    const list = html.match(/<ol[^>]*aria-label="ログの行"[^>]*>([\s\S]*?)<\/ol>/);
+    assert.ok(list, "ログの末尾に「ログの行」の一覧がある");
+    const items = [...list[1].matchAll(/<li[^>]*>([\s\S]*?)<\/li>/g)].map((match) => match[1]);
+    assert.deepEqual(items, ["2026-11-13T09:01:00Z step_complete plan", "2026-11-13T09:05:00Z step_start implement"]);
+    assert.match(html, /セッションログの活動はまだありません。/, "活動の印が届く前はまだ無いことを示す");
+  } finally {
+    await server.shutdown();
+  }
+});
+
+test("ログが残っていない run は、ログの末尾の節に「ログは残っていません。」と表示する", async () => {
+  const response = {
+    ...createRunDetailResponse("run-aaa"),
+    logsRemoved: true,
+    stepLogs: [],
+    logTail: "",
+    reports: [],
+  };
+  const server = await startTaktDashServer({ runDetail: response });
+  try {
+    const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
+    assert.match(html, /ログは残っていません。/);
+    assert.match(html, /採用ページのレイアウトを直す/, "状態ストアの値（タスク名）は表示する");
+  } finally {
+    await server.shutdown();
+  }
+});
+
+test("ログが残っている run には「ログは残っていません。」を表示しない", async () => {
+  const server = await startTaktDashServer({ runDetail: createRunDetailResponse("run-aaa") });
+  try {
+    const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
+    assert.doesNotMatch(html, /ログは残っていません。/);
   } finally {
     await server.shutdown();
   }
