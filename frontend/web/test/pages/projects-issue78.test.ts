@@ -50,9 +50,9 @@ const cardFor = (html: string, project = PROJECT): string => {
   return html.slice(start, end + "</article>".length);
 };
 
-// 各ゴール行は h4.goal-head から始まる。次の見出しまでを1行として切り出す。
+// 各ゴール行は h3.goal-head から始まる。次の見出しまでを1行として切り出す。
 const goalRows = (card: string): string[] => {
-  const starts = Array.from(card.matchAll(/<h4 class="goal-head">/g), (match) => match.index ?? 0);
+  const starts = Array.from(card.matchAll(/<h3 class="goal-head">/g), (match) => match.index ?? 0);
   return starts.map((start, index) => card.slice(start, starts[index + 1] ?? card.length));
 };
 
@@ -65,7 +65,7 @@ const goalRowFor = (card: string, needle: string): string => {
 };
 
 const headingTexts = (card: string): string[] =>
-  Array.from(card.matchAll(/<h4 class="goal-head">([\s\S]*?)<\/h4>/g), (match) => match[1] ?? "");
+  Array.from(card.matchAll(/<h3 class="goal-head">([\s\S]*?)<\/h3>/g), (match) => match[1] ?? "");
 
 const badgeClasses = (row: string): string[] =>
   Array.from(
@@ -139,7 +139,7 @@ test("ゴールの見出しは目的の最初の1文を1行で出し、全文を
   const card = cardFor(renderProjects([goal({ name })]));
 
   assert.deepEqual(headingTexts(card), ["採用ページのレイアウトを直す。"]);
-  assert.doesNotMatch(card, /<h4 class="goal-head">[^<]*対象はトップページだけである。<\/h4>/);
+  assert.doesNotMatch(card, /<h3 class="goal-head">[^<]*対象はトップページだけである。<\/h3>/);
 });
 
 test("引用と括弧の内側に句点がある目的でも、外側の最初の文までを見出しにする", () => {
@@ -446,5 +446,5 @@ test("見出しからゴール詳細へのリンクを作らない", () => {
   );
 
   assert.doesNotMatch(card, /href="\/goals\//, "行き先の無いゴール詳細リンクを作らない");
-  assert.doesNotMatch(card, /<a\b[^>]*>\s*<h4\b/, "見出しをリンクにしない");
+  assert.doesNotMatch(card, /<a\b[^>]*>\s*<h3\b/, "見出しをリンクにしない");
 });

@@ -28,7 +28,7 @@ const renderSidebar = (
   );
 
 const sideFoot = (html: string): string => {
-  const match = /<div class="side-foot">([\s\S]*?)<\/div>/.exec(html);
+  const match = /<(?:div|details)\b[^>]*\bclass="side-foot"[^>]*>([\s\S]*?)<\/(?:div|details)>/.exec(html);
   assert.ok(match, `サイドバー下端（.side-foot）が描画されていません: ${html}`);
   return match[1]!;
 };

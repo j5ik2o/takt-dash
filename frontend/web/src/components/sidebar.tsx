@@ -25,10 +25,34 @@ const PAGES = [
   { href: "/conversations", label: "会話" },
 ] as const;
 
-// 現在のパスと一致するナビだけを現在ページにする。前方一致にすると "/" が
-// すべてのページで一致してしまうため、完全一致で判定する。
-export const isCurrentPath = (currentPath: string | undefined, href: string): boolean =>
-  currentPath !== undefined && currentPath === href;
+// 現在ページの判定に使う先頭セグメントを取り出す。クエリやハッシュは無視し、
+// 先頭の空でないセグメントだけを見る。"goals" と "goalsx" は別セグメントになる。
+const firstSegment = (path: string): string => path.split(/[/?#]/).filter((part) => part !== "")[0] ?? "";
+
+// パスをナビの項目へ対応付ける。ゴール配下のタスク詳細（"/tasks/..."）は
+// ゴールの項目（"/goals"）として示す。それ以外は先頭セグメントで決める。
+const navSegmentOf = (path: string): string => {
+  const segment = firstSegment(path);
+  return segment === "tasks" ? "goals" : segment;
+};
+
+// 現在のパスがナビの項目に対応するかを判定する。完全一致に加え、先頭セグメントが
+// 一致する詳細ページ（"/goals/goal-1" は "/goals"）も現在ページにする。"/" は
+// 完全一致したときだけ対象にし、"/runs/..." のようにナビに対応が無いパスは
+// どの項目にも一致させない。
+export const isCurrentPath = (currentPath: string | undefined, href: string): boolean => {
+  if (currentPath === undefined) {
+    return false;
+  }
+  if (currentPath === href) {
+    return true;
+  }
+  if (href === "/") {
+    return false;
+  }
+  const currentSegment = navSegmentOf(currentPath);
+  return currentSegment !== "" && currentSegment === navSegmentOf(href);
+};
 
 export function Sidebar({
   servers,
@@ -83,7 +107,8 @@ export function Sidebar({
           })}
         </ul>
       </div>
-      <div className="side-foot">
+      <details className="side-foot">
+        <summary>詳細</summary>
         <p>最終読み取り時刻 {readAt ? formatClock(readAt) : "不明"}</p>
         <p>
           {servers.length}台中{connectedCount}台から読めています
@@ -95,7 +120,7 @@ export function Sidebar({
           backend {backendBuild.commit} ({backendBuild.branch})
         </p>
         {commitsDiffer(frontendBuild, backendBuild) ? <p>コミットが不一致です</p> : null}
-      </div>
+      </details>
     </nav>
   );
 }

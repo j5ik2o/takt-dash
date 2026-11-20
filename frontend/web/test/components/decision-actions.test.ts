@@ -474,24 +474,32 @@ test("選択肢の回答は先頭以外を選んでも、選んだ選択肢を�
   assert.equal(answered.action.payload.text, "来週", "選んだ選択肢をそのまま送信する");
 });
 
-test("一覧の操作要素と入力欄は対象を識別できる name を持つ", () => {
+// issue #317 D30: 操作ボタンの読み上げ名は簡潔な操作名にし、対象の識別は周囲の
+// 「対象:」表示（.target）で行う。可視の操作名をそのまま読み上げ名にし、対象識別子を
+// 読み上げ名へ埋め込まない。
+test("一覧の操作要素は簡潔な操作名を持ち、対象は周囲の項目で識別できる", () => {
   const mergeHtml = renderDecisions(stateWith([merge()]));
-  assert.match(mergeHtml, /aria-label="マージを承認（[^"]*corporate-site[^"]*PR #418[^"]*）"/);
+  assert.match(mergeHtml, /<button[^>]*>マージを承認<\/button>/);
+  assert.doesNotMatch(mergeHtml, /aria-label="マージを承認（/);
+  assert.match(mergeHtml, /<span class="target">対象: プルリクエスト #418<\/span>/);
 
   const registrationHtml = renderDecisions(stateWith([registration()]));
-  assert.match(registrationHtml, /aria-label="承認（[^"]*takt[^"]*revision 7[^"]*）"/);
-  assert.match(registrationHtml, /aria-label="却下（[^"]*takt[^"]*revision 7[^"]*）"/);
+  assert.match(registrationHtml, /<button[^>]*>承認<\/button>/);
+  assert.match(registrationHtml, /<button[^>]*>却下<\/button>/);
+  assert.doesNotMatch(registrationHtml, /aria-label="承認（/);
+  assert.doesNotMatch(registrationHtml, /aria-label="却下（/);
 
   const optionsHtml = renderDecisions(
     stateWith([findDecision((decision) => decision.inquiryId === "inquiry-options")]),
   );
-  assert.match(optionsHtml, /aria-label="今週（[^"]*inquiry-options[^"]*）"/);
+  assert.match(optionsHtml, /<button[^>]*>今週<\/button>/);
+  assert.doesNotMatch(optionsHtml, /aria-label="今週（/);
 
   const textHtml = renderDecisions(
     stateWith([findDecision((decision) => decision.inquiryId === "inquiry-text")]),
   );
-  assert.match(textHtml, /aria-label="回答（[^"]*inquiry-text[^"]*）"/);
-  assert.match(textHtml, /aria-label="回答する（[^"]*inquiry-text[^"]*）"/);
+  assert.match(textHtml, /<button[^>]*>回答する<\/button>/);
+  assert.doesNotMatch(textHtml, /aria-label="回答する（/);
 });
 
 test("操作の結果は成功を status、失敗を alert として表示する", () => {
