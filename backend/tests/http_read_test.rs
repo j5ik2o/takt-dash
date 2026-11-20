@@ -135,6 +135,31 @@ async fn a_server_that_keeps_returning_404_fails_instead_of_looping() {
 }
 
 #[tokio::test]
+async fn session_loss_on_tools_call_retries_once_then_surfaces_failure() {
+  // initialize は成功するが tools/call の時点でセッションが消えているサーバーでは、
+  // セッションを作り直して 1 回だけ再試行し、それでも 404 なら失敗として表面化する。
+  // initialize の回数と tools/call の回数を数え、再試行が 1 回で止まることを確認する。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let server = HttpMockServer::start(&state, Some("drop-session-on-call"));
+  let cwd = project_dir(directory.path());
+  let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
+
+  let error = handle.read_snapshot(&cwd, None).await.expect_err("tools/call が 404 を返し続ける場合は読み取り失敗です");
+  assert!(matches!(error, ToolError::Transport(_)), "セッション消失の失敗は輸送エラーです: {error}");
+
+  let events = server.session_events();
+  assert_eq!(
+    events.iter().filter(|event| event.starts_with("new ")).count(),
+    2,
+    "initialize は初回と再試行の 2 回だけです: {events:?}"
+  );
+  let calls = server.recorded_calls();
+  assert_eq!(calls.len(), 2, "tools/call は初回と再試行の 2 回だけです: {calls:?}");
+  assert!(calls.iter().all(|call| call["name"] == calls[0]["name"]), "再試行は同じ道具を送り直します: {calls:?}");
+}
+
+#[tokio::test]
 async fn connection_refused_is_a_transport_error_not_an_empty_snapshot() {
   // 常駐サーバーが落ちている（接続拒否）ときは、空 snapshot を成功として返さず輸送エラーにする。
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");

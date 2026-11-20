@@ -18,7 +18,7 @@ use takt_dash_backend::{
   config::Thresholds,
   domain::{SilentMinutes, StaleMinutes},
   mcp::McpClientRegistry,
-  model::ConnectionState,
+  model::{ConnectionState, GoalStatus},
   poller::Poller,
   store::StateStore,
 };
@@ -85,6 +85,60 @@ impl Harness {
     let mut servers = BTreeMap::new();
     servers.insert("mac-mini-read".to_owned(), server_meta());
     let projects = projects.iter().map(|name| common::project(name, &directory.path().join(name))).collect();
+    let store = Arc::new(StateStore::new(servers, projects, Thresholds {
+      pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
+      run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
+      connection_failure_count:       3,
+      connection_delay_seconds:       120,
+    }));
+    let activity_db_path = directory.path().join("events.sqlite");
+    let activity = Arc::new(ActivityStore::open(&activity_db_path).expect("SQLite を開けます"));
+    let (changes, _) = tokio::sync::broadcast::channel(16);
+    Harness { _directory: directory, config_path, activity, store, changes }
+  }
+
+  /// 読み取りと書き込みに別々の stdio 接続先を指定する設定を作る。
+  fn with_split_stdio_servers(state: Value) -> Self {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let config_path = directory.path().join("taktdash.config.json");
+    let state_path = directory.path().join("state.json");
+    write_json(&state_path, &state);
+    let project_dir = directory.path().join("takt-dash");
+    std::fs::create_dir_all(&project_dir).expect("プロジェクトの cwd を作れます");
+    let cwd = std::fs::canonicalize(&project_dir).expect("cwd の実パスを解決できます").display().to_string();
+    write_json(
+      &config_path,
+      &json!({
+        "mcpServers": {
+          "read-stdio": {
+            "command": "node",
+            "args": [mock_script().display().to_string(), "--state", state_path.display().to_string()],
+            "env": {},
+          },
+          "write-stdio": {
+            "command": "node",
+            "args": [mock_script().display().to_string(), "--state", state_path.display().to_string()],
+            "env": {},
+          },
+        },
+        "servers": {
+          "read-stdio": { "name": "j5ik2o-mac-mini", "kind": "Mac mini", "concurrency": 4 },
+        },
+        "projects": [{
+          "name": "takt-dash",
+          "server": "read-stdio",
+          "writeServer": "write-stdio",
+          "about": "takt-dash の説明",
+          "cwd": cwd,
+        }],
+        "intervalSeconds": 30,
+        "thresholds": { "pendingDecisionStaleMinutes": 240, "runLogSilentMinutes": 10 },
+        "sqlite": { "path": "data/taktdash.sqlite" },
+      }),
+    );
+    let mut servers = BTreeMap::new();
+    servers.insert("read-stdio".to_owned(), server_meta());
+    let projects = vec![common::project("takt-dash", &directory.path().join("takt-dash"))];
     let store = Arc::new(StateStore::new(servers, projects, Thresholds {
       pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
       run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
@@ -190,4 +244,57 @@ async fn write_registry_still_owns_a_child_process_independent_of_http_reads() {
     "書き込み用の接続先は stdio のままです"
   );
   poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn split_stdio_read_and_write_servers_keep_the_read_client_registered() {
+  // 読み取り先と書き込み先が異なる stdio エントリを指す構成でも、定期読み取りは
+  // 読み取り先の子プロセスから読める。書き込み先だけをレジストリに残すと、読み取りが
+  // 「子プロセスがありません」で毎回失敗する。
+  let harness = Harness::with_split_stdio_servers(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  let report = poller.read_cycle_once().await.expect("1 サイクルを実行できます");
+  poller.shutdown().await;
+
+  assert_eq!(report.projects_failed, 0, "読み取り先が異なる stdio でも読み取りは失敗しません");
+  assert_eq!(report.projects_read, 1);
+  let slot = harness.store.slot("takt-dash").expect("スロットがあります");
+  let snapshot = slot.snapshot.expect("snapshot があります");
+  assert_eq!(snapshot.goals.len(), 1, "読み取り先の mock からゴールを読みます");
+}
+
+#[tokio::test]
+async fn switching_the_read_server_from_http_to_stdio_resets_the_diff_baseline() {
+  // 読み取り先を HTTP から stdio へ切り替えたプロジェクトは、旧接続先の snapshot を
+  // 差分基準にしない。切り替え後の初回読み取りは基準化のみで、状態変化の出来事を
+  // 記録しない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let http_state = directory.path().join("http-state.json");
+  write_json(&http_state, &state_with_goal("g1"));
+  let server = HttpMockServer::start(&http_state, None);
+  let harness = Harness::with_http_server(
+    server.url(),
+    server.token(),
+    &["takt-dash"],
+    json!({ "goals": [ { "id": "g1", "status": "completed", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ] }),
+  );
+
+  let mut poller = harness.poller();
+  let first = poller.read_cycle_once().await.expect("HTTP での 1 サイクルを実行できます");
+  assert_eq!(first.projects_read, 1);
+
+  // 設定を書き換え、読み取り先を書き込み用の stdio エントリへ切り替える。
+  let mut config: Value = serde_json::from_str(&std::fs::read_to_string(&harness.config_path).unwrap()).unwrap();
+  config["projects"][0]["server"] = json!("mac-mini-write");
+  write_json(&harness.config_path, &config);
+
+  let second = poller.read_cycle_once().await.expect("stdio での 2 サイクル目を実行できます");
+  poller.shutdown().await;
+
+  assert_eq!(second.projects_read, 1);
+  assert_eq!(second.events_recorded, 0, "切り替え後の初回読み取りは差分基準をリセットし、出来事を記録しません");
+  let slot = harness.store.slot("takt-dash").expect("スロットがあります");
+  let snapshot = slot.snapshot.expect("snapshot があります");
+  assert_eq!(snapshot.goals.len(), 1);
+  assert_eq!(snapshot.goals[0].status, GoalStatus::Completed, "切り替え後の読み取り先から状態を読みます");
 }

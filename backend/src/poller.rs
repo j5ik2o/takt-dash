@@ -42,6 +42,7 @@ pub struct Poller {
 /// ハンドルを作り直し、セッションと差分基準をリセットします。
 struct ProjectRead {
   server: HttpMcpServer,
+  cwd:    PathBuf,
   handle: HttpReadHandle,
 }
 
@@ -209,30 +210,40 @@ impl Poller {
   }
 
   fn sync_clients(&self, config: &Config) {
-    // 書き込み RPC が使う stdio の子プロセスだけをレジストリで管理する。読み取りは常駐 HTTP
-    // サーバーへ向けるため、HTTP 接続先のプロジェクトでは子プロセスを起動しない。
-    // 書き込み先は `write_server`（未設定なら `server`）で決まり、stdio であることは config
-    // が検証済み。
-    let wanted: Vec<(String, String)> = config
-      .projects
-      .iter()
-      .filter(|project| matches!(config.servers.get(&project.write_server), Some(McpServer::Stdio(_))))
-      .map(|project| (project.write_server.clone(), project.name.clone()))
-      .collect();
+    // レジストリは、読み取りと書き込みが使う stdio の子プロセスを管理する。読み取り先
+    // （`server`）と書き込み先（`write_server`、未設定なら `server`）が異なる stdio
+    // エントリを指す場合は双方を登録する。書き込み先だけを残すと、読み取りが
+    // 「子プロセスがありません」で毎回失敗する。読み取りが HTTP 接続先のプロジェクト
+    // では、読み取り用の子プロセスは起動しない。
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for project in &config.projects {
+      for server_id in [&project.server, &project.write_server] {
+        if matches!(config.servers.get(server_id), Some(McpServer::Stdio(_))) {
+          let key = (server_id.clone(), project.name.clone());
+          if !wanted.contains(&key) {
+            wanted.push(key);
+          }
+        }
+      }
+    }
     self.registry.retain(&wanted);
     for project in &config.projects {
-      let Some(McpServer::Stdio(server)) = config.servers.get(&project.write_server) else {
-        continue;
-      };
-      self.registry.client(&project.write_server, &project.name, || client_config(server, &project.cwd));
+      for server_id in [&project.server, &project.write_server] {
+        let Some(McpServer::Stdio(server)) = config.servers.get(server_id) else {
+          continue;
+        };
+        self.registry.client(server_id, &project.name, || client_config(server, &project.cwd));
+      }
     }
   }
 
   /// HTTP 接続先のプロジェクトの読み取りハンドルを、設定に追随させる。
   ///
-  /// 接続先（URL とトークン）が変わったプロジェクトはハンドルを作り直し、セッションと差分基準を
-  /// リセットします。設定から外れたプロジェクトのハンドルは破棄します。stdio 接続先の
-  /// プロジェクトは読み取りハンドルを持たないため、ここで扱いません。
+  /// 接続先（URL とトークン）とプロジェクトの cwd が変わらないプロジェクトはハンドルを
+  /// 使い回します。どちらかが変わったプロジェクトはハンドルを作り直し、セッションと
+  /// 差分基準をリセットします。HTTP から stdio へ切り替わってハンドルを失った
+  /// プロジェクトも、旧接続先の差分基準を新しい読み取り元へ投影しないようリセット
+  /// します。stdio 接続先のプロジェクトは読み取りハンドルを持ちません。
   fn sync_reads(&mut self, config: &Config) {
     let mut rebuilt = Vec::new();
     let mut next = BTreeMap::new();
@@ -241,7 +252,7 @@ impl Poller {
         continue;
       };
       match self.reads.remove(&project.name) {
-        | Some(read) if &read.server == server => {
+        | Some(read) if &read.server == server && read.cwd == project.cwd => {
           next.insert(project.name.clone(), read);
         },
         | _ => {
@@ -249,13 +260,14 @@ impl Poller {
             McpServer::Http(server.clone()).connection(),
             Duration::from_secs(READ_TIMEOUT_SECONDS),
           );
-          next.insert(project.name.clone(), ProjectRead { server: server.clone(), handle });
+          next.insert(project.name.clone(), ProjectRead { server: server.clone(), cwd: project.cwd.clone(), handle });
           rebuilt.push(project.name.clone());
         },
       }
     }
+    let dropped: Vec<String> = self.reads.keys().filter(|name| !next.contains_key(*name)).cloned().collect();
     self.reads = next;
-    for project in rebuilt {
+    for project in rebuilt.into_iter().chain(dropped) {
       self.reset_project_baseline(&project);
     }
   }

@@ -45,6 +45,32 @@ const loadState = () => {
   return JSON.parse(readFileSync(statePath, "utf8"));
 };
 
+// takt_get_goal の textOffset / maxBytes によるテキストページ。stdio mock と同じ形で、
+// 実 takt-mcp の sliceUtf8（forward）と同じく文字境界へそろえる。
+const textPage = (text, offsetRaw, maxBytesRaw) => {
+  const bytes = Buffer.from(String(text), "utf8");
+  const maxBytes = Number(maxBytesRaw ?? 4096);
+  let start = Math.min(Number(offsetRaw ?? 0), bytes.length);
+  let end = Math.min(bytes.length, start + maxBytes);
+  while (start < end && (bytes[start] & 0xc0) === 0x80) start++;
+  while (end > start && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+  return {
+    content: bytes.subarray(start, end).toString("utf8"),
+    totalBytes: bytes.length,
+    offset: start,
+    returnedBytes: end - start,
+    direction: "forward",
+    truncated: start > 0 || end < bytes.length,
+    nextOffset: end < bytes.length ? end : null,
+  };
+};
+
+// 実 takt-mcp の項目不在（selectGoalValue の throw）と同じ道具エラー。stdio mock と同じ。
+const goalFieldMissing = () => ({
+  content: [{ type: "text", text: "Goal read failed: Selected field does not exist" }],
+  isError: true,
+});
+
 const paged = (items, key, offsetRaw) => {
   const offset = Number(offsetRaw ?? 0);
   const page = items.slice(offset, offset + PAGE_SIZE);
@@ -110,7 +136,27 @@ const handleToolCall = (name, args) => {
       if (args.path === undefined) {
         return asText({ goal: detail.summary ?? {} });
       }
-      return asText({ goalId: args.goalId, path: args.path });
+      if ((detail.omitFields ?? []).includes(String(args.path))) {
+        return asText({ goalId: args.goalId, path: args.path });
+      }
+      if (Object.hasOwn(detail.malformedFields ?? {}, String(args.path))) {
+        return asText(detail.malformedFields[String(args.path)]);
+      }
+      if (String(args.path).startsWith("specifications.")) {
+        const notation = String(args.path).slice("specifications.".length);
+        return asText(textPage((detail.specifications ?? {})[notation] ?? "", args.textOffset, args.maxBytes));
+      }
+      const value = detail[args.path];
+      if (Array.isArray(value)) {
+        return asText(paged(value, "items", args.offset));
+      }
+      if (typeof value === "string") {
+        return asText(textPage(value, args.textOffset, args.maxBytes));
+      }
+      if (value === undefined) {
+        return goalFieldMissing();
+      }
+      return asText({ items: value });
     }
     case "takt_get_run": {
       const run = (state.runs ?? {})[args.runSlug];
@@ -237,6 +283,15 @@ const server = createServer((request, response) => {
     }
     if (message.method === "tools/call") {
       const { name, arguments: args } = message.params ?? {};
+      if (behavior === "drop-session-on-call") {
+        // initialize は成功してセッションが採番されるが、tools/call の時点では
+        // セッションが消えている状態を再現する。呼び出しの記録は残す。
+        if (callsPath !== undefined) {
+          appendFileSync(callsPath, `${JSON.stringify({ name, arguments: args })}\n`);
+        }
+        jsonBody(response, 404, { jsonrpc: "2.0", error: { code: -32002, message: "session not found" }, id: message.id ?? null });
+        return;
+      }
       if (callsPath !== undefined) {
         appendFileSync(callsPath, `${JSON.stringify({ name, arguments: args })}\n`);
       }

@@ -74,7 +74,10 @@ async fn screen_reads_return_over_http_without_spawning_a_child_process() {
     .get_goal_detail(GetGoalDetailRequest { goal_id: "g1".to_owned() })
     .await
     .expect("GetGoalDetail が HTTP 経由で返ります");
-  assert_eq!(goal.into_inner().goal_id, "g1");
+  let goal = goal.into_inner();
+  assert_eq!(goal.goal_id, "g1");
+  assert_eq!(goal.objective, "ゴール g1 の目的", "ゴールの目的が HTTP 経由の本文から返ります");
+  assert_eq!(goal.acceptance_criteria, ["条件1".to_owned()], "受け入れ条件が HTTP 経由で返ります");
 
   let task = client
     .get_task_detail(GetTaskDetailRequest {

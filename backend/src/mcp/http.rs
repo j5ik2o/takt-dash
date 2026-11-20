@@ -160,6 +160,9 @@ impl HttpReadHandle {
       ExchangeError::Transport(TransportError::Protocol(format!("Authorization ヘッダを作れませんでした: {error}")))
     })?;
     builder = builder.header("authorization", authorization);
+    // MCP の Streamable HTTP では、応答が JSON と SSE のどちらでも返せることを
+    // Accept で申告しなければならない。実 takt-mcp は申告が無い要求を 406 で拒否する。
+    builder = builder.header("accept", "application/json, text/event-stream");
     if let Some(session) = session {
       let value = HeaderValue::from_str(session).map_err(|error| {
         ExchangeError::Transport(TransportError::Protocol(format!("Mcp-Session-Id を作れませんでした: {error}")))
@@ -174,6 +177,7 @@ impl HttpReadHandle {
       .map_err(|_| ExchangeError::Transport(TransportError::Timeout(self.request_timeout.as_secs())))?
       .map_err(|error| ExchangeError::Transport(TransportError::Io(error.to_string())))?;
     let status = response.status();
+    let content_type = response.headers().get("content-type").and_then(|value| value.to_str().ok()).map(str::to_owned);
     let session_id = response.headers().get("mcp-session-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
     let collected = timeout(self.request_timeout, read_body(response.into_body()))
       .await
@@ -185,11 +189,42 @@ impl HttpReadHandle {
       // 通知の受け付けなど、応答本文を持たない応答。
       return Ok((session_id, JsonRpcIncoming { id: None, result: Some(Value::Null), error: None, method: None }));
     }
-    let incoming: JsonRpcIncoming = serde_json::from_slice(&collected).map_err(|error| {
-      ExchangeError::Transport(TransportError::InvalidJson(format!("{error}: {}", String::from_utf8_lossy(&collected))))
-    })?;
+    let incoming = parse_incoming(&collected, content_type.as_deref())?;
     Ok((session_id, incoming))
   }
+}
+
+/// 応答本文を JSON-RPC メッセージとして読む。
+///
+/// 通常の応答は `application/json` の本文そのものである。サーバーが
+/// `text/event-stream` で返す場合は、ストリーム内の `data:` 行のうち、結果か
+/// エラーを持つ最後のメッセージを応答として採用する。通知だけのストリームは
+/// 応答ではないため、失敗として表面化させる。
+fn parse_incoming(body: &[u8], content_type: Option<&str>) -> Result<JsonRpcIncoming, ExchangeError> {
+  if content_type.is_some_and(|value| value.contains("text/event-stream")) {
+    let text = String::from_utf8_lossy(body);
+    let mut response: Option<JsonRpcIncoming> = None;
+    for line in text.lines() {
+      let Some(data) = line.trim().strip_prefix("data:") else {
+        continue;
+      };
+      let Ok(incoming) = serde_json::from_str::<JsonRpcIncoming>(data.trim()) else {
+        continue;
+      };
+      if incoming.result.is_some() || incoming.error.is_some() {
+        response = Some(incoming);
+      }
+    }
+    return response.ok_or_else(|| {
+      ExchangeError::Transport(TransportError::InvalidJson(format!(
+        "text/event-stream の応答に結果を持つメッセージがありません: {}",
+        text.chars().take(200).collect::<String>()
+      )))
+    });
+  }
+  serde_json::from_slice(body).map_err(|error| {
+    ExchangeError::Transport(TransportError::InvalidJson(format!("{error}: {}", String::from_utf8_lossy(body))))
+  })
 }
 
 impl HttpReadHandle {
@@ -277,5 +312,35 @@ impl ExchangeError {
       },
       | ExchangeError::Transport(error) => error,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn parses_a_plain_json_response() {
+    let incoming = match parse_incoming(br#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#, Some("application/json")) {
+      | Ok(incoming) => incoming,
+      | Err(_) => panic!("JSON 応答を読めます"),
+    };
+    assert_eq!(incoming.result, Some(json!({ "ok": true })));
+  }
+
+  #[test]
+  fn parses_the_response_message_out_of_an_event_stream() {
+    let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":true}}\n\n";
+    let incoming = match parse_incoming(body.as_bytes(), Some("text/event-stream")) {
+      | Ok(incoming) => incoming,
+      | Err(_) => panic!("SSE 応答を読めます"),
+    };
+    assert_eq!(incoming.result, Some(json!({ "ok": true })));
+  }
+
+  #[test]
+  fn an_event_stream_without_a_response_message_is_an_error() {
+    let body = "data: {\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n\n";
+    assert!(parse_incoming(body.as_bytes(), Some("text/event-stream")).is_err(), "応答が無い SSE は失敗です");
   }
 }
