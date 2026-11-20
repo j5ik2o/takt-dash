@@ -14,12 +14,15 @@ use tokio::sync::{broadcast, watch};
 
 use crate::{
   activity::ActivityStore,
-  config::{load_config, Config, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
+  config::{load_config, Config, HttpMcpServer, McpServer, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
-  mcp::{client_config, McpClientRegistry, ToolError, ToolSet},
+  mcp::{client_config, HttpReadHandle, McpClientRegistry, ToolError, ToolSet},
   model::{ConnectionState, ConnectionTransition, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot},
   store::StateStore,
 };
+
+/// 読み取り 1 回のタイムアウト。常駐サーバーとの往復に十分な余裕を持たせます。
+const READ_TIMEOUT_SECONDS: u64 = 15;
 
 /// 定期読み取りを1サイクル実行するための調整役。
 pub struct Poller {
@@ -27,11 +30,19 @@ pub struct Poller {
   activity:       Arc<ActivityStore>,
   store:          Arc<StateStore>,
   registry:       McpClientRegistry,
+  reads:          BTreeMap<String, ProjectRead>,
   previous:       BTreeMap<String, ProjectSnapshot>,
   /// 最後に出来事の記録へ成功した接続状態。接続断・復帰の再検出を防ぐ比較基準。
   notified:       BTreeMap<String, ConnectionState>,
   changes:        broadcast::Sender<()>,
   last_signature: Option<StoreSignature>,
+}
+
+/// 1 プロジェクトの読み取りハンドルと、そのハンドルを作った接続先。接続先が変わったら
+/// ハンドルを作り直し、セッションと差分基準をリセットします。
+struct ProjectRead {
+  server: HttpMcpServer,
+  handle: HttpReadHandle,
 }
 
 /// 1サイクルで読み取った件数と、記録した出来事の件数、次の待機に使う間隔。
@@ -61,6 +72,7 @@ impl Poller {
       activity,
       store,
       registry,
+      reads: BTreeMap::new(),
       previous: BTreeMap::new(),
       notified: BTreeMap::new(),
       changes,
@@ -93,6 +105,7 @@ impl Poller {
     self.store.set_servers(config.server_meta.clone());
     self.store.set_projects(config.projects.clone());
     self.sync_clients(&config);
+    self.sync_reads(&config);
     let mut report = CycleReport {
       projects_read:   0,
       projects_failed: 0,
@@ -196,14 +209,54 @@ impl Poller {
   }
 
   fn sync_clients(&self, config: &Config) {
-    let wanted: Vec<(String, String)> =
-      config.projects.iter().map(|project| (project.server.clone(), project.name.clone())).collect();
+    // 書き込み RPC が使う stdio の子プロセスだけをレジストリで管理する。読み取りは常駐 HTTP
+    // サーバーへ向けるため、HTTP 接続先のプロジェクトでは子プロセスを起動しない。
+    // 書き込み先は `write_server`（未設定なら `server`）で決まり、stdio であることは config
+    // が検証済み。
+    let wanted: Vec<(String, String)> = config
+      .projects
+      .iter()
+      .filter(|project| matches!(config.servers.get(&project.write_server), Some(McpServer::Stdio(_))))
+      .map(|project| (project.write_server.clone(), project.name.clone()))
+      .collect();
     self.registry.retain(&wanted);
     for project in &config.projects {
-      let Some(server) = config.servers.get(&project.server) else {
+      let Some(McpServer::Stdio(server)) = config.servers.get(&project.write_server) else {
         continue;
       };
-      self.registry.client(&project.server, &project.name, || client_config(server, &project.cwd));
+      self.registry.client(&project.write_server, &project.name, || client_config(server, &project.cwd));
+    }
+  }
+
+  /// HTTP 接続先のプロジェクトの読み取りハンドルを、設定に追随させる。
+  ///
+  /// 接続先（URL とトークン）が変わったプロジェクトはハンドルを作り直し、セッションと差分基準を
+  /// リセットします。設定から外れたプロジェクトのハンドルは破棄します。stdio 接続先の
+  /// プロジェクトは読み取りハンドルを持たないため、ここで扱いません。
+  fn sync_reads(&mut self, config: &Config) {
+    let mut rebuilt = Vec::new();
+    let mut next = BTreeMap::new();
+    for project in &config.projects {
+      let Some(McpServer::Http(server)) = config.servers.get(&project.server) else {
+        continue;
+      };
+      match self.reads.remove(&project.name) {
+        | Some(read) if &read.server == server => {
+          next.insert(project.name.clone(), read);
+        },
+        | _ => {
+          let handle = HttpReadHandle::new(
+            McpServer::Http(server.clone()).connection(),
+            Duration::from_secs(READ_TIMEOUT_SECONDS),
+          );
+          next.insert(project.name.clone(), ProjectRead { server: server.clone(), handle });
+          rebuilt.push(project.name.clone());
+        },
+      }
+    }
+    self.reads = next;
+    for project in rebuilt {
+      self.reset_project_baseline(&project);
     }
   }
 
@@ -220,16 +273,22 @@ impl Poller {
   /// 1 プロジェクトを読み取る。補助読み取り（run・ゴール質問・通知・ゴールに属さない
   /// 問い合わせ）の道具エラーは read_snapshot 内で前回値に縮退するため、ここで返る失敗は
   /// コア読み取り（ゴール・タスク）の失敗と、補助読み取りの輸送エラー・解析エラーだけです。
+  ///
+  /// HTTP 接続先のプロジェクトは常駐サーバーのハンドルから読み、stdio 接続先のプロジェクトは
+  /// 従来どおりレジストリの子プロセスから読みます。
   async fn read_one(
     &mut self,
     project: &Project,
     prev: Option<&ProjectSnapshot>,
   ) -> Result<ProjectSnapshot, ToolError> {
+    if let Some(read) = self.reads.get_mut(&project.name) {
+      return read.handle.read_snapshot(&project.cwd, prev).await;
+    }
     let Some(client) = self.registry.get(&project.server, &project.name) else {
       return Err(ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name)));
     };
     let mut client = client.lock().await;
-    ToolSet::new(&mut client, project.cwd.clone()).read_snapshot(prev).await
+    ToolSet::new(&mut *client, project.cwd.clone()).read_snapshot(prev).await
   }
 }
 

@@ -13,9 +13,9 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use super::client::{CallError, McpClient, McpClientConfig};
+use super::client::{CallError, McpClientConfig, ToolCaller};
 use crate::{
-  config::McpServer,
+  config::StdioMcpServer,
   domain::{GoalId, InquiryId, MergeUntil, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   model::{
     GoalDetail, GoalEntry, GoalQuestionEntry, GoalTaskEntry, GoalWorkLogEntry, InquiryEntry, NotificationEntry,
@@ -40,9 +40,10 @@ use self::{
 
 /// takt-mcp 子プロセスの起動設定を作る。
 ///
-/// poller の定期読み取りと GetRunDetail の要求時読み取りが、同じ起動条件（タイムアウトを含む）を
-/// 共有するために公開します。
-pub fn client_config(server: &McpServer, cwd: &std::path::Path) -> McpClientConfig {
+/// 書き込み RPC が stdio の子プロセスを起動し、poller が書き込み子プロセスを管理するための
+/// 起動条件（タイムアウトを含む）を共有するために公開します。読み取りは常駐 HTTP サーバーを
+/// 使うため、この起動設定は使いません。
+pub fn client_config(server: &StdioMcpServer, cwd: &std::path::Path) -> McpClientConfig {
   McpClientConfig {
     command:         server.command.clone(),
     args:            server.args.clone(),
@@ -79,7 +80,7 @@ impl From<CallError> for ToolError {
 /// takt-mcp の読み取り道具は入力引数に絶対パスの `cwd` を必須とするため、この道具のまとまりは
 /// 対象プロジェクトの `cwd` を保持し、すべての tools/call の引数へ渡します。
 pub struct ToolSet<'a> {
-  client:    &'a mut McpClient,
+  client:    &'a mut dyn ToolCaller,
   cwd:       PathBuf,
   workflows: HashMap<String, Option<Vec<String>>>,
 }
@@ -91,7 +92,7 @@ const MAX_PAGES: usize = 100;
 const SPECIFICATION_NOTATIONS: [&str; 3] = ["gherkin", "quint", "alloy"];
 
 impl<'a> ToolSet<'a> {
-  pub fn new(client: &'a mut McpClient, cwd: PathBuf) -> Self {
+  pub fn new(client: &'a mut dyn ToolCaller, cwd: PathBuf) -> Self {
     ToolSet { client, cwd, workflows: HashMap::new() }
   }
 

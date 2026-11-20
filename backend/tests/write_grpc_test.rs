@@ -1421,3 +1421,46 @@ async fn write_rpc_rebuild_resets_the_baseline_before_the_next_poll_cycle() {
   let snapshot = slot.snapshot.expect("新しい設定で読み取った状態があります");
   assert_eq!(snapshot.goals[0].execution_status, ExecutionStatus::Paused, "新しい設定の状態を読み取ります");
 }
+
+#[tokio::test]
+async fn write_over_http_read_project_routes_to_the_stdio_write_server() {
+  // 読み取りを HTTP へ切り替えたプロジェクトでも、書き込みは `writeServer` の stdio で成功し、
+  // 書き込み道具が HTTP サーバーへ渡らないことを観測する。書き込み先は読み取り先と別 id。
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", std::path::Path::new("/abs/takt-dash")), server_meta(), json!({}))
+    .http_read()
+    .build();
+  harness.store.record_success(
+    "takt-dash",
+    snapshot_with(vec![inquiry_entry(
+      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e",
+      "11111111-1111-4111-8111-111111111111",
+      InquiryKind::Question,
+    )]),
+    time("2026-11-13T12:00:00Z"),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "takt-dash".to_owned(),
+      goal_id:    Some("11111111-1111-4111-8111-111111111111".to_owned()),
+      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect("HTTP 読み取りのプロジェクトでも writeServer の stdio で回答できます");
+
+  let calls = calls_named(&harness, "takt_answer_goal_question");
+  assert_eq!(calls.len(), 1, "書き込みは stdio の子プロセスへ渡ります");
+  let http_calls = harness.http_recorded_calls();
+  assert!(
+    !http_calls.iter().any(|call| call["name"] == "takt_answer_goal_question"),
+    "書き込み道具を HTTP サーバーへ渡しません: {http_calls:?}"
+  );
+
+  server.stop().await;
+}
