@@ -30,6 +30,102 @@ cargo build -p takt-dash-backend
 プロジェクト（`servers` / `projects`）、読み取り間隔、異常判定の閾値を書きます。
 takt-mcp に接続できない環境でも gRPC サーバー自体は起動し、状態は空として返します。
 
+## 読み取りを常駐 HTTP サーバーへ向ける
+
+`mcpServers` のエントリは、子プロセスを起動する stdio 起動方法か、ホストごとに常駐する
+takt-mcp の HTTP サーバーの接続先（`type: "http"`）のどちらかです。HTTP 接続先に向けた
+プロジェクトの読み取り（定期読み取りと画面の詳細）は、常駐サーバーへ `tools/call` を送ります。
+HTTP サーバーは `127.0.0.1` のみで待ち受け、`Authorization: Bearer <token>` の完全一致を要求します。
+書き込み操作（回答・マージ・承認・却下）は stdio の子プロセスが担います。
+
+`taktdash.config.json` の `mcpServers` に、ホストごとの HTTP 接続先を登録します。値は環境依存です。
+`taktdash.config.json` は `.gitignore` の対象で、リポジトリには実トークンを入れません。
+
+```json
+{
+  "mcpServers": {
+    "mac-mini-read": {
+      "type": "http",
+      "url": "http://127.0.0.1:43117/",
+      "headers": { "Authorization": "Bearer <実際のトークン>" }
+    }
+  }
+}
+```
+
+URL のホストは `127.0.0.1` に限ります。`Authorization` は `Bearer ` で始まる必要があります。
+
+読み取りを HTTP へ向けたプロジェクトでも、書き込みは stdio の takt-mcp へ向けます。プロジェクトの
+`server` が読み取り接続先、`writeServer` が書き込み接続先です。`writeServer` は stdio（`command`）の
+エントリである必要があり、省略した場合は `server` と同じ id を使います。
+
+```json
+{
+  "mcpServers": {
+    "mac-mini-read": {
+      "type": "http",
+      "url": "http://127.0.0.1:43117/",
+      "headers": { "Authorization": "Bearer <実際のトークン>" }
+    },
+    "mac-mini-write": { "command": "node", "args": ["/Users/you/local/takt-custom/dist/app/mcp/index.js"], "env": {} }
+  },
+  "projects": [
+    { "name": "takt-dash", "server": "mac-mini-read", "writeServer": "mac-mini-write", "cwd": "/Users/you/Sources/j5ik2o.github.com/j5ik2o/takt-dash" }
+  ]
+}
+```
+
+### 常駐サーバーを起動・停止・再起動する
+
+実機の takt-custom の dist にある takt-mcp を、ポートとトークンを固定して HTTP モードで起動します。
+
+```bash
+# 起動（--http-port と --http-token で固定する。トークンは環境依存の設定から渡す）
+node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117 --http-token "$TAKTDASH_HTTP_TOKEN"
+# 停止
+kill "$(cat ~/Library/Application\ Support/taktdash/takt-mcp-http.pid)"
+# 再起動
+kill "$(cat ~/Library/Application\ Support/taktdash/takt-mcp-http.pid)"
+node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117 --http-token "$TAKTDASH_HTTP_TOKEN"
+```
+
+サーバーは起動時に `MCP HTTP listening on http://127.0.0.1:<port>/` を標準エラーへ出します。
+サーバーが落ちていると、backend の読み取りは空の結果ではなく失敗として表面化し、
+該当プロジェクトの接続状態が遅延中・応答なしへ進みます（`プロジェクトの読み取りに失敗しました` のログ）。
+
+### launchd に登録する
+
+`~/Library/LaunchAgents/com.example.taktdash-takt-mcp-http.plist` を作り、起動時に常駐サーバーを
+立ち上げます。トークンは plist に直書きせず、環境依存の設定ファイルや `launchctl setenv` で渡します。
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.taktdash-takt-mcp-http</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>node</string>
+    <string>/Users/you/local/takt-custom/dist/app/mcp/index.js</string>
+    <string>--http</string>
+    <string>--http-port</string><string>43117</string>
+    <string>--http-token</string><string>REPLACE_WITH_ENV_TOKEN</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/taktdash-takt-mcp-http.err.log</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.example.taktdash-takt-mcp-http.plist    # 登録して起動
+launchctl unload ~/Library/LaunchAgents/com.example.taktdash-takt-mcp-http.plist  # 停止して解除
+launchctl kickstart -k gui/"$(id -u)"/com.example.taktdash-takt-mcp-http           # 再起動
+```
+
 ## フロントエンドを起動する
 
 バックエンドの待ち受けアドレスを `TAKTDASH_BACKEND_ADDR` で指定して起動します。
