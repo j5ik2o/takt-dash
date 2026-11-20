@@ -157,6 +157,12 @@ impl TryFrom<&str> for HttpServerEndpoint {
     if port == 0 {
       return Err(ConfigError::Invalid(format!("HTTP 接続先 {url} のポート番号は 1 以上である必要があります。")));
     }
+    let path = &rest[authority.len()..];
+    if !path.is_empty() && path != "/" {
+      return Err(ConfigError::Invalid(format!(
+        "HTTP 接続先 {url} のパス {path} はサポートしません。実機の takt-mcp は / だけを公開します。"
+      )));
+    }
     Ok(HttpServerEndpoint { port })
   }
 }

@@ -406,10 +406,15 @@ fn present_body(speaker: ConversationSpeaker, raw_text: String) -> PresentedBody
 /// `## このターンの入力` の包みから、`speaker` を持つ JSON の `text` を取り出す。
 ///
 /// 見出しより後だけを対象にし、行単位で JSON を解釈します。`speaker` を持たない
-/// JSON や、包みの無い本文は対象にしません。
+/// JSON や、包みの無い本文は対象にしません。前のターンの本文に同じ見出しが
+/// 含まれていても、現在の包みは行頭の見出しのうち最後のものです。
 fn unwrap_user_input(raw: &str) -> Option<String> {
   const MARKER: &str = "## このターンの入力";
-  let start = raw.find(MARKER)? + MARKER.len();
+  let start = raw
+    .match_indices(MARKER)
+    .filter(|(index, _)| *index == 0 || raw.as_bytes()[index - 1] == b'\n')
+    .last()
+    .map(|(index, _)| index + MARKER.len())?;
   for line in raw[start..].lines() {
     let trimmed = line.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {

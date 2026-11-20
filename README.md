@@ -96,7 +96,8 @@ node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117
 ### launchd に登録する
 
 `~/Library/LaunchAgents/com.example.taktdash-takt-mcp-http.plist` を作り、起動時に常駐サーバーを
-立ち上げます。トークンは plist に直書きせず、環境依存の設定ファイルや `launchctl setenv` で渡します。
+立ち上げます。トークンは plist に直書きせず、`launchctl setenv` で渡します。
+`ProgramArguments` は環境変数を展開しないため、シェルを経由して環境からトークンを読ませます。
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -106,12 +107,9 @@ node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117
   <key>Label</key><string>com.example.taktdash-takt-mcp-http</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>node</string>
-    <string>/Users/you/local/takt-custom/dist/app/mcp/index.js</string>
-    <string>--http</string>
-    <string>--http-port</string><string>43117</string>
-    <string>--http-token</string><string>REPLACE_WITH_ENV_TOKEN</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117 --http-token "$TAKTDASH_HTTP_TOKEN"</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

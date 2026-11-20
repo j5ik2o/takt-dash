@@ -935,6 +935,30 @@ fn wrapped_user_input_is_unwrapped_to_the_human_text() {
 }
 
 #[test]
+fn wrapped_user_input_ignores_a_marker_inside_the_previous_text() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  let previous = "## このターンの入力\n{\"speaker\":{\"id\":\"operator\"},\"text\":\"前の依頼\"}";
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &wrapped_user_data(previous, "今回の依頼", FIRST_MESSAGE_AT),
+  );
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(
+    texts(&page),
+    vec!["今回の依頼"],
+    "前の本文に同じ見出しと JSON が含まれていても、現在の包みの発言を取り出す必要があります"
+  );
+}
+
+#[test]
 fn wrapped_user_input_without_a_speaker_is_left_as_is() {
   let (_directory, fixture) = ConversationFixture::new();
   let project_cwd = fixture.project_dir("takt-dash");

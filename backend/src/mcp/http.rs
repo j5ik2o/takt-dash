@@ -168,6 +168,10 @@ impl HttpReadHandle {
         ExchangeError::Transport(TransportError::Protocol(format!("Mcp-Session-Id を作れませんでした: {error}")))
       })?;
       builder = builder.header(HeaderName::from_static("mcp-session-id"), value);
+      // 初期化で合意した版（2025-06-18）では、初期化後の要求に MCP-Protocol-Version が
+      // 必須です。付けないと、サーバーは要求を旧版として解釈することがあります。
+      builder =
+        builder.header(HeaderName::from_static("mcp-protocol-version"), HeaderValue::from_static(PROTOCOL_VERSION));
     }
     let request = builder
       .body(Full::new(Bytes::from(body)))
@@ -197,18 +201,34 @@ impl HttpReadHandle {
 /// 応答本文を JSON-RPC メッセージとして読む。
 ///
 /// 通常の応答は `application/json` の本文そのものである。サーバーが
-/// `text/event-stream` で返す場合は、ストリーム内の `data:` 行のうち、結果か
+/// `text/event-stream` で返す場合は、ストリーム内のイベントのうち、結果か
 /// エラーを持つ最後のメッセージを応答として採用する。通知だけのストリームは
 /// 応答ではないため、失敗として表面化させる。
 fn parse_incoming(body: &[u8], content_type: Option<&str>) -> Result<JsonRpcIncoming, ExchangeError> {
   if content_type.is_some_and(|value| value.contains("text/event-stream")) {
     let text = String::from_utf8_lossy(body);
-    let mut response: Option<JsonRpcIncoming> = None;
+    // SSE では1つのイベントの JSON を複数の `data:` 行へ分けることがあるため、
+    // 空行で区切られたイベントごとに `data:` 行を改行で連結してから解釈します。
+    let mut events: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
     for line in text.lines() {
-      let Some(data) = line.trim().strip_prefix("data:") else {
+      if line.trim().is_empty() {
+        if !current.is_empty() {
+          events.push(current.join("\n"));
+          current.clear();
+        }
         continue;
-      };
-      let Ok(incoming) = serde_json::from_str::<JsonRpcIncoming>(data.trim()) else {
+      }
+      if let Some(data) = line.trim_start().strip_prefix("data:") {
+        current.push(data.strip_prefix(' ').unwrap_or(data));
+      }
+    }
+    if !current.is_empty() {
+      events.push(current.join("\n"));
+    }
+    let mut response: Option<JsonRpcIncoming> = None;
+    for data in &events {
+      let Ok(incoming) = serde_json::from_str::<JsonRpcIncoming>(data) else {
         continue;
       };
       if incoming.result.is_some() || incoming.error.is_some() {
@@ -392,6 +412,16 @@ mod tests {
     let incoming = match parse_incoming(body.as_bytes(), Some("text/event-stream")) {
       | Ok(incoming) => incoming,
       | Err(_) => panic!("SSE 応答を読めます"),
+    };
+    assert_eq!(incoming.result, Some(json!({ "ok": true })));
+  }
+
+  #[test]
+  fn parses_an_event_stream_message_split_across_data_lines() {
+    let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\ndata: \"result\":{\"ok\":true}}\n\n";
+    let incoming = match parse_incoming(body.as_bytes(), Some("text/event-stream")) {
+      | Ok(incoming) => incoming,
+      | Err(_) => panic!("複数行に分かれた data を連結して SSE 応答を読めます"),
     };
     assert_eq!(incoming.result, Some(json!({ "ok": true })));
   }

@@ -343,7 +343,12 @@ impl McpProcess {
         continue;
       }
       if let Some(error) = incoming.error {
-        return Err(TransportError::Rpc { code: error.code, message: error.message });
+        // 中断した呼び出しのエラー応答が残っていても、それはこの要求の失敗では
+        // ありません。ID が一致するエラーと、ID を持たないプロトコルのエラーだけを返します。
+        if incoming.id.is_none() || incoming.id.as_ref().and_then(Value::as_u64) == Some(id) {
+          return Err(TransportError::Rpc { code: error.code, message: error.message });
+        }
+        continue;
       }
       if incoming.id.as_ref().and_then(Value::as_u64) == Some(id) {
         return Ok(incoming.result.unwrap_or(Value::Null));

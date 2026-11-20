@@ -613,6 +613,19 @@ fn http_url_with_a_host_other_than_loopback_is_rejected() {
 }
 
 #[test]
+fn http_url_with_a_non_root_path_is_rejected() {
+  for url in ["http://127.0.0.1:43117/mcp", "http://127.0.0.1:43117/mcp/"] {
+    let text =
+      format!(r#"{{ "mcpServers": {{ "remote": {} }}, "projects": [] }}"#, http_entry(url, "Bearer <redacted>"));
+    let error = parse_config(&text, Path::new("/base")).expect_err("ルート以外のパスを持つ HTTP 接続先は拒否します");
+    assert!(
+      matches!(&error, ConfigError::Invalid(message) if message.contains("パス")),
+      "パスを指摘する検証エラーになります: {error}"
+    );
+  }
+}
+
+#[test]
 fn http_entry_without_authorization_header_is_rejected() {
   let text = r#"{
     "mcpServers": { "anonymous": { "type": "http", "url": "http://127.0.0.1:7801/" } },
