@@ -19,6 +19,7 @@
 //     "runs": { "<runSlug>": {"runSlug","currentStep","startedAt","currentStepStartedAt","stepLogs",
 //                              "sessionId","summary","workflow","status","currentIteration","currentStepExecutionCount",
 //                              "phase","logTail","lastLogAt","taskText","reports","instructions"} },
+//       reports は [ {"filename","sizeBytes","content"} ]。content は view "report" の本文になる。
 //     "workflows": { "<workflow名>": ["plan", "implement", ...] },
 //     "notifications": { "<goalId>": [ {"id","kind","body","recordedAt"} ] },
 //     "goalDetails": {
@@ -42,10 +43,14 @@
 //     "responses": { "<道具名>": {...} },  // 指定した書き込み道具の応答を丸ごと差し替える
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
+//     "hang": ["takt_list_goal_questions:g1", "takt_get_run:r1@120"], // 指定した呼び出しだけ応答しない。
+//     "delayMs": { "takt_list_goals": 1000 },            // 道具ごとに応答を遅らせる。
+//     "delays": { "takt_list_goals": 1500 },  // 指定した道具の応答を指定ミリ秒だけ遅らせる
+//     "hangOnce": ["takt_list_goals"]  // 指定した道具は最初の子プロセスだけ応答しない（マーカーが残る）
 //   }
 // --calls <path> を渡すと、受け取った tools/call を {"name","arguments"} の JSONL として追記する。
 // --processes <path> を渡すと、起動時に自分の pid を 1 行追記する。
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isAbsolute } from "node:path";
 
@@ -57,6 +62,7 @@ const option = (name) => {
 
 const behavior = option("--behavior") ?? "ok";
 const statePath = option("--state");
+const callLogPath = option("--call-log");
 // 受け取った tools/call を JSONL で追記する。テストは書き込み道具へ渡った引数を
 // ここから読み、backend が組み立てた引数を直接観測する。
 const callsPath = option("--calls");
@@ -177,6 +183,9 @@ const TOOL_ARGUMENTS = {
   takt_approve_goal_registration: { required: ["cwd", "revision"], optional: [] },
   takt_reject_goal_registration: { required: ["cwd", "revision"], optional: [] },
   takt_merge_goal_pr: { required: ["cwd", "goalId", "prNumber", "until"], optional: [] },
+  // manager 専用の終了依頼。実機の takt-mcp の入力契約（reason 必須）は、窓口が takt-custom の
+  // dist の実物で確認済みです。backend が投函する {cwd, goalId, reason} を受け付けます。
+  takt_finish_goal: { required: ["cwd", "goalId", "reason"], optional: [] },
 };
 
 // 引数の検証。実契約と同じく cwd 必須・絶対パス、未知キーは拒否する。
@@ -220,16 +229,95 @@ const handleServerNotifications = () => {
   reply({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info", data: "起動しました" } });
 };
 
-// takt_get_run の応答。stepLogs を PAGE_SIZE 件ずつ窓切りし、stepLogPage.nextOffset を返す。
-// report 引数と instructionId 引数が来たら、その本文だけを取り出して返す。
-const runResponse = (state, args) => {
+// 実 takt-mcp の対象レポート不在（runSessionReader の throw）と同じ道具エラー。
+const runReportMissing = () => ({
+  content: [{ type: "text", text: "Selected report does not exist" }],
+  isError: true,
+});
+
+// 実 takt-mcp の対象指示書不在（runSessionReader の throw）と同じ道具エラー。
+const runInstructionMissing = () => ({
+  content: [{ type: "text", text: "Selected instruction does not exist" }],
+  isError: true,
+});
+
+// takt_get_run の view "report" の応答。実 takt-mcp（runSessionReader の loadReports）と同じく、
+// reports[].content の UTF-8 バイト列を offset と maxBytes（既定 4096）で切り出し、
+// { runSlug, report: { filename, content, totalBytes, offset, returnedBytes, direction, truncated, nextOffset } }
+// を返す。対象のレポートが無ければ道具エラーにする。
+const runReportResponse = (state, args) => {
+  const run = (state.runs ?? {})[args.runSlug];
+  const report = (run?.reports ?? []).find((entry) => entry.filename === args.report);
+  if (args.report === undefined || report === undefined) {
+    return runReportMissing();
+  }
+  return asText({
+    runSlug: args.runSlug,
+    report: { filename: report.filename, ...textPage(report.content ?? "", args.offset, args.maxBytes) },
+  });
+};
+
+// takt_get_run の view "instructions" の応答。実 takt-mcp（runSessionReader）と同じく、
+// { runSlug, instructions: [{instructionId, issuedAt, state}], collection, totalCount,
+// returnedCount, omittedCount, offset, nextOffset, truncated } を返す。limit の既定は 50。
+// instructionId の指定がある場合は一覧ではなく、その指示書の本文を
+// { runSlug, instruction: { instructionId, issuedAt, state, content, totalBytes, offset,
+// returnedBytes, direction, truncated, nextOffset } } で返し、対象が無ければ道具エラーにする。
+const runInstructionsResponse = (state, args) => {
+  const run = (state.runs ?? {})[args.runSlug];
+  if (args.instructionId !== undefined) {
+    const instruction = (run?.instructions ?? []).find((entry) => entry.instructionId === Number(args.instructionId));
+    if (instruction === undefined) {
+      return runInstructionMissing();
+    }
+    return asText({
+      runSlug: args.runSlug,
+      instruction: {
+        instructionId: instruction.instructionId,
+        issuedAt: instruction.issuedAt,
+        state: instruction.state,
+        ...textPage(instruction.content ?? "", args.offset, args.maxBytes),
+      },
+    });
+  }
+  if (run === undefined) {
+    return {};
+  }
+  const instructions = run.instructions ?? [];
+  const offset = Number(args.offset ?? 0);
+  const limit = Number(args.limit ?? 50);
+  const window = instructions.slice(offset, offset + limit);
+  const nextOffset = offset + window.length < instructions.length ? offset + window.length : null;
+  return asText({
+    runSlug: args.runSlug,
+    instructions: window,
+    collection: "instructions",
+    totalCount: instructions.length,
+    returnedCount: window.length,
+    omittedCount: instructions.length - window.length,
+    offset,
+    nextOffset,
+    truncated: nextOffset !== null,
+  });
+};
+
+// takt_get_run の view "task" の応答。実 takt-mcp（runSessionReader）と同じく、
+// { runSlug, task: { content, totalBytes, offset, returnedBytes, direction, truncated,
+// nextOffset } } を返す。本文は state の taskText を使う。
+const runTaskResponse = (state, args) => {
   const run = (state.runs ?? {})[args.runSlug];
   if (run === undefined) {
     return {};
   }
-  if (args.report !== undefined) {
-    const report = (run.reports ?? []).find((entry) => entry.filename === args.report);
-    return report === undefined ? {} : { filename: report.filename, content: report.content ?? "", sizeBytes: report.sizeBytes ?? 0 };
+  return asText({ runSlug: args.runSlug, task: textPage(run.taskText ?? "", args.offset, args.maxBytes) });
+};
+
+// takt_get_run の応答。stepLogs を PAGE_SIZE 件ずつ窓切りし、stepLogPage.nextOffset を返す。
+// instructionId 引数が来たら、その本文だけを取り出して返す。
+const runResponse = (state, args) => {
+  const run = (state.runs ?? {})[args.runSlug];
+  if (run === undefined) {
+    return {};
   }
   if (args.instructionId !== undefined) {
     const instruction = (run.instructions ?? []).find((entry) => entry.instructionId === Number(args.instructionId));
@@ -239,8 +327,10 @@ const runResponse = (state, args) => {
   const offset = Number(args.offset ?? 0);
   const window = stepLogs.slice(offset, offset + PAGE_SIZE);
   const nextOffset = offset + window.length < stepLogs.length ? offset + window.length : null;
+  // 実 takt-mcp の要約は、指示書の一覧とタスク本文を含まない（どちらも view で読む）。
+  const { instructions: _instructions, taskText: _taskText, ...summary } = run;
   return {
-    ...run,
+    ...summary,
     stepLogs: window,
     stepLogPage: {
       collection: "stepLogs",
@@ -252,6 +342,25 @@ const runResponse = (state, args) => {
       truncated: offset + window.length < stepLogs.length,
     },
   };
+};
+
+const scopeOf = (args) => args.goalId ?? args.runSlug;
+
+// "hang" の項目は "<道具名>"、"<道具名>:<goalId または runSlug>"、
+// "<道具名>:<goalId または runSlug>@<offset>" の順で照合する。
+const isHung = (state, name, args) => {
+  const hang = state.hang ?? [];
+  if (hang.includes(name)) {
+    return true;
+  }
+  const scope = scopeOf(args);
+  if (scope === undefined) {
+    return false;
+  }
+  if (hang.includes(`${name}:${scope}`)) {
+    return true;
+  }
+  return args.offset !== undefined && hang.includes(`${name}:${scope}@${Number(args.offset)}`);
 };
 
 const handleToolCall = (name, args) => {
@@ -286,6 +395,15 @@ const handleToolCall = (name, args) => {
     case "takt_list_standalone_inquiries":
       return asText(paged(state.standaloneInquiries ?? [], "inquiries", args.offset));
     case "takt_get_run":
+      if (args.view === "report") {
+        return runReportResponse(state, args);
+      }
+      if (args.view === "instructions") {
+        return runInstructionsResponse(state, args);
+      }
+      if (args.view === "task") {
+        return runTaskResponse(state, args);
+      }
       return asText(runResponse(state, args));
     case "takt_get_goal": {
       if (args.path === "notifications") {
@@ -349,6 +467,9 @@ const handleToolCall = (name, args) => {
         workflow: "merge-goal-pr",
         until: args.until,
       });
+    case "takt_finish_goal":
+      // 依頼を受け付けたことを表す最小の応答。実 takt-mcp の応答形は未確認。
+      return asText({ goalId: args.goalId, status: "finished" });
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };
   }
@@ -362,7 +483,7 @@ const recordCall = (name, args) => {
   appendFileSync(callsPath, `${JSON.stringify({ name, arguments: args })}\n`);
 };
 
-const onLine = (line) => {
+const onLine = async (line) => {
   let message;
   try {
     message = JSON.parse(line);
@@ -418,10 +539,37 @@ const onLine = (line) => {
       return;
     }
     const { name, arguments: args } = message.params ?? {};
+    if (callLogPath) {
+      appendFileSync(callLogPath, `${name}\n`);
+    }
     recordCall(name, args);
     const invalid = validateArguments(name, args);
     if (invalid !== undefined) {
       reply({ jsonrpc: "2.0", id: message.id, error: { code: -32602, message: invalid } });
+      return;
+    }
+    const state = loadState();
+    if (isHung(state, name, args)) {
+      return;
+    }
+    const delayMs = state.delayMs?.[name] ?? 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    // hangOnce に指定した道具は、最初の子プロセスだけが応答しない。マーカーが残るため、
+    // 作り直した子プロセス（再試行側）は応答する。「1回だけ時間切れし、その後は回復する」
+    // サーバーを模す。
+    if (statePath !== undefined && (state.hangOnce ?? []).includes(name)) {
+      const marker = `${statePath}.hang-once.${name}`;
+      if (!existsSync(marker)) {
+        writeFileSync(marker, String(process.pid));
+        return;
+      }
+    }
+    // delays に指定した道具は、応答を指定ミリ秒だけ遅らせる。期限より遅い応答を模す。
+    const replyDelayMs = Number((state.delays ?? {})[name] ?? 0);
+    if (replyDelayMs > 0) {
+      setTimeout(() => reply({ jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) }), replyDelayMs);
       return;
     }
     reply({ jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) });
@@ -433,5 +581,9 @@ const onLine = (line) => {
 };
 
 const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });
-reader.on("line", onLine);
+// 応答の遅延中も受信順を保つため、1 行ずつ直列に処理する。
+let queue = Promise.resolve();
+reader.on("line", (line) => {
+  queue = queue.then(() => onLine(line)).catch(() => process.exit(3));
+});
 reader.on("close", () => process.exit(0));

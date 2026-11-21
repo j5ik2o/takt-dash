@@ -44,13 +44,15 @@ fn proto_defines_the_read_and_write_rpcs() {
       "GetOverview".to_owned(),
       "GetPendingDecisions".to_owned(),
       "GetProjects".to_owned(),
+      "GetRunContent".to_owned(),
       "GetRunDetail".to_owned(),
+      "GetRunUpdates".to_owned(),
       "GetTaskDetail".to_owned(),
       "ListGoalRegistrationProposals".to_owned(),
       "RejectGoalRegistration".to_owned(),
       "WatchState".to_owned(),
     ],
-    "読み取りの9 RPC と WatchState と書き込みの5 RPC が定義されている必要があります: {names:?}"
+    "読み取りの11 RPC と WatchState と書き込みの5 RPC が定義されている必要があります: {names:?}"
   );
 }
 
@@ -70,6 +72,7 @@ fn watch_state_is_a_server_streaming_rpc() {
     "GetPendingDecisions",
     "GetActivity",
     "GetRunDetail",
+    "GetRunUpdates",
     "GetConversation",
     "GetGoals",
     "GetGoalDetail",
@@ -128,7 +131,7 @@ fn generated_dashboard_state_carries_the_read_state() {
       kind:         "Mac mini".to_owned(),
       connected:    false,
       last_read_at: None,
-      concurrency:  4,
+      write_only:   false,
     }],
     thresholds: Some(v1::AnomalyThresholds { pending_decision_stale_minutes: 240, run_log_silent_minutes: 10 }),
     ..Default::default()
@@ -178,6 +181,7 @@ fn generated_client_exposes_the_read_and_write_calls() {
     std::marker::PhantomData::<v1::GetPendingDecisionsRequest>,
     std::marker::PhantomData::<v1::GetActivityRequest>,
     std::marker::PhantomData::<v1::GetRunDetailRequest>,
+    std::marker::PhantomData::<v1::GetRunUpdatesRequest>,
     std::marker::PhantomData::<v1::GetConversationRequest>,
     std::marker::PhantomData::<v1::GetGoalsRequest>,
     std::marker::PhantomData::<v1::GetGoalDetailRequest>,
@@ -194,6 +198,7 @@ fn generated_client_exposes_the_read_and_write_calls() {
     std::marker::PhantomData::<v1::GetPendingDecisionsResponse>,
     std::marker::PhantomData::<v1::GetActivityResponse>,
     std::marker::PhantomData::<v1::GetRunDetailResponse>,
+    std::marker::PhantomData::<v1::GetRunUpdatesResponse>,
     std::marker::PhantomData::<v1::GetConversationResponse>,
     std::marker::PhantomData::<v1::GetGoalsResponse>,
     std::marker::PhantomData::<v1::GetGoalDetailResponse>,
@@ -204,4 +209,40 @@ fn generated_client_exposes_the_read_and_write_calls() {
     std::marker::PhantomData::<v1::RejectGoalRegistrationResponse>,
     std::marker::PhantomData::<v1::ListGoalRegistrationProposalsResponse>,
   );
+}
+
+#[test]
+fn run_detail_lists_reports_and_instructions_without_their_bodies() {
+  // run 詳細のレポートと指示書は一覧の項目だけを持ち、本文は GetRunContent で取得する。生成した型を
+  // 本文のフィールド無しで組み立てられることで、本文が run 詳細の応答から外れていることを確かめる。
+  let report = v1::RunReport { filename: "plan.md".to_owned(), size_bytes: 120 };
+  let instruction =
+    v1::RunInstruction { instruction_id: 1, issued_at: None, state: "pending".to_owned() };
+  let removed = v1::GetRunDetailResponse { logs_removed: true, ..Default::default() };
+
+  assert_eq!(report.filename, "plan.md");
+  assert_eq!(instruction.instruction_id, 1);
+  assert!(removed.logs_removed, "run 詳細はログが残っていないことを logs_removed で表します");
+}
+
+#[test]
+fn run_content_request_selects_either_a_report_or_an_instruction() {
+  let report = v1::GetRunContentRequest {
+    run_slug: "run-1".to_owned(),
+    target:   Some(v1::get_run_content_request::Target::ReportFilename("plan.md".to_owned())),
+  };
+  let instruction = v1::GetRunContentRequest {
+    run_slug: "run-1".to_owned(),
+    target:   Some(v1::get_run_content_request::Target::InstructionId(2)),
+  };
+  let response = v1::GetRunContentResponse {
+    run_slug:   "run-1".to_owned(),
+    content:    "本文".to_owned(),
+    size_bytes: 6,
+    truncated:  false,
+  };
+
+  assert!(matches!(report.target, Some(v1::get_run_content_request::Target::ReportFilename(_))));
+  assert!(matches!(instruction.target, Some(v1::get_run_content_request::Target::InstructionId(2))));
+  assert_eq!(response.content, "本文");
 }

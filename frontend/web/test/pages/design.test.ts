@@ -12,12 +12,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   createActivityResponse,
   createDashboardState,
-  createProjectsResponse,
   createRunDetailResponse,
   NOW,
 } from "../support/fixtures.ts";
+import { elementsWithClass, textOf } from "../support/markup.ts";
 import { ActivityKind, DashboardState, ExecutionStatus, GoalStatus, type GetActivityResponse } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
+import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
 import { RunDetailContent } from "../../src/components/run-detail-content.tsx";
 import { Sidebar } from "../../src/components/sidebar.tsx";
 import ActivityPage from "../../app/activity/page.tsx";
@@ -37,13 +38,15 @@ type CssRule = { selectors: string; body: string };
 
 // 入れ子のない通常の規則だけを取り出す。@media の中の規則は、そのブロックを
 // 切り出してから同じ関数へ渡す。
+// 規則の直前のコメントをセレクタに含めないよう、コメントを除いてから取り出す。
 const cssRules = (css: string): CssRule[] => {
   const rules: CssRule[] = [];
+  const source = css.replace(/\/\*[\s\S]*?\*\//g, "");
   const pattern = /([^{}]+)\{([^{}]*)\}/g;
-  let match = pattern.exec(css);
+  let match = pattern.exec(source);
   while (match !== null) {
     rules.push({ selectors: match[1] ?? "", body: match[2] ?? "" });
-    match = pattern.exec(css);
+    match = pattern.exec(source);
   }
   return rules;
 };
@@ -207,7 +210,7 @@ test("状態の色は状態ごとのトークンで定義し、待機中の点�
 test("ログ停止の run 行は警告の状態クラスを描画する", () => {
   const tenMinutesLater = new Date(NOW.getTime() + 10 * 60_000);
   const html = renderPage(OverviewPage, {
-    view: buildOverviewView(createDashboardState(), tenMinutesLater),
+    view: buildOverviewView(createDashboardState(), tenMinutesLater, true),
   });
 
   assert.match(html, /class="st warn"/, "状態ラベルを警告の見た目で出す");
@@ -220,16 +223,16 @@ test("応答なしのサーバーの run 行は待機の状態クラスを描画
     ...base,
     runs: base.runs.map((run) => ({ ...run, serverId: "down" })),
   });
-  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
 
-  const row = /<li class="run-row">([\s\S]*?)<\/li>/.exec(html)?.[1];
+  const row = /<tr class="run-row">([\s\S]*?)<\/tr>/.exec(html)?.[1];
   assert.ok(row !== undefined, "run 行が描画されている");
   assert.match(row, /class="st idle"/, "状態ラベルを待機の見た目で出す");
   assert.match(row, /class="dot idle"/, "状態の点を待機の見た目で出す");
 });
 
-test("サーバーカードの状態バッジは状態ごとの色クラスを持つ", async () => {
-  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), NOW) });
+test("サーバーの状態バッジは状態ごとの色クラスを持つ", async () => {
+  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), NOW, true) });
   assert.match(html, /class="big-badge live"/, "動作中のバッジを実行中の見た目で出す");
   assert.match(html, /class="big-badge down"/, "応答なしのバッジを応答なしの見た目で出す");
 
@@ -237,12 +240,7 @@ test("サーバーカードの状態バッジは状態ごとの色クラスを�
   const live = requireDeclaration(css, /\.big-badge\.live$/, "background", ".big-badge.live");
   assert.match(live, /var\(--/, "動作中のバッジはトークンの背景色を持つ");
 
-  const down =
-    declarationMatching(css, /\.big-badge\.down$/, "color") ??
-    declarationMatching(css, /\.scard\.down\s+\.big-badge$/, "color");
-  if (down === undefined) {
-    assert.fail("応答なしのバッジの色が定義されていない");
-  }
+  const down = requireDeclaration(css, /\.big-badge\.down$/, "color", ".big-badge.down");
   assert.match(down, /var\(--/, "応答なしのバッジはトークンの色を持つ");
 });
 
@@ -262,6 +260,25 @@ test("ゴールの見出しは1行に収めてあふれを省略記号にし、�
   assert.equal(minWidth, "0", "ゴール行の最小幅を0にしてカードの幅に収める");
 });
 
+// ゴール一覧のカードの題名は、長い目的文でも1行に収め、あふれを省略記号にする（issue #148）。
+// 題名の h3 は .card-head（display:flex）の flex 項目であり、flex 基底幅を 0 にしないと
+// 内容幅のままで縮まない。省略の3宣言に加えて flex の基底幅も検査する。
+test("ゴール一覧のカードの題名は1行に収めてあふれを省略記号にする", async () => {
+  const css = await readCss();
+
+  const selector = /^\.goal-card-head\s+h3$/;
+  assert.equal(requireDeclaration(css, selector, "white-space", ".goal-card-head h3"), "nowrap");
+  assert.equal(requireDeclaration(css, selector, "overflow", ".goal-card-head h3"), "hidden");
+  assert.equal(requireDeclaration(css, selector, "text-overflow", ".goal-card-head h3"), "ellipsis");
+  assert.equal(requireDeclaration(css, selector, "min-width", ".goal-card-head h3"), "0");
+  // flex 基底幅を 0 にして、題名が行の余白へ縮めることを検査する（issue #148）。
+  assert.match(
+    requireDeclaration(css, selector, "flex", ".goal-card-head h3"),
+    /(^|\s)0(\s|$)/,
+    "題名の flex 基底幅を 0 にして縮める",
+  );
+});
+
 test("PR リンクは本文と区別できるリンク色を持ち、hover で下線を付ける", async () => {
   const css = await readCss();
 
@@ -278,10 +295,10 @@ test("PR リンクは本文と区別できるリンク色を持ち、hover で�
 });
 
 test("一時停止のゴールは待機の色のバッジを付け、進行中のゴールと区別する", () => {
-  const base = createProjectsResponse();
+  const base = createDashboardState();
   const state = DashboardState.create({
-    ...base.state!,
-    goals: base.state!.goals.map((goal) =>
+    ...base,
+    goals: base.goals.map((goal) =>
       goal.goalId === "goal-2"
         ? goal
         : {
@@ -291,7 +308,7 @@ test("一時停止のゴールは待機の色のバッジを付け、進行中�
           },
     ),
   });
-  const html = renderPage(ProjectsPage, { response: { ...base, state }, now: NOW });
+  const html = renderPage(ProjectsPage, { state, now: NOW });
 
   const paused = goalBadgeFor(html, "一時停止");
   assert.match(paused, /class="[^"]*\bidle\b[^"]*"/, "一時停止のバッジは待機の色クラスを持つ");
@@ -301,25 +318,41 @@ test("一時停止のゴールは待機の色のバッジを付け、進行中�
   assert.doesNotMatch(active, /class="[^"]*\bidle\b[^"]*"/, "進行中を待機の色にしない");
 });
 
-test("サーバーのカードは 1280px 以下で1列になり、run 行は3列の定義を保つ", async () => {
-  const css = await readCss();
+// main の #238 のテストは、旧サーバーカードの run 行（96px 固定の状態列を持つ .runs .run-row の grid）で
+// .runs .st が折り返すことを確かめていた。概要の run は表（issue #120）に移り、.runs を使う要素は無い。
+// 振る舞い（長い状態ラベルが隣の本文へ重ならない）は、状態ラベルが独立した状態の列のセルに入り、
+// ゴール・ステップの本文のセルとは別のセルになっていることで確かめる。表のセルどうしは重ならない。
+test("run 行の状態ラベルは状態の列のセルに入り、隣の本文へ重ならない", () => {
+  const tenMinutesLater = new Date(NOW.getTime() + 10 * 60_000);
+  const html = renderPage(OverviewPage, {
+    view: buildOverviewView(createDashboardState(), tenMinutesLater, true),
+  });
 
-  const block = mediaBlockFor(css, 1280);
-  if (block === undefined) {
-    assert.fail("@media (max-width: 1280px) の定義がない");
+  const rows = elementsWithClass(html, "run-row").filter((element) => element.name === "tr");
+  assert.ok(rows.length > 0, "run の行が表の行として描画されている");
+  for (const row of rows) {
+    const statusCell = elementsWithClass(row.outer, "run-status")[0];
+    if (statusCell === undefined) {
+      assert.fail("run の行に状態の列のセルが無い");
+    }
+    assert.equal(statusCell.name, "td", "状態の列は表のセルである");
+    assert.equal(elementsWithClass(statusCell.outer, "st").length, 1, "状態ラベルは状態の列のセルの中にある");
+    for (const bodyClass of ["run-goal", "run-step"]) {
+      const bodyCell = elementsWithClass(row.outer, bodyClass)[0];
+      if (bodyCell === undefined) {
+        assert.fail(`run の行に ${bodyClass} のセルが無い`);
+      }
+      assert.equal(bodyCell.name, "td", `${bodyClass} は表のセルである`);
+      assert.equal(elementsWithClass(bodyCell.outer, "st").length, 0, `状態ラベルを ${bodyClass} のセルへ入れない`);
+    }
   }
-  const scards = requireDeclaration(block, /^\.scards$/, "grid-template-columns", "1280px 以下の .scards");
-  assert.match(scards, /^(?:minmax\(0,\s*1fr\)|1fr)$/, "1024px を含む幅でサーバーのカードを1列にする");
-
-  const runRow = requireDeclaration(css, /^\.runs\s+\.run-row$/, "grid-template-columns", ".runs .run-row");
-  assert.match(
-    runRow,
-    /^96px\s+minmax\(0,\s*1fr\)\s+200px$/,
-    "run 行は状態・本文・進捗の3列を保つ",
+  assert.ok(
+    rows.some((row) => /class="st warn"/.test(row.outer) && textOf(row.outer).includes("ログが止まっています")),
+    "長いラベル「ログが止まっています」の行でも同じ構造で描画する",
   );
 });
 
-test("760px 以下でモバイルの1列構成にし、旧 720px の切り替えを残さない", async () => {
+test("760px 以下でサイドバーと本文を1列にし、旧 720px の切り替えを残さない", async () => {
   const css = await readCss();
 
   const block = mediaBlockFor(css, 760);
@@ -328,20 +361,11 @@ test("760px 以下でモバイルの1列構成にし、旧 720px の切り替え
   }
   const shell = requireDeclaration(block, /^\.shell$/, "grid-template-columns", "760px 以下の .shell");
   assert.match(shell, /^(?:minmax\(0,\s*1fr\)|1fr)$/, "サイドバーと本文を1列にする");
-  const scards = requireDeclaration(block, /^\.scards$/, "grid-template-columns", "760px 以下の .scards");
-  assert.match(scards, /^(?:minmax\(0,\s*1fr\)|1fr)$/, "サーバーのカードを1列にする");
-  const runRow =
-    declarationMatching(block, /^\.runs\s+\.run-row$/, "grid-template-columns") ??
-    declarationMatching(block, /^\.run-row$/, "grid-template-columns");
-  if (runRow === undefined) {
-    assert.fail("760px 以下の run 行の列定義がない");
-  }
-  assert.match(runRow, /^(?:minmax\(0,\s*1fr\)|1fr)$/, "run 行を1列にする");
 
   assert.equal(mediaBlockFor(css, 720), undefined, "旧 720px の切り替えを残さない");
 });
 
-test("サイドバーはモックの幅を持ち、タイルとサーバーのカードはモックの角丸と数字の大きさを持つ", async () => {
+test("サイドバーはモックの幅を持ち、タイルはモックの角丸と数字の大きさを持つ", async () => {
   const css = await readCss();
 
   const shell = requireDeclaration(css, /^\.shell$/, "grid-template-columns", ".shell");
@@ -349,39 +373,18 @@ test("サイドバーはモックの幅を持ち、タイルとサーバーの�
 
   assert.equal(requireDeclaration(css, /^\.tile$/, "border-radius", ".tile"), "12px");
   assert.equal(requireDeclaration(css, /^\.tile\s+\.num$/, "font-size", ".tile .num"), "32px");
-  assert.equal(requireDeclaration(css, /^\.scard$/, "border-radius", ".scard"), "14px");
-
-  const scards = requireDeclaration(css, /^\.scards$/, "grid-template-columns", ".scards");
-  assert.match(scards, /^repeat\(2,/, "サーバーのカードは広い幅で2列");
 });
 
-test("概要のタイルは3列で、1280px で2列へ折り返さない", async () => {
-  const css = await readCss();
-
-  const tiles = requireDeclaration(css, /^\.tiles$/, "grid-template-columns", ".tiles");
-  assert.match(tiles, /^repeat\(3,/, "実行中 run・判断待ち・24時間完了の3枚を並べる");
-
-  const block = mediaBlockFor(css, 1280);
-  const narrowTiles = block === undefined ? undefined : declarationMatching(block, /^\.tiles$/, "grid-template-columns");
-  assert.doesNotMatch(narrowTiles ?? "", /repeat\(\s*2/, "1280px で3枚のタイルを2列へ折り返さない");
-});
-
-test("概要はタイル・サーバーカード・run 行の余白を詰め、警告と判断待ちパネルと下端の集計の見た目を持つ", async () => {
+test("概要はタイルの余白を詰め、警告と判断待ちパネルの見た目を持つ", async () => {
   const css = await readCss();
 
   assert.ok(selectorExists(css, /^\.overview\s+\.tile$/), "概要のタイルの余白を詰める規則がある");
-  assert.ok(selectorExists(css, /^\.overview\s+\.scard$/), "概要のサーバーカードの余白を詰める規則がある");
-  assert.ok(
-    selectorExists(css, /^\.overview\s+\.runs\s+\.run-row$/),
-    "概要の run 行の余白を詰める規則がある",
-  );
 
   assert.ok(selectorExists(css, /^\.health\.attention$/), "警告バナーの見た目がある");
   const attention = requireDeclaration(css, /^\.health\.attention$/, "background", ".health.attention");
   assert.match(attention, /var\(--/, "警告バナーは警告色のトークンを使う");
   assert.ok(selectorExists(css, /^\.tile\.attention$/), "判断待ちのタイルの注意の見た目がある");
   assert.ok(selectorExists(css, /^\.callout$/), "判断待ちパネルの見た目がある");
-  assert.ok(selectorExists(css, /^\.sc-foot$/), "サーバーカード下端の集計の見た目がある");
   assert.ok(selectorExists(css, /^\.side-foot$/), "サイドバー下端の見た目がある");
 });
 
@@ -397,6 +400,91 @@ test("判断待ちは橙の左罫線の容器になり、要約は4列で wide �
   assert.match(wide, /span\s+2/, "wide の項目は2列を占める");
 
   assert.equal(requireDeclaration(css, /^pre$/, "max-height", "pre"), "360px", "ログの高さを制限する");
+});
+
+// var(--name) を :root の値へ解決する。直接の値はそのまま返す。
+const resolveRootVariable = (css: string, value: string): string => {
+  const reference = /^var\(\s*(--[a-z0-9-]+)\s*\)$/i.exec(value.trim());
+  if (reference === null) {
+    return value.trim();
+  }
+  return requireDeclaration(css, /^:root$/, reference[1]!, ":root");
+};
+
+test("判断待ちの項目は列の grid をやめ、どの幅でも列の指定を持たない", async () => {
+  const css = await readCss();
+
+  for (const rule of cssRules(css)) {
+    const trayItemSelectors = rule.selectors
+      .split(",")
+      .map((token) => token.trim())
+      .filter((token) => /^\.tray-item\b/.test(token));
+    if (trayItemSelectors.length === 0) {
+      continue;
+    }
+    for (const property of ["grid-template-columns", "grid-column"]) {
+      assert.equal(
+        declaration(rule.body, property),
+        undefined,
+        `${trayItemSelectors.join(", ")} に ${property} を残さない（列に分けると内容量で位置がずれる）`,
+      );
+    }
+  }
+});
+
+test("判断待ちの見出し行は左の群と右端の待ち時間を両端に分ける", async () => {
+  const css = await readCss();
+
+  assert.ok(selectorExists(css, /^\.tray-item\s+\.decision-head$/), "見出し行の規則がある");
+  const justify = declarationMatching(css, /^\.tray-item\s+\.decision-head$/, "justify-content");
+  const waitMargin = declarationMatching(css, /^\.tray-item\s+\.wait$/, "margin-left");
+  assert.ok(
+    justify === "space-between" || waitMargin === "auto",
+    "待ち時間を見出し行の右端へ寄せる（justify-content: space-between か margin-left: auto）",
+  );
+});
+
+test("判断待ちの本文は1行の上限を 80ch 前後にし、改行を保持する", async () => {
+  const css = await readCss();
+
+  const maxWidth = resolveRootVariable(
+    css,
+    requireDeclaration(css, /^\.tray-item\s+\.decision-body$/, "max-width", ".tray-item .decision-body"),
+  );
+  const ch = /^(\d+(?:\.\d+)?)ch$/.exec(maxWidth);
+  assert.ok(ch !== null, `本文の上限は ch で指定する: ${maxWidth}`);
+  const value = Number(ch[1]);
+  assert.ok(value >= 70 && value <= 90, `本文の上限は 80ch 前後: ${maxWidth}`);
+
+  assert.equal(
+    requireDeclaration(css, /^\.tray-item\s+\.desc$/, "white-space", ".tray-item .desc"),
+    "pre-wrap",
+    "本文の改行を保持する",
+  );
+});
+
+test("判断待ちが0件の空の状態は橙の警告の線を持たず、通常の線を使う", async () => {
+  const css = await readCss();
+
+  const rule = cssRules(css).find((candidate) =>
+    candidate.selectors.split(",").some((token) => /^\.tray\.tray-empty$/.test(token.trim())),
+  );
+  if (rule === undefined) {
+    assert.fail(".tray.tray-empty の規則が定義されていない");
+  }
+  const border = declaration(rule.body, "border");
+  const borderLeft = declaration(rule.body, "border-left");
+  const borderColor = declaration(rule.body, "border-color");
+  assert.ok(border !== undefined || borderColor !== undefined, "空の状態は .tray の四辺の線を上書きする");
+  for (const value of [border, borderLeft, borderColor]) {
+    if (value !== undefined) {
+      assert.doesNotMatch(value, /orange/, `空の状態の線に橙を使わない: ${value}`);
+    }
+  }
+  assert.match(border ?? borderColor ?? "", /var\(--line\)/, "空の状態は通常の線の色を使う");
+  if (border !== undefined && borderLeft === undefined) {
+    assert.doesNotMatch(border, /5px/, "左端だけ太い警告の線にしない");
+  }
 });
 
 test("時刻と識別子は等幅書体になり、run 詳細の識別子に mono が付く", async () => {
@@ -431,7 +519,7 @@ test("時刻と識別子は等幅書体になり、run 詳細の識別子に mon
     "このステップの開始の span を等幅にする",
   );
 
-  const projects = renderPage(ProjectsPage, { response: createProjectsResponse(), now: NOW });
+  const projects = renderPage(ProjectsPage, { state: createDashboardState(), now: NOW });
   const runLink = /<a\b[^>]*href="\/runs\/run-aaa"[^>]*>/.exec(projects)?.[0];
   assert.ok(runLink !== undefined, "run のリンクが描画されている");
   assert.match(runLink, /class="[^"]*\bmono\b[^"]*"/, "run の識別子を等幅にする");
@@ -456,15 +544,15 @@ test("ゴールのバッジの色クラスは状態ごとのトークンで描�
     "600",
   );
 
-  const base = createProjectsResponse();
+  const base = createDashboardState();
   const state = DashboardState.create({
-    ...base.state!,
-    goals: base.state!.goals.map((goal) => ({
+    ...base,
+    goals: base.goals.map((goal) => ({
       ...goal,
       executionStatus: ExecutionStatus.EXECUTION_STATUS_ABORTED,
     })),
   });
-  const html = renderPage(ProjectsPage, { response: { ...base, state }, now: NOW });
+  const html = renderPage(ProjectsPage, { state, now: NOW });
   const aborted = goalBadgeFor(html, "中止");
   assert.match(aborted, /class="[^"]*\bwarn\b[^"]*"/, "中止のバッジは警告の色クラスを持つ");
 });
@@ -481,10 +569,15 @@ test("760px 以下でもサーバーの状態テキストを隠さない", async
     "760px 以下でサーバーの状態を消さない",
   );
 
+  const state = createDashboardState();
   const html = renderToStaticMarkup(
     createElement(Sidebar, {
-      servers: createDashboardState().servers,
+      snapshotLoaded: true,
+      servers: state.servers,
       pendingCount: 0,
+      // 状態は run の件数でも決まるため、run があるサーバーが「動作中」になる
+      // 前提をそろえて渡す（issue #188）。Sidebar の runs は内部型のため変換して渡す。
+      runs: dashboardStateFromProto(state).runs,
       frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
       backendBuild: { commit: "a1b2c3d", branch: "takt/backend" },
     }),
@@ -535,7 +628,7 @@ const activityRowFor = (kind: ActivityKind): string => {
       },
     ],
   };
-  const html = renderPage(ActivityPage, { response, now: NOW });
+  const html = renderPage(ActivityPage, { state: createDashboardState(), response, now: NOW });
   const row = /<li class="ev[\s\S]*?<\/li>/.exec(html)?.[0];
   if (row === undefined) {
     assert.fail(`kind ${kind} の出来事行が描画されていない`);
@@ -560,7 +653,7 @@ test("アクティビティの出来事行は種類ごとの状態を点とラ�
   assert.doesNotMatch(idle, /class="ev warn"/, "一時停止は注意の行にしない");
 });
 
-test("接続の切断から復帰をまとめた行は最新の復帰の状態に揃える", () => {
+test("接続の切断と復帰は別の行になり、それぞれの種類の状態で表示する", () => {
   const base = createActivityResponse();
   const response: GetActivityResponse = {
     ...base,
@@ -581,11 +674,17 @@ test("接続の切断から復帰をまとめた行は最新の復帰の状態�
       },
     ],
   };
-  const html = renderPage(ActivityPage, { response, now: NOW });
+  const html = renderPage(ActivityPage, { state: createDashboardState(), response, now: NOW });
   const rows = html.match(/<li class="ev[\s\S]*?<\/li>/g) ?? [];
-  assert.equal(rows.length, 1, "隣接する接続イベントは1行にまとまる");
-  const row = rows[0]!;
-  assert.doesNotMatch(row, /class="ev warn"/, "最新が復帰なら注意の行にしない");
-  assert.doesNotMatch(row, /class="kl warn"/, "最新が復帰なら警告のラベルにしない");
-  assert.match(row, /class="dot live"/, "最新が復帰なら実行中の点にする");
+  assert.equal(rows.length, 2, "切断と復帰は別の行になる");
+  const restoredRow = rows[0]!;
+  assert.match(restoredRow, /接続の復帰/, "復帰の行は復帰の種類で出す");
+  assert.doesNotMatch(restoredRow, /class="ev warn"/, "復帰の行は注意の行にしない");
+  assert.doesNotMatch(restoredRow, /class="kl warn"/, "復帰の行は警告のラベルにしない");
+  assert.match(restoredRow, /class="dot live"/, "復帰の行は実行中の点にする");
+  const lostRow = rows[1]!;
+  assert.match(lostRow, /接続の切断/, "切断の行は切断の種類で出す");
+  assert.match(lostRow, /class="ev warn"/, "切断の行は注意の行にする");
+  assert.match(lostRow, /class="kl warn"/, "切断の行は警告のラベルにする");
+  assert.match(lostRow, /class="dot warn"/, "切断の行は警告の点にする");
 });

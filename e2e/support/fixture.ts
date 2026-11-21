@@ -68,3 +68,51 @@ export function buildMockState(now: Date): Record<string, unknown> {
     },
   };
 }
+
+// 実行中の run の本体ログのファイル名。run のディレクトリの logs/ の下に置く。
+export const RUN_BODY_LOG = "e2e-run-overview.jsonl";
+
+// 実行中の run（RUN_SLUG）を、takt がプロジェクトの .takt へ書く保存形式で表したもの。
+// backend は実行中のタスクの run を tasks.yaml の対応表、meta.json、本体ログから組み立てるため、
+// takt-mcp モックの状態（buildMockState）と同じ run をファイルでも用意する。
+export type RunFiles = {
+  // `<project>/.takt/tasks.yaml` の本文。
+  tasksYaml: string;
+  // `<project>/.takt/runs/<RUN_SLUG>/meta.json` の本文。
+  meta: Record<string, unknown>;
+  // `<project>/.takt/runs/<RUN_SLUG>/logs/<RUN_BODY_LOG>` の最初のレコード。
+  bodyLogRecords: Record<string, unknown>[];
+};
+
+export function buildRunFiles(now: Date): RunFiles {
+  const at = now.toISOString();
+  return {
+    tasksYaml: `tasks:\n  - name: ${GOAL_TEXT}\n    run_slug: ${RUN_SLUG}\n`,
+    meta: {
+      workflow: "e2e",
+      status: "running",
+      currentStep: "implement",
+      currentIteration: 1,
+      phase: 1,
+      startTime: at,
+      updatedAt: at,
+      task: GOAL_TEXT,
+    },
+    bodyLogRecords: [
+      { type: "workflow_start", workflow: "e2e", timestamp: at },
+      {
+        type: "step_start",
+        step: "implement",
+        persona: "coder",
+        iteration: 1,
+        timestamp: at,
+        workflow: "e2e",
+        stack: [{ workflow: "e2e", step: "implement", kind: "agent", occurrence: 1 }],
+      },
+    ],
+  };
+}
+
+// 本体ログの1行（JSONL）にする。
+export const toJsonLines = (records: readonly Record<string, unknown>[]): string =>
+  records.map((record) => `${JSON.stringify(record)}\n`).join("");

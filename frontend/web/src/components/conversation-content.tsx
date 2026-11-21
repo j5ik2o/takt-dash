@@ -69,6 +69,11 @@ export function ConversationContent({
                 {message.occurredAt !== undefined ? formatDateTime(message.occurredAt) : "時刻不明"}
               </time>
             </p>
+            {message.notice !== undefined ? (
+              <p className="conversation-notice" role="note">
+                {message.notice}
+              </p>
+            ) : null}
             <p className="conversation-text">{message.text}</p>
           </li>
         ))}

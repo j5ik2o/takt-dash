@@ -3,16 +3,21 @@
 //! 設定は .mcp.json と同じ mcpServers 形式を基にした1ファイルで、takt-mcp の起動方法・
 //! サーバー・プロジェクト・読み取り間隔・異常判定の閾値を同じファイルに持ちます。
 //! 値の解決はこの境界で一度だけ行い、以降の内部処理は解決済みの値だけを使います。
+//!
+//! mcpServers の各エントリは、子プロセスを起動する stdio 接続と、常駐する takt-mcp の
+//! HTTP サーバーへつなぐ http 接続のどちらかです。読み取りと書き込みは、それぞれの接続先
+//! （`server` と `writeServer`）が指すエントリの接続方法を使います。同じ mcpServers に
+//! 対象サーバーごとのエントリを登録します。
 
 use std::{
   collections::BTreeMap,
-  net::SocketAddr,
+  net::{IpAddr, SocketAddr},
   path::{Path, PathBuf},
 };
 
 use serde::Deserialize;
 
-use crate::domain::{ProjectName, ServerId, SilentMinutes, StaleMinutes};
+use crate::domain::{ProjectName, ScreenReadLanes, ServerId, SilentMinutes, StaleMinutes};
 
 /// 読み取り間隔の既定値（秒）。
 pub const DEFAULT_INTERVAL_SECONDS: u64 = 30;
@@ -28,6 +33,23 @@ pub const DEFAULT_CONNECTION_DELAY_SECONDS: u32 = 120;
 pub const DEFAULT_SQLITE_PATH: &str = "data/taktdash.sqlite";
 /// gRPC サーバーの待ち受けアドレスの既定値。
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50051";
+/// takt-mcp の HTTP サーバーが待ち受けるホスト。実機の transport は 127.0.0.1 固定です。
+pub const HTTP_LOOPBACK_HOST: &str = "127.0.0.1";
+/// プロジェクトの同時実行上限の既定値。プロジェクトの .takt/config.yaml に
+/// concurrency キーが無い場合の takt 自身の既定値に合わせる。
+pub const DEFAULT_PROJECT_CONCURRENCY: i32 = 1;
+/// 画面読み取りレーンの本数の既定値（プロジェクトごと）。
+pub const DEFAULT_SCREEN_READ_LANES: u32 = 1;
+/// 画面読み取りレーンの本数の上限（プロジェクトごと）。子プロセスの増加を抑えるため、
+/// 設定値がこれを超える場合は上限へ丸めます。
+pub const MAX_SCREEN_READ_LANES: u32 = ScreenReadLanes::MAX;
+/// 中止済みのマージ待ちゴールを、閉じた PR の確認後に自動終了する既定値。
+pub const DEFAULT_AUTO_TERMINATE_CLOSED_GOALS: bool = true;
+
+/// `autoTerminateClosedGoals` を省略したときの既定値（true）。
+fn default_true() -> bool {
+  DEFAULT_AUTO_TERMINATE_CLOSED_GOALS
+}
 
 /// 設定ファイルの読み込みと検証で起きる失敗。
 #[derive(Debug, thiserror::Error)]
@@ -43,39 +65,144 @@ pub enum ConfigError {
 /// 検証済みの接続設定。相対パスは読み込み時に絶対パスへ解決済みです。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-  pub servers:          BTreeMap<String, McpServer>,
-  pub server_meta:      BTreeMap<String, ServerMeta>,
-  pub projects:         Vec<Project>,
+  pub servers: BTreeMap<String, McpServer>,
+  pub server_meta: BTreeMap<String, ServerMeta>,
+  pub projects: Vec<Project>,
   pub interval_seconds: u64,
-  pub thresholds:       Thresholds,
-  pub sqlite_path:      PathBuf,
+  /// 画面からの読み取りに使う takt-mcp 接続レーンの本数（プロジェクトごと、1〜3）。
+  pub screen_read_lanes: ScreenReadLanes,
+  pub thresholds: Thresholds,
+  pub sqlite_path: PathBuf,
   /// gRPC サーバーの待ち受けアドレス。設定の境界で SocketAddr へ解決済みです。
-  pub listen:           SocketAddr,
+  pub listen: SocketAddr,
+  /// 中止済みのマージ待ちゴールを、PR が閉じていると確認できたとき自動終了するかどうか。
+  pub auto_terminate_closed_goals: bool,
+  /// manager 用の stdio エントリの id（`manager: true` を付けたエントリ）。複数ある場合は
+  /// サーバー id 順の先頭を使います。未設定なら None で、終了依頼は行いません。
+  pub manager_server: Option<String>,
 }
 
-/// takt-mcp の起動方法。
+/// takt-mcp への接続方法。stdio は子プロセスを起動する起動方法、http は常駐サーバーの接続先です。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpServer {
+pub enum McpServer {
+  Stdio(StdioMcpServer),
+  Http(HttpMcpServer),
+}
+
+impl McpServer {
+  /// この接続方法を、接続先の種類ごとの [`McpConnection`] へ写す。
+  pub fn connection(&self) -> McpConnection {
+    match self {
+      | McpServer::Stdio(server) => McpConnection::Stdio(server.clone()),
+      | McpServer::Http(server) => McpConnection::Http(server.clone()),
+    }
+  }
+}
+
+/// 接続方法を、その種類だけを持つ接続に解決したもの。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpConnection {
+  Stdio(StdioMcpServer),
+  Http(HttpMcpServer),
+}
+
+/// 子プロセスとして起動する takt-mcp の起動方法。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StdioMcpServer {
   pub command: String,
   pub args:    Vec<String>,
   pub env:     BTreeMap<String, String>,
+  /// manager 用の接続かどうか。真のエントリだけが終了依頼（`takt_finish_goal`）の投函先に
+  /// なります。読み取り・書き込みのレーンはこの値を使いません。
+  pub manager: bool,
 }
 
-/// サーバーの表示情報。
+/// 常駐する takt-mcp の HTTP サーバーへの接続先。読み取り専用の読み取り経路がこれを使います。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpMcpServer {
+  pub endpoint:      HttpServerEndpoint,
+  /// `Authorization` ヘッダにそのまま設定する値（`Bearer <token>`）。
+  pub authorization: String,
+}
+
+/// takt-mcp の HTTP サーバーの接続先。ループバック `127.0.0.1` の `http://` だけを表せます。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpServerEndpoint {
+  port: u16,
+}
+
+impl HttpServerEndpoint {
+  pub fn port(&self) -> u16 {
+    self.port
+  }
+
+  /// `http://127.0.0.1:<port>/` の URL を組み立てる。
+  pub fn url(&self) -> String {
+    format!("http://{HTTP_LOOPBACK_HOST}:{}/", self.port)
+  }
+}
+
+impl TryFrom<&str> for HttpServerEndpoint {
+  type Error = ConfigError;
+
+  fn try_from(url: &str) -> Result<Self, Self::Error> {
+    let rest = url
+      .strip_prefix("http://")
+      .ok_or_else(|| ConfigError::Invalid(format!("HTTP 接続先 {url} は http:// で始まる必要があります。")))?;
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.is_empty() {
+      return Err(ConfigError::Invalid(format!("HTTP 接続先 {url} にホストとポートがありません。")));
+    }
+    let (host, port_text) = authority
+      .rsplit_once(':')
+      .ok_or_else(|| ConfigError::Invalid(format!("HTTP 接続先 {url} にポート番号がありません。")))?;
+    let host: IpAddr = host.parse().map_err(|_| {
+      ConfigError::Invalid(format!(
+        "HTTP 接続先 {url} のホストを解釈できませんでした。ホストは {HTTP_LOOPBACK_HOST} である必要があります。"
+      ))
+    })?;
+    if !host.is_loopback() || host.to_string() != HTTP_LOOPBACK_HOST {
+      return Err(ConfigError::Invalid(format!(
+        "HTTP 接続先 {url} のホストは {HTTP_LOOPBACK_HOST} である必要があります。実機の takt-mcp は 127.0.0.1 のみで待ち受けます。"
+      )));
+    }
+    let port: u16 = port_text.parse().map_err(|_| {
+      ConfigError::Invalid(format!("HTTP 接続先 {url} のポート番号 {port_text} を解釈できませんでした。"))
+    })?;
+    if port == 0 {
+      return Err(ConfigError::Invalid(format!("HTTP 接続先 {url} のポート番号は 1 以上である必要があります。")));
+    }
+    let path = &rest[authority.len()..];
+    if !path.is_empty() && path != "/" {
+      return Err(ConfigError::Invalid(format!(
+        "HTTP 接続先 {url} のパス {path} はサポートしません。実機の takt-mcp は / だけを公開します。"
+      )));
+    }
+    Ok(HttpServerEndpoint { port })
+  }
+}
+
+/// サーバーの表示情報。同時実行の上限はサーバー単位には存在しないため持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerMeta {
-  pub name:        String,
-  pub kind:        String,
-  pub concurrency: i32,
+  pub name: String,
+  pub kind: String,
 }
 
 /// 集約対象のプロジェクト。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
-  pub name:   String,
-  pub server: String,
-  pub about:  String,
-  pub cwd:    PathBuf,
+  pub name:         String,
+  /// 読み取り接続先（`mcpServers` の id）。画面と定期読み取りが使います。
+  pub server:       String,
+  /// 書き込み接続先（`mcpServers` の id）。未設定なら `server` と同じ。
+  pub write_server: String,
+  pub about:        String,
+  pub cwd:          PathBuf,
+  /// 同時実行の上限。プロジェクトの .takt/config.yaml の concurrency から解決し、
+  /// キーが無い場合は takt の既定値にする。parse_config では既定値を入れ、
+  /// load_config がファイルから解決した値で置き換える。
+  pub concurrency:  i32,
 }
 
 /// 異常判定の閾値。
@@ -90,42 +217,54 @@ pub struct Thresholds {
 #[derive(Debug, Deserialize)]
 struct RawConfig {
   #[serde(rename = "mcpServers", default)]
-  mcp_servers:      BTreeMap<String, RawMcpServer>,
+  mcp_servers: BTreeMap<String, RawMcpServer>,
   #[serde(default)]
-  servers:          BTreeMap<String, RawServerMeta>,
+  servers: BTreeMap<String, RawServerMeta>,
   #[serde(default)]
-  projects:         Vec<RawProject>,
+  projects: Vec<RawProject>,
   #[serde(rename = "intervalSeconds")]
   interval_seconds: Option<u64>,
+  #[serde(rename = "screenReadLanes")]
+  screen_read_lanes: Option<u32>,
   #[serde(default)]
-  thresholds:       RawThresholds,
+  thresholds: RawThresholds,
   #[serde(default)]
-  sqlite:           RawSqlite,
-  listen:           Option<String>,
+  sqlite: RawSqlite,
+  listen: Option<String>,
+  #[serde(rename = "autoTerminateClosedGoals", default = "default_true")]
+  auto_terminate_closed_goals: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawMcpServer {
-  command: String,
+  #[serde(rename = "type")]
+  kind:    Option<String>,
+  command: Option<String>,
   #[serde(default)]
   args:    Vec<String>,
   #[serde(default)]
   env:     BTreeMap<String, String>,
+  url:     Option<String>,
+  #[serde(default)]
+  headers: BTreeMap<String, String>,
+  /// manager 用の接続であることを示す任意項目。stdio に限り真にできます。
+  manager: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawServerMeta {
-  name:        Option<String>,
-  kind:        Option<String>,
-  concurrency: Option<i32>,
+  name: Option<String>,
+  kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawProject {
-  name:   String,
-  server: String,
-  about:  Option<String>,
-  cwd:    String,
+  name:         String,
+  server:       String,
+  #[serde(rename = "writeServer")]
+  write_server: Option<String>,
+  about:        Option<String>,
+  cwd:          String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -150,7 +289,243 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
   let text =
     std::fs::read_to_string(path).map_err(|source| ConfigError::Read { path: path.display().to_string(), source })?;
   let base_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-  parse_config(&text, &base_dir)
+  let mut config = parse_config(&text, &base_dir)?;
+  for project in &mut config.projects {
+    project.concurrency = read_project_concurrency(&project.cwd);
+  }
+  Ok(config)
+}
+
+/// プロジェクトの .takt/config.yaml から同時実行の上限を読む。ファイルが無い・
+/// キーが無い・値が不正な場合は takt の既定値を使う。表示に使う値であり、
+/// 読めないことを設定エラーにはしない。
+fn read_project_concurrency(cwd: &Path) -> i32 {
+  let path = cwd.join(".takt").join("config.yaml");
+  let Ok(text) = std::fs::read_to_string(&path) else {
+    return DEFAULT_PROJECT_CONCURRENCY;
+  };
+  parse_takt_concurrency(&text).unwrap_or(DEFAULT_PROJECT_CONCURRENCY)
+}
+
+/// takt の設定（YAML）のトップレベルの concurrency を取り出す。ネストした
+/// 同名のキーは対象にしない。値が正の整数でない場合は None を返す。
+///
+/// 対応する表記は、平坦なブロックマッピングに加えて、キーの引用（単一・
+/// 二重）、ルート全体のインデント、数値を次の行へ置く書き方、1行のフロー
+/// マッピングである。引用はスカラーの開始位置にある場合だけ引用として
+/// 扱い、通常スカラーの途中に現れる引用符は文字として扱う。複数行に
+/// またがる通常スカラーは、値全体を1行で表せないため対象にしない。
+/// アンカーや複数行にまたがるフローマッピングなどの完全な YAML 構文も
+/// 対象にしない。
+fn parse_takt_concurrency(text: &str) -> Option<i32> {
+  let lines = yaml_content_lines(text);
+  let first = lines.first().map(|(_, content)| *content)?;
+  parse_block_concurrency(&lines).or_else(|| parse_flow_concurrency(first))
+}
+
+/// ブロックマッピングからトップレベルの concurrency を取り出す。ネストした
+/// 同名のキーは対象にしない。値が正の整数でない場合は None を返す。
+fn parse_block_concurrency(lines: &[(usize, &str)]) -> Option<i32> {
+  let root_indent = lines.iter().map(|(indent, _)| *indent).min()?;
+  for (index, (indent, content)) in lines.iter().enumerate() {
+    if *indent != root_indent {
+      continue;
+    }
+    let Some((key, value)) = split_yaml_entry(content) else {
+      continue;
+    };
+    if unquote_yaml_scalar(key) != "concurrency" {
+      continue;
+    }
+    if !value.trim().is_empty() {
+      // より深くインデントされた内容行が続けば、値は複数行の通常スカラー
+      // であり、この行の文字列だけでは値全体を表さないため受理しない。
+      if continues_on_following_line(lines, index + 1, root_indent + 1) {
+        return None;
+      }
+      return parse_concurrency_value(value);
+    }
+    // 値が同じ行に無い場合は、より深くインデントされた次の行が単独の
+    // スカラーであるときだけ、その行を値として扱う。
+    let (next_indent, next) = lines.get(index + 1)?;
+    if *next_indent > root_indent && is_plain_scalar_line(next) {
+      // 値の行と同じかより深いインデントの内容行が続けば、値は複数行の
+      // 通常スカラーであり、最初の行だけでは値全体を表さないため受理しない。
+      if continues_on_following_line(lines, index + 2, *next_indent) {
+        return None;
+      }
+      return parse_concurrency_value(next);
+    }
+    return None;
+  }
+  None
+}
+
+/// 1行のフローマッピング（`{ key: value, ... }`）からトップレベルの
+/// concurrency を取り出す。値が正の整数でない場合は None を返す。
+fn parse_flow_concurrency(line: &str) -> Option<i32> {
+  let inner = line.trim().strip_prefix('{')?.strip_suffix('}')?;
+  for entry in split_flow_entries(inner) {
+    let Some((key, value)) = split_yaml_entry(entry) else {
+      continue;
+    };
+    if unquote_yaml_scalar(key) == "concurrency" {
+      return parse_concurrency_value(value);
+    }
+  }
+  None
+}
+
+/// concurrency の値を正の整数として検証する。引用符で囲まれた数値も受け付ける。
+fn parse_concurrency_value(value: &str) -> Option<i32> {
+  let parsed: i32 = unquote_yaml_scalar(value).parse().ok()?;
+  (parsed > 0).then_some(parsed)
+}
+
+/// YAML の内容行を（インデント幅, インデントを除いた内容）の列にする。
+/// 空行とコメントだけの行は落とす。
+fn yaml_content_lines(text: &str) -> Vec<(usize, &str)> {
+  text
+    .lines()
+    .filter_map(|line| {
+      let line = strip_yaml_comment(line).trim_end();
+      let content = line.trim_start();
+      if content.is_empty() {
+        return None;
+      }
+      Some((line.len() - content.len(), content))
+    })
+    .collect()
+}
+
+/// 行からコメントを取り除く。引用符の中の # はコメントとみなさない。
+/// YAML の規則どおり、# の直前が行頭か空白の場合だけコメントとして扱う。
+fn strip_yaml_comment(line: &str) -> &str {
+  let mut scan = YamlQuoteScan::new();
+  let mut after_boundary = true;
+  let mut chars = line.char_indices().peekable();
+  while let Some((index, ch)) = chars.next() {
+    let next = chars.peek().map(|(_, ch)| *ch);
+    if !scan.advance(ch, next) && ch == '#' && after_boundary {
+      return &line[..index];
+    }
+    after_boundary = ch == ' ' || ch == '\t';
+  }
+  line
+}
+
+/// YAML の1行を走査する際の引用状態。引用はスカラーの開始位置にある場合
+/// だけ引用として扱い、通常スカラーの途中に現れる引用符（アポストロフィ
+/// など）は文字として扱う。二重引用の中のエスケープと、単一引用の中で
+/// 重ねた引用符は、引用を閉じるものとして扱わない。
+struct YamlQuoteScan {
+  quote:           Option<char>,
+  escaped:         bool,
+  at_scalar_start: bool,
+}
+
+impl YamlQuoteScan {
+  fn new() -> Self {
+    Self { quote: None, escaped: false, at_scalar_start: true }
+  }
+
+  /// 文字を1つ読み進める。その文字が引用の内側（引用符そのものと
+  /// エスケープされた文字を含む）なら true を返す。呼び出し側は、true の
+  /// 文字を区切りやコメントの開始として扱わない。
+  fn advance(&mut self, ch: char, next: Option<char>) -> bool {
+    if self.escaped {
+      self.escaped = false;
+      return true;
+    }
+    if let Some(open) = self.quote {
+      if (open == '"' && ch == '\\') || (open == '\'' && ch == '\'' && next == Some('\'')) {
+        self.escaped = true;
+      } else if ch == open {
+        self.quote = None;
+        self.at_scalar_start = false;
+      }
+      return true;
+    }
+    match ch {
+      | '"' | '\'' if self.at_scalar_start => {
+        self.quote = Some(ch);
+        true
+      },
+      | ':' | ',' | '{' | '[' => {
+        self.at_scalar_start = true;
+        false
+      },
+      | ' ' | '\t' => false,
+      | _ => {
+        self.at_scalar_start = false;
+        false
+      },
+    }
+  }
+}
+
+/// 指定した位置の内容行が、基準以上のインデントを持つかどうかを返す。
+/// 通常スカラーに継続する内容行があるかの判定に使う。
+fn continues_on_following_line(lines: &[(usize, &str)], index: usize, min_indent: usize) -> bool {
+  lines.get(index).is_some_and(|(indent, _)| *indent >= min_indent)
+}
+
+/// `key: value` の形の行をキーと値へ分ける。キーが引用符で始まる場合は、
+/// 閉じ引用符の直後のコロンを区切りとする。コロンが無ければ None を返す。
+fn split_yaml_entry(content: &str) -> Option<(&str, &str)> {
+  let content = content.trim();
+  if let Some(quote) = content.chars().next().filter(|ch| *ch == '"' || *ch == '\'') {
+    let rest = &content[quote.len_utf8()..];
+    let close = rest.find(quote)?;
+    let key = &content[..quote.len_utf8() + close + quote.len_utf8()];
+    let value = rest[close + quote.len_utf8()..].trim_start().strip_prefix(':')?;
+    return Some((key, value));
+  }
+  content.split_once(':')
+}
+
+/// フローマッピングの中身を、入れ子と引用符を考慮しながらカンマで分ける。
+fn split_flow_entries(inner: &str) -> Vec<&str> {
+  let mut entries = Vec::new();
+  let mut depth = 0usize;
+  let mut scan = YamlQuoteScan::new();
+  let mut start = 0;
+  let mut chars = inner.char_indices().peekable();
+  while let Some((index, ch)) = chars.next() {
+    let next = chars.peek().map(|(_, ch)| *ch);
+    if scan.advance(ch, next) {
+      continue;
+    }
+    match ch {
+      | '{' | '[' => depth += 1,
+      | '}' | ']' => depth = depth.saturating_sub(1),
+      | ',' if depth == 0 => {
+        entries.push(&inner[start..index]);
+        start = index + ch.len_utf8();
+      },
+      | _ => {},
+    }
+  }
+  entries.push(&inner[start..]);
+  entries
+}
+
+/// スカラーの前後の引用符（単一・二重）を、対になっている場合だけ取り除く。
+fn unquote_yaml_scalar(value: &str) -> &str {
+  let value = value.trim();
+  let bytes = value.as_bytes();
+  if value.len() >= 2 {
+    let first = bytes[0];
+    if (first == b'"' || first == b'\'') && bytes[value.len() - 1] == first {
+      return &value[1..value.len() - 1];
+    }
+  }
+  value
+}
+
+/// ネストしたマッピングやシーケンスではなく、値そのものを表す行かどうか。
+fn is_plain_scalar_line(content: &str) -> bool {
+  !content.trim_start().starts_with("- ") && split_yaml_entry(content).is_none()
 }
 
 /// 設定の本文と、相対パスの解決に使う基準ディレクトリから [`Config`] を組み立てる。
@@ -160,7 +535,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   let mut servers = BTreeMap::new();
   for (id, server) in raw.mcp_servers {
     validate_server_id(&id)?;
-    servers.insert(id, McpServer { command: server.command, args: server.args, env: server.env });
+    servers.insert(id.clone(), resolve_mcp_server(&id, server)?);
   }
   if servers.is_empty() {
     return Err(ConfigError::Invalid("mcpServers が空です。takt-mcp の起動方法を1つ以上指定してください。".to_owned()));
@@ -170,9 +545,7 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
     validate_server_id(&id)?;
     let name = meta.name.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の name がありません。")))?;
     let kind = meta.kind.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の kind がありません。")))?;
-    let concurrency =
-      meta.concurrency.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の concurrency がありません。")))?;
-    server_meta.insert(id, ServerMeta { name, kind, concurrency });
+    server_meta.insert(id, ServerMeta { name, kind });
   }
   let mut projects = Vec::new();
   let mut seen_names = std::collections::BTreeSet::new();
@@ -192,6 +565,14 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
         project.name
       )));
     }
+    let write_server = project.write_server.unwrap_or_else(|| project.server.clone());
+    validate_server_id(&write_server)?;
+    servers.get(&write_server).ok_or_else(|| {
+      ConfigError::Invalid(format!(
+        "プロジェクト {} が参照する書き込み用サーバー {} は mcpServers にありません。",
+        project.name, write_server
+      ))
+    })?;
     let cwd = PathBuf::from(&project.cwd);
     if !cwd.is_absolute() {
       return Err(ConfigError::Invalid(format!(
@@ -202,8 +583,10 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
     projects.push(Project {
       name: project.name,
       server: project.server,
+      write_server,
       about: project.about.unwrap_or_default(),
       cwd,
+      concurrency: DEFAULT_PROJECT_CONCURRENCY,
     });
   }
   let sqlite_raw = raw.sqlite.path.unwrap_or_else(|| DEFAULT_SQLITE_PATH.to_owned());
@@ -213,6 +596,8 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   if interval_seconds == 0 {
     return Err(ConfigError::Invalid("intervalSeconds は1秒以上である必要があります。".to_owned()));
   }
+  // 画面読み取りレーンの本数は任意項目です。範囲外の値はエラーにせず、1〜上限へ丸めます。
+  let screen_read_lanes = ScreenReadLanes::clamped(raw.screen_read_lanes.unwrap_or(DEFAULT_SCREEN_READ_LANES));
   let pending_decision_stale_minutes =
     raw.thresholds.pending_decision_stale_minutes.unwrap_or(DEFAULT_PENDING_DECISION_STALE_MINUTES);
   let run_log_silent_minutes = raw.thresholds.run_log_silent_minutes.unwrap_or(DEFAULT_RUN_LOG_SILENT_MINUTES);
@@ -234,7 +619,61 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   let listen = listen_raw.parse::<SocketAddr>().map_err(|error| {
     ConfigError::Invalid(format!("listen {listen_raw} を待ち受けアドレスとして解釈できませんでした: {error}"))
   })?;
-  Ok(Config { servers, server_meta, projects, interval_seconds, thresholds, sqlite_path, listen })
+  // manager 用エントリは stdio に限り、複数指定した場合はサーバー ID 順の先頭を使います。
+  // サーバー ID の地図が BTreeMap なので、最初に見つかったものが ID 順の先頭になります。
+  let manager_server = servers.iter().find_map(|(id, server)| match server {
+    | McpServer::Stdio(stdio) if stdio.manager => Some(id.clone()),
+    | _ => None,
+  });
+  Ok(Config {
+    servers,
+    server_meta,
+    projects,
+    interval_seconds,
+    screen_read_lanes,
+    thresholds,
+    sqlite_path,
+    listen,
+    auto_terminate_closed_goals: raw.auto_terminate_closed_goals,
+    manager_server,
+  })
+}
+
+/// 1 件の mcpServers のエントリを、stdio 起動方法か HTTP 接続先のどちらかへ解決する。
+///
+/// `type` が `http` のときは HTTP 接続先として `url` と `Authorization` ヘッダを必須にし、
+/// `command` などの起動方法は使わない。`type` がない、または `stdio` のときは起動方法として
+/// `command` を必須にします。
+fn resolve_mcp_server(id: &str, server: RawMcpServer) -> Result<McpServer, ConfigError> {
+  let is_http = matches!(server.kind.as_deref(), Some("http"));
+  if is_http {
+    if server.manager == Some(true) {
+      return Err(ConfigError::Invalid(format!(
+        "サーバー {id} は manager: true と type: http を同時に指定できません。manager 用エントリは stdio の起動方法に限ります。"
+      )));
+    }
+    let url =
+      server.url.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の type: http には url が必須です。")))?;
+    let endpoint = HttpServerEndpoint::try_from(url.as_str())?;
+    let authorization = server.headers.get("Authorization").cloned().ok_or_else(|| {
+      ConfigError::Invalid(format!("サーバー {id} の HTTP 接続先には headers.Authorization が必須です。"))
+    })?;
+    if !authorization.starts_with("Bearer ") || authorization.len() <= "Bearer ".len() {
+      return Err(ConfigError::Invalid(format!(
+        "サーバー {id} の headers.Authorization は \"Bearer <token>\" である必要があります。"
+      )));
+    }
+    return Ok(McpServer::Http(HttpMcpServer { endpoint, authorization }));
+  }
+  let command = server.command.ok_or_else(|| {
+    ConfigError::Invalid(format!("サーバー {id} の command がありません。stdio の起動方法には command が必須です。"))
+  })?;
+  Ok(McpServer::Stdio(StdioMcpServer {
+    command,
+    args: server.args,
+    env: server.env,
+    manager: server.manager == Some(true),
+  }))
 }
 
 fn validate_server_id(id: &str) -> Result<(), ConfigError> {

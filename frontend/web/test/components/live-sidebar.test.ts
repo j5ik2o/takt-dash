@@ -5,7 +5,7 @@
 // ビルド情報はビルド時に埋め込んだ値を prop で受け取って、サイドバー下端に表示する。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createElement } from "react";
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BACKEND_BRANCH, BACKEND_COMMIT, createDashboardState } from "../support/fixtures.ts";
 import { StateStreamProvider } from "../../src/components/state-provider.tsx";
@@ -18,14 +18,14 @@ const FRONTEND_BUILD: BuildInfo = { commit: "a1b2c3d", branch: "takt/20261116-fr
 const renderSidebar = (
   initialState: ReturnType<typeof createDashboardState>,
   frontendBuild: BuildInfo = FRONTEND_BUILD,
-): string =>
-  renderToStaticMarkup(
-    createElement(
-      StateStreamProvider,
-      { initialState },
-      createElement(LiveSidebar, { frontendBuild }),
-    ),
-  );
+): string => {
+  // children は Provider の props の必須項目のため、型付けした props ごと渡す。
+  const props: ComponentProps<typeof StateStreamProvider> = { initialSnapshotLoaded: true,
+    initialState,
+    children: createElement(LiveSidebar, { frontendBuild }),
+  };
+  return renderToStaticMarkup(createElement(StateStreamProvider, props));
+};
 
 const sideFoot = (html: string): string => {
   const match = /<(?:div|details)\b[^>]*\bclass="side-foot"[^>]*>([\s\S]*?)<\/(?:div|details)>/.exec(html);
@@ -59,7 +59,7 @@ test("サイドバーは最終読み取り時刻・読めた台数・サーバ�
   assert.match(html, /16:30/, "最終読み取り時刻の値を出す");
   assert.match(html, /2台中1台から読めています/, "読めているサーバーの台数を出す");
   assert.match(html, /run\s*1件/, "run のあるサーバーの件数を出す");
-  assert.match(html, /run\s*0件/, "run の無いサーバーの件数を出す");
+  assert.match(html, /run\s*対象なし/, "配下にプロジェクトのないサーバーを区別する");
 });
 
 test("最終読み取り時刻が無いときは不明と表示し、例外にしない", () => {

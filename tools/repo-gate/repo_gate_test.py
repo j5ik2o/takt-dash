@@ -42,6 +42,15 @@ make は呼ばない。
      セットアップしない、のそれぞれで失敗する。
   10. .gitignore に生成物の除外が無い、rust-toolchain.toml のチャネルが stable でない、
      のそれぞれで失敗する。
+  11. frontend-style 検査（gate_frontend_style.py）が、frontend/web の CSS とコンポーネント
+     （.tsx）にある色の直書き（16 進、色の関数、色の名前）と列数の固定（repeat に数や式を
+     書く、column-count など）を違反として報告する。:root 以外の規則の --* に書いた色も
+     違反にする。:root の変数定義、コメント、var() の参照、transparent、auto-fit と
+     auto-fill、トラック指定、テスト・node_modules・public・src/proto の中のファイルは
+     違反にしない。既存の例外は値ごとに一致するときだけ通し、値の変更、同じセレクタへの
+     新しい違反、例外に一致する宣言の削除は失敗させる（照合はテスト専用の CSS と例外一覧
+     で確かめる）。実リポジトリの frontend/web もこの検査に通る（make done → make test →
+     このファイルの経路で実行される）。
 """
 import importlib.util
 import io
@@ -54,7 +63,13 @@ import tempfile
 import traceback
 from pathlib import Path
 
+import gate_frontend_style
+
 GATE = Path(__file__).resolve().parent / "repo_gate.py"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+# 既存の例外一覧は実際の globals.css の宣言と値ごと一致させるため、一時リポジトリにも
+# 同じ CSS を置き、例外が「見つからない」と判定されないようにする。
+REAL_GLOBALS_CSS = REPO_ROOT / "frontend/web/app/globals.css"
 
 # make や npm を誤って本物のまま呼ぶ実装の欠陥で、テスト自体が固まらないよう、
 # 1 テストの上限を置く。
@@ -490,18 +505,67 @@ next-env.d.ts
 
 TOOLCHAIN = '[toolchain]\nchannel = "stable"\n'
 
+ACCEPTED_PATH = "scripts/aislop-accepted.json"
+
+ISSUE_REASON = "一時的な受け入れ。解消は https://github.com/j5ik2o/takt-dash/issues/104 で追跡し、issue が閉じたら削除する"
+
+ACCEPTED_FILE = "tools/big.py"
+
+
+def accepted_json(entries):
+    """実リポジトリの scripts/aislop-accepted.json と同じ形の受け入れ一覧を作る。"""
+    return json.dumps(
+        {
+            "engines": ["format", "lint", "code-quality", "ai-slop", "security"],
+            "missingToolsAllowed": {"ruff": "Python 側は ruff を導入していない。"},
+            "accepted": entries,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def accepted_finding(**overrides):
+    finding = {
+        "engine": "code-quality",
+        "rule": "complexity/file-too-large",
+        "file": ACCEPTED_FILE,
+        "message": "File has 10 lines (max 400)",
+        "maxLines": 10,
+    }
+    finding.update(overrides)
+    return finding
+
+
+def accepted_entry(reason=ISSUE_REASON, findings=None):
+    entry = {"findings": [accepted_finding()] if findings is None else findings}
+    if reason is not None:
+        entry["reason"] = reason
+    return entry
+
+
+ACCEPTED = accepted_json([])
+
+
 # 関門のコマンドは外部へ何も出力しない小さな脚本に置き換える。make done の成否は
 # rest に置いた検査の記録から決め、env.toml の fail_targets に並べた検査だけ失敗させる。
 
 
-def repository(sandbox, makefile=MAKEFILE, ci=CI, workflow=WORKFLOW, gitignore=GITIGNORE, toolchain=TOOLCHAIN):
+def repository(
+    sandbox, makefile=MAKEFILE, ci=CI, workflow=WORKFLOW, gitignore=GITIGNORE, toolchain=TOOLCHAIN, accepted=None
+):
     sandbox.write("Cargo.toml", CARGO_WORKSPACE)
     sandbox.write("backend/Cargo.toml", BACKEND_MANIFEST)
     sandbox.write("backend/src/lib.rs", "")
     sandbox.write("frontend/cli/Cargo.toml", CLI_MANIFEST)
     sandbox.write("frontend/cli/src/main.rs", "fn main() {}\n")
     sandbox.write("frontend/web/package.json", WEB_MANIFEST)
+    sandbox.write("frontend/web/app/globals.css", REAL_GLOBALS_CSS.read_text(encoding="utf-8"))
     sandbox.write("proto/README.md", "protobuf\n")
+    sandbox.write(
+        ACCEPTED_PATH,
+        json.dumps({"engines": [], "missingToolsAllowed": {}, "accepted": []}, ensure_ascii=False),
+    )
     if makefile is not None:
         sandbox.write("Makefile", makefile)
     if ci is not None:
@@ -512,6 +576,8 @@ def repository(sandbox, makefile=MAKEFILE, ci=CI, workflow=WORKFLOW, gitignore=G
         sandbox.write(".gitignore", gitignore)
     if toolchain is not None:
         sandbox.write("rust-toolchain.toml", toolchain)
+    if accepted is not None:
+        sandbox.write(ACCEPTED_PATH, accepted)
 
 
 def stub_external_tools(sandbox, make_failure=False):
@@ -607,6 +673,7 @@ def assert_success(sandbox, label):
         "workflow-machine-gate",
         "gitignore-rules",
         "stable-toolchain",
+        "frontend-style",
     }, f"{label}: 検査の内訳が違います: {names}"
     return payload
 
@@ -1333,6 +1400,232 @@ def test_status_only_step_is_not_a_publish_step() -> None:
         assert_success(sandbox, "status だけを実行する開始ステップ")
 
 
+def test_publish_stage_detection() -> None:
+    """publish.py の段階検出は、正規形のコマンドだけを受理する。
+
+    正規形は `python3 tools/project-status/publish.py <段階>` の1行であり、
+    段階の後ろには publish.py 自身のオプション（--status と
+    --require-published）だけを置ける。publish.py への言及があるのに正規形に
+    一致しないコマンドは、正規形を示す理由つきで拒否する。echo の引数・
+    コメント・引用符内の文字列・ラッパー越し・複数行など、記法を問わない。
+    オプションの値に後続コマンドやコマンド置換を付けた入力も受理しない。
+    publish.py への言及が無いコマンドは公開と無関係であり、そのまま通す。
+    """
+    with Sandbox() as sandbox:
+        module = sandbox.module
+
+        def step(command, as_name="commit"):
+            return {
+                "name": "create_pr",
+                "mode": "system",
+                "system_inputs": [{"type": "command", "as": as_name, "command": command}],
+            }
+
+        for stage in ("commit", "push", "pr"):
+            assert module.publish_stages(
+                step(f"python3 tools/project-status/publish.py {stage}", stage)
+            ) == {stage: stage}, f"正規形の {stage} を拾う"
+        assert module.publish_stages(
+            step('python3 tools/project-status/publish.py status --status "In Review"', "status")
+        ) == {"status": "status"}, "status の --status（引用符付き）を受理する"
+        assert module.publish_stages(
+            step("python3 tools/project-status/publish.py status --status 'In Review'", "status")
+        ) == {"status": "status"}, "status の --status（単一引用符）を受理する"
+        assert module.publish_stages(
+            step("python3 tools/project-status/publish.py status --status InReview", "status")
+        ) == {"status": "status"}, "status の --status（引用符なし）を受理する"
+        assert module.publish_stages(
+            step(
+                'python3 tools/project-status/publish.py status --status "In Review"'
+                " --require-published",
+                "status",
+            )
+        ) == {"status": "status"}, "--require-published を受理する"
+        assert module.publish_stages(
+            step(
+                'python3 tools/project-status/publish.py status --require-published'
+                ' --status "In Review"',
+                "status",
+            )
+        ) == {"status": "status"}, "オプションの順序は問わない"
+        assert module.publish_stages(step("make done")) == {}, (
+            "publish.py への言及が無いコマンドはそのまま通す"
+        )
+        assert module.publish_stages(
+            {
+                "name": "create_pr",
+                "mode": "system",
+                "system_inputs": [
+                    {"type": "command", "as": "note", "command": "echo 公開の準備"},
+                    {
+                        "type": "command",
+                        "as": "commit",
+                        "command": "python3 tools/project-status/publish.py commit",
+                    },
+                ],
+            }
+        ) == {"commit": "commit"}, "言及の無いコマンドと正規形が混ざっても正規形だけを拾う"
+
+        rejected = {
+            "echo の引数": "echo python3 tools/project-status/publish.py commit",
+            "引用符内の文字列": 'echo "python3 tools/project-status/publish.py commit"',
+            "コメント": "# python3 tools/project-status/publish.py commit",
+            "bash -c の内側": "bash -c 'python3 tools/project-status/publish.py commit'",
+            "前段との連結": "cd frontend && python3 tools/project-status/publish.py commit",
+            "python のオプション付き": "python3 -u tools/project-status/publish.py commit",
+            "環境変数代入付き": "FOO=1 python3 tools/project-status/publish.py commit",
+            "ラッパー越し": "env FOO=1 python3 tools/project-status/publish.py commit",
+            "バージョン付きインタプリタ": "python3.11 tools/project-status/publish.py commit",
+            "パス付きインタプリタ": "/usr/bin/python3 tools/project-status/publish.py commit",
+            "直接実行": "tools/project-status/publish.py commit",
+            "複数行": "cat <<'EOF'\nready\nEOF\npython3 tools/project-status/publish.py commit",
+            "段階が無い": "python3 tools/project-status/publish.py",
+            "段階が違う": "python3 tools/project-status/publish.py deploy",
+            "publish.py に無いオプション": "python3 tools/project-status/publish.py commit --verbose",
+            "後段との連結": "python3 tools/project-status/publish.py commit; echo done",
+            "オプション値への後続コマンドの付加": (
+                "python3 tools/project-status/publish.py commit --status x;true"
+            ),
+            "オプション値の連結": "python3 tools/project-status/publish.py status --status x&&true",
+            "オプション値のパイプ": "python3 tools/project-status/publish.py status --status x|true",
+            "オプション値のリダイレクト": (
+                "python3 tools/project-status/publish.py status --status x>/dev/null"
+            ),
+            "オプション値のコマンド置換": (
+                "python3 tools/project-status/publish.py status --status $(true)"
+            ),
+            "引用符内のコマンド置換": (
+                'python3 tools/project-status/publish.py status --status "$(true)"'
+            ),
+            "オプション値のバッククォート": (
+                "python3 tools/project-status/publish.py status --status `true`"
+            ),
+        }
+        for label, command in rejected.items():
+            try:
+                module.publish_stages(step(command))
+            except module.GateError as error:
+                assert "正規形" in str(error), (
+                    f"{label}: 拒否の理由に正規形が含まれません: {error}"
+                )
+            else:
+                raise AssertionError(f"{label}: 正規形でないコマンドが受理されました")
+
+
+def test_publish_workflow_passes() -> None:
+    """公開ステップを置く正しい構成は、関門を通る。"""
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=PUBLISH_WORKFLOW)
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "公開ステップを置く構成")
+
+
+def test_publish_workflow_rejects_noncanonical_forms() -> None:
+    """公開コマンドの正規形でない記法は、正規形を示す理由つきで拒否する。
+
+    python のオプション・環境変数代入・ラッパー・バージョン付きインタプリタ・
+    ヒアドキュメントの前置き・行継続・前段との連結は、シェルでは公開スクリプトを
+    起動する有効な記法だが、正規形に一致しないため公開コマンドとして受理しない。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "python のオプション付き": lambda line: line.replace("python3 ", "python3 -u ", 1),
+        "環境変数代入付き": lambda line: line.replace(
+            "          python3 ", "          PYTHONUNBUFFERED=1 python3 ", 1
+        ),
+        "ラッパー越し": lambda line: line.replace(
+            "python3 ", "env PYTHONUNBUFFERED=1 python3 ", 1
+        ),
+        "バージョン付きインタプリタ": lambda line: line.replace("python3 ", "python3.11 ", 1),
+        "ヒアドキュメントの前置き": lambda line: (
+            "          cat <<'EOF'\n          It's a publish step\n          EOF\n" + line
+        ),
+        "行継続で折り返す": lambda line: line.replace(
+            "python3 ", "python3 \\\n            ", 1
+        ),
+        "前段との連結": lambda line: line.replace("python3 ", "true && python3 ", 1),
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "正規形")
+
+
+def test_publish_commands_must_use_canonical_form() -> None:
+    """publish.py への言及だけでは、公開ステップとして受理しない。
+
+    echo の引数・引用符内の文字列・コメント・ヒアドキュメントの本文・構文確認
+    だけのシェル・場所の表示だけを行う command -v など、publish.py に言及する
+    だけのコマンドは、正規形を示す理由つきで拒否する。
+    """
+    stage_lines = [
+        "          python3 tools/project-status/publish.py commit\n",
+        "          python3 tools/project-status/publish.py push\n",
+        "          python3 tools/project-status/publish.py pr\n",
+        "          python3 tools/project-status/publish.py status --status \"In Review\"\n",
+    ]
+    for line in stage_lines:
+        assert line in PUBLISH_WORKFLOW, f"置換対象が見つかりません: {line!r}"
+    cases = {
+        "echo で表示するだけ": lambda line: "          echo " + line.strip() + "\n",
+        "引用符内の文字列で表示するだけ": lambda line: "          echo \"" + line.strip() + "\"\n",
+        "コメントに書くだけ": lambda line: "          # " + line.strip() + "\n",
+        "構文確認だけのシェルで表示するだけ": lambda line: "          bash -n -c '"
+        + line.strip()
+        + "'\n",
+        "ヒアドキュメントで表示するだけ": lambda line: "          cat <<'EOF'\n"
+        + line
+        + "          EOF\n",
+        "command -v で場所を表示するだけ": lambda line: "          command -v "
+        + line.strip()
+        + "\n",
+        "ラッパー越しの構文確認だけのシェルで表示するだけ": lambda line: (
+            "          env FOO=1 bash -n -c '" + line.strip() + "'\n"
+        ),
+    }
+    for label, transform in cases.items():
+        workflow = PUBLISH_WORKFLOW
+        for line in stage_lines:
+            workflow = workflow.replace(line, transform(line))
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=workflow)
+            stub_external_tools(sandbox)
+            assert_failure(sandbox, label, "workflow-machine-gate", "正規形")
+
+
+def test_publish_success_rule_must_precede_unconditional_rule() -> None:
+    """公開の成功規則は、when(true) の無条件規則より前に置かなければならない。
+
+    規則は先に一致したものから順に評価されるため、無条件規則が先にあると、公開が
+    成功してもそちらが選ばれて aislop_gate へ進まない。
+    """
+    success_rule = (
+        "      - condition: when(context.create_pr.commit.exit_code == 0 && "
+        "context.create_pr.push.exit_code == 0 && context.create_pr.pr.exit_code == 0)\n"
+        "        next: aislop_gate\n"
+    )
+    fallback_rule = "      - condition: when(true)\n        next: fix_publish\n"
+    assert success_rule + fallback_rule in PUBLISH_WORKFLOW, "公開ステップの規則列が見つかりません"
+    workflow = PUBLISH_WORKFLOW.replace(success_rule + fallback_rule, fallback_rule + success_rule)
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=workflow)
+        stub_external_tools(sandbox)
+        assert_failure(
+            sandbox, "無条件規則が成功規則より前にある", "workflow-machine-gate", "無条件規則より後"
+        )
+
+
 def test_workflow_requires_aislop_gate_step() -> None:
     """aislop の機械ゲートが無い、順序が違う、失敗時に戻らない、のそれぞれで失敗する。"""
     machine_success_complete = MACHINE_GATE_STEP.replace(
@@ -1942,8 +2235,918 @@ def test_makefile_recipe_parsing() -> None:
         assert targets["done"][0] == "$(MAKE) fmt", targets
 
 
+GLOBALS_CSS = "frontend/web/app/globals.css"
+
+
+def append_css(sandbox, text):
+    """一時リポジトリの globals.css の末尾へ text を足し、text の 1 行目の行番号を返す。"""
+    path = sandbox.root / GLOBALS_CSS
+    original = path.read_text(encoding="utf-8")
+    if not original.endswith("\n"):
+        original += "\n"
+    path.write_text(original + text, encoding="utf-8")
+    return original.count("\n") + 1
+
+
+def assert_style_failure(sandbox, label, snippets):
+    code, out, err = sandbox.run([])
+    assert code != 0, f"{label}: 違反があるのに成功しました。stdout={out!r}"
+    lines = [line for line in err.splitlines() if line.startswith("frontend-style:")]
+    assert len(lines) == 1, f"{label}: frontend-style の違反が 1 行で報告されません: {err!r}"
+    for snippet in snippets:
+        assert snippet in lines[0], f"{label}: 違反の報告に {snippet!r} が含まれません: {lines[0]!r}"
+    return lines[0]
+
+
+def test_frontend_style_reports_css_colors() -> None:
+    for label, value in {
+        "16 進": "#fff",
+        "rgb()": "rgb(1, 2, 3)",
+        "hsl()": "hsl(10, 20%, 30%)",
+        "色の名前": "red",
+    }.items():
+        with Sandbox() as sandbox:
+            repository(sandbox)
+            stub_external_tools(sandbox)
+            start = append_css(sandbox, f".foo {{\n  color: {value};\n}}\n")
+            assert_style_failure(
+                sandbox,
+                f"CSS の色（{label}）",
+                [f"app/globals.css:{start + 1}", ".foo", "color", value, "[色]"],
+            )
+
+
+def test_frontend_style_allows_css_variables_comments_and_keywords() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        append_css(
+            sandbox,
+            ":root {\n  --x-surface: #fff;\n}\n"
+            "/* issue #119 の #fff と rgb(0, 0, 0) と red */\n"
+            ".foo {\n  color: var(--teal);\n  background: transparent;\n  border-color: currentcolor;\n}\n",
+        )
+        assert_success(sandbox, "変数の定義・コメント・変数の参照・transparent")
+
+
+def test_frontend_style_reports_css_fixed_columns() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        start = append_css(
+            sandbox,
+            "@media (max-width: 760px) {\n  .grid {\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n  }\n}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "@media の中の repeat(3, …)",
+            [
+                f"app/globals.css:{start + 2}",
+                "@media (max-width: 760px)",
+                ".grid",
+                "grid-template-columns",
+                "repeat(3, minmax(0, 1fr))",
+                "[列数]",
+            ],
+        )
+
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        start = append_css(sandbox, ".text {\n  column-count: 3;\n}\n")
+        assert_style_failure(
+            sandbox,
+            "column-count: 3",
+            [f"app/globals.css:{start + 1}", ".text", "column-count", "[列数]"],
+        )
+
+
+def test_frontend_style_allows_auto_columns_and_track_lists() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        append_css(
+            sandbox,
+            ".grid {\n  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));\n}\n"
+            ".grid2 {\n  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));\n}\n"
+            ".row {\n  grid-template-columns: 96px minmax(0, 1fr) 200px;\n}\n",
+        )
+        assert_success(sandbox, "auto-fit・auto-fill・トラック指定")
+
+
+COMPONENT = "frontend/web/src/components/x.tsx"
+
+
+def test_frontend_style_reports_component_colors() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            '  return <p style={{ color: "#f00", background: "red" }} />;\n'
+            "}\n",
+        )
+        line = assert_style_failure(
+            sandbox,
+            "コンポーネントの style の色",
+            ["src/components/x.tsx:2", "#f00", "red", "[色]"],
+        )
+        assert line.count("src/components/x.tsx:2") == 2, f"色の違反が 2 件報告されません: {line!r}"
+
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            '  return <p style={{ borderColor: "rgba(0, 0, 0, 0.5)" }} />;\n'
+            "}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "コンポーネントの色の関数",
+            ["src/components/x.tsx:2", "rgba(0, 0, 0, 0.5)", "[色]"],
+        )
+
+
+def test_frontend_style_ignores_component_text_comments_and_class_names() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "// see #abc\n"
+            "/* #fff と rgb(0, 0, 0)\n   repeat(3, 1fr) */\n"
+            "export function X() {\n"
+            "  return (\n"
+            '    <a href="https://example.com" className="orange">\n'
+            "      <p>issue #119</p>\n"
+            '      <span className="red">赤</span>\n'
+            "    </a>\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_success(sandbox, "JSX の本文・コメント・クラス名・URL")
+
+
+def test_frontend_style_reports_component_fixed_columns() -> None:
+    for label, (statement, snippet) in {
+        "件数で決める repeat": (
+            "  return <div style={{ gridTemplateColumns: `repeat(${servers.length}, 1fr)` }} />;\n",
+            "repeat(",
+        ),
+        "数で固定する repeat": (
+            '  return <div style={{ gridTemplateColumns: "repeat(3, 1fr)" }} />;\n',
+            "repeat(3",
+        ),
+        "columnCount": (
+            "  return <div style={{ columnCount: 3 }} />;\n",
+            "columnCount",
+        ),
+    }.items():
+        with Sandbox() as sandbox:
+            repository(sandbox)
+            stub_external_tools(sandbox)
+            sandbox.write(
+                COMPONENT,
+                "export function X({ servers }: { servers: string[] }) {\n" + statement + "}\n",
+            )
+            assert_style_failure(
+                sandbox,
+                f"コンポーネントの列数（{label}）",
+                ["src/components/x.tsx:2", snippet, "[列数]"],
+            )
+
+
+def test_frontend_style_reports_component_multiline_style_declarations() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            "  return (\n"
+            "    <p\n"
+            "      style={{\n"
+            "        color:\n"
+            '          "red",\n'
+            "      }}\n"
+            "    />\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "改行をまたぐ style の色の名前",
+            ["src/components/x.tsx:6", "red", "[色]"],
+        )
+
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            "  return (\n"
+            "    <div\n"
+            "      style={{\n"
+            "        gridTemplateColumns:\n"
+            '          "repeat(3, 1fr)",\n'
+            "      }}\n"
+            "    />\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_style_failure(
+            sandbox,
+            "改行をまたぐ style の列数",
+            ["src/components/x.tsx:6", "repeat(3", "[列数]"],
+        )
+
+
+def test_frontend_style_ignores_component_body_text_and_expressions() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            "  return (\n"
+            "    <div>\n"
+            '      <p>{"-".repeat(3)}</p>\n'
+            "      <p>rgb(1, 2, 3)</p>\n"
+            "    </div>\n"
+            "  );\n"
+            "}\n",
+        )
+        assert_success(sandbox, "JSX の本文と文字列のメソッド呼び出し")
+
+
+def test_frontend_style_skips_auto_columns_and_excluded_files() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        sandbox.write(
+            COMPONENT,
+            "export function X() {\n"
+            '  return <div style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }} />;\n'
+            "}\n",
+        )
+        fixed = 'export const A = () => <div style={{ gridTemplateColumns: "repeat(3, 1fr)", color: "#f00" }} />;\n'
+        sandbox.write("frontend/web/test/a.test.tsx", fixed)
+        sandbox.write("frontend/web/src/components/a.test.tsx", fixed)
+        sandbox.write("frontend/web/node_modules/p/b.tsx", fixed)
+        sandbox.write("frontend/web/src/proto/gen.tsx", fixed)
+        sandbox.write("frontend/web/node_modules/p/b.css", ".b { color: #f00; grid-template-columns: repeat(3, 1fr); }\n")
+        sandbox.write("frontend/web/.next/c.css", ".c { color: #f00; }\n")
+        sandbox.write("frontend/web/public/p.css", ".p { color: #f00; grid-template-columns: repeat(3, 1fr); }\n")
+        sandbox.write("frontend/web/public/q.tsx", fixed)
+        assert_success(sandbox, "auto-fill と対象外のファイル")
+
+
+LEGACY_DECLARATION = ".legacy {\n  grid-template-columns: repeat(3, minmax(0, 1fr));\n}\n"
+LEGACY_EXCEPTIONS = [
+    ("app/globals.css", (".legacy",), "grid-template-columns", "repeat(3, minmax(0, 1fr))"),
+]
+
+
+def frontend_style_error(sandbox, css, exceptions):
+    """globals.css を css だけにして検査し、違反の文言（違反が無ければ None）を返す。"""
+    sandbox.write(GLOBALS_CSS, css)
+    try:
+        gate_frontend_style.check_frontend_style(sandbox.root, sandbox.module.GateError, exceptions)
+    except sandbox.module.GateError as error:
+        return str(error)
+    return None
+
+
+def test_frontend_style_existing_exceptions_match_exact_values() -> None:
+    # 照合の規則はテスト専用の CSS と例外一覧で確かめ、実際の globals.css の宣言には頼らない
+    # （部品を適用して既存の宣言を一覧ごと外しても、このテストは成り立つ）。
+    with Sandbox() as sandbox:
+        error = frontend_style_error(sandbox, LEGACY_DECLARATION, LEGACY_EXCEPTIONS)
+        assert error is None, f"例外一覧と一致する宣言が通りません: {error!r}"
+
+    cases = {
+        "例外の値を変える": (
+            ".legacy {\n  grid-template-columns: repeat(5, minmax(0, 1fr));\n}\n",
+            [
+                "app/globals.css:2",
+                "repeat(5, minmax(0, 1fr))",
+                # 一致しなくなった例外の項目も、同じ報告に含める。
+                "例外一覧の宣言が見つかりません",
+                "repeat(3, minmax(0, 1fr))",
+            ],
+            [],
+        ),
+        "例外のセレクタに色を足す": (
+            ".legacy {\n  grid-template-columns: repeat(3, minmax(0, 1fr));\n  color: #000;\n}\n",
+            ["app/globals.css:3", ".legacy", "color: #000", "[色]"],
+            # 一致したままの例外を、見つからないと報告しない。
+            ["見つかりません"],
+        ),
+        "例外に一致する宣言を消す": (
+            ".legacy {\n  gap: var(--space-18);\n}\n",
+            ["例外一覧の宣言が見つかりません", ".legacy", "grid-template-columns", "repeat(3, minmax(0, 1fr))"],
+            [],
+        ),
+    }
+    for label, (css, snippets, absent) in cases.items():
+        with Sandbox() as sandbox:
+            error = frontend_style_error(sandbox, css, LEGACY_EXCEPTIONS)
+            assert error is not None, f"{label}: 違反があるのに成功しました"
+            for snippet in snippets:
+                assert snippet in error, f"{label}: 違反の報告に {snippet!r} が含まれません: {error!r}"
+            for snippet in absent:
+                assert snippet not in error, f"{label}: 違反の報告に {snippet!r} が含まれます: {error!r}"
+
+
+def test_frontend_style_reports_css_variables_outside_root() -> None:
+    # 判定から外すのは :root の中の変数の定義だけで、ほかの規則の --* に書いた色は検出する。
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        start = append_css(sandbox, ".foo {\n  --c: #f00;\n}\n")
+        assert_style_failure(
+            sandbox,
+            ":root 以外の規則の変数の色",
+            [f"app/globals.css:{start + 1}", ".foo", "--c", "#f00", "[色]"],
+        )
+
+
+def test_frontend_style_requires_css_files() -> None:
+    # 探索先を誤って何も見ずに通る状態を防ぐ。例外が見つからないことより先に報告する。
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        stub_external_tools(sandbox)
+        (sandbox.root / GLOBALS_CSS).unlink()
+        assert_style_failure(sandbox, "CSS が無い", ["frontend/web に検査する CSS がありません"])
+
+
+def test_repository_frontend_passes_frontend_style() -> None:
+    # make done → make test → このテストの経路で実リポジトリを検査する。repo_gate.main を
+    # --skip-make なしで呼ぶと make done を再び起動して再帰するため、検査関数を直接呼ぶ。
+    gate = load_gate()
+    try:
+        detail = gate_frontend_style.check_frontend_style(
+            REPO_ROOT, gate.GateError, gate_frontend_style.EXISTING_EXCEPTIONS
+        )
+    except gate.GateError as error:
+        raise AssertionError(f"実リポジトリの frontend/web が frontend-style に違反しています: {error}")
+    assert "app/globals.css" in detail["css_files"], f"globals.css を走査していません: {detail!r}"
+
+
+def test_aislop_check_accepts_leading_newlines() -> None:
+    with Sandbox() as sandbox:
+        assert sandbox.module.invokes_aislop_check("\n\n" + AISLOP_CHECK)
+
+
+def test_aislop_check_rejects_quoted_empty_arguments() -> None:
+    with Sandbox() as sandbox:
+        for empty in ("''", '""'):
+            command = f"echo {empty} {AISLOP_CHECK}"
+            assert not sandbox.module.invokes_aislop_check(command), command
+
+
+def test_workflow_aislop_check_must_be_reachable() -> None:
+    for prefix in ("npm ci && ", "npm ci\n", "exit 0\n", "exit 0; ", "exit 0; echo ready; "):
+        command = prefix + AISLOP_CHECK
+        step = AISLOP_GATE_STEP.replace(
+            f"command: npm ci && {AISLOP_CHECK}",
+            "command: |\n" + "\n".join("          " + line for line in command.splitlines()),
+        )
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=WORKFLOW.replace(AISLOP_GATE_STEP, step))
+            stub_external_tools(sandbox)
+            if prefix.startswith("exit"):
+                assert_gate_rejects(sandbox, command)
+            else:
+                assert_success(sandbox, command)
+
+
+def test_ci_aislop_check_must_be_reachable() -> None:
+    for prefix in ("npm ci && ", "npm ci\n", "exit 0\n", "exit 0; ", "exit 0; echo ready; "):
+        command = prefix + AISLOP_CHECK
+        run = "      - run: |\n" + "".join("          " + line + "\n" for line in command.splitlines())
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=CI.replace(f"      - run: {AISLOP_CHECK}\n", run))
+            stub_external_tools(sandbox)
+            if prefix.startswith("exit"):
+                assert_gate_rejects(sandbox, command, "ci-runs-make-done")
+            else:
+                assert_success(sandbox, command)
+
+
+def test_aislop_success_result_must_belong_to_check() -> None:
+    for check_alias, other_alias, accepted in (
+        ("result", "preparation", True),
+        ("check_result", "result", False),
+        ("result", "result", False),
+    ):
+        step = AISLOP_GATE_STEP.replace("as: result", f"as: {check_alias}").replace(
+            "    rules:\n",
+            "      - type: command\n"
+            f"        as: {other_alias}\n"
+            "        command: 'true'\n"
+            "    rules:\n",
+        )
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=WORKFLOW.replace(AISLOP_GATE_STEP, step))
+            stub_external_tools(sandbox)
+            if accepted:
+                assert_success(sandbox, "チェック自身の result を参照する")
+            else:
+                assert_gate_rejects(sandbox, "チェック以外が result を生成する")
+
+
+def test_ci_required_steps_accept_default_failure_behavior() -> None:
+    for setting in (
+        "",
+        "        continue-on-error: false\n",
+        "        continue-on-error: ${{ false }}\n",
+        "        continue-on-error: ${{false}}\n",
+    ):
+        for command in ("make done", AISLOP_CHECK):
+            line = f"      - run: {command}\n"
+            with Sandbox() as sandbox:
+                repository(sandbox, ci=CI.replace(line, line + setting))
+                stub_external_tools(sandbox)
+                assert_success(sandbox, f"失敗を許容しない必須起動: {command}, {setting!r}")
+
+
+def test_ci_make_done_must_not_allow_failure() -> None:
+    for setting in ("true", "${{ true }}", "${{ matrix.allow_failure }}"):
+        ci = CI.replace("    steps:\n", "    strategy:\n      matrix:\n        allow_failure: [true, false]\n    steps:\n")
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=ci.replace(
+                "      - run: make done\n",
+                f"      - run: make done\n        continue-on-error: {setting}\n",
+            ))
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, f"make done の失敗を許容する: {setting}", "ci-runs-make-done")
+
+
+def test_ci_aislop_must_not_allow_failure() -> None:
+    line = f"      - run: {AISLOP_CHECK}\n"
+    for setting in ("true", "${{ true }}", "${{ matrix.allow_failure }}"):
+        ci = CI.replace("    steps:\n", "    strategy:\n      matrix:\n        allow_failure: [true, false]\n    steps:\n")
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=ci.replace(line, line + f"        continue-on-error: {setting}\n"))
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, f"aislop の失敗を許容する: {setting}", "ci-runs-make-done")
+
+
+def test_ci_setup_comments_do_not_count_as_actions() -> None:
+    for setup in (
+        "      - uses: dtolnay/rust-toolchain@stable\n        with:\n          components: clippy\n",
+        "      - uses: dtolnay/rust-toolchain@nightly\n        with:\n          components: rustfmt\n",
+        "      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n",
+    ):
+        commented = "".join("# " + line + "\n" for line in setup.splitlines())
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=CI.replace(setup, commented))
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, setup, "ci-runs-make-done")
+
+
+def test_ci_setup_options_must_belong_to_matching_action() -> None:
+    for uses, option in (
+        ("dtolnay/rust-toolchain@nightly", "components: rustfmt"),
+        ("actions/setup-node@v4", "node-version: 22"),
+    ):
+        setup = f"      - uses: {uses}\n        with:\n          {option}\n"
+        misplaced = (
+            f"      - uses: {uses}\n"
+            "      - uses: example/unrelated-action@v1\n"
+            "        with:\n"
+            f"          {option}\n"
+        )
+        with Sandbox() as sandbox:
+            repository(sandbox, ci=CI.replace(setup, misplaced))
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, misplaced, "ci-runs-make-done")
+
+
+def test_machine_gate_fix_return_must_precede_unconditional_abort() -> None:
+    for original in FIX_MACHINE_GATE_STEPS:
+        header, _ = original.split("    rules:\n", 1)
+        return_rule = "      - condition: 修正して検証した\n        next: machine_gate\n"
+        abort_rule = "      - condition: when(true)\n        next: ABORT\n"
+        for rules, accepted in ((return_rule + abort_rule, True), (abort_rule + return_rule, False)):
+            step = header + "    rules:\n" + rules
+            with Sandbox() as sandbox:
+                repository(sandbox, workflow=WORKFLOW.replace(original, step))
+                stub_external_tools(sandbox)
+                if accepted:
+                    assert_success(sandbox, step)
+                else:
+                    assert_gate_rejects(sandbox, step)
+
+
+def test_aislop_fix_return_must_precede_unconditional_abort() -> None:
+    header, _ = FIX_AISLOP_GATE_STEP.split("    rules:\n", 1)
+    return_rule = "      - condition: 修正して検証した\n        next: machine_gate\n"
+    abort_rule = "      - condition: when(true)\n        next: ABORT\n"
+    for rules, accepted in ((return_rule + abort_rule, True), (abort_rule + return_rule, False)):
+        step = header + "    rules:\n" + rules
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=WORKFLOW.replace(FIX_AISLOP_GATE_STEP, step))
+            stub_external_tools(sandbox)
+            if accepted:
+                assert_success(sandbox, step)
+            else:
+                assert_gate_rejects(sandbox, step)
+
+
+def test_publish_fix_must_reject_additional_complete_transition() -> None:
+    extra = "      - condition: 公開を省略する\n        next: COMPLETE\n"
+    with Sandbox() as sandbox:
+        repository(sandbox, workflow=PUBLISH_WORKFLOW + extra)
+        stub_external_tools(sandbox)
+        assert_gate_rejects(sandbox, "再試行を残したまま COMPLETE へ抜ける")
+
+
+def test_shell_comments_preserve_newline() -> None:
+    from gate_shell import strip_shell_comments
+
+    command = f"echo ok # note\n{AISLOP_CHECK}"
+    assert strip_shell_comments(command) == f"echo ok \n{AISLOP_CHECK}"
+    continued = "echo \\\n# note\n" + AISLOP_CHECK
+    assert strip_shell_comments(continued) == "echo \\\n\n" + AISLOP_CHECK
+
+
+def test_shell_comments_preserve_hash_inside_words() -> None:
+    from gate_shell import strip_shell_comments
+
+    for command in ("echo '#'", 'echo "#"', r"echo \#", "echo tag#v", "echo tag#v '#' \"#\" \\#"):
+        actual = strip_shell_comments(command)
+        assert actual == command, f"{command!r} が {actual!r} に変化しました"
+
+
+def test_aislop_success_must_not_be_shadowed_by_zero_matching_rule() -> None:
+    success = "      - condition: when(context.aislop_gate.result.exit_code == 0)\n"
+    for operator, accepted in (("!=", True), (">=", False)):
+        preceding = (
+            f"      - condition: when(context.aislop_gate.result.exit_code {operator} 0)\n"
+            "        next: fix_aislop_gate\n"
+        )
+        step = AISLOP_GATE_STEP.replace(success, preceding + success)
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=WORKFLOW.replace(AISLOP_GATE_STEP, step))
+            stub_external_tools(sandbox)
+            if accepted:
+                assert_success(sandbox, "0 に一致しない先行規則")
+            else:
+                assert_gate_rejects(sandbox, "0 にも一致する先行規則")
+
+
+def test_aislop_rejects_shell_control_before_check() -> None:
+    with Sandbox() as sandbox:
+        for prefix in (
+            "exit 0; echo ready; ",
+            "command exit 0; ",
+            "exec true; ",
+            "time exit 0; ",
+            "eval 'exit 0'; ",
+            "set -n; ",
+            ">/dev/null exit 0; ",
+            "ex\\\nit 0; ",
+            "if false; then ",
+        ):
+            command = prefix + AISLOP_CHECK
+            assert not sandbox.module.invokes_aislop_check(command), command
+
+
+
+def test_aislop_check_rejects_heredoc_before_check() -> None:
+    with Sandbox() as sandbox:
+        for command in (
+            "cat <<'node scripts/aislop-check-bootstrap.mjs check'\n" + AISLOP_CHECK,
+            "cat <<EOF\nbody\nEOF\n" + AISLOP_CHECK,
+            "cat <<-EOF\n" + AISLOP_CHECK + "\nEOF",
+        ):
+            assert not sandbox.module.invokes_aislop_check(command), command
+
+
+def test_aislop_check_accepts_quoted_heredoc_operator() -> None:
+    with Sandbox() as sandbox:
+        for command in (
+            "echo '<< ready'\n" + AISLOP_CHECK,
+            'echo "<< ready"\n' + AISLOP_CHECK,
+            "echo \\<< ready\n" + AISLOP_CHECK,
+        ):
+            assert sandbox.module.invokes_aislop_check(command), command
+
+
+def test_workflow_aislop_reachability_with_adjacent_redirection() -> None:
+    for separator in ("\n", "; "):
+        for head in ("echo</dev/null", "echo 'exit</dev/null'", "exit</dev/null"):
+            command = head + separator + AISLOP_CHECK
+            step = AISLOP_GATE_STEP.replace(
+                f"command: npm ci && {AISLOP_CHECK}",
+                "command: |\n" + "\n".join("          " + line for line in command.splitlines()),
+            )
+            with Sandbox() as sandbox:
+                repository(sandbox, workflow=WORKFLOW.replace(AISLOP_GATE_STEP, step))
+                stub_external_tools(sandbox)
+                if head == "exit</dev/null":
+                    assert_gate_rejects(sandbox, command)
+                else:
+                    assert_success(sandbox, command)
+
+
+def test_ci_aislop_reachability_with_adjacent_redirection() -> None:
+    for separator in ("\n", "; "):
+        for head in ("echo</dev/null", "echo 'exit</dev/null'", "exit</dev/null"):
+            command = head + separator + AISLOP_CHECK
+            run = "      - run: |\n" + "".join("          " + line + "\n" for line in command.splitlines())
+            with Sandbox() as sandbox:
+                repository(sandbox, ci=CI.replace(f"      - run: {AISLOP_CHECK}\n", run))
+                stub_external_tools(sandbox)
+                if head == "exit</dev/null":
+                    assert_gate_rejects(sandbox, command, "ci-runs-make-done")
+                else:
+                    assert_success(sandbox, command)
+
+
+
+def numbered_lines(count, trailing_newline=True):
+    text = "\n".join(f"line {index}" for index in range(1, count + 1))
+    return text + "\n" if trailing_newline and count else text
+
+
+def accepted_repository(sandbox, entries, files=None):
+    """受け入れ一覧と、そこが参照するファイルを置いたリポジトリを作る。"""
+    repository(sandbox, accepted=accepted_json(entries))
+    if files is None:
+        files = {ACCEPTED_FILE: numbered_lines(10)}
+    for relative, text in files.items():
+        sandbox.write(relative, text)
+    stub_external_tools(sandbox)
+
+
+def accepted_detail(payload):
+    detail = {check["name"]: check for check in payload["checks"]}["workflow-machine-gate"]["detail"]
+    return detail["aislop_accepted"]
+
+
+def test_aislop_accepted_entry_requires_issue_link() -> None:
+    with Sandbox() as sandbox:
+        accepted_repository(sandbox, [accepted_entry()])
+        payload = assert_success(sandbox, "issue の URL を含む reason")
+        assert accepted_detail(payload) == {"entries": 1, "findings": 1}, accepted_detail(payload)
+
+    for label, reason in {
+        "issue 番号だけ": "一時的な受け入れ。解消は issue #104 で追跡する",
+        "pull の URL": "解消は https://github.com/j5ik2o/takt-dash/pull/85 で追跡する",
+        "別リポジトリの issue": "解消は https://github.com/j5ik2o/other/issues/1 で追跡する",
+        "番号の無い issue URL": "解消は https://github.com/j5ik2o/takt-dash/issues/ で追跡する",
+        "空の reason": "",
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [accepted_entry(reason=reason)])
+            assert_failure(sandbox, label, "workflow-machine-gate", "https://github.com/j5ik2o/takt-dash/issues/")
+
+    for label, entry in {
+        "reason が無い": accepted_entry(reason=None),
+        "reason が文字列でない": {"reason": ["https://github.com/j5ik2o/takt-dash/issues/104"], "findings": [accepted_finding()]},
+        "エントリが辞書でない": ISSUE_REASON,
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [entry])
+            assert_gate_rejects(sandbox, label)
+
+    # 2 件目だけがリンクを欠く場合も、1 件目の合格で検査を打ち切らない。
+    with Sandbox() as sandbox:
+        accepted_repository(sandbox, [accepted_entry(), accepted_entry(reason="解消は issue #104")])
+        assert_failure(sandbox, "2 件目のリンク欠落", "workflow-machine-gate", "https://github.com/j5ik2o/takt-dash/issues/")
+
+
+def test_aislop_accepted_finding_requires_max_lines() -> None:
+    without_limit = accepted_finding()
+    del without_limit["maxLines"]
+    for label, finding in {
+        "maxLines が無い": without_limit,
+        "maxLines が文字列": accepted_finding(maxLines="10"),
+        "maxLines が真偽値": accepted_finding(maxLines=True),
+        "maxLines が小数": accepted_finding(maxLines=10.0),
+        "maxLines が 0": accepted_finding(maxLines=0),
+        "maxLines が負": accepted_finding(maxLines=-1),
+        "maxLines が null": accepted_finding(maxLines=None),
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [accepted_entry(findings=[finding])])
+            assert_failure(sandbox, label, "workflow-machine-gate", "maxLines")
+
+    # 2 件目の finding だけが上限の欄を欠く場合も失敗する。
+    with Sandbox() as sandbox:
+        accepted_repository(sandbox, [accepted_entry(findings=[accepted_finding(), without_limit])])
+        assert_failure(sandbox, "2 件目の finding", "workflow-machine-gate", "maxLines")
+
+    for label, entry in {
+        "findings が空": accepted_entry(findings=[]),
+        "findings が無い": {"reason": ISSUE_REASON},
+        "finding が辞書でない": accepted_entry(findings=[ACCEPTED_FILE]),
+        "file が無い": accepted_entry(findings=[{key: value for key, value in accepted_finding().items() if key != "file"}]),
+        "file が空": accepted_entry(findings=[accepted_finding(file="")]),
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [entry])
+            assert_gate_rejects(sandbox, label)
+
+
+def test_aislop_accepted_issue_link_is_read_from_decoded_reason() -> None:
+    entry = accepted_entry()
+    for label, serialized in {
+        "改行とインデント": accepted_json([entry]),
+        "JSON エスケープ": json.dumps({"accepted": [entry]}, ensure_ascii=True).replace("/", "\\u002f"),
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [entry])
+            sandbox.write(ACCEPTED_PATH, serialized)
+            assert_success(sandbox, label)
+
+    with Sandbox() as sandbox:
+        accepted_repository(
+            sandbox,
+            [accepted_entry(reason="一時的な受け入れ", findings=[accepted_finding(message=ISSUE_REASON)])],
+        )
+        assert_failure(sandbox, "message にだけ URL がある", "workflow-machine-gate", "reason")
+
+
+def test_aislop_accepted_file_over_max_lines_fails() -> None:
+    for label, text in {
+        "11 行（末尾改行あり）": numbered_lines(11),
+        "11 行（末尾改行なし）": numbered_lines(11, trailing_newline=False),
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [accepted_entry()], files={ACCEPTED_FILE: text})
+            assert_failure(sandbox, label, "workflow-machine-gate", ACCEPTED_FILE)
+
+    # 1 エントリが複数ファイルにまたがるとき、上限を超えた側だけを報告する。
+    with Sandbox() as sandbox:
+        accepted_repository(
+            sandbox,
+            [accepted_entry(findings=[accepted_finding(), accepted_finding(file="tools/other.py", maxLines=3)])],
+            files={ACCEPTED_FILE: numbered_lines(10), "tools/other.py": numbered_lines(4)},
+        )
+        assert_failure(sandbox, "2 件目のファイルが超過", "workflow-machine-gate", "tools/other.py")
+
+
+def test_aislop_accepted_file_must_exist_under_root() -> None:
+    with Sandbox() as sandbox:
+        accepted_repository(sandbox, [accepted_entry()], files={})
+        assert_failure(sandbox, "ファイルが無い", "workflow-machine-gate", ACCEPTED_FILE)
+
+    with Sandbox() as sandbox:
+        outside = sandbox.base / "outside.py"
+        outside.write_text(numbered_lines(1), encoding="utf-8")
+        for label, file in {
+            "ルートの外（相対）": "../outside.py",
+            "絶対パス": str(outside),
+            "ディレクトリ": "tools",
+        }.items():
+            accepted_repository(sandbox, [accepted_entry(findings=[accepted_finding(file=file)])])
+            assert_gate_rejects(sandbox, label)
+
+
+def test_aislop_accepted_within_max_lines_passes() -> None:
+    for label, text in {
+        "上限と同じ 10 行": numbered_lines(10),
+        "上限と同じ 10 行（末尾改行なし）": numbered_lines(10, trailing_newline=False),
+        "上限未満の 9 行": numbered_lines(9),
+        "空のファイル": "",
+    }.items():
+        with Sandbox() as sandbox:
+            accepted_repository(sandbox, [accepted_entry()], files={ACCEPTED_FILE: text})
+            payload = assert_success(sandbox, label)
+            assert accepted_detail(payload) == {"entries": 1, "findings": 1}, accepted_detail(payload)
+
+    with Sandbox() as sandbox:
+        accepted_repository(
+            sandbox,
+            [
+                accepted_entry(findings=[accepted_finding(), accepted_finding(file="tools/other.py", maxLines=3)]),
+                accepted_entry(reason="解消は https://github.com/j5ik2o/takt-dash/issues/7 で追跡する"),
+            ],
+            files={ACCEPTED_FILE: numbered_lines(10), "tools/other.py": numbered_lines(3)},
+        )
+        payload = assert_success(sandbox, "複数エントリと複数ファイル")
+        assert accepted_detail(payload) == {"entries": 2, "findings": 3}, accepted_detail(payload)
+
+
+def test_aislop_accepted_empty_list_passes() -> None:
+    # 解消後に一覧が空になっても許容する。missingToolsAllowed の理由は受け入れとは
+    # 別の契約なので、解消 issue の URL を要求しない。
+    with Sandbox() as sandbox:
+        repository(sandbox, accepted=ACCEPTED)
+        stub_external_tools(sandbox)
+        payload = assert_success(sandbox, "空の一覧")
+        assert accepted_detail(payload) == {"entries": 0, "findings": 0}, accepted_detail(payload)
+
+
+def test_aislop_accepted_list_must_be_readable() -> None:
+    with Sandbox() as sandbox:
+        repository(sandbox)
+        (sandbox.root / ACCEPTED_PATH).unlink()
+        stub_external_tools(sandbox)
+        assert_gate_rejects(sandbox, "一覧のファイルが無い")
+
+    for label, accepted in {
+        "JSON として読めない": "{",
+        "accepted が配列でない": json.dumps({"missingToolsAllowed": {}, "accepted": {}}),
+        "accepted が無い": json.dumps({"missingToolsAllowed": {}}),
+    }.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, accepted=accepted)
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, label)
+
+
+def test_repository_aislop_accepted_list_passes() -> None:
+    """machine_gate と CI の make test で、実リポジトリの受け入れ一覧を検査する。"""
+    from gate_aislop_accepted import check_aislop_accepted
+
+    root = Path(__file__).resolve().parents[2]
+    entries = json.loads((root / "scripts/aislop-accepted.json").read_text(encoding="utf-8"))["accepted"]
+    result = check_aislop_accepted(root)
+    assert result["entries"] == len(entries), result
+
+
+def test_aislop_accepted_at_registered_limit_passes() -> None:
+    with Sandbox() as sandbox:
+        accepted_repository(
+            sandbox,
+            [accepted_entry(findings=[accepted_finding(maxLines=417)])],
+            files={ACCEPTED_FILE: numbered_lines(417)},
+        )
+        payload = assert_success(sandbox, "登録上限417行と同じ行数")
+        assert accepted_detail(payload) == {"entries": 1, "findings": 1}, accepted_detail(payload)
+
+
+def test_aislop_accepted_rejects_one_line_over_registered_limit() -> None:
+    with Sandbox() as sandbox:
+        accepted_repository(
+            sandbox,
+            [accepted_entry(findings=[accepted_finding(maxLines=417)])],
+            files={ACCEPTED_FILE: numbered_lines(417)},
+        )
+        assert_success(sandbox, "登録上限417行と同じ行数")
+        sandbox.write(ACCEPTED_FILE, numbered_lines(418))
+        code, out, err = sandbox.run(["--skip-make"])
+        assert code == 1, f"418行で失敗しません: stdout={out!r}, stderr={err!r}"
+        failure = [line for line in err.splitlines() if line.startswith("workflow-machine-gate:")]
+        assert len(failure) == 1, err
+        assert all(value in failure[0] for value in (ACCEPTED_FILE, "418", "417", "maxLines")), failure
+
+
+def test_aislop_accepted_issue_link_in_message_only_fails() -> None:
+    with Sandbox() as sandbox:
+        entry = accepted_entry()
+        accepted_repository(sandbox, [entry])
+        assert_success(sandbox, "reason に解消 issue がある登録")
+        entry["reason"] = "一時的な受け入れ"
+        entry["findings"][0]["message"] += " " + ISSUE_REASON
+        sandbox.write(ACCEPTED_PATH, accepted_json([entry]))
+        assert_failure(sandbox, "同じ URL が message にだけある登録", "workflow-machine-gate", "reason")
+
+
 def main() -> int:
     tests = [
+        test_aislop_accepted_entry_requires_issue_link,
+        test_aislop_accepted_finding_requires_max_lines,
+        test_aislop_accepted_issue_link_is_read_from_decoded_reason,
+        test_aislop_accepted_file_over_max_lines_fails,
+        test_aislop_accepted_file_must_exist_under_root,
+        test_aislop_accepted_within_max_lines_passes,
+        test_aislop_accepted_empty_list_passes,
+        test_aislop_accepted_list_must_be_readable,
+        test_repository_aislop_accepted_list_passes,
+        test_aislop_accepted_at_registered_limit_passes,
+        test_aislop_accepted_rejects_one_line_over_registered_limit,
+        test_aislop_accepted_issue_link_in_message_only_fails,
+        test_workflow_aislop_reachability_with_adjacent_redirection,
+        test_ci_aislop_reachability_with_adjacent_redirection,
+        test_aislop_check_accepts_leading_newlines,
+        test_aislop_check_rejects_quoted_empty_arguments,
+        test_workflow_aislop_check_must_be_reachable,
+        test_ci_aislop_check_must_be_reachable,
+        test_aislop_success_result_must_belong_to_check,
+        test_ci_required_steps_accept_default_failure_behavior,
+        test_ci_make_done_must_not_allow_failure,
+        test_ci_aislop_must_not_allow_failure,
+        test_ci_setup_comments_do_not_count_as_actions,
+        test_ci_setup_options_must_belong_to_matching_action,
+        test_machine_gate_fix_return_must_precede_unconditional_abort,
+        test_aislop_fix_return_must_precede_unconditional_abort,
+        test_publish_fix_must_reject_additional_complete_transition,
+        test_shell_comments_preserve_newline,
+        test_shell_comments_preserve_hash_inside_words,
+        test_aislop_success_must_not_be_shadowed_by_zero_matching_rule,
+        test_aislop_rejects_shell_control_before_check,
+        test_aislop_check_rejects_heredoc_before_check,
+        test_aislop_check_accepts_quoted_heredoc_operator,
         test_correct_repository_passes,
         test_workspace_members_must_be_backend_and_cli,
         test_backend_must_have_lib_and_cli_must_have_bin,
@@ -1954,6 +3157,12 @@ def main() -> int:
         test_clippy_must_reject_warnings,
         test_done_must_install_node_dependencies_when_missing,
         test_machine_gate_develop_complete_and_mode,
+        test_status_only_step_is_not_a_publish_step,
+        test_publish_stage_detection,
+        test_publish_workflow_passes,
+        test_publish_workflow_rejects_noncanonical_forms,
+        test_publish_commands_must_use_canonical_form,
+        test_publish_success_rule_must_precede_unconditional_rule,
         test_machine_gate_requires_six_system_inputs,
         test_machine_gate_commands_invoke_their_make_targets,
         test_machine_gate_success_requires_all_six_exit_codes,
@@ -1980,6 +3189,20 @@ def main() -> int:
         test_skip_make_omits_the_command_run,
         test_install_guard_detection,
         test_makefile_recipe_parsing,
+        test_frontend_style_reports_css_colors,
+        test_frontend_style_allows_css_variables_comments_and_keywords,
+        test_frontend_style_reports_css_fixed_columns,
+        test_frontend_style_allows_auto_columns_and_track_lists,
+        test_frontend_style_reports_component_colors,
+        test_frontend_style_ignores_component_text_comments_and_class_names,
+        test_frontend_style_reports_component_fixed_columns,
+        test_frontend_style_reports_component_multiline_style_declarations,
+        test_frontend_style_ignores_component_body_text_and_expressions,
+        test_frontend_style_skips_auto_columns_and_excluded_files,
+        test_frontend_style_existing_exceptions_match_exact_values,
+        test_frontend_style_reports_css_variables_outside_root,
+        test_frontend_style_requires_css_files,
+        test_repository_frontend_passes_frontend_style,
     ]
     failures = 0
     for test in tests:

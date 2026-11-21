@@ -5,12 +5,13 @@ mod common;
 
 use common::*;
 use takt_dash_backend::{
-  domain::RunSlug,
-  events::detect,
+  domain::{GoalId, PullRequestState, RunSlug},
+  events::{detect, detect_with_terminations},
   model::{
     ConnectionState, ConnectionTransition, EventKind, ExecutionStatus, GoalStatus, ProjectSnapshot, TaskEntry,
     TaskStatus,
   },
+  store::{FinishRequest, GoalTermination},
 };
 
 const SERVER: &str = "mac-mini";
@@ -217,9 +218,10 @@ fn awaiting_merge_with_completed_finish_task_and_unrelated_running_task_is_a_hum
 }
 
 #[test]
-fn awaiting_merge_with_failed_finish_task_is_not_a_human_merge_wait_event() {
-  // 仕上げタスクが failed で終わったゴールは人待ちではありません。前回が人待ちでなく、
-  // 今回も人待ちでないので、人のマージ待ちは記録しません。
+fn awaiting_merge_with_failed_finish_task_is_a_human_merge_wait_event() {
+  // 仕上げタスクが failed で終わったゴールは、仕上げが止まって人の判断が要る状態として
+  // 人のマージ待ちに含める（issue #231）。前回は人待ちでなく今回が人待ちなので、
+  // 人のマージ待ちを1回記録します。
   let now = time("2026-11-13T10:00:00Z");
   let prev = snapshot(
     vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)],
@@ -238,9 +240,10 @@ fn awaiting_merge_with_failed_finish_task_is_not_a_human_merge_wait_event() {
 
   let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
 
-  assert!(
-    !ids(&events).contains(&EventKind::AwaitingMerge),
-    "仕上げタスクが失敗で終わったゴールは人のマージ待ちを記録しません: {:?}",
+  assert_eq!(
+    ids(&events).iter().filter(|kind| **kind == EventKind::AwaitingMerge).count(),
+    1,
+    "仕上げタスクが失敗で終わったゴールは人のマージ待ちを1回記録します: {:?}",
     ids(&events)
   );
 }
@@ -389,4 +392,40 @@ fn baseline_of_empty_snapshot_with_existing_goal_emits_nothing() {
   let events = detect(SERVER, PROJECT, Some(&empty), &next, Some(stable()), now);
 
   assert_eq!(ids(&events), vec![EventKind::GoalCreated]);
+}
+
+#[test]
+fn awaiting_merge_event_is_suppressed_for_terminated_goal() {
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]);
+  let next = snapshot(vec![merge_goal("g1", 42)], vec![], vec![], vec![], vec![]);
+  let mut terminated: std::collections::BTreeMap<GoalId, GoalTermination> = std::collections::BTreeMap::new();
+  terminated.insert(GoalId::try_from("g1").expect("有効なゴール ID"), GoalTermination {
+    pull_request:   None,
+    finish_request: FinishRequest::Requested,
+  });
+
+  let events = detect_with_terminations(SERVER, PROJECT, Some(&prev), &next, Some(stable()), Some(&terminated), now);
+
+  assert!(
+    !ids(&events).contains(&EventKind::AwaitingMerge),
+    "終了依頼済みのゴールはマージ待ちの出来事を記録しません: {:?}",
+    ids(&events)
+  );
+}
+
+#[test]
+fn awaiting_merge_event_still_emits_for_open_pull_request() {
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(vec![goal("g1", GoalStatus::Created, ExecutionStatus::Active)], vec![], vec![], vec![], vec![]);
+  let next = snapshot(vec![merge_goal("g1", 42)], vec![], vec![], vec![], vec![]);
+  let mut terminated: std::collections::BTreeMap<GoalId, GoalTermination> = std::collections::BTreeMap::new();
+  terminated.insert(GoalId::try_from("g1").expect("有効なゴール ID"), GoalTermination {
+    pull_request:   Some(PullRequestState::Open),
+    finish_request: FinishRequest::NotRequested,
+  });
+
+  let events = detect_with_terminations(SERVER, PROJECT, Some(&prev), &next, Some(stable()), Some(&terminated), now);
+
+  assert_eq!(ids(&events), vec![EventKind::AwaitingMerge]);
 }

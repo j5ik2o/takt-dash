@@ -35,6 +35,7 @@ pub struct GrpcHarness {
   home:           PathBuf,
   project_dir:    PathBuf,
   project_cwds:   BTreeMap<String, PathBuf>,
+  http:           Option<common::HttpMockServer>,
   pub store:      Arc<StateStore>,
   pub activity:   Arc<ActivityStore>,
   pub changes:    tokio::sync::broadcast::Sender<()>,
@@ -48,6 +49,8 @@ pub struct GrpcHarnessBuilder {
   state:      Value,
   interval:   u64,
   thresholds: Thresholds,
+  http_read:  bool,
+  http_write: bool,
 }
 
 impl Default for GrpcHarnessBuilder {
@@ -63,6 +66,8 @@ impl Default for GrpcHarnessBuilder {
         connection_failure_count:       3,
         connection_delay_seconds:       120,
       },
+      http_read:  false,
+      http_write: false,
     }
   }
 }
@@ -84,6 +89,20 @@ impl GrpcHarnessBuilder {
   pub fn project(mut self, project: Project) -> Self {
     self.servers.entry(project.server.clone()).or_insert_with(common::server_meta);
     self.projects.push(project);
+    self
+  }
+
+  /// 単一サーバーの設定の読み取り接続先を HTTP にする。画面読み取り RPC が常駐 HTTP サーバー
+  /// 経由で返ることを観測するテストで使います。書き込み用の stdio 接続先は別 id で併存させます。
+  pub fn http_read(mut self) -> Self {
+    self.http_read = true;
+    self
+  }
+
+  /// 書き込み先も、読み取りと同じ常駐 HTTP サーバーへ向ける。書き込み道具が HTTP
+  /// サーバーへ渡ることを観測するテストで使います。`http_read` と組み合わせて使います。
+  pub fn http_write(mut self) -> Self {
+    self.http_write = true;
     self
   }
 
@@ -133,32 +152,59 @@ impl GrpcHarnessBuilder {
     let calls_path = directory.path().join("tool-calls.jsonl");
     let processes_path = directory.path().join("mcp-processes.txt");
     let config_path = directory.path().join("taktdash.config.json");
+    // HTTP 読み取りのテストでは、読み取り接続先を常駐 HTTP サーバーへ変える。書き込みは
+    // 既定では stdio のまま維持するため、stdio 起動方法を別 id（`<id>-write`）で登録し、
+    // 各プロジェクトの `writeServer` に指す。`http_write` を指定したテストでは、
+    // `writeServer` も読み取りと同じ HTTP サーバーへ指す。
+    let http = if self.http_read { Some(common::HttpMockServer::start(&state_path, None)) } else { None };
+    let http_write = self.http_write;
+    let stdio_entry = |backing: &Path| {
+      json!({
+        "command": "node",
+        "args": [
+          common::mock_script().display().to_string(),
+          "--state", state_path.display().to_string(),
+          "--calls", backing.join("tool-calls.jsonl").display().to_string(),
+          "--processes", backing.join("mcp-processes.txt").display().to_string(),
+        ],
+        "env": {}
+      })
+    };
     let mut mcp_servers = serde_json::Map::new();
     for server_id in servers.keys() {
-      mcp_servers.insert(
-        server_id.clone(),
-        json!({
-          "command": "node",
-          "args": [
-            common::mock_script().display().to_string(),
-            "--state", state_path.display().to_string(),
-            "--calls", calls_path.display().to_string(),
-            "--processes", processes_path.display().to_string(),
-          ],
-          "env": {}
-        }),
-      );
+      if let Some(http) = &http {
+        mcp_servers.insert(
+          server_id.clone(),
+          json!({
+            "type": "http",
+            "url": http.url(),
+            "headers": { "Authorization": format!("Bearer {}", http.token()) },
+          }),
+        );
+        mcp_servers.insert(format!("{server_id}-write"), stdio_entry(directory.path()));
+      } else {
+        mcp_servers.insert(server_id.clone(), stdio_entry(directory.path()));
+      }
     }
+    let write_server_of = |project: &Project| {
+      if http_write {
+        project.server.clone()
+      } else if http.is_some() {
+        format!("{}-write", project.server)
+      } else {
+        project.write_server.clone()
+      }
+    };
     let config = json!({
       "mcpServers": mcp_servers,
       "servers": servers.iter().map(|(server_id, meta)| (server_id.clone(), json!({
         "name": meta.name,
         "kind": meta.kind,
-        "concurrency": meta.concurrency,
       }))).collect::<serde_json::Map<_, _>>(),
       "projects": projects.iter().map(|project| json!({
         "name": project.name,
         "server": project.server,
+        "writeServer": write_server_of(project),
         "about": project.about,
         "cwd": project.cwd.display().to_string(),
       })).collect::<Vec<_>>(),
@@ -184,6 +230,7 @@ impl GrpcHarnessBuilder {
       home,
       project_dir,
       project_cwds,
+      http,
       store,
       activity,
       changes,
@@ -245,7 +292,6 @@ impl GrpcHarness {
     value["servers"][server_id] = json!({
       "name": meta.name,
       "kind": meta.kind,
-      "concurrency": meta.concurrency,
     });
     std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
   }
@@ -304,6 +350,11 @@ impl GrpcHarness {
       .filter(|line| !line.trim().is_empty())
       .map(|line| line.trim().parse().expect("記録した子プロセスの pid を解析できます"))
       .collect()
+  }
+
+  /// HTTP 読み取り用の mock サーバーが受け取った tools/call を返す。HTTP モードでない場合は空。
+  pub fn http_recorded_calls(&self) -> Vec<serde_json::Value> {
+    self.http.as_ref().map(common::HttpMockServer::recorded_calls).unwrap_or_default()
   }
 }
 

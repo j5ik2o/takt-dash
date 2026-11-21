@@ -13,6 +13,13 @@ taktdash-change ワークフローの machine_gate の test 検査が、修正�
     その後に「=== make test の出力の末尾」の見出しと、残りの予算に収まる入力の末尾を置く。
     要約は失敗したテストの名前、集計の行（cargo の `test result: FAILED`、npm の `ℹ` の行）、
     表明の本文の順に入れ、予算に入らない分は省略したことを行で示す。
+  - 予算が小さく、要約の見出しと末尾の見出しを両方収められない場合は、短い形式で出す。
+    見出しは収まっても、省略の行のための予約のために失敗したテスト名が 1 件も
+    入らない場合も、短い形式で出す（issue #205）。短い形式は上限全体を使うため、
+    中間の予算でも集計の行とテスト名が残る。
+    短い形式は「=== make test の失敗の要約 ===」の見出しと、収まる範囲の集計の行と
+    テスト名だけで、末尾の切り取りは付けない。見出しすら収まらない予算では、短い形式の
+    先頭を文字の途中で切らずに切り取る。
   - 出力全体は max_bytes バイト以下で、UTF-8 の文字の途中では切らない。
 
 抽出の対象:
@@ -152,30 +159,54 @@ def extract_npm(lines, failures):
 
 
 def build_summary(failures, raw_size, budget):
-    """要約の行を優先順に予算へ入れる。入らない行は省略の行で示す。"""
+    """要約の行を優先順に予算へ入れる。入らない行は省略の行で示す。
+
+    戻り値は必ず budget バイト以内。見出しの行自体が予算に入らない場合は
+    None を返し、呼び出し側が短い形式へ切り替える。見出しは入っても、予約の
+    ために失敗したテスト名が 1 件も入らない場合と、内容が 1 件も入らない
+    場合も None を返す。見出しと省略の行だけでは失敗の中身が伝わらず、短い
+    形式の方が集計の行とテスト名を残せるためである（issue #205）。
+    """
     lines = [f"{SUMMARY_HEADER}（生の出力 {raw_size} バイトから抽出） ==="]
     used = byte_len(lines[0]) + 1
+    if used > budget:
+        return None
     # 省略の行のために予約する。
     reserve = 200
 
     def add_group(title, items, unit):
         nonlocal used
+        added = 0
         if not items:
-            return
-        lines.append(title)
-        used += byte_len(title) + 1
+            return added
+        title_size = byte_len(title) + 1
+        title_pending = True
         for position, item in enumerate(items):
             size = byte_len(item) + 1
-            if used + size > budget - reserve:
+            extra = title_size if title_pending else 0
+            if used + extra + size > budget - reserve:
                 note = f"（以降の{unit} {len(items) - position} 件を省略）"
-                lines.append(note)
-                used += byte_len(note) + 1
-                return
+                note_size = byte_len(note) + 1
+                if used + extra + note_size <= budget:
+                    if title_pending:
+                        lines.append(title)
+                        used += title_size
+                    lines.append(note)
+                    used += note_size
+                return added
+            if title_pending:
+                lines.append(title)
+                used += title_size
+                title_pending = False
             lines.append(item)
             used += size
+            added += 1
+        return added
 
-    add_group("失敗したテスト:", [f"    {name}" for name in failures.names], "テスト名")
-    add_group("集計:", failures.result_lines, "集計の行")
+    names_added = add_group(
+        "失敗したテスト:", [f"    {name}" for name in failures.names], "テスト名"
+    )
+    results_added = add_group("集計:", failures.result_lines, "集計の行")
     bodies = []
     for body in failures.bodies:
         clipped = cut_head(body, BODY_MAX_BYTES)
@@ -183,8 +214,45 @@ def build_summary(failures, raw_size, budget):
             omitted = byte_len(body) - byte_len(clipped)
             clipped += f"\n（この表明の残り {omitted} バイトを省略）"
         bodies.append(clipped)
-    add_group("表明:", bodies, "表明")
-    return ("\n".join(lines) + "\n").encode("utf-8")
+    bodies_added = add_group("表明:", bodies, "表明")
+    if failures.names and names_added == 0:
+        return None
+    if names_added + results_added + bodies_added == 0 and (
+        failures.names or failures.result_lines
+    ):
+        return None
+    result = ("\n".join(lines) + "\n").encode("utf-8")
+    return result if len(result) <= budget else None
+
+
+def build_short_summary(failures, max_bytes):
+    """短い形式の要約。見出しと、収まる範囲の集計の行とテスト名だけで出す。
+
+    max_bytes バイト以内であることを保証する。見出しすら収まらない場合は、
+    見出しを文字の途中で切らずに切り取る。
+    """
+    lines = [f"{SUMMARY_HEADER} ==="]
+    candidates = list(failures.result_lines)
+    candidates += [f"    {name}" for name in failures.names]
+    used = byte_len(lines[0]) + 1
+    omitted = False
+    for item in candidates:
+        size = byte_len(item) + 1
+        if used + size > max_bytes:
+            omitted = True
+            continue
+        lines.append(item)
+        used += size
+    if omitted:
+        note = "（以降を省略）"
+        note_size = byte_len(note) + 1
+        if used + note_size <= max_bytes:
+            lines.append(note)
+            used += note_size
+    text = "\n".join(lines) + "\n"
+    if byte_len(text) > max_bytes:
+        text = cut_head(text, max_bytes)
+    return text.encode("utf-8")
 
 
 def summarize(data, max_bytes):
@@ -195,13 +263,19 @@ def summarize(data, max_bytes):
     extract_npm(lines, failures)
     if not failures.found():
         return data[-max_bytes:] if len(data) > max_bytes else data
-    budget = max_bytes * SUMMARY_SHARE_NUMERATOR // SUMMARY_SHARE_DENOMINATOR
-    summary = build_summary(failures, len(data), budget)
     tail_template = TAIL_HEADER + "（生の出力 {} バイトのうち最後の {} バイト） ===\n"
-    reserved_header = byte_len(tail_template.format(len(data), max_bytes))
-    tail = cut_tail(data, max_bytes - len(summary) - reserved_header)
-    header = tail_template.format(len(data), len(tail)).encode("utf-8")
-    return summary + header + tail
+    # 末尾の見出しの大きさを先に差し引き、組み立て全体が上限に収まるようにする。
+    tail_header_size = byte_len(tail_template.format(len(data), max_bytes))
+    share = max_bytes * SUMMARY_SHARE_NUMERATOR // SUMMARY_SHARE_DENOMINATOR
+    budget = min(share, max_bytes - tail_header_size)
+    summary = build_summary(failures, len(data), budget)
+    if summary is not None:
+        tail = cut_tail(data, max_bytes - len(summary) - tail_header_size)
+        header = tail_template.format(len(data), len(tail)).encode("utf-8")
+        result = summary + header + tail
+        if len(result) <= max_bytes:
+            return result
+    return build_short_summary(failures, max_bytes)
 
 
 def main():

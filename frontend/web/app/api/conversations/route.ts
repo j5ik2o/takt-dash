@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { BackendUnavailableError, createBackendClient } from "../../../src/grpc/client";
+import { BackendUnavailableError, getBackendClient } from "../../../src/grpc/client";
 import { GetConversationResponse } from "../../../src/proto/taktdash";
 
 export const dynamic = "force-dynamic";
@@ -53,7 +53,7 @@ export async function GET(request: NextRequest): Promise<Response> {
   const sessionParam = params.get("session_id");
   const sessionId = sessionParam !== null && sessionParam !== "" ? sessionParam : undefined;
 
-  const client = createBackendClient();
+  const client = getBackendClient();
   try {
     const response = await client.getConversation({ project, sessionId, afterSeq, limit });
     // toJSON は既定値（false・0）のフィールドを省略する。画面の差分取得は has_more と
@@ -67,7 +67,5 @@ export async function GET(request: NextRequest): Promise<Response> {
       return errorResponse(error.message, 503);
     }
     throw error;
-  } finally {
-    await client.close();
   }
 }

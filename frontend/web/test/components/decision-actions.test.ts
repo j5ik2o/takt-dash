@@ -47,7 +47,7 @@ const stateWith = (items: PendingDecision[]): DashboardState => ({
 });
 
 const renderDecisions = (state: DashboardState): string =>
-  renderToStaticMarkup(createElement(DecisionsContent, { state, now: NOW }));
+  renderToStaticMarkup(createElement(DecisionsContent, { snapshotLoaded: true, state, now: NOW, disconnected: false }));
 
 const noop = (): void => {};
 
@@ -81,6 +81,42 @@ test("判断待ち一覧は種別ごとの操作要素を描画する", () => {
   assert.match(html, /<button[^>]*>マージを承認<\/button>/);
   assert.match(html, /<button[^>]*>承認<\/button>/);
   assert.match(html, /<button[^>]*>却下<\/button>/);
+});
+
+test("判断待ち一覧はまだ読めていないサーバーがあるとき0件でも「判断待ちはありません」と断定しない", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    pendingDecisions: [],
+    servers: base.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
+  });
+  assert.doesNotMatch(html, /判断待ちはありません/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /判断待ちがあるかどうかは分かりません/);
+});
+
+test("判断待ち一覧はサーバーが既読でも未読のプロジェクトがあるとき0件でも「判断待ちはありません」と断定しない", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    pendingDecisions: [],
+    projects: base.projects.map((project, index) =>
+      index === 0 ? { ...project, lastReadAt: undefined } : project,
+    ),
+  });
+  assert.doesNotMatch(html, /判断待ちはありません/);
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /判断待ちがあるかどうかは分かりません/);
+});
+
+test("判断待ち一覧はまだ読めていないサーバーがあっても読めた分の一覧はそのまま描画する", () => {
+  const base = createActionableDashboardState();
+  const html = renderDecisions({
+    ...base,
+    servers: base.servers.map((server) => ({ ...server, connected: false, lastReadAt: undefined })),
+  });
+  assert.match(html, /まだ読めていないサーバー・プロジェクトがあります/);
+  assert.match(html, /リリースの日取りはどうしますか/);
 });
 
 test("作業の依頼には実施結果の2択だけを描画し、テキスト入力を出さない", () => {
@@ -474,32 +510,20 @@ test("選択肢の回答は先頭以外を選んでも、選んだ選択肢を�
   assert.equal(answered.action.payload.text, "来週", "選んだ選択肢をそのまま送信する");
 });
 
-// issue #317 D30: 操作ボタンの読み上げ名は簡潔な操作名にし、対象の識別は周囲の
-// 「対象:」表示（.target）で行う。可視の操作名をそのまま読み上げ名にし、対象識別子を
-// 読み上げ名へ埋め込まない。
-test("一覧の操作要素は簡潔な操作名を持ち、対象は周囲の項目で識別できる", () => {
-  const mergeHtml = renderDecisions(stateWith([merge()]));
-  assert.match(mergeHtml, /<button[^>]*>マージを承認<\/button>/);
-  assert.doesNotMatch(mergeHtml, /aria-label="マージを承認（/);
-  assert.match(mergeHtml, /<span class="target">対象: プルリクエスト #418<\/span>/);
+test("同じ inquiryId でもゴールが違う問い合わせは別の項目として描画し、操作要素の name も区別する", () => {
+  const base = findDecision((decision) => decision.inquiryId === "inquiry-options");
+  const first: PendingDecision = { ...base, goalId: "goal-2" };
+  const second: PendingDecision = { ...base, goalId: "goal-3" };
 
-  const registrationHtml = renderDecisions(stateWith([registration()]));
-  assert.match(registrationHtml, /<button[^>]*>承認<\/button>/);
-  assert.match(registrationHtml, /<button[^>]*>却下<\/button>/);
-  assert.doesNotMatch(registrationHtml, /aria-label="承認（/);
-  assert.doesNotMatch(registrationHtml, /aria-label="却下（/);
+  const html = renderDecisions(stateWith([first, second]));
 
-  const optionsHtml = renderDecisions(
-    stateWith([findDecision((decision) => decision.inquiryId === "inquiry-options")]),
-  );
-  assert.match(optionsHtml, /<button[^>]*>今週<\/button>/);
-  assert.doesNotMatch(optionsHtml, /aria-label="今週（/);
+  assert.equal((html.match(/class="tray-item/g) ?? []).length, 2);
 
-  const textHtml = renderDecisions(
-    stateWith([findDecision((decision) => decision.inquiryId === "inquiry-text")]),
-  );
-  assert.match(textHtml, /<button[^>]*>回答する<\/button>/);
-  assert.doesNotMatch(textHtml, /aria-label="回答する（/);
+  const labels = [...html.matchAll(/aria-label="今週（([^"]*)）"/g)].map((match) => match[1]!);
+  assert.equal(labels.length, 2);
+  assert.equal(new Set(labels).size, 2);
+  assert.ok(labels.some((label) => label.includes("goal-2")));
+  assert.ok(labels.some((label) => label.includes("goal-3")));
 });
 
 test("操作の結果は成功を status、失敗を alert として表示する", () => {

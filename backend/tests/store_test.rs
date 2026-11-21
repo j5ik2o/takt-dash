@@ -9,12 +9,12 @@ use chrono::{DateTime, Utc};
 use common::*;
 use takt_dash_backend::{
   config::ServerMeta,
-  domain::{GoalId, SilentMinutes, StaleMinutes},
+  domain::{GoalId, PullRequestState, SilentMinutes, StaleMinutes},
   model::{
-    ConnectionState, EventKind, ExecutionStatus, GoalStatus, PendingDecisionFilter, PendingDecisionType,
+    ConnectionState, EventKind, ExecutionStatus, GoalEntry, GoalStatus, PendingDecisionFilter, PendingDecisionType,
     ProjectSnapshot, TaskStatus,
   },
-  store::{is_human_merge_wait, StateStore},
+  store::{is_human_merge_wait, FinishRequest, StateStore},
 };
 
 fn goal_id() -> GoalId {
@@ -83,15 +83,21 @@ fn human_merge_wait_excludes_pending_or_running_finish_task() {
 }
 
 #[test]
-fn human_merge_wait_excludes_failed_finish_task_states() {
+fn human_merge_wait_includes_failed_finish_task_states() {
+  // 仕上げタスクが失敗系の状態で終わったゴールは、仕上げが止まって人の判断が要る
+  // 状態として人のマージ待ちに含める（issue #231）。
   for status in [TaskStatus::Failed, TaskStatus::Exceeded, TaskStatus::PrFailed] {
     let tasks = [task_for_goal("merge", "g1", status, true)];
     let refs: Vec<&takt_dash_backend::model::TaskEntry> = tasks.iter().collect();
-    assert!(
-      !is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &refs),
-      "{status:?} は人のマージ待ちではありません"
-    );
+    assert!(is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &refs), "{status:?} は人のマージ待ちです");
   }
+}
+
+#[test]
+fn human_merge_wait_includes_goal_without_finish_task() {
+  // 仕上げタスクが無い awaiting_merge のゴールは人のマージ待ちです。
+  let refs: Vec<&takt_dash_backend::model::TaskEntry> = Vec::new();
+  assert!(is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id(), &refs));
 }
 
 #[test]
@@ -120,6 +126,25 @@ fn human_merge_wait_ignores_other_goals_finish_tasks() {
     is_human_merge_wait(GoalStatus::AwaitingMerge, &goal_id_named("g2"), &refs),
     "g2 の仕上げタスクは完了なので待ち"
   );
+}
+
+#[test]
+fn pending_decisions_include_failed_finish_task_goal_with_last_status() {
+  let store = store_with(240, 10);
+  let snapshot = snapshot(
+    vec![merge_goal("g-merge", 99)],
+    vec![task_for_goal("merge", "g-merge", TaskStatus::Failed, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+  store.record_success("takt-dash", snapshot, now());
+
+  let decisions = store.pending_decisions(now(), PendingDecisionFilter::All);
+
+  assert_eq!(decisions.len(), 1);
+  assert_eq!(decisions[0].decision_type, PendingDecisionType::AwaitingMerge);
+  assert_eq!(decisions[0].merge_task_last, Some(TaskStatus::Failed));
 }
 
 #[test]
@@ -477,25 +502,19 @@ fn set_projects_projects_added_projects_as_unread_and_removes_deleted_ones() {
 #[test]
 fn set_servers_replaces_adds_and_removes_server_metadata() {
   let mut servers = BTreeMap::new();
-  servers.insert("mac-mini".to_owned(), ServerMeta {
-    name:        "j5ik2o-mac-mini".to_owned(),
-    kind:        "Mac mini".to_owned(),
-    concurrency: 4,
-  });
+  servers.insert("mac-mini".to_owned(), ServerMeta { name: "j5ik2o-mac-mini".to_owned(), kind: "Mac mini".to_owned() });
   let store =
     StateStore::new(servers, vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))], thresholds());
 
   // 稼働中の再読み込みで、既存サーバーの表示情報を変え、新規サーバーを追加し、旧サーバーを消す。
   let mut refreshed = BTreeMap::new();
-  refreshed.insert("mac-mini".to_owned(), ServerMeta {
-    name:        "mini-renamed".to_owned(),
-    kind:        "Mac mini (改称)".to_owned(),
-    concurrency: 8,
-  });
+  refreshed
+    .insert("mac-mini".to_owned(), ServerMeta {
+      name: "mini-renamed".to_owned(), kind: "Mac mini (改称)".to_owned()
+    });
   refreshed.insert("mac-studio".to_owned(), ServerMeta {
-    name:        "j5ik2o-mac-studio".to_owned(),
-    kind:        "Mac Studio".to_owned(),
-    concurrency: 2,
+    name: "j5ik2o-mac-studio".to_owned(),
+    kind: "Mac Studio".to_owned(),
   });
   store.set_servers(refreshed);
 
@@ -504,7 +523,6 @@ fn set_servers_replaces_adds_and_removes_server_metadata() {
   let mini = after.get("mac-mini").expect("既存サーバーは残ります");
   assert_eq!(mini.name, "mini-renamed", "既存サーバーの表示情報を新しい設定で置き換えます");
   assert_eq!(mini.kind, "Mac mini (改称)");
-  assert_eq!(mini.concurrency, 8, "並列度の変更も反映します");
   assert_eq!(after.get("mac-studio").expect("追加サーバーがあります").name, "j5ik2o-mac-studio");
 }
 
@@ -565,15 +583,10 @@ fn set_servers_replaces_server_meta_on_the_same_store() {
 
   // 稼働中の再読み込みで、既存サーバーの表示情報を変え、新しいサーバーを追加する。
   let mut changed = BTreeMap::new();
-  changed.insert("mac-mini".to_owned(), ServerMeta {
-    name:        "renamed-mini".to_owned(),
-    kind:        "Mac Studio".to_owned(),
-    concurrency: 8,
-  });
+  changed.insert("mac-mini".to_owned(), ServerMeta { name: "renamed-mini".to_owned(), kind: "Mac Studio".to_owned() });
   changed.insert("mac-studio".to_owned(), ServerMeta {
-    name:        "j5ik2o-mac-studio".to_owned(),
-    kind:        "Mac Studio".to_owned(),
-    concurrency: 2,
+    name: "j5ik2o-mac-studio".to_owned(),
+    kind: "Mac Studio".to_owned(),
   });
   store.set_servers(changed);
 
@@ -581,7 +594,6 @@ fn set_servers_replaces_server_meta_on_the_same_store() {
   assert_eq!(after.len(), 2, "追加したサーバーを投影に載せます");
   assert_eq!(after["mac-mini"].name, "renamed-mini", "改名を同じストアへ反映します");
   assert_eq!(after["mac-mini"].kind, "Mac Studio", "種類の変更も反映します");
-  assert_eq!(after["mac-mini"].concurrency, 8, "同時実行数の変更も反映します");
   assert_eq!(after["mac-studio"].name, "j5ik2o-mac-studio");
 
   // 設定から消えたサーバーは投影に残さない。
@@ -608,4 +620,124 @@ fn project_view_returns_goal_and_event_kind_helpers_stay_consistent() {
   assert!(view.connected);
   assert_eq!(view.goals[0].goal_id.as_str(), "g1");
   assert_eq!(EventKind::from_stored(EventKind::Inquiry.as_str()), Some(EventKind::Inquiry));
+}
+
+#[test]
+fn invalidated_goal_questions_are_taken_once_per_project() {
+  let store = store_with(30, 10);
+  store.invalidate_goal_questions("takt-dash", goal_id_named("g1"));
+  store.invalidate_goal_questions("takt-dash", goal_id_named("g2"));
+
+  let taken = store.take_invalidated_goal_questions("takt-dash");
+
+  assert_eq!(taken.into_iter().collect::<Vec<_>>(), vec![goal_id_named("g1"), goal_id_named("g2")]);
+  assert!(store.take_invalidated_goal_questions("takt-dash").is_empty(), "取り出した記録は消えます");
+  assert!(store.take_invalidated_goal_questions("other").is_empty(), "記録はプロジェクトごとです");
+}
+
+#[test]
+fn invalidated_goal_questions_of_a_removed_project_are_dropped() {
+  let store = store_with(30, 10);
+  store.invalidate_goal_questions("takt-dash", goal_id_named("g1"));
+
+  store.set_projects(vec![]);
+  store.set_projects(vec![project("takt-dash", std::path::Path::new("/abs/takt-dash"))]);
+
+  assert!(
+    store.take_invalidated_goal_questions("takt-dash").is_empty(),
+    "設定から外れたプロジェクトの記録は残しません"
+  );
+}
+
+/// 中止済み（aborted）のマージ待ちゴールを作る。
+///
+/// 自動終了の対象条件（`awaiting_merge` かつ `aborted`）を満たすゴールを、PR 番号付きで
+/// 組み立てます。`task_for_goal` で完了済みの仕上げタスクを添えると、人のマージ待ちの
+/// 仕上げタスク条件も満たします。
+fn aborted_merge_goal(id: &str, pull_request: i64) -> GoalEntry {
+  GoalEntry { execution_status: ExecutionStatus::Aborted, ..merge_goal(id, pull_request) }
+}
+
+#[test]
+fn awaiting_merge_active_goal_stays_a_pending_decision() {
+  // 自動終了の対象条件を1つでも欠くゴールは、従来どおり判断待ちに残ります（AC2）。
+  // ここでは実行状態が active の awaiting_merge ゴールを対象から除外しないことを固定します。
+  let store = store_with(240, 10);
+  let snapshot = snapshot(
+    vec![merge_goal("g1", 5)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Completed, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+  store.record_success("takt-dash", snapshot, now());
+
+  let decisions = store.pending_decisions(now(), PendingDecisionFilter::AwaitingMerge);
+
+  assert_eq!(decisions.len(), 1, "active のマージ待ちゴールは判断待ちに残ります");
+  assert_eq!(decisions[0].goal_id.as_deref(), Some("g1"));
+}
+
+#[test]
+fn aborted_merge_goal_with_open_pr_stays_a_pending_decision() {
+  // 中止済みでも PR が開いているゴールは、終了依頼の対象外として判断待ちに残ります（AC2）。
+  let store = store_with(240, 10);
+  let snapshot = snapshot(
+    vec![aborted_merge_goal("g1", 5)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Completed, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+  store.record_success("takt-dash", snapshot, now());
+
+  let decisions = store.pending_decisions(now(), PendingDecisionFilter::AwaitingMerge);
+
+  assert_eq!(decisions.len(), 1, "PR が開いている中止済みゴールは判断待ちに残ります");
+}
+
+#[test]
+fn recorded_closed_pull_request_suppresses_the_pending_decision() {
+  // PR が閉じていると確認できたゴールは判断待ちに出しません（AC1 の射影）。
+  let store = store_with(240, 10);
+  let snapshot = snapshot(
+    vec![aborted_merge_goal("g1", 5)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Completed, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+  store.record_success("takt-dash", snapshot, now());
+  store.record_pull_request(
+    "takt-dash",
+    GoalId::try_from("g1").expect("有効なゴール ID"),
+    Some(PullRequestState::Closed),
+  );
+
+  let decisions = store.pending_decisions(now(), PendingDecisionFilter::AwaitingMerge);
+
+  assert!(decisions.is_empty(), "CLOSED の PR を持つゴールは判断待ちに出ません");
+}
+
+#[test]
+fn recorded_finish_request_suppresses_and_failure_keeps_the_pending_decision() {
+  // 終了依頼済みは判断待ちに出さず、依頼の失敗だけでは表示を維持します（要件19・AC4）。
+  let store = store_with(240, 10);
+  let snapshot = snapshot(
+    vec![aborted_merge_goal("g1", 5)],
+    vec![task_for_goal("merge", "g1", TaskStatus::Completed, true)],
+    vec![],
+    vec![],
+    vec![],
+  );
+  store.record_success("takt-dash", snapshot, now());
+  let goal = GoalId::try_from("g1").expect("有効なゴール ID");
+
+  store.record_finish_request("takt-dash", goal.clone(), FinishRequest::Failed("失敗".to_owned()));
+  let after_failure = store.pending_decisions(now(), PendingDecisionFilter::AwaitingMerge);
+  assert_eq!(after_failure.len(), 1, "依頼が失敗しただけでは判断待ちに残ります");
+
+  store.record_finish_request("takt-dash", goal, FinishRequest::Requested);
+  let after_request = store.pending_decisions(now(), PendingDecisionFilter::AwaitingMerge);
+  assert!(after_request.is_empty(), "依頼済みのゴールは判断待ちに出ません");
 }

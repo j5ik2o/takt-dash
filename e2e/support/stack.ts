@@ -1,10 +1,20 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, openSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, connect, type AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { buildMockState, PROJECT_ABOUT, PROJECT_NAME, SERVER_ID, SERVER_NAME } from "./fixture";
+import {
+  buildMockState,
+  buildRunFiles,
+  PROJECT_ABOUT,
+  PROJECT_NAME,
+  RUN_BODY_LOG,
+  RUN_SLUG,
+  SERVER_ID,
+  SERVER_NAME,
+  toJsonLines,
+} from "./fixture";
 
 // リポジトリのルートは e2e/support から2階層上。ビルド済み成果物と実行ファイルをここから解決する。
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -24,6 +34,9 @@ export type Stack = {
   projectDir: string;
   readCalls: () => Promise<ToolCall[]>;
   updateState: (mutate: (state: Record<string, unknown>) => Record<string, unknown>) => Promise<void>;
+  // 実行中の run（RUN_SLUG）の本体ログの末尾へ、レコードを1行ずつ追記する。
+  // run のファイルを書く既定の状態（mockState を渡さない起動）でだけ使える。
+  appendRunLog: (records: readonly Record<string, unknown>[]) => Promise<void>;
   setMockDelay: (ms: number) => Promise<void>;
   stopMock: () => Promise<void>;
   stopBackend: () => Promise<void>;
@@ -236,9 +249,11 @@ export type StackProject = {
 // 開始するスタックの構成。プロジェクトを渡すとその件数・内容で起動し、
 // 省略すると既定の1プロジェクト（PROJECT_NAME / PROJECT_ABOUT）で起動する。
 // serverName を渡すと、その名前でサーバーを設定する（長いサーバー名の表示を測る検証用）。
+// mockState を渡すと起動時のモックの状態をその関数で作り、省略すると既定の buildMockState を使う。
 export type StartStackOptions = {
   projects?: readonly StackProject[];
   serverName?: string;
+  mockState?: (now: Date) => Record<string, unknown>;
 };
 
 type StackConfigInput = {
@@ -297,6 +312,8 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
   const backendLog = path.join(tempDir, "backend.log");
   const webLog = path.join(tempDir, "web.log");
   const homeDir = path.join(tempDir, "home");
+  const runDir = path.join(projectDir, ".takt", "runs", RUN_SLUG);
+  const runBodyLogPath = path.join(runDir, "logs", RUN_BODY_LOG);
 
   let backend: ChildProcess | undefined;
   let web: ChildProcess | undefined;
@@ -365,6 +382,21 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     }
   };
 
+  // backend は実行中の run を run のファイルから組み立てるため、モックの状態と同じ run を
+  // プロジェクトの .takt へ書く。backend の起動前に用意し、最初の読み取りから一覧に載せる。
+  const writeRunFiles = async (now: Date): Promise<void> => {
+    const files = buildRunFiles(now);
+    await mkdir(path.dirname(runBodyLogPath), { recursive: true });
+    await writeFile(path.join(projectDir, ".takt", "tasks.yaml"), files.tasksYaml, "utf8");
+    await writeFile(path.join(runDir, "meta.json"), JSON.stringify(files.meta), "utf8");
+    await writeFile(runBodyLogPath, toJsonLines(files.bodyLogRecords), "utf8");
+  };
+
+  // 1回の appendFile で完結した行だけを書き、backend に書きかけの行を読ませない。
+  const appendRunLog = async (records: readonly Record<string, unknown>[]): Promise<void> => {
+    await appendFile(runBodyLogPath, toJsonLines(records), "utf8");
+  };
+
   const updateState = async (
     mutate: (state: Record<string, unknown>) => Record<string, unknown>,
   ): Promise<void> => {
@@ -414,7 +446,14 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
   const serverName = options.serverName ?? SERVER_NAME;
 
   try {
-    await writeFile(statePath, JSON.stringify(buildMockState(new Date())), "utf8");
+    const startedAt = new Date();
+    await writeFile(statePath, JSON.stringify((options.mockState ?? buildMockState)(startedAt)), "utf8");
+    // run のファイル（buildRunFiles）は既定の状態（buildMockState）の run を表すため、既定の状態のときだけ書く。
+    // mockState を渡した状態（撮影の states.ts）では書かない。backend は対応表を読めない run を
+    // takt_get_run から組み立てるため、run は同じモックの状態から読まれ、既定の run も混ざらない。
+    if (options.mockState === undefined) {
+      await writeRunFiles(startedAt);
+    }
     // backend がモックを起動する前に遅延 0（透過）を用意し、ラッパーが初回から同じ契約で読めるようにする。
     await writeFile(delayPath, JSON.stringify({ stdoutDelayMs: 0 }), "utf8");
     await mkdir(homeDir, { recursive: true });
@@ -426,9 +465,8 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
       "utf8",
     );
     const webPort = await freePort();
-    // Next は route handler の request.url を listen ホスト名ではなく localhost で組み立てる。
-    // origin 境界の検証と一致させるため、利用時と同じ localhost を webUrl に使う。
-    webUrl = `http://localhost:${webPort}`;
+    // 本番と同じく Web は 0.0.0.0 で待ち受け、利用側は listen 名と違う 127.0.0.1 から開く。
+    webUrl = `http://127.0.0.1:${webPort}`;
 
     backend = spawnWithLog(
       BACKEND_BIN,
@@ -447,10 +485,11 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
 
     web = spawnWithLog(
       NEXT_BIN,
-      ["start", "-H", "127.0.0.1", "-p", String(webPort)],
+      ["start", "-H", "0.0.0.0", "-p", String(webPort)],
       WEB_DIR,
       webLog,
-      { ...process.env, TAKTDASH_BACKEND_ADDR: backendAddress },
+      // 空きポートは既定の許可ホストに含まれないため、利用する URL のホストだけを許可する。
+      { ...process.env, TAKTDASH_BACKEND_ADDR: backendAddress, TAKTDASH_ALLOWED_HOSTS: `127.0.0.1:${webPort}` },
     );
     if (web.pid === undefined) {
       throw new Error("web を起動できませんでした。");
@@ -485,6 +524,7 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     projectDir,
     readCalls,
     updateState,
+    appendRunLog,
     setMockDelay,
     stopMock: stopMockProcess,
     stopBackend: stopBackendProcess,
