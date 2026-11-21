@@ -9,7 +9,7 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - run: exit 0
+      - run: sleep 180
   required-ci:
     name: takt-dash required CI
     needs: [done, e2e]
