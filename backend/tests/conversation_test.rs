@@ -1111,7 +1111,7 @@ fn garbled_user_text_gets_a_notice_without_changing_the_body() {
 }
 
 #[test]
-fn ten_replacements_are_marked_as_garbled() {
+fn two_digit_replacements_are_marked_as_garbled() {
   let (_directory, fixture) = ConversationFixture::new();
   let project_cwd = fixture.project_dir("takt-dash");
   seed_session(&fixture, &project_cwd);
@@ -1123,12 +1123,12 @@ fn ten_replacements_are_marked_as_garbled() {
   assert_eq!(
     notices(&page),
     vec![Some("元記録で文字化けしています（置換文字 10 個）".to_owned())],
-    "しきい値の10個で印を付ける必要があります"
+    "本文全体が読めなくなる二桁の置換文字には印を付ける必要があります（issue #111 の実測: 文字化けした seq 8 は 87 個、正常な seq 22 は 0 個）"
   );
 }
 
 #[test]
-fn nine_replacements_are_not_marked_as_garbled() {
+fn single_digit_replacements_are_not_marked_as_garbled() {
   let (_directory, fixture) = ConversationFixture::new();
   let project_cwd = fixture.project_dir("takt-dash");
   seed_session(&fixture, &project_cwd);
@@ -1137,7 +1137,11 @@ fn nine_replacements_are_not_marked_as_garbled() {
 
   let page = reader.read(&query("takt-dash", &project_cwd));
 
-  assert_eq!(notices(&page), vec![None], "しきい値未満の置換文字では印を付けない必要があります");
+  assert_eq!(
+    notices(&page),
+    vec![None],
+    "短い断片の破損（一桁）では本文が読めるため印を付けない必要があります（しきい値 10 の下側境界）"
+  );
   assert_eq!(page.messages[0].text.matches('\u{FFFD}').count(), 9);
 }
 

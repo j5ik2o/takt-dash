@@ -338,6 +338,23 @@ pub(super) fn conversation_message(
   ConversationMessage { seq, occurred_at: Some(ts(secs)), speaker: speaker as i32, text: text.to_owned(), notice: None }
 }
 
+/// 注意書き付きの会話の1件を組み立てる。`notice` は本文に添える注意書き（元記録の文字化けなど）。
+pub(super) fn conversation_message_with_notice(
+  seq: i64,
+  secs: i64,
+  speaker: v1::ConversationSpeaker,
+  text: &str,
+  notice: &str,
+) -> ConversationMessage {
+  ConversationMessage {
+    seq,
+    occurred_at: Some(ts(secs)),
+    speaker: speaker as i32,
+    text: text.to_owned(),
+    notice: Some(notice.to_owned()),
+  }
+}
+
 /// 会話の1ページを組み立てる。
 pub(super) fn conversation_page(
   project: &str,
