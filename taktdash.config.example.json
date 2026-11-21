@@ -6,13 +6,29 @@
         "/Users/you/local/takt-custom/dist/app/mcp/index.js"
       ],
       "env": {}
+    },
+    "mac-mini-read": {
+      "type": "http",
+      "url": "http://127.0.0.1:43117/",
+      "headers": {
+        "Authorization": "Bearer your-http-token-dummy"
+      }
+    },
+    "mac-mini-manager": {
+      "command": "node",
+      "args": [
+        "/Users/you/local/takt-custom/dist/app/mcp/index.js",
+        "--tool-set",
+        "manager"
+      ],
+      "env": {},
+      "manager": true
     }
   },
   "servers": {
     "mac-mini": {
       "name": "your-mac-mini",
-      "kind": "Mac mini",
-      "concurrency": 4
+      "kind": "Mac mini"
     }
   },
   "projects": [
@@ -42,11 +58,13 @@
     }
   ],
   "intervalSeconds": 30,
+  "screenReadLanes": 1,
   "thresholds": {
     "pendingDecisionStaleMinutes": 240,
     "runLogSilentMinutes": 10
   },
   "sqlite": {
     "path": "data/taktdash.sqlite"
-  }
+  },
+  "autoTerminateClosedGoals": true
 }

@@ -154,5 +154,9 @@ pub fn goal_question(entry: model::GoalQuestionEntry) -> v1::GoalQuestion {
 
 /// ゴールに紐づくタスクを proto の GoalTask へ変換する。
 pub fn goal_task(entry: model::GoalTaskEntry) -> v1::GoalTask {
-  v1::GoalTask { task_name: entry.task_name, status: task_status(entry.status) as i32, run_slug: entry.run_slug }
+  v1::GoalTask {
+    task_name: entry.task_name.as_str().to_owned(),
+    status:    task_status(entry.status) as i32,
+    run_slug:  entry.run_slug.map(|run_slug| run_slug.as_str().to_owned()),
+  }
 }

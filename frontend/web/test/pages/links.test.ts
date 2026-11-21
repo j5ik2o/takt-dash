@@ -1,7 +1,7 @@
 // 概要・プロジェクト・サイドバーのリンクの契約（issue #34 / #35 / #36）。
 //
 // 概要のプロジェクトカードは /projects の当該カードへ、サイドバーのサーバー名は
-// 概要の当該サーバーカードへ、サイドバーのブランドは / へ遷移する。リンク先の
+// 概要の当該サーバーの1行へ、サイドバーのブランドは / へ遷移する。リンク先の
 // fragment と遷移先の id は同じ規則で作られ、既存の見出し id と衝突しない。
 // 描画結果の HTML からリンクと id を観測し、CSS から hover と :focus-visible を観測する。
 import test from "node:test";
@@ -10,8 +10,9 @@ import { createElement, type ComponentType, type ReactElement } from "react";
 import { readFile } from "node:fs/promises";
 import { renderToStaticMarkup } from "react-dom/server";
 import { fileURLToPath } from "node:url";
-import { createDashboardState, createProjectsResponse, NOW } from "../support/fixtures.ts";
-import { DashboardState, InquiryKind, PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
+import { createDashboardState, NOW } from "../support/fixtures.ts";
+import { elementWithAttribute, textOf } from "../support/markup.ts";
+import { ConnectionState, DashboardState, InquiryKind, PendingDecisionType, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { buildOverviewView } from "../../src/state/dashboard.ts";
 import { Sidebar } from "../../src/components/sidebar.tsx";
 import OverviewPage from "../../app/page.tsx";
@@ -44,14 +45,15 @@ const openingTagWithAttribute = (html: string, attribute: string, value: string)
 };
 
 const renderOverviewWithState = (state = createDashboardState()): string =>
-  renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
 
 const renderProjectsWithState = (state = createDashboardState()): string =>
-  renderPage(ProjectsPage, { response: { ...createProjectsResponse(), state }, now: NOW });
+  renderPage(ProjectsPage, { state, now: NOW });
 
 const renderSidebarWithState = (state = createDashboardState()): string =>
   renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: state.servers,
       pendingCount: 0,
       frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
@@ -91,7 +93,18 @@ test("プロジェクト名が既存の見出し id と衝突してもカード 
   const base = createDashboardState();
   const state = {
     ...base,
-    projects: [{ name: "h-projects", about: "衝突を確かめるプロジェクト", serverId: "mini", completedTasks24h: 1 }],
+    projects: [
+      {
+        name: "h-projects",
+        about: "衝突を確かめるプロジェクト",
+        serverId: "mini",
+        completedTasks24h: 1,
+        concurrency: 1,
+        connected: true,
+        lastReadAt: NOW,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+      },
+    ],
   };
   const overview = renderOverviewWithState(state);
   anchorFor(overview, "/projects#project-h-projects");
@@ -109,7 +122,7 @@ test("サイドバーのブランド「taktDash」はトップページへのリ
   assert.match(inner, /^\s*taktDash\s*$/, "リンクの内容はブランド名だけ");
 });
 
-test("サイドバーのサーバー名は概要の当該サーバーカードへのリンクで、状態表示はリンク外に残る", () => {
+test("サイドバーのサーバー名は概要の当該サーバーの1行へのリンクで、状態表示はリンク外に残る", () => {
   const state = createDashboardState();
   const sidebar = renderSidebarWithState(state);
   const overview = renderOverviewWithState(state);
@@ -118,28 +131,26 @@ test("サイドバーのサーバー名は概要の当該サーバーカード�
     const { inner } = anchorFor(sidebar, href);
     assert.match(inner, new RegExp(escapeRegExp(server.name)), "サーバー名がリンク内にある");
     assert.doesNotMatch(inner, /動作中|応答なし/, "状態表示はリンク内に入れない");
-    const fragment = href.split("#")[1];
-    const { name, tag } = openingTagWithAttribute(overview, "id", fragment);
-    assert.equal(name, "article", "サーバーカードの article に id を付ける");
-    assert.match(tag, /class="[^"]*\bscard\b/, "id はサーバーカードに付く");
+    const fragment = href.split("#")[1]!;
+    const line = elementWithAttribute(overview, "id", fragment);
+    assert.match(textOf(line.outer), new RegExp(`表示名: ${escapeRegExp(server.name)}`), "id はそのサーバーの1行に付く");
   }
   assert.match(overview, /id="h-servers"/, "既存の見出し id を残す");
 });
 
-test("サーバー ID が既存の見出し id と衝突してもカード id はリンク先と一致する", () => {
+test("サーバー ID が既存の見出し id と衝突してもサーバーの1行の id はリンク先と一致する", () => {
   const base = createDashboardState();
   const state = {
     ...base,
-    servers: [{ serverId: "h-servers", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, concurrency: 4 }],
+    servers: [{ serverId: "h-servers", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, writeOnly: false }],
     runs: [],
   };
   const sidebar = renderSidebarWithState(state);
   anchorFor(sidebar, "/#server-h-servers");
   const overview = renderOverviewWithState(state);
-  const { name, tag } = openingTagWithAttribute(overview, "id", "server-h-servers");
-  assert.equal(name, "article");
-  assert.match(tag, /class="[^"]*\bscard\b/);
-  assert.match(overview, /id="h-servers"/, "サーバー ID の h-servers と見出しの id が衝突しない");
+  const line = elementWithAttribute(overview, "id", "server-h-servers");
+  assert.match(textOf(line.outer), /表示名: Mac mini/, "id はそのサーバーの1行に付く");
+  assert.equal(overview.split('id="h-servers"').length - 1, 1, "サーバー ID の h-servers と見出しの id が衝突しない");
 });
 
 test("新しいリンクは hover とキーボードフォーカスでリンクと分かる", async () => {
@@ -172,6 +183,8 @@ const inquiryDecision = (overrides: Partial<PendingDecision> = {}): PendingDecis
   createdAt: new Date(NOW.getTime() - 30 * 60_000),
   body: "リリースの日取りはどうしますか。",
   options: [],
+  // 問い合わせにはプルリクエストが無い。proto の必須フィールドとして明示する。
+  pullRequest: undefined,
   stale: false,
   ...overrides,
 });
@@ -185,9 +198,9 @@ test("概要の判断待ちパネルの「内容を見る」は判断待ちペ�
   const overview = renderOverviewWithState(state);
   const decisions = renderDecisionsWithState(state);
 
-  const href = "/decisions#decision-inquiry:mini:esa:inquiry-schedule";
+  const href = "/decisions#decision-inquiry:mini:esa:goal-2:inquiry-schedule";
   anchorFor(overview, href);
-  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:esa:inquiry-schedule");
+  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:esa:goal-2:inquiry-schedule");
   assert.equal(name, "li", "判断待ちページの項目に同じ id を付ける");
 });
 
@@ -201,8 +214,82 @@ test("判断待ちのアンカー id は既存の見出し id と衝突しない
   const decisions = renderDecisionsWithState(state);
 
   assert.equal(overview.split('id="h-projects"').length - 1, 1, "概要の見出し id は1つだけ残す");
-  anchorFor(overview, "/decisions#decision-inquiry:mini:h-projects:x");
-  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:h-projects:x");
+  anchorFor(overview, "/decisions#decision-inquiry:mini:h-projects:goal-2:x");
+  const { name } = openingTagWithAttribute(decisions, "id", "decision-inquiry:mini:h-projects:goal-2:x");
   assert.equal(name, "li", "判断待ちの id は decision- 接頭辞を付ける");
   assert.equal(decisions.split('id="h-projects"').length - 1, 0, "見出しの id と同じ id を作らない");
+});
+
+test("名前に %20 を含むプロジェクトでも概要のリンクが該当カードへ遷移する", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    projects: [
+      {
+        name: "release%20candidate",
+        about: "% を含む名前のプロジェクト",
+        serverId: "mini",
+        completedTasks24h: 1,
+        concurrency: 1,
+        connected: true,
+        lastReadAt: NOW,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+      },
+    ],
+  };
+  const overview = renderOverviewWithState(state);
+  const href = "/projects#project-release%2520candidate";
+  anchorFor(overview, href);
+  const projects = renderProjectsWithState(state);
+  const fragment = decodeURIComponent(href.split("#")[1]);
+  const { name, tag } = openingTagWithAttribute(projects, "id", fragment);
+  assert.equal(name, "article", "カードの article に id を付ける");
+  assert.match(tag, /class="[^"]*\bcard\b/, "id はカードの article に付く");
+});
+
+test("名前に % を含むプロジェクトでも概要のリンクが該当カードへ遷移する", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    projects: [
+      {
+        name: "100%",
+        about: "% を含む名前のプロジェクト",
+        serverId: "mini",
+        completedTasks24h: 1,
+        concurrency: 1,
+        connected: true,
+        lastReadAt: NOW,
+        connectionState: ConnectionState.CONNECTION_STATE_CONNECTED,
+      },
+    ],
+  };
+  const overview = renderOverviewWithState(state);
+  const href = "/projects#project-100%25";
+  anchorFor(overview, href);
+  const projects = renderProjectsWithState(state);
+  const fragment = decodeURIComponent(href.split("#")[1]);
+  const { name, tag } = openingTagWithAttribute(projects, "id", fragment);
+  assert.equal(name, "article", "カードの article に id を付ける");
+  assert.match(tag, /class="[^"]*\bcard\b/, "id はカードの article に付く");
+});
+
+test("ID に % を含むサーバーでもサイドバーのリンクが該当カードへ遷移する", () => {
+  const base = createDashboardState();
+  const state = {
+    ...base,
+    servers: [{ serverId: "100%", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, writeOnly: false }],
+    runs: [],
+  };
+  const sidebar = renderSidebarWithState(state);
+  const href = "/#server-100%25";
+  anchorFor(sidebar, href);
+  const overview = renderOverviewWithState(state);
+  const fragment = decodeURIComponent(href.split("#")[1]);
+  // main のこのテストは、遷移先を旧サーバーカード（article.scard）として確かめていた。概要はサーバーを
+  // 1行で出す形（issue #120）に変わったため、遷移先がそのサーバーの1行（.server-line）であることを確かめる。
+  const { tag } = openingTagWithAttribute(overview, "id", fragment);
+  assert.match(tag, /class="[^"]*\bserver-line\b/, "id はそのサーバーの1行に付く");
+  const line = elementWithAttribute(overview, "id", fragment);
+  assert.match(textOf(line.outer), /表示名: Mac mini/, "遷移先の1行にそのサーバーの表示名がある");
 });

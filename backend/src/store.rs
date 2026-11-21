@@ -6,7 +6,7 @@
 //! 起点も更新しません。判断待ち・滞留・ログの無音は正規状態から都度計算します。
 
 use std::{
-  collections::BTreeMap,
+  collections::{BTreeMap, BTreeSet},
   sync::{Arc, Mutex},
 };
 
@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::{
   config::{Project, ServerMeta, Thresholds},
-  domain::{GoalId, ProjectName, RunSlug, ServerId},
+  domain::{GoalId, ProjectName, PullRequestState, RunSlug, ServerId},
   model::{
     ConnectionState, ConnectionTransition, GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType,
     ProjectSnapshot, ProjectView, RegistrationProposalEntry, RunEntry, TaskEntry, TaskStatus,
@@ -78,6 +78,43 @@ fn connection_state_on_failure(slot: &ProjectSlot, thresholds: Thresholds, now: 
   }
 }
 
+/// ゴールごとの自動終了の記録。サイクルを跨いで保持し、判断待ちの射影が読みます。
+///
+/// PR の状態は確認できたときだけ持ち、確認できないときは `None` のままです。終了依頼の状態は
+/// 依頼済みか、直前の依頼の失敗理由を持ちます。`set_projects` でプロジェクトが外れたら破棄します。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GoalTermination {
+  /// gh で確認できた PR の状態。未確認は None。
+  pub pull_request:   Option<PullRequestState>,
+  /// manager への終了依頼の状態。
+  pub finish_request: FinishRequest,
+}
+
+/// manager への終了依頼の状態。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FinishRequest {
+  /// まだ依頼していない。
+  #[default]
+  NotRequested,
+  /// 依頼済み。takt がゴールを終端にした後も、このプロジェクトの記録が削除される
+  /// （[`StateStore::set_projects`]）まで判断待ちに出し続けません。
+  Requested,
+  /// 直近の依頼が失敗した。理由を保持します。表示は PR の確認状態で決まるため、依頼の
+  /// 失敗だけでは判断待ちに戻しません。失敗した依頼は次の読み取り
+  /// サイクルで候補に戻して再評価します（同じサイクルでは再試行しません）。
+  Failed(String),
+}
+
+impl GoalTermination {
+  /// このゴールを判断待ちから外すか。PR が閉じているか、終了依頼を投函済みなら外します。
+  ///
+  /// 依頼が失敗しただけ（[`FinishRequest::Failed`]）では外しません。状態を確認できなかった
+  /// 場合は誤って隠さず、従来どおり表示を維持します。
+  pub fn suppresses_display(&self) -> bool {
+    self.finish_request == FinishRequest::Requested || self.pull_request.is_some_and(PullRequestState::is_closed)
+  }
+}
+
 /// 集約した状態を保持する共有ストア。
 #[derive(Debug, Clone)]
 pub struct StateStore {
@@ -86,10 +123,15 @@ pub struct StateStore {
 
 #[derive(Debug)]
 struct StoreInner {
-  servers:    BTreeMap<String, ServerMeta>,
-  projects:   Vec<Project>,
-  thresholds: Thresholds,
-  slots:      BTreeMap<String, ProjectSlot>,
+  servers:             BTreeMap<String, ServerMeta>,
+  projects:            Vec<Project>,
+  thresholds:          Thresholds,
+  slots:               BTreeMap<String, ProjectSlot>,
+  /// 問い合わせへの回答が成功し、次の周期で質問を読み直すゴール（プロジェクトごと）。
+  /// 状態が変わらない終端のゴールでも、ここに載ったゴールは質問の読み取りを省きません。
+  questions_to_reread: BTreeMap<String, BTreeSet<GoalId>>,
+  /// 自動終了のための、プロジェクトごとのゴール単位の記録（PR の状態と終了依頼）。
+  terminations:        BTreeMap<String, BTreeMap<GoalId, GoalTermination>>,
 }
 
 impl StateStore {
@@ -99,7 +141,16 @@ impl StateStore {
     for project in &projects {
       slots.insert(project.name.clone(), ProjectSlot::unread());
     }
-    StateStore { inner: Arc::new(Mutex::new(StoreInner { servers, projects, thresholds, slots })) }
+    StateStore {
+      inner: Arc::new(Mutex::new(StoreInner {
+        servers,
+        projects,
+        thresholds,
+        slots,
+        questions_to_reread: BTreeMap::new(),
+        terminations: BTreeMap::new(),
+      })),
+    }
   }
 
   /// 読み取りが成功したときの接続状態の遷移を、状態を変えずに返す。
@@ -146,10 +197,61 @@ impl StateStore {
     let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
     let wanted: Vec<&str> = projects.iter().map(|project| project.name.as_str()).collect();
     inner.slots.retain(|name, _| wanted.contains(&name.as_str()));
+    inner.questions_to_reread.retain(|name, _| wanted.contains(&name.as_str()));
+    inner.terminations.retain(|name, _| wanted.contains(&name.as_str()));
     for project in &projects {
       inner.slots.entry(project.name.clone()).or_insert_with(ProjectSlot::unread);
     }
     inner.projects = projects;
+  }
+
+  /// 問い合わせへの回答が成功したゴールを、次の周期で質問を読み直すゴールとして記録する。
+  ///
+  /// 状態が変わらない終端のゴールは質問の読み取りを省き、前回の問い合わせを引き継ぎます。回答の後も
+  /// 省くと、回答済みになった問い合わせが判断待ちに残るため、回答したゴールだけを読み直させます。
+  pub fn invalidate_goal_questions(&self, project: &str, goal_id: GoalId) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    inner.questions_to_reread.entry(project.to_owned()).or_default().insert(goal_id);
+  }
+
+  /// 次の周期で質問を読み直すゴールを取り出し、記録から消す。
+  pub fn take_invalidated_goal_questions(&self, project: &str) -> BTreeSet<GoalId> {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    inner.questions_to_reread.remove(project).unwrap_or_default()
+  }
+
+  /// プロジェクトのゴールについて、PR の状態の確認結果を記録する。
+  pub fn record_pull_request(&self, project: &str, goal_id: GoalId, pull_request: Option<PullRequestState>) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    let record = inner.terminations.entry(project.to_owned()).or_default().entry(goal_id).or_default();
+    if let Some(state) = pull_request {
+      record.pull_request = Some(state);
+    }
+  }
+
+  /// プロジェクトのゴールについて、終了依頼の状態を記録する。
+  pub fn record_finish_request(&self, project: &str, goal_id: GoalId, finish_request: FinishRequest) {
+    let mut inner = self.inner.lock().expect("状態ストアのロックが壊れています");
+    let record = inner.terminations.entry(project.to_owned()).or_default().entry(goal_id).or_default();
+    record.finish_request = finish_request;
+  }
+
+  /// プロジェクトのゴールの自動終了の記録を返す。まだ記録が無ければ None。
+  pub fn termination(&self, project: &str, goal_id: &GoalId) -> Option<GoalTermination> {
+    self
+      .inner
+      .lock()
+      .expect("状態ストアのロックが壊れています")
+      .terminations
+      .get(project)
+      .and_then(|records| records.get(goal_id))
+      .cloned()
+  }
+
+  /// プロジェクトの自動終了の記録をまとめて返す。出来事の検出が判断待ちと同じ規則を
+  /// 共有するために使います。記録が無ければ None。
+  pub fn terminations(&self, project: &str) -> Option<BTreeMap<GoalId, GoalTermination>> {
+    self.inner.lock().expect("状態ストアのロックが壊れています").terminations.get(project).cloned()
   }
 
   /// 稼働中に再読み込みした設定のサーバー表示情報を反映する。
@@ -210,6 +312,8 @@ impl StateStore {
           name: project.name.clone(),
           about: project.about.clone(),
           server_id: project.server.clone(),
+          write_server_id: project.write_server.clone(),
+          concurrency: project.concurrency,
           connected: slot.is_connected(),
           connection_state: slot.connection_state,
           last_read_at: slot.last_read_at,
@@ -271,7 +375,13 @@ impl StateStore {
         decisions.extend(inquiry_decisions(project, snapshot, now, stale_threshold));
       }
       if matches!(filter, PendingDecisionFilter::All | PendingDecisionFilter::AwaitingMerge) {
-        decisions.extend(merge_decisions(project, snapshot, now, stale_threshold));
+        decisions.extend(merge_decisions(
+          project,
+          snapshot,
+          inner.terminations.get(&project.name),
+          now,
+          stale_threshold,
+        ));
       }
       if matches!(filter, PendingDecisionFilter::All) {
         decisions.extend(registration_decisions(project, snapshot, now));
@@ -301,8 +411,8 @@ impl StateStore {
     self.is_log_silent_at(run.last_log_at, now)
   }
 
-  /// 最後のログの時刻が分からない場合を「無音」と判定しない無音判定。takt_get_run の応答に
-  /// 最後のログの時刻が無い run の詳細取得で使います。
+  /// 最後のログの時刻が分からない場合を「無音」と判定しない無音判定。最後のログの時刻が
+  /// 無い run の詳細取得で使います。
   pub fn is_log_silent_at(&self, last_log_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     let inner = self.inner.lock().expect("状態ストアのロックが壊れています");
     is_log_silent_at(last_log_at, now, inner.thresholds.run_log_silent_minutes.get())
@@ -342,6 +452,7 @@ fn inquiry_decisions(
         stale:               wait >= stale_threshold,
         inquiry_id:          Some(inquiry.inquiry_id.clone()),
         revision:            None,
+        merge_task_last:     None,
       }
     })
     .collect()
@@ -350,6 +461,7 @@ fn inquiry_decisions(
 fn merge_decisions(
   project: &Project,
   snapshot: &ProjectSnapshot,
+  terminations: Option<&BTreeMap<GoalId, GoalTermination>>,
   now: DateTime<Utc>,
   stale_threshold: Duration,
 ) -> Vec<PendingDecision> {
@@ -357,10 +469,19 @@ fn merge_decisions(
   snapshot
     .goals
     .iter()
-    .filter(|goal| is_human_merge_wait(goal.status, &goal.goal_id, &merge_tasks))
+    .filter(|goal| {
+      let termination = terminations.and_then(|records| records.get(&goal.goal_id));
+      // 終了依頼済み、または PR が閉じていると確認できたゴールは判断待ちに出しません。
+      if termination.is_some_and(GoalTermination::suppresses_display) {
+        return false;
+      }
+      is_human_merge_wait(goal.status, &goal.goal_id, &merge_tasks)
+    })
     .map(|goal| {
       let created_at = goal.awaiting_merge_at.unwrap_or(now);
       let wait = now.signed_duration_since(created_at);
+      let merge_task_last =
+        merge_tasks.iter().rev().find(|task| task.goal_id.as_ref() == Some(&goal.goal_id)).map(|task| task.status);
       PendingDecision {
         decision_type: PendingDecisionType::AwaitingMerge,
         server_id: project.server.clone(),
@@ -376,6 +497,7 @@ fn merge_decisions(
         stale: wait >= stale_threshold,
         inquiry_id: None,
         revision: None,
+        merge_task_last,
       }
     })
     .collect()
@@ -403,23 +525,21 @@ fn registration_decisions(project: &Project, snapshot: &ProjectSnapshot, now: Da
       stale:               false,
       inquiry_id:          None,
       revision:            Some(proposal.revision),
+      merge_task_last:     None,
     })
     .collect()
 }
 
-/// takt の activity.ts と同じ規則で、人のマージ待ちかどうかを判定する。
+/// フロントエンドの isHumanMergeWaiting と同じ規則で、人のマージ待ちかどうかを判定する。
 ///
-/// awaiting_merge で、ゴールの仕上げタスクに pending/running がなく、
-/// 配列末尾の仕上げタスクの状態が failed/exceeded/pr_failed でもないときに人のマージ待ちです。
+/// awaiting_merge で、ゴールの仕上げタスクに pending/running がなければ人のマージ待ちです。
+/// 仕上げタスクが失敗系の状態（failed/exceeded/pr_failed）で終わった場合は、仕上げが止まって
+/// 人の判断が要る状態として含めます（issue #231）。
 pub fn is_human_merge_wait(status: GoalStatus, goal_id: &GoalId, merge_tasks: &[&TaskEntry]) -> bool {
   if status != GoalStatus::AwaitingMerge {
     return false;
   }
   let goal_merge_tasks: Vec<&TaskEntry> =
     merge_tasks.iter().copied().filter(|task| task.goal_id.as_ref() == Some(goal_id)).collect();
-  if goal_merge_tasks.iter().any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running)) {
-    return false;
-  }
-  let last_status = goal_merge_tasks.last().map(|task| task.status);
-  !matches!(last_status, Some(TaskStatus::Failed) | Some(TaskStatus::Exceeded) | Some(TaskStatus::PrFailed))
+  !goal_merge_tasks.iter().any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
 }

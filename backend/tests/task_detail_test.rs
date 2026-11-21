@@ -394,6 +394,43 @@ async fn get_task_detail_leaves_branch_and_pull_request_url_unset_when_the_task_
 }
 
 #[tokio::test]
+async fn get_task_detail_succeeds_for_a_task_with_an_empty_goal_id() {
+  let tasks = vec![json!({
+    "name": "standalone-task",
+    "goalId": "",
+    "status": "pending",
+    "summary": "単独",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", Path::new("/abs/takt-dash")),
+      server_meta(),
+      json!({ "tasks": tasks, "isError": ["takt_get_goal"] }),
+    )
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let detail = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "standalone-task".to_owned(),
+      goal_id:   None,
+    })
+    .await
+    .expect("goalId が空文字のタスクは takt_get_goal を呼ばずに取得できます")
+    .into_inner();
+
+  assert_eq!(detail.task_name, "standalone-task");
+  assert_eq!(detail.status, ProtoTaskStatus::Pending as i32);
+  assert!(detail.goal_id.is_none(), "goalId が空文字のタスクはゴール ID を未設定にします");
+  assert!(detail.branch.is_none(), "goalId が空文字のタスクは branch を未設定にします");
+  assert!(detail.pull_request_url.is_none(), "goalId が空文字のタスクはプルリクエスト URL を未設定にします");
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn get_task_detail_maps_created_started_and_completed_times() {
   let tasks = vec![json!({
     "name": "time-task",
@@ -579,6 +616,100 @@ async fn get_task_detail_maps_a_goal_read_failure_to_unavailable() {
     .expect_err("ゴールの読み取り失敗は空値ではなく失敗になります");
 
   assert_eq!(status.code(), tonic::Code::Unavailable, "ゴールの読み取り失敗は Unavailable です: {status:?}");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_rejects_a_zero_pull_request_number_as_internal() {
+  // prNumber が 0 の値は PullRequestNumber の検証（1 以上）で弾かれ、解析エラーに
+  // なることを確認します（issue #157）。
+  let tasks = vec![json!({
+    "name": "bad-pr-task",
+    "goalId": "g1",
+    "status": "completed",
+    "summary": "要約",
+    "prNumber": 0,
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", Path::new("/abs/takt-dash")), server_meta(), json!({ "tasks": tasks }))
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "bad-pr-task".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect_err("prNumber が 0 のタスクは解析エラーです");
+
+  assert_eq!(status.code(), tonic::Code::Internal, "検証で弾かれた応答は Internal です: {status:?}");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_rejects_a_run_slug_with_a_path_separator_as_internal() {
+  // パスの区切りを含む runSlug は RunSlug の検証で弾かれ、解析エラーになることを
+  // 確認します（issue #157）。
+  let tasks = vec![json!({
+    "name": "bad-slug-task",
+    "goalId": "g1",
+    "status": "completed",
+    "summary": "要約",
+    "runSlug": "bad/slug",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", Path::new("/abs/takt-dash")), server_meta(), json!({ "tasks": tasks }))
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "bad-slug-task".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect_err("区切りを含む runSlug のタスクは解析エラーです");
+
+  assert_eq!(status.code(), tonic::Code::Internal, "検証で弾かれた応答は Internal です: {status:?}");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_task_detail_rejects_an_invalid_source_run_slug_as_internal() {
+  // sourceRunSlug も RunSlug の検証を通るため、親ディレクトリを指す値は
+  // 紐づく run の一覧へ入らず、解析エラーになることを確認します（issue #157）。
+  let tasks = vec![json!({
+    "name": "bad-source-slug-task",
+    "goalId": "g1",
+    "status": "completed",
+    "summary": "要約",
+    "runSlug": "run-1",
+    "sourceRunSlug": "..",
+  })];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", Path::new("/abs/takt-dash")), server_meta(), json!({ "tasks": tasks }))
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .get_task_detail(GetTaskDetailRequest {
+      project:   "takt-dash".to_owned(),
+      task_name: "bad-source-slug-task".to_owned(),
+      goal_id:   Some("g1".to_owned()),
+    })
+    .await
+    .expect_err("不正な sourceRunSlug のタスクは解析エラーです");
+
+  assert_eq!(status.code(), tonic::Code::Internal, "検証で弾かれた応答は Internal です: {status:?}");
 
   server.stop().await;
 }

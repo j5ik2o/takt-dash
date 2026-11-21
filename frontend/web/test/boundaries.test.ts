@@ -54,6 +54,22 @@ test("クライアントコンポーネントは gRPC クライアントを impo
   assert.deepEqual(offenders, [], "クライアントコンポーネントから gRPC クライアントを import しない");
 });
 
+test("バックエンドの gRPC クライアント生成は共有アクセサに限定される", async () => {
+  const files = [
+    ...(await listFiles(join(webRoot, "app"), [".tsx", ".ts"])),
+    ...(await listFiles(join(webRoot, "src", "components"), [".tsx", ".ts"])),
+  ].filter((path) => !path.endsWith(".test.ts") && !path.endsWith(".test.mts"));
+
+  const offenders: string[] = [];
+  for (const path of files) {
+    const source = await read(path);
+    if (/import[^;]*\bcreateBackendClient\b[^;]*from/.test(source)) {
+      offenders.push(path.replace(webRoot, ""));
+    }
+  }
+  assert.deepEqual(offenders, [], "生成は getBackendClient() の1箇所だけにします");
+});
+
 test("globals.css は狭い幅で1列化するメディアクエリを持つ", async () => {
   const css = await read(join(webRoot, "app", "globals.css"));
   assert.match(css, /@media[^{]*max-width/);

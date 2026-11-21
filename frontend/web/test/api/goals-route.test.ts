@@ -14,15 +14,18 @@ import { reserveClosedAddress, startTaktDashServer } from "../support/grpc-serve
 import { GET as getGoalDetail } from "../../app/api/goals/[goalId]/route.ts";
 import { GET as getTaskDetail } from "../../app/api/tasks/[project]/route.ts";
 import type { GetTaskDetailRequest } from "../../src/proto/taktdash.ts";
+import { closeBackendClient } from "../../src/grpc/client.ts";
 
 const TASK_NAME = "採用ページのレイアウトを直す";
 
 const withServerEnv = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
+  await closeBackendClient();
   const previous = process.env.TAKTDASH_BACKEND_ADDR;
   process.env.TAKTDASH_BACKEND_ADDR = address;
   try {
     return await run();
   } finally {
+    await closeBackendClient();
     if (previous === undefined) {
       delete process.env.TAKTDASH_BACKEND_ADDR;
     } else {
@@ -143,6 +146,15 @@ test("タスク詳細の Route Handler は ?task が無いとき 400 を返す",
 test("タスク詳細の Route Handler は ?task= が空のとき 400 を返す", async () => {
   const response = await getTaskDetail(
     new NextRequest("http://localhost/api/tasks/corporate-site?task="),
+    taskContext("corporate-site"),
+  );
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "タスク名が指定されていません。" });
+});
+
+test("タスク詳細の Route Handler は ?task が空白のみのとき 400 を返す", async () => {
+  const response = await getTaskDetail(
+    new NextRequest("http://localhost/api/tasks/corporate-site?task=%20%20"),
     taskContext("corporate-site"),
   );
   assert.equal(response.status, 400);

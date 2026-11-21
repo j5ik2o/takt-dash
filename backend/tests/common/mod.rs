@@ -2,13 +2,17 @@
 
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::{
+  path::{Path, PathBuf},
+  process::{Child, Command, Stdio},
+  time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
 use takt_dash_backend::{
-  config::{McpServer, Project, ServerMeta, Thresholds},
+  config::{HttpMcpServer, HttpServerEndpoint, McpConnection, Project, ServerMeta, StdioMcpServer, Thresholds},
   domain::{GoalId, InquiryId, PullRequestNumber, SilentMinutes, StaleMinutes, TaskName},
-  mcp::{McpClient, McpClientConfig, ToolSet},
+  mcp::{McpClient, McpClientConfig, ReadToolSet, WriteToolSet},
   model::{
     ExecutionStatus, GoalEntry, GoalStatus, InquiryEntry, InquiryKind, NotificationEntry, ProjectSnapshot, RunEntry,
     TaskEntry, TaskStatus,
@@ -44,12 +48,34 @@ pub fn mock_config_with_timeout(
     env: Default::default(),
     cwd: cwd.to_path_buf(),
     request_timeout: std::time::Duration::from_secs(timeout_secs),
+    tool_timeouts: Default::default(),
   }
+}
+
+/// 道具呼び出しの記録先を指定して mock サーバの起動設定を作る。
+pub fn mock_config_with_call_log(cwd: &Path, state: &Path, call_log: &Path) -> McpClientConfig {
+  let mut config = mock_config(cwd, state, None);
+  config.args.push("--call-log".to_owned());
+  config.args.push(call_log.display().to_string());
+  config
 }
 
 /// mock サーバへ接続するクライアントを作る。
 pub fn mock_client(config: McpClientConfig) -> McpClient {
   McpClient::new(config)
+}
+
+/// mock サーバが記録した道具名の一覧を読む。
+pub fn recorded_calls(path: &Path) -> Vec<String> {
+  match std::fs::read_to_string(path) {
+    | Ok(text) => text.lines().filter(|line| !line.is_empty()).map(str::to_owned).collect(),
+    | Err(_) => Vec::new(),
+  }
+}
+
+/// 道具呼び出しの記録を空にする。
+pub fn clear_recorded_calls(path: &Path) {
+  std::fs::write(path, "").expect("道具呼び出しの記録を空にできます");
 }
 
 /// 受け取った道具呼び出しを JSONL で記録する mock サーバの起動設定を作る。
@@ -59,11 +85,21 @@ pub fn mock_config_with_calls(cwd: &Path, state: &Path, calls: &Path) -> McpClie
   config.args.push(calls.display().to_string());
   config
 }
+/// プロジェクトの cwd を持つ読み取り専用の道具のまとまりを作る。mock は実契約と同じく cwd
+/// 必須なので、テストはプロジェクトの cwd（通常は mock を起動したディレクトリ）を渡します。
+pub fn tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> ReadToolSet<'a> {
+  ReadToolSet::new(client, cwd.to_path_buf())
+}
 
-/// プロジェクトの cwd を持つ道具のまとまりを作る。mock は実契約と同じく cwd 必須なので、
-/// テストはプロジェクトの cwd（通常は mock を起動したディレクトリ）を渡します。
-pub fn tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> ToolSet<'a> {
-  ToolSet::new(client, cwd.to_path_buf())
+/// 書き込み専用の道具のまとまりを作る。書き込みレーンのテストが使う。
+pub fn write_tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> WriteToolSet<'a> {
+  WriteToolSet::new(client, cwd.to_path_buf())
+}
+
+/// プロジェクトの cwd の run
+/// の集計を作る。読み取り1回ごとに作ると、本体ログは毎回先頭から読みます。
+pub fn run_logs(cwd: &Path) -> takt_dash_backend::run_progress::RunLogHandle {
+  takt_dash_backend::run_progress::run_log_handle(cwd.to_path_buf())
 }
 
 /// takt-mcp の道具呼び出し引数へ cwd を加える。
@@ -177,24 +213,396 @@ pub fn snapshot(
   runs: Vec<RunEntry>,
   notifications: Vec<NotificationEntry>,
 ) -> ProjectSnapshot {
-  ProjectSnapshot { goals, tasks, inquiries, runs, notifications, proposals: Vec::new() }
+  ProjectSnapshot { goals, tasks, inquiries, runs, notifications, ..ProjectSnapshot::empty() }
 }
 
 pub fn server_meta() -> ServerMeta {
-  ServerMeta { name: "j5ik2o-mac-mini".to_owned(), kind: "Mac mini".to_owned(), concurrency: 4 }
+  ServerMeta { name: "j5ik2o-mac-mini".to_owned(), kind: "Mac mini".to_owned() }
 }
 
 pub fn project(name: &str, cwd: &Path) -> Project {
   Project {
-    name:   name.to_owned(),
-    server: "mac-mini".to_owned(),
-    about:  format!("{name} の説明"),
-    cwd:    cwd.to_path_buf(),
+    name:         name.to_owned(),
+    server:       "mac-mini".to_owned(),
+    write_server: "mac-mini".to_owned(),
+    about:        format!("{name} の説明"),
+    cwd:          cwd.to_path_buf(),
+    concurrency:  1,
   }
 }
 
-pub fn mcp_server() -> McpServer {
-  McpServer { command: "node".to_owned(), args: vec!["server.mjs".to_owned()], env: Default::default() }
+/// mock HTTP MCP サーバのスクリプトへの絶対パス。
+pub fn mcp_server() -> StdioMcpServer {
+  StdioMcpServer {
+    command: "node".to_owned(),
+    args:    vec!["server.mjs".to_owned()],
+    env:     Default::default(),
+    manager: false,
+  }
+}
+
+pub fn mock_http_script() -> PathBuf {
+  Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("mock_mcp_http_server.mjs")
+}
+
+/// テスト用の接続先とトークンを持つ HTTP 接続設定。
+pub fn http_connection(url: &str, token: &str) -> McpConnection {
+  McpConnection::Http(HttpMcpServer {
+    endpoint:      HttpServerEndpoint::try_from(url).expect("テストの HTTP 接続先は 127.0.0.1 の url です"),
+    authorization: format!("Bearer {token}"),
+  })
+}
+
+/// mock HTTP MCP サーバの起動に必要な入力。
+pub struct HttpMockServer {
+  child:      Child,
+  url:        String,
+  token:      String,
+  calls:      PathBuf,
+  sessions:   PathBuf,
+  _directory: tempfile::TempDir,
+}
+
+impl HttpMockServer {
+  /// mock HTTP MCP サーバを空きポートで起動し、待ち受ける URL を返す。
+  ///
+  /// `--state` で読み取り道具の応答になる状態ファイルを渡します。起動待ちは ready ファイルが
+  /// 書かれるまで行い、固定の sleep では待ち合わせません。
+  pub fn start(state: &Path, behavior: Option<&str>) -> Self {
+    Self::start_with_token(state, behavior, "test-token")
+  }
+
+  /// 期待する Authorization のトークンを指定して mock HTTP MCP サーバを起動する。
+  pub fn start_with_token(state: &Path, behavior: Option<&str>, token: &str) -> Self {
+    Self::start_on_port_with_token(state, behavior, token, 0)
+  }
+
+  /// 指定したポートで mock HTTP MCP サーバを起動する。`port` が 0 なら空きポートを選びます。
+  ///
+  /// サーバー再起動を再現し、同じ接続先で新しいプロセスを立ち上げるために使います。
+  pub fn start_on_port(state: &Path, behavior: Option<&str>, port: u16) -> Self {
+    Self::start_on_port_with_token(state, behavior, "test-token", port)
+  }
+
+  fn start_on_port_with_token(state: &Path, behavior: Option<&str>, token: &str, port: u16) -> Self {
+    let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+    let ready = directory.path().join("ready.json");
+    let calls = directory.path().join("calls.jsonl");
+    let sessions = directory.path().join("sessions.log");
+    let script = mock_http_script();
+    let mut command = Command::new("node");
+    command
+      .arg(&script)
+      .arg("--state")
+      .arg(state)
+      .arg("--ready-file")
+      .arg(&ready)
+      .arg("--calls")
+      .arg(&calls)
+      .arg("--session-log")
+      .arg(&sessions)
+      .arg("--require-auth")
+      .arg(format!("Bearer {token}"))
+      .arg("--port")
+      .arg(port.to_string())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    if let Some(behavior) = behavior {
+      command.arg("--behavior").arg(behavior);
+    }
+    let mut child = command.spawn().expect("mock HTTP MCP サーバを起動できます");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+      if ready.exists() {
+        let text = std::fs::read_to_string(&ready).expect("ready ファイルを読めます");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("ready ファイルは JSON です");
+        let url = value["url"].as_str().expect("ready ファイルに url があります").to_owned();
+        return HttpMockServer { child, url, token: token.to_owned(), calls, sessions, _directory: directory };
+      }
+      std::thread::sleep(Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("mock HTTP MCP サーバが 10 秒以内に起動しませんでした");
+  }
+
+  pub fn url(&self) -> &str {
+    &self.url
+  }
+
+  pub fn token(&self) -> &str {
+    &self.token
+  }
+
+  /// mock サーバに対する takt-mcp の HTTP 接続設定。
+  pub fn connection(&self) -> McpConnection {
+    http_connection(&self.url, &self.token)
+  }
+
+  /// 受け取った tools/call を JSONL から読む。記録が無ければ空です。
+  pub fn recorded_calls(&self) -> Vec<serde_json::Value> {
+    let Ok(text) = std::fs::read_to_string(&self.calls) else {
+      return Vec::new();
+    };
+    text
+      .lines()
+      .filter(|line| !line.trim().is_empty())
+      .map(|line| serde_json::from_str(line).expect("記録した道具呼び出しを解析できます"))
+      .collect()
+  }
+
+  /// セッションの採番と再利用の記録（"new ..." / "reuse ..."）を読む。
+  pub fn session_events(&self) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(&self.sessions) else {
+      return Vec::new();
+    };
+    text.lines().filter(|line| !line.trim().is_empty()).map(str::to_owned).collect()
+  }
+
+  /// 接続を確認できるまで待つために、テストから URL のポート番号を返す。
+  pub fn port(&self) -> u16 {
+    let without_scheme = self.url.trim_start_matches("http://");
+    let authority = without_scheme.trim_end_matches('/');
+    authority.rsplit(':').next().and_then(|port| port.parse().ok()).expect("url からポート番号を取れます")
+  }
+}
+
+impl Drop for HttpMockServer {
+  fn drop(&mut self) {
+    let _ = self.child.kill();
+    let _ = self.child.wait();
+  }
+}
+
+/// takt がプロジェクトの `.takt` へ書く run の保存形式（`tasks.yaml` の対応表、`meta.json`、
+/// 本体ログ、`reports/`）を一時ディレクトリへ作る。
+///
+/// 実ホームや実在の `takt-worktrees` は参照せず、run はすべてプロジェクトの `.takt/runs` の
+/// 下に置きます。本体ログの record は実物のキー構成（type、step、persona、iteration、status、
+/// timestamp、workflow、stack）に合わせた合成データです。
+pub struct RunFixture {
+  project_cwd: PathBuf,
+}
+
+/// `tasks.yaml` の1項目。`source_run_slug` は元 run の解決だけに使う別の値です。
+pub struct RunTaskLine<'a> {
+  pub run_slug:        Option<&'a str>,
+  pub source_run_slug: Option<&'a str>,
+}
+
+/// worktree で動く run の `tasks.yaml` の1項目。`worktree_path` は takt が書く絶対パスです。
+pub struct WorktreeTaskLine<'a> {
+  pub run_slug:        Option<&'a str>,
+  pub source_run_slug: Option<&'a str>,
+  pub worktree_path:   &'a Path,
+}
+
+impl RunFixture {
+  /// `worktree_path` を持つ項目だけで `tasks.yaml` の対応表を書く。
+  pub fn write_worktree_tasks(&self, entries: &[WorktreeTaskLine<'_>]) {
+    let mut yaml = String::from("tasks:\n");
+    for entry in entries {
+      let mut fields = Vec::new();
+      if let Some(run_slug) = entry.run_slug {
+        fields.push(format!("run_slug: {run_slug}"));
+      }
+      if let Some(source) = entry.source_run_slug {
+        fields.push(format!("source_run_slug: {source}"));
+      }
+      fields.push(format!("worktree_path: {}", entry.worktree_path.display()));
+      for (index, field) in fields.iter().enumerate() {
+        let prefix = if index == 0 { "  - " } else { "    " };
+        yaml.push_str(&format!("{prefix}{field}\n"));
+      }
+    }
+    std::fs::write(self.project_cwd.join(".takt").join("tasks.yaml"), yaml).expect("tasks.yaml を書けます");
+  }
+
+  /// takt の LiveInterventionFileStore と同じく、プロジェクト側の
+  /// `.takt/runs/<run_slug>/interventions.jsonl` へ指示書のイベントを1行ずつ書く。
+  pub fn write_interventions(&self, run_slug: &str, events: &[serde_json::Value]) {
+    let directory = self.project_cwd.join(".takt").join("runs").join(run_slug);
+    std::fs::create_dir_all(&directory).expect("run のディレクトリを作れます");
+    let text: String = events.iter().map(|event| format!("{event}\n")).collect();
+    std::fs::write(directory.join("interventions.jsonl"), text).expect("interventions.jsonl を書けます");
+  }
+
+  pub fn new(project_cwd: &Path) -> RunFixture {
+    std::fs::create_dir_all(project_cwd.join(".takt")).expect("プロジェクトの .takt を作れます");
+    RunFixture { project_cwd: project_cwd.to_path_buf() }
+  }
+
+  /// `tasks.yaml` の対応表を書く。指定した run だけが対応表に載ります。
+  pub fn write_tasks(&self, entries: &[RunTaskLine<'_>]) {
+    let mut yaml = String::from("tasks:\n");
+    for entry in entries {
+      let mut fields = Vec::new();
+      if let Some(run_slug) = entry.run_slug {
+        fields.push(format!("run_slug: {run_slug}"));
+      }
+      if let Some(source) = entry.source_run_slug {
+        fields.push(format!("source_run_slug: {source}"));
+      }
+      for (index, field) in fields.iter().enumerate() {
+        let prefix = if index == 0 { "  - " } else { "    " };
+        yaml.push_str(&format!("{prefix}{field}\n"));
+      }
+    }
+    std::fs::write(self.project_cwd.join(".takt").join("tasks.yaml"), yaml).expect("tasks.yaml を書けます");
+  }
+
+  /// run のディレクトリ（`logs` を含む）を作って返す。
+  pub fn run_dir(&self, run_slug: &str) -> PathBuf {
+    let run_dir = self.project_cwd.join(".takt").join("runs").join(run_slug);
+    std::fs::create_dir_all(run_dir.join("logs")).expect("run の logs ディレクトリを作れます");
+    run_dir
+  }
+
+  pub fn write_meta(&self, run_slug: &str, meta: &serde_json::Value) {
+    std::fs::write(self.run_dir(run_slug).join("meta.json"), meta.to_string()).expect("meta.json を書けます");
+  }
+
+  pub fn write_meta_raw(&self, run_slug: &str, text: &str) {
+    std::fs::write(self.run_dir(run_slug).join("meta.json"), text).expect("meta.json を書けます");
+  }
+
+  pub fn body_log(&self, run_slug: &str) -> PathBuf {
+    self.run_dir(run_slug).join("logs").join("session.jsonl")
+  }
+
+  /// 本体ログの末尾へ record を1行ずつ追記する。
+  pub fn append_records(&self, run_slug: &str, records: &[serde_json::Value]) {
+    use std::io::Write;
+    let mut file =
+      std::fs::OpenOptions::new().append(true).create(true).open(self.body_log(run_slug)).expect("本体ログを開けます");
+    for record in records {
+      let mut line = record.to_string();
+      line.push('\n');
+      file.write_all(line.as_bytes()).expect("本体ログへ追記できます");
+    }
+  }
+
+  /// 本体ログの既読範囲にある `from` をすべて、同じバイト長の `to` へ書き換える。inode
+  /// とファイルの大きさは
+  /// 変えないため、読み取り位置を保持する読み取りは書き換えた範囲を読み直しません。
+  pub fn overwrite_body_log_in_place(&self, run_slug: &str, from: &str, to: &str) {
+    use std::io::{Seek, SeekFrom, Write};
+    assert_eq!(from.len(), to.len(), "書き換えの前後でバイト長を揃えます");
+    let path = self.body_log(run_slug);
+    let text = std::fs::read_to_string(&path).expect("本体ログを読めます");
+    let replaced = text.replace(from, to);
+    assert_ne!(text, replaced, "書き換え対象 {from} が本体ログにあります");
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).expect("本体ログを開けます");
+    file.seek(SeekFrom::Start(0)).expect("先頭へ移動できます");
+    file.write_all(replaced.as_bytes()).expect("本体ログを書き換えられます");
+  }
+
+  /// 本体ログの更新時刻を固定する。ログ群の最新更新時刻を決定的にするために使います。
+  pub fn set_body_log_modified(&self, run_slug: &str, modified: DateTime<Utc>) {
+    let file = std::fs::File::options().write(true).open(self.body_log(run_slug)).expect("本体ログを開けます");
+    file.set_modified(std::time::SystemTime::from(modified)).expect("更新時刻を設定できます");
+  }
+
+  /// `reports/` の下へレポートを書く。`relative` は `/` 区切りの相対パスです。
+  pub fn write_report(&self, run_slug: &str, relative: &str, content: &str) {
+    let path = self.run_dir(run_slug).join("reports").join(relative);
+    std::fs::create_dir_all(path.parent().expect("レポートの親があります")).expect("レポートの置き場を作れます");
+    std::fs::write(path, content).expect("レポートを書けます");
+  }
+}
+
+/// 実行中の run の `meta.json`。
+pub fn running_meta(current_step: &str, current_iteration: i64, workflow: &str, start_time: &str) -> serde_json::Value {
+  serde_json::json!({
+    "workflow": workflow,
+    "status": "running",
+    "startTime": start_time,
+    "currentStep": current_step,
+    "currentIteration": current_iteration,
+    "phase": 1,
+    "updatedAt": start_time
+  })
+}
+
+pub fn workflow_start_record(workflow: &str) -> serde_json::Value {
+  serde_json::json!({ "type": "workflow_start", "workflow": workflow })
+}
+
+/// 最上位（stack の長さ 1）の step_complete。
+pub fn step_complete_record(step: &str, persona: &str, iteration: i64, timestamp: &str) -> serde_json::Value {
+  serde_json::json!({
+    "type": "step_complete",
+    "step": step,
+    "persona": persona,
+    "iteration": iteration,
+    "status": "done",
+    "timestamp": timestamp,
+    "workflow": "development-core",
+    "stack": [ { "workflow": "development-core", "step": step, "kind": "agent", "occurrence": 1 } ]
+  })
+}
+
+/// step_start。`stack_steps` は外側から順の stack の step 名で、長さが stack の深さになります。
+pub fn step_start_record(
+  step: &str,
+  workflow: &str,
+  iteration: i64,
+  timestamp: &str,
+  stack_steps: &[&str],
+) -> serde_json::Value {
+  let stack: Vec<serde_json::Value> = stack_steps
+    .iter()
+    .map(|stack_step| serde_json::json!({ "workflow": workflow, "step": stack_step, "kind": "agent", "occurrence": 1 }))
+    .collect();
+  serde_json::json!({
+    "type": "step_start",
+    "step": step,
+    "persona": "coder",
+    "iteration": iteration,
+    "timestamp": timestamp,
+    "workflow": workflow,
+    "stack": stack
+  })
+}
+
+/// takt の `interventions.jsonl` の issued イベント。
+pub fn issued_event(instruction_id: i64, issued_at: &str, content: &str) -> serde_json::Value {
+  serde_json::json!({ "type": "issued", "instructionId": instruction_id, "issuedAt": issued_at, "content": content })
+}
+
+/// takt の `interventions.jsonl` の delivered イベント。`mode` は same_session / next_step /
+/// batch_boundary です。
+pub fn delivered_event(instruction_ids: &[i64], mode: &str, delivered_at: &str, step: &str) -> serde_json::Value {
+  serde_json::json!({
+    "type": "delivered",
+    "instructionIds": instruction_ids,
+    "deliveredAt": delivered_at,
+    "mode": mode,
+    "step": step,
+    "phase": 1
+  })
+}
+
+/// 集計の対象にならない種類（provider の出来事）の record。本体ログを大きくするために使います。
+/// 1件の JSON はおよそ `payload_bytes` バイトです。
+pub fn filler_record(index: usize, payload_bytes: usize) -> serde_json::Value {
+  serde_json::json!({ "type": "provider_event", "index": index, "data": "x".repeat(payload_bytes) })
+}
+
+/// 本体ログの末尾へ、`total_bytes` を超えるまで集計対象外の record を追記する。
+pub fn append_filler_records(fixture: &RunFixture, run_slug: &str, total_bytes: u64) {
+  use std::io::Write;
+  let mut file =
+    std::fs::OpenOptions::new().append(true).create(true).open(fixture.body_log(run_slug)).expect("本体ログを開けます");
+  let mut written = 0_u64;
+  let mut index = 0;
+  while written <= total_bytes {
+    let mut line = filler_record(index, 4096).to_string();
+    line.push('\n');
+    file.write_all(line.as_bytes()).expect("本体ログへ追記できます");
+    written += line.len() as u64;
+    index += 1;
+  }
 }
 
 pub fn thresholds() -> Thresholds {

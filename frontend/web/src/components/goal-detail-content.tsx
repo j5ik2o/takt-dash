@@ -1,7 +1,9 @@
 import type { ReactElement } from "react";
 import Link from "next/link";
-import type { GetGoalDetailResponse, GoalQuestion } from "../proto/taktdash";
-import { executionStatusLabel, goalStatusLabel, taskStatusLabel } from "../state/dashboard";
+import type { GetGoalDetailResponse, GoalQuestion, GoalTask, TaskStatusCounts } from "../proto/taktdash";
+import { taskStatusLabel } from "../state/dashboard";
+import { goalStateSentence } from "../state/goal-badge";
+import { TASK_STATUS } from "../state/proto-values";
 import { formatDateTime } from "../state/format";
 
 type GoalDetailContentProps = {
@@ -34,6 +36,43 @@ const answerLines = (question: GoalQuestion): string[] => {
   return lines;
 };
 
+// 回答が無い質問の表示。取り下げ済みの質問は回答待ちではないため「未回答」とは
+// 表示せず、取り下げとして表示する（issue #127）。
+const unansweredLabel = (question: GoalQuestion): string =>
+  question.status === "withdrawn" ? "取り下げ済み" : "未回答";
+
+// 詳細の状態の文面はゴール一覧と同じ対応表（goalStateSentence）で作る。詳細の
+// 応答には件数の集計が無いため、タスク一覧から状態別の件数を数えて一覧と同じ
+// 入力にそろえる（issue #198）。
+const taskCountsOf = (tasks: readonly GoalTask[]): TaskStatusCounts => {
+  const counts: TaskStatusCounts = { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 };
+  for (const task of tasks) {
+    switch (task.status) {
+      case TASK_STATUS.PENDING:
+        counts.pending += 1;
+        break;
+      case TASK_STATUS.RUNNING:
+        counts.running += 1;
+        break;
+      case TASK_STATUS.COMPLETED:
+        counts.completed += 1;
+        break;
+      case TASK_STATUS.FAILED:
+        counts.failed += 1;
+        break;
+      case TASK_STATUS.EXCEEDED:
+        counts.exceeded += 1;
+        break;
+      case TASK_STATUS.PR_FAILED:
+        counts.prFailed += 1;
+        break;
+      default:
+        break;
+    }
+  }
+  return counts;
+};
+
 // ゴール詳細は proto の GetGoalDetailResponse が返す範囲だけを表示する。
 // 開始ブランチは proto にフィールドがないため、値ではなく欠落が分かる表示にする。
 export function GoalDetailContent({ detail }: GoalDetailContentProps): ReactElement {
@@ -49,8 +88,12 @@ export function GoalDetailContent({ detail }: GoalDetailContentProps): ReactElem
         <div>
           <h1>ゴール {detail.goalId}</h1>
           <p>
-            {detail.project} のゴールです。ゴールは{goalStatusLabel(detail.status)}で、実行状態は
-            {executionStatusLabel(detail.executionStatus)}です。
+            {detail.project} のゴールです。
+            {goalStateSentence({
+              status: detail.status,
+              executionStatus: detail.executionStatus,
+              taskCounts: taskCountsOf(detail.tasks),
+            })}
           </p>
         </div>
       </header>
@@ -142,7 +185,7 @@ export function GoalDetailContent({ detail }: GoalDetailContentProps): ReactElem
                   </div>
                   <p>{question.body}</p>
                   {answers.length === 0 ? (
-                    <p>未回答</p>
+                    <p>{unansweredLabel(question)}</p>
                   ) : (
                     answers.map((answer, index) => <p key={`${index}-${answer}`}>{answer}</p>)
                   )}

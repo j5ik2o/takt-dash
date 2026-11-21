@@ -10,6 +10,8 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Sidebar } from "../../src/components/sidebar.tsx";
+import { ConnectionState, type Project } from "../../src/proto/taktdash.ts";
+import { dashboardStateFromProto, type DashboardRun } from "../../src/state/restore-state.ts";
 import { createDashboardState, NOW } from "../support/fixtures.ts";
 
 type BuildInfo = { commit: string; branch: string };
@@ -26,6 +28,7 @@ const renderSidebar = (
 ): string =>
   renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: extra.servers ?? [],
       pendingCount: 0,
       readAt: extra.readAt,
@@ -127,4 +130,161 @@ test("サイドバー下端は折りたためる区画として描画し、開�
   assert.match(foot, /最終読み取り時刻/, "開けば最終読み取り時刻を読める");
   assert.match(foot, /2台中1台から読めています/, "開けば読めている台数を読める");
   assert.match(foot, /a1b2c3d/, "開けば frontend のビルド情報を読める");
+});
+
+// サーバー行（名前を含む li）の中から、状態の点のクラスと状態テキストを取り出す。
+const serverRow = (html: string, serverName: string): { dot: string; state: string } => {
+  const item = html.split("<li>").find((part) => part.includes(serverName));
+  assert.ok(item, `サーバー ${serverName} の行が描画されていません: ${html}`);
+  const dot = /<span class="dot ([^"]*)"/.exec(item)?.[1];
+  const state = /<span class="srv-state">([^<]*)<\/span>/.exec(item)?.[1];
+  assert.ok(dot !== undefined && state !== undefined, `状態の点とテキストが描画されていません: ${item}`);
+  return { dot, state };
+};
+
+const renderSidebarWithServers = (runs: readonly DashboardRun[]): string =>
+  renderToStaticMarkup(
+    createElement(Sidebar, {
+      snapshotLoaded: true,
+      servers: createDashboardState().servers,
+      pendingCount: 0,
+      runs,
+      frontendBuild: FRONTEND_BUILD,
+      backendBuild: BACKEND_BUILD,
+    }),
+  );
+
+test("サイドバーのサーバー状態は概要カードと同じ基準と文言で出す", () => {
+  const state = createDashboardState();
+
+  const withRuns = renderSidebarWithServers(dashboardStateFromProto(state).runs);
+  assert.deepEqual(
+    serverRow(withRuns, "Mac mini"),
+    { dot: "live", state: "動作中" },
+    "接続済みで run があるサーバーはカードと同じく動作中にする",
+  );
+  assert.deepEqual(
+    serverRow(withRuns, "Mac Studio"),
+    { dot: "down", state: "応答なし" },
+    "未接続のサーバーはカードと同じく応答なしにする",
+  );
+
+  const withoutRuns = renderSidebarWithServers([]);
+  assert.deepEqual(
+    serverRow(withoutRuns, "Mac mini"),
+    { dot: "idle", state: "接続中" },
+    "接続済みで run が無いサーバーは、カードと同じく接続中にし、動作中と食い違わせない",
+  );
+  assert.deepEqual(
+    serverRow(withoutRuns, "Mac Studio"),
+    { dot: "down", state: "応答なし" },
+    "未接続のサーバーの表示は run の有無によらず応答なしのままにする",
+  );
+});
+
+const renderSidebarWithProjects = (projects: readonly Project[]): string => {
+  const state = createDashboardState();
+  return renderToStaticMarkup(
+    createElement(Sidebar, {
+      snapshotLoaded: true,
+      servers: state.servers,
+      pendingCount: 0,
+      runs: dashboardStateFromProto(state).runs,
+      projects,
+      frontendBuild: FRONTEND_BUILD,
+      backendBuild: BACKEND_BUILD,
+    }),
+  );
+};
+
+test("応答していないプロジェクトがあるサーバーはサイドバーでも一部応答なしになり、下端にプロジェクト名が出る", () => {
+  const state = createDashboardState();
+  const projects = state.projects.map((project) =>
+    project.name === "esa"
+      ? {
+          ...project,
+          connected: false,
+          connectionState: ConnectionState.CONNECTION_STATE_UNRESPONSIVE,
+        }
+      : project,
+  );
+  const html = renderSidebarWithProjects(projects);
+
+  assert.deepEqual(
+    serverRow(html, "Mac mini"),
+    { dot: "warn", state: "一部応答なし" },
+    "配下のプロジェクトが応答していないサーバーは、カードと同じく動作中と表示しない",
+  );
+  const foot = sideFoot(html);
+  assert.match(foot, /esa から応答がありません/, "応答していないプロジェクト名を下端に出す");
+  assert.match(foot, /2台中1台から読めています/, "読めている台数の表示は残す");
+});
+
+test("接続済みで run が無いサーバーは、配下が無くてもサイドバーでは「接続中」のままにする", () => {
+  const state = createDashboardState();
+  const html = renderToStaticMarkup(
+    createElement(Sidebar, {
+      snapshotLoaded: true,
+      servers: state.servers.map((server) => ({ ...server, connected: true })),
+      projects: state.projects,
+      runs: [],
+      pendingCount: 0,
+      frontendBuild: FRONTEND_BUILD,
+      backendBuild: BACKEND_BUILD,
+    }),
+  );
+
+  assert.deepEqual(
+    serverRow(html, "Mac Studio"),
+    { dot: "idle", state: "接続中" },
+    "接続済みと分かるサーバーを書き込み専用と決めつけない",
+  );
+});
+
+test("読み取りプロジェクトを持たない書き込み専用サーバーはサイドバーで応答なしと表示しない", () => {
+  const state = createDashboardState();
+  const readServer = state.servers[0]!;
+  const writeOnly = state.servers[1]!;
+  const readProjects = state.projects.map((project) => ({ ...project, serverId: readServer.serverId }));
+  const html = renderToStaticMarkup(
+    createElement(Sidebar, {
+      snapshotLoaded: true,
+      servers: [{ ...writeOnly, connected: false, writeOnly: true }, readServer],
+      projects: readProjects,
+      runs: [],
+      pendingCount: 0,
+      frontendBuild: FRONTEND_BUILD,
+      backendBuild: BACKEND_BUILD,
+    }),
+  );
+
+  assert.deepEqual(
+    serverRow(html, "Mac Studio"),
+    { dot: "writeOnly", state: "書き込み専用" },
+    "読み取り先に指定されていないサーバーは応答なしにせず、書き込み専用と示す",
+  );
+  assert.deepEqual(
+    serverRow(html, "Mac mini"),
+    { dot: "idle", state: "接続中" },
+    "読み取りを行うサーバーの表示は従来どおりにする",
+  );
+});
+
+test("まだ読めていないプロジェクトはサイドバーでも正常に見せず、下端で未読と分かる", () => {
+  const state = createDashboardState();
+  const projects = state.projects.map((project) =>
+    project.name === "esa" ? { ...project, lastReadAt: undefined } : project,
+  );
+  const html = renderSidebarWithProjects(projects);
+
+  assert.deepEqual(
+    serverRow(html, "Mac mini"),
+    { dot: "warn", state: "一部応答なし" },
+    "未読のプロジェクトがあるサーバーも正常に見せない",
+  );
+  assert.match(
+    sideFoot(html),
+    /esa はまだ一度も読めていません/,
+    "未読のプロジェクト名を下端に出す",
+  );
 });

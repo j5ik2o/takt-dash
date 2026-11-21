@@ -71,6 +71,8 @@ backend の値オブジェクトは `backend/src/domain.rs` にまとめ、生�
 | 日次集計の日付 | `DailyDate` | `backend/src/domain.rs:234-281` | size（10文字）→ lexical content（数字と `-`）→ syntax（`YYYY-MM-DD`）→ semantics（`NaiveDate` で実在日）の順。`From<NaiveDate>` は失敗しない | `activity.rs`、`grpc/mod.rs` |
 | until | `MergeUntil` | `backend/src/domain.rs:285-314` | 空 → size、ASCII 小文字以外 → lexical content、`prepare` / `merge` 以外 → syntax | `mcp/tools.rs`、`grpc/mod.rs` |
 | run の状態 | `RunStatus` | `backend/src/model.rs:151-170` | `TryFrom<&str>` は `running` / `completed` / `aborted` / `failed` だけを受け、未知は `DomainError::Semantics` | `model.rs`、`mcp/tools.rs`、テスト fixture |
+| run のレポートの名前（issue #70 で追加） | `ReportFilename` | `backend/src/domain.rs:113-157` | size（1024 バイト以下）→ lexical content（`validate_text`）→ syntax（絶対パス・`\`・空の区切り・`.`・`..` を拒否）→ semantics（`.md` で終わる）。`reports/` の下に収まることは読み取り時に実パスで確かめる（`backend/src/run_log.rs` の `read_report`）。画面側は `toReportFilename`（`frontend/web/src/state/domain-primitives.ts:113`）が同じ順で検証する | `grpc/mod.rs`、`run_log.rs`、`run_progress.rs`、`app/api/runs/[slug]/content/route.ts` |
+| run への指示書の ID（issue #70 で追加） | `InstructionId` | `backend/src/domain.rs:159-194` | `TryFrom<i32>` / `TryFrom<i64>`。0 以下と `i32` の範囲外を `DomainError::Size` で拒否。画面側は `toInstructionId`（`frontend/web/src/state/domain-primitives.ts:132`） | `grpc/mod.rs`、`run_log.rs`、`app/api/runs/[slug]/content/route.ts` |
 
 件数の飽和について: `task_status_counts`（`backend/src/grpc/mod.rs:198`）は状態ごとの件数を `TaskCount` に通し、proto の `int32` に収まらない件数だけ `i32::MAX` へ飽和させます。`completed_tasks_since`（`backend/src/activity.rs:211`）は SQL の `COUNT(*)` を `TaskCount::try_from` で復元し、失敗を `rusqlite::Error::FromSqlConversionFailure` に写します。
 
@@ -79,6 +81,12 @@ SQL からの復元では、`ServerCount.server_id`（`backend/src/activity.rs:3
 ### run 状態の厳格化（第2段の明示的な挙動変更）
 
 第1段の調査時点では、takt 応答の `status` が欠落または未知のとき `RunStatus::Running` に丸めていました。第2段では `parse_run_status`（`backend/src/mcp/tools.rs:637`）が欠落と未知を `ToolError::Parse` にし、既知の4値だけを受けます。そのため、`status` を持たない run 応答は読み取りエラーになります。これは要求 `R17` で明示された唯一の外部挙動の変更です。既存の run fixture には有効な `"status"` を追加し、欠落・未知の期待を `ToolError::Parse` に更新しました。既知4値の応答と gRPC の射影は従来と同じです。
+
+### 詳細モデルの追随（issue #157）
+
+第2段の置換から漏れていた詳細モデル（`TaskDetail`、`GoalDetail`、`GoalTaskEntry`、`backend/src/model.rs`）の識別子も、既存の値オブジェクトへ置き換えました。`TaskDetail` はプロジェクト名（`ProjectName`）、タスク名（`TaskName`）、ゴール ID（`Option<GoalId>`）、run slug（`Option<RunSlug>` と `Vec<RunSlug>`）、プルリクエスト番号（`Option<PullRequestNumber>`）を持ち、`GoalDetail` はゴール ID（`GoalId`）、`GoalTaskEntry` はタスク名（`TaskName`）と run slug（`Option<RunSlug>`）を持ちます。
+
+解析（`parse_task_detail`、`backend/src/mcp/tools/goal.rs`）は、一覧の解析（`parse_task`、`parse_goal`）と同じ流儀で `domain_value` を通して検証し、不正な値は `ToolError::Parse` にします。たとえば `prNumber` が 0 の応答は、詳細の読み取り全体が解析エラーになります。空文字の `goalId`・`runSlug`・`sourceRunSlug` は、一覧と同じく未所属（`None`）として扱います。`GoalDetail` と `GoalTaskEntry` の識別子は、検証済みの要求値（`GoalId`）と一覧の `TaskEntry` から組み立てるため、新しい検証は増えていません。proto の定義は変えず、gRPC の組み立て（`backend/src/grpc/mod.rs`、`backend/src/grpc/mapping.rs`）で値オブジェクトと proto の生の型を相互変換します。
 
 ### 値オブジェクトで検証しない意味制約
 
@@ -217,5 +225,5 @@ SQL からの復元では、`ServerCount.server_id`（`backend/src/activity.rs:3
 | `frontend/web/app` の入力検証 | `frontend/web/app/api/decisions/_shared.ts:75`〜`:79` に `isNonEmptyString` と `isPositiveInteger` があり、`frontend/web/app/api/decisions/merge/route.ts:12`〜`:24` が `serverId`・`project`・`goalId`・`prNumber` を生の値で検証している。同じファイルの `:27` は `until: "merge"` を直書きしている | `order.md` の調査対象が `frontend/web/src` のため一覧には載せない。ただし同じ値の重複検証であり、後続の段で `frontend/web/src` の型を決めたあとに、この境界も同じ型へ寄せるかを再検討する |
 | web 側の状態の種別 | `frontend/web/src/state/proto-values.ts:120`〜`:129` の `enumFromWire` は、数値ならそのまま返し、未知の文字列は `-1` にする。`GoalStatus` などの専用型ではなく `number` を返す | 「対象」として一覧に載せる。既知の値だけを受ける型へ変えるのは後続の段とする |
 | CLI の接続先アドレス | `frontend/cli/src/main.rs:944`〜`:946` の `env_backend_addr` は環境変数を `String` のまま返し、`:88` と `:119` で空文字だけを弾く | taktDash のドメインの値ではなく接続設定のため「対象外」とする。解決時の変換は既存の接続処理に任せる |
-| takt が返す表示用の状態 | `backend/src/model.rs:235` の `StepLogEntry.status` と `backend/src/model.rs:254` の `RunInstructionEntry.state` は `String` で、値の集合は takt 側が決める | takt は対象外のため「対象外」とする。taktDash 側で不変条件を決める必要が出た場合は、その時点で別の要求として扱う |
+| takt が返す表示用の状態 | `backend/src/model.rs:310` の `StepLogEntry.status` は `String` で、値の集合は takt 側が決める。指示書の状態は issue #70 で `backend/src/run_log.rs:458` の `InstructionState`（pending / deliveredSameSession / deliveredNextStep / unconsumedWarned の4種類）にし、出力するときに takt の状態名へ変換する | `StepLogEntry.status` は takt が決める値のため「対象外」とする。taktDash 側で不変条件を決める必要が出た場合は、その時点で別の要求として扱う |
 | 件数を値オブジェクトにする範囲 | `proto/taktdash.proto:141`〜`:148` の `TaskStatusCounts`、`backend/src/activity.rs:21`〜`:25` の `DailyCount`、`frontend/cli/src/main.rs:962`〜`:974` の集計が該当する | 「時刻や間隔などの量」に件数を含めて「対象」とする。総数との一致という意味上の制約を持つため、単純な属性ではないと判断した |

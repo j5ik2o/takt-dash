@@ -13,6 +13,7 @@ import {
 import {
   createConversationResponse,
   createConversationMessages,
+  createGarbledConversationMessage,
 } from "../support/fixtures.ts";
 import {
   beginConversationSwitch,
@@ -329,6 +330,22 @@ test("更新の失敗は本文を保って警告し、成功で警告を解除�
     recovered.page?.messages.map((message) => message.seq),
     [1, 2, 3],
   );
+});
+
+test("元記録の文字化けの印を notice として復元する", () => {
+  const garbled = createGarbledConversationMessage();
+  const page = restore({ messages: [garbled] });
+
+  assert.equal(page.messages[0]?.notice, garbled.notice, "印を本文とは別の値として復元する");
+  assert.equal(page.messages[0]?.text, garbled.text, "本文は変えずに復元する");
+});
+
+test("印のないメッセージは notice を持たない", () => {
+  const page = restore();
+
+  for (const message of page.messages) {
+    assert.equal(message.notice, undefined, "印のないメッセージに印を付けない");
+  }
 });
 
 test("対象外の発話者は未知の名称と欠落を不明(-1)にし、未知の数値はそのまま保つ", () => {

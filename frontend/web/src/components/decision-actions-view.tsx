@@ -9,6 +9,7 @@ import { OPERATION_ANSWER_REPORT } from "../state/proto-values";
 import {
   INITIAL_DECISION_DIALOG_STATE,
   decisionActionState,
+  decisionTargetLabel,
   openDecisionDialogState,
   resolveDecisionIntent,
   toDecisionResult,
@@ -334,17 +335,19 @@ type DialogActionSectionProps = {
   triggers: DialogTrigger[];
   configs: ConfirmDialogConfig[];
   active: DialogKind | null;
+  targetLabel: string;
   busy: boolean;
   triggerRefs: RefObject<Record<DialogKind, HTMLButtonElement | null>>;
   onAction: (intent: DecisionActionsIntent) => void;
 };
 
 // 確認ダイアログを開くトリガー群と、いま開いている種別のダイアログをまとめて描画する。
-// トリガーは可視の操作名をそのまま読み上げ名にし、種別ごとの見出し・本文・確定ボタン名を並べる。
+// 対象の識別子を含む aria-label と、種別ごとの見出し・本文・確定ボタン名が同じ形で並ぶ。
 function DialogActionSection({
   triggers,
   configs,
   active,
+  targetLabel,
   busy,
   triggerRefs,
   onAction,
@@ -360,6 +363,7 @@ function DialogActionSection({
           ref={(element) => {
             triggerRefs.current[dialog] = element;
           }}
+          aria-label={`${label}（${targetLabel}）`}
           onClick={() => onAction({ type: "open", dialog })}
         >
           {label}
@@ -389,6 +393,7 @@ export function DecisionActionsView({
   onAction,
 }: DecisionActionsViewProps): ReactElement {
   const state = decisionActionState(decision);
+  const targetLabel = decisionTargetLabel(decision);
 
   // ダイアログを開いたトリガーを覚えておき、閉じたときにフォーカスを戻す。
   // 送信中はトリガーが無効なので、復帰は busy の解除まで待つ。
@@ -436,6 +441,7 @@ export function DecisionActionsView({
               key={option}
               type="button"
               disabled={busy}
+              aria-label={`${option}（${targetLabel}）`}
               onClick={() => onAction({ type: "answer-option", option })}
             >
               {option}
@@ -457,9 +463,14 @@ export function DecisionActionsView({
             type="text"
             value={text}
             disabled={busy}
+            aria-label={`回答（${targetLabel}）`}
             onChange={(event) => onTextChange(event.target.value)}
           />
-          <button type="submit" disabled={busy || text.trim() === ""}>
+          <button
+            type="submit"
+            disabled={busy || text.trim() === ""}
+            aria-label={`回答する（${targetLabel}）`}
+          >
             回答する
           </button>
         </form>
@@ -471,6 +482,7 @@ export function DecisionActionsView({
           <button
             type="button"
             disabled={busy}
+            aria-label={`実施した（${targetLabel}）`}
             onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.COMPLETED })}
           >
             実施した
@@ -478,6 +490,7 @@ export function DecisionActionsView({
           <button
             type="button"
             disabled={busy}
+            aria-label={`対応できない（${targetLabel}）`}
             onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.UNABLE })}
           >
             対応できない
@@ -491,6 +504,7 @@ export function DecisionActionsView({
           triggers={DIALOG_TRIGGERS.merge}
           configs={buildConfirmDialogs("merge", decision, dialogTarget)}
           active={dialog}
+          targetLabel={targetLabel}
           busy={busy}
           triggerRefs={triggerRefs}
           onAction={onAction}
@@ -503,6 +517,7 @@ export function DecisionActionsView({
           triggers={DIALOG_TRIGGERS.goalRegistration}
           configs={buildConfirmDialogs("goal-registration", decision, dialogTarget)}
           active={dialog}
+          targetLabel={targetLabel}
           busy={busy}
           triggerRefs={triggerRefs}
           onAction={onAction}
