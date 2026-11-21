@@ -146,6 +146,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -168,6 +170,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -190,6 +194,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -212,6 +218,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -234,6 +242,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -256,6 +266,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -277,6 +289,9 @@ steps:
     description: aislop の警告以上の指摘をコードの修正で解消し、検証してから機械ゲートへ戻る
     capabilities: edit
     edit: true
+    persona: coder
+    promotion:
+      - at: 2
     instruction:
       - aislop の指摘を直す
       - |
@@ -284,6 +299,7 @@ steps:
         scripts/aislop-accepted.json のエントリを追加・変更してはなりません。
         受け入れ一覧への追加には、窓口の承認と、解消を追跡する issue の番号
         （https://github.com/j5ik2o/takt-dash/issues/<番号>）が必須です。run が自分で追加してはなりません。
+        受け入れは解消までの一時措置です。解消 issue が閉じたら、そのエントリを削除してください。
         修正で解消できない場合は、一覧を変えずに ABORT へ進み、理由を報告してください。
         {context:aislop_gate.result.stdout}
         {context:aislop_gate.result.stderr}

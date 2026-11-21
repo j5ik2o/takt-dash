@@ -78,18 +78,9 @@ pub trait ToolCaller: Send {
   ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TransportError>> + Send + 'a>> {
     Box::pin(async { Ok(()) })
   }
-
-  /// 接続の起動方法。進行証拠の読み取りが、SSH かローカルかを判定するのに使います。
-  fn config(&self) -> Option<&McpClientConfig> {
-    None
-  }
 }
 
 impl ToolCaller for McpClient {
-  fn config(&self) -> Option<&McpClientConfig> {
-    Some(&self.config)
-  }
-
   fn call_tool<'a>(
     &'a mut self,
     name: &'a str,
@@ -118,12 +109,6 @@ pub struct McpClientConfig {
   /// 道具ごとのタイムアウト。ここに無い道具は `request_timeout` を使います。
   /// 応答が大きく高負荷で遅れやすい読み取り道具だけを個別に長くします。
   pub tool_timeouts:   BTreeMap<String, Duration>,
-}
-
-impl McpClientConfig {
-  pub(crate) fn is_ssh(&self) -> bool {
-    std::path::Path::new(&self.command).file_name().and_then(|name| name.to_str()) == Some("ssh")
-  }
 }
 
 /// 起動と初期化だけに使う期限。道具の呼び出しの期限とは分けます。高負荷のときは
@@ -278,10 +263,7 @@ impl McpClient {
       .map_err(|_| TransportError::Spawn("起動の許可を待つ間にセマフォが閉じました".to_owned()))?;
     let mut command = Command::new(&self.config.command);
     command.args(&self.config.args);
-    // SSH の cwd は接続先のパスであり、このホストに存在するとは限らない。
-    if !self.config.is_ssh() {
-      command.current_dir(&self.config.cwd);
-    }
+    command.current_dir(&self.config.cwd);
     for (key, value) in &self.config.env {
       command.env(key, value);
     }

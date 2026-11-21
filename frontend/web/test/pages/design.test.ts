@@ -603,7 +603,7 @@ test("prefers-reduced-motion では全画面の実行中の点を静止させる
   const selectors = cssRules(block).flatMap((candidate) =>
     candidate.selectors.split(",").map((token) => token.trim()),
   );
-  for (const expected of [".run-row .dot.live", ".run-row.flash"]) {
+  for (const expected of [".run-row .dot.live", ".run-row .bar.live > i", ".run-row.flash"]) {
     assert.ok(selectors.includes(expected), `${expected} を reduced motion の対象に保つ`);
   }
 });

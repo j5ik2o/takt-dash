@@ -122,7 +122,6 @@ pub fn goal(id: &str, status: GoalStatus, execution: ExecutionStatus) -> GoalEnt
     status,
     execution_status: execution,
     objective: format!("ゴール {id}"),
-    objective_truncated: false,
     integration_branch: format!("takt/{id}"),
     pull_request_number: None,
     pull_request_url: None,
@@ -184,7 +183,6 @@ pub fn notification(id: &str, kind: &str, recorded_at: DateTime<Utc>) -> Notific
 
 pub fn run(run_slug: &str, task_name: &str, last_log_at: DateTime<Utc>) -> RunEntry {
   RunEntry {
-    progress:                None,
     run_slug:                run_slug.to_owned(),
     session_id:              String::new(),
     task_name:               TaskName::try_from(task_name).expect("テストのタスク名は有効です"),
@@ -235,7 +233,12 @@ pub fn project(name: &str, cwd: &Path) -> Project {
 
 /// mock HTTP MCP サーバのスクリプトへの絶対パス。
 pub fn mcp_server() -> StdioMcpServer {
-  StdioMcpServer { command: "node".to_owned(), args: vec!["server.mjs".to_owned()], env: Default::default() }
+  StdioMcpServer {
+    command: "node".to_owned(),
+    args:    vec!["server.mjs".to_owned()],
+    env:     Default::default(),
+    manager: false,
+  }
 }
 
 pub fn mock_http_script() -> PathBuf {

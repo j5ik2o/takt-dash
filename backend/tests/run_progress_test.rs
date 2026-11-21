@@ -189,47 +189,6 @@ fn execution_count_is_unset_without_any_step_start() {
 }
 
 #[test]
-fn returning_from_a_fix_updates_counts_on_the_same_reader_and_matches_a_fresh_read() {
-  let project = Project::new();
-  let fixture = project.fixture(&["r1"]);
-  fixture.write_meta("r1", &running_meta("gate", 7, WORKFLOW, "2026-11-13T09:00:00Z"));
-  fixture.append_records("r1", &[
-    workflow_start_record(WORKFLOW),
-    step_start_record("gate", WORKFLOW, 7, "2026-11-13T09:01:00Z", &["gate"]),
-  ]);
-  let mut logs = project.logs();
-  let first = logs.read(&run_slug("r1")).expect("最初の gate を読めます");
-  assert_eq!(first.current_step.as_deref(), Some("gate"));
-  assert_eq!(first.current_step_execution_count, Some(1));
-
-  fixture.write_meta("r1", &running_meta("fix", 8, WORKFLOW, "2026-11-13T09:00:00Z"));
-  fixture.append_records("r1", &[
-    step_complete_record("gate", "reviewer", 7, "2026-11-13T09:02:00Z"),
-    step_start_record("fix", WORKFLOW, 8, "2026-11-13T09:03:00Z", &["fix"]),
-  ]);
-  let fixing = logs.read(&run_slug("r1")).expect("修正中の状態を読めます");
-  assert_eq!(fixing.current_step.as_deref(), Some("fix"));
-  assert_eq!(fixing.current_step_execution_count, Some(1));
-
-  fixture.write_meta("r1", &running_meta("gate", 9, WORKFLOW, "2026-11-13T09:00:00Z"));
-  fixture.append_records("r1", &[
-    step_complete_record("fix", "coder", 8, "2026-11-13T09:04:00Z"),
-    step_start_record("gate", WORKFLOW, 9, "2026-11-13T09:05:00Z", &["gate"]),
-  ]);
-  let returned = logs.read(&run_slug("r1")).expect("修正から戻った gate を読めます");
-  let fresh = project.logs().read(&run_slug("r1")).expect("先頭からも読めます");
-  assert_eq!(returned.current_step.as_deref(), Some("gate"));
-  assert_eq!(returned.current_iteration, Some(9));
-  assert_eq!(returned.current_step_execution_count, Some(2));
-  assert_eq!(returned.current_step_started_at, Some(time("2026-11-13T09:05:00Z")));
-  assert_eq!(returned.current_step_execution_count, fresh.current_step_execution_count);
-  assert_eq!(returned.current_step_started_at, fresh.current_step_started_at);
-
-  let unchanged = logs.read(&run_slug("r1")).expect("変更が無い状態も読めます");
-  assert_eq!(unchanged.current_step_execution_count, Some(2), "再取得だけでは回数を増やしません");
-}
-
-#[test]
 fn run_entry_uses_the_meta_start_time_and_falls_back_to_the_task_start() {
   let project = Project::new();
   let fixture = project.fixture(&["r1"]);
@@ -525,7 +484,7 @@ fn run_entry_summary_is_the_first_line_of_the_meta_task() {
 
   let entry = logs.read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
 
-  assert_eq!(entry.summary, "認証処理を実装する…");
+  assert_eq!(entry.summary, "認証処理を実装する");
 }
 
 #[test]
@@ -541,8 +500,7 @@ fn run_entry_summary_is_cut_at_eighty_characters() {
 
   let entry = logs.read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
 
-  assert!(entry.summary.starts_with(&"あ".repeat(79)), "文字境界で先頭の要約を保持します");
-  assert!(entry.summary.ends_with('…'), "80文字を超えた本文を省略したことを示します");
+  assert_eq!(entry.summary, "あ".repeat(79) + "い");
 }
 
 #[test]
@@ -555,98 +513,6 @@ fn run_entry_summary_is_empty_without_a_meta_task() {
   let entry = logs.read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
 
   assert_eq!(entry.summary, "");
-}
-
-#[test]
-fn run_summary_distinguishes_complete_text_from_dropped_content() {
-  for (text, omitted) in [
-    ("あ".repeat(79), false),
-    ("あ".repeat(80), false),
-    ("あ".repeat(81), true),
-    (format!("{}\n続き", "あ".repeat(80)), true),
-    (format!("  {}\n  ", "あ".repeat(80)), false),
-  ] {
-    let project = Project::new();
-    let fixture = project.fixture(&["r1"]);
-    let mut meta = running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z");
-    meta["task"] = json!(text);
-    fixture.write_meta("r1", &meta);
-
-    let entry = project.logs().read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
-
-    if omitted {
-      assert!(entry.summary.ends_with('…'), "落とした本文を示します: {}", entry.summary);
-    } else {
-      assert_eq!(entry.summary, text.trim());
-    }
-  }
-}
-
-#[test]
-fn marked_step_reaches_run_entry_tail_and_updates_without_prompt_fields() {
-  let project = Project::new();
-  let fixture = project.fixture(&["r1"]);
-  fixture.write_meta("r1", &running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z"));
-  let step = "あ".repeat(513);
-  fixture.append_records("r1", &[
-    workflow_start_record(WORKFLOW),
-    json!({ "type": "step_start", "step": step, "iteration": 1, "model": "公開モデル",
-      "nested": [{ "content": "秘密B", "systemPrompt": "秘密A" }] }),
-    json!({ "type": "step_complete", "step": step, "iteration": 1, "status": "completed" }),
-  ]);
-  let mut logs = project.logs();
-
-  let view = logs.read(&run_slug("r1")).expect("run を読めます");
-  let entry = view.run_entry(&run_slug("r1"), &task(None));
-  let expected_step = format!("{}…", "あ".repeat(511));
-  assert_eq!(entry.steps[0].step_name, expected_step);
-  assert_eq!(view.step_logs()[0].step_name, expected_step);
-  assert!(view.log_tail().contains(&expected_step));
-  let updates = logs.read_updates(&run_slug("r1"), None).expect("更新を読めます");
-  assert!(updates.lines.iter().any(|line| line.text == format!("step_complete {expected_step}")));
-  for line in &updates.lines {
-    assert!(!line.text.contains("秘密A") && !line.text.contains("秘密B"));
-  }
-}
-
-#[test]
-fn public_step_mentioning_prompt_key_reaches_the_displayed_log() {
-  let project = Project::new();
-  let fixture = project.fixture(&["r1"]);
-  fixture.write_meta("r1", &running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z"));
-  fixture.append_records("r1", &[
-    workflow_start_record(WORKFLOW),
-    json!({ "type": "step_start", "step": "systemPrompt を確認",
-      "nested": [{ "systemPrompt": "秘密A", "content": "秘密B" }] }),
-  ]);
-
-  let view = project.logs().read(&run_slug("r1")).expect("run を読めます");
-
-  assert!(view.log_tail().lines().any(|line| line == "step_start systemPrompt を確認"));
-  assert!(!view.log_tail().contains("秘密A"));
-  assert!(!view.log_tail().contains("秘密B"));
-}
-
-#[test]
-fn long_step_names_are_matched_before_the_display_preview_is_created() {
-  let project = Project::new();
-  let fixture = project.fixture(&["r1"]);
-  let first = format!("{}A", "あ".repeat(512));
-  let second = format!("{}B", "あ".repeat(512));
-  fixture.write_meta("r1", &running_meta(&first, 1, WORKFLOW, "2026-11-13T09:00:00Z"));
-  fixture.append_records("r1", &[
-    workflow_start_record(WORKFLOW),
-    json!({ "type": "step_start", "step": first, "iteration": 1, "model": "first",
-      "timestamp": "2026-11-13T09:01:00Z" }),
-    json!({ "type": "step_start", "step": second, "iteration": 1, "model": "second",
-      "timestamp": "2026-11-13T09:02:00Z" }),
-    json!({ "type": "step_complete", "step": first, "iteration": 1 }),
-  ]);
-
-  let view = project.logs().read(&run_slug("r1")).expect("run を読めます");
-
-  assert_eq!(view.run_entry(&run_slug("r1"), &task(None)).steps[0].model, "first");
-  assert_eq!(view.current_step_started_at, Some(time("2026-11-13T09:01:00Z")));
 }
 
 #[test]

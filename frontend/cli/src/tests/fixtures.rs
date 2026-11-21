@@ -80,7 +80,6 @@ fn sample_overview_projects() -> Vec<Project> {
 
 fn sample_overview_goals() -> Vec<v1::Goal> {
   vec![v1::Goal {
-    name_truncated:    false,
     goal_id:           "goal-cli".to_owned(),
     server_id:         "mini".to_owned(),
     project:           "taktdash-cli".to_owned(),
@@ -98,7 +97,6 @@ fn sample_overview_goals() -> Vec<v1::Goal> {
 fn sample_overview_runs() -> Vec<v1::Run> {
   vec![
     v1::Run {
-      progress:                None,
       run_slug:                "run-1".to_owned(),
       session_id:              "session-1".to_owned(),
       server_id:               "mini".to_owned(),
@@ -120,7 +118,6 @@ fn sample_overview_runs() -> Vec<v1::Run> {
     },
     // 実行中でない run を混ぜ、実行中の件数が全 run の件数と取り違えられないようにする。
     v1::Run {
-      progress:                None,
       run_slug:                "run-2".to_owned(),
       session_id:              "session-2".to_owned(),
       server_id:               "studio".to_owned(),
@@ -205,7 +202,6 @@ fn sample_overview_pending_decisions() -> Vec<PendingDecision> {
 pub(super) fn sample_goals() -> Vec<v1::Goal> {
   vec![
     v1::Goal {
-      name_truncated:    false,
       goal_id:           "goal-cli".to_owned(),
       server_id:         "mini".to_owned(),
       project:           "taktdash-cli".to_owned(),
@@ -226,7 +222,6 @@ pub(super) fn sample_goals() -> Vec<v1::Goal> {
       merge_task_last:   None,
     },
     v1::Goal {
-      name_truncated:    false,
       goal_id:           "goal-web".to_owned(),
       server_id:         "studio".to_owned(),
       project:           "corporate-site".to_owned(),
@@ -340,13 +335,23 @@ pub(super) fn conversation_message(
   speaker: v1::ConversationSpeaker,
   text: &str,
 ) -> ConversationMessage {
+  ConversationMessage { seq, occurred_at: Some(ts(secs)), speaker: speaker as i32, text: text.to_owned(), notice: None }
+}
+
+/// 注意書き付きの会話の1件を組み立てる。`notice` は本文に添える注意書き（元記録の文字化けなど）。
+pub(super) fn conversation_message_with_notice(
+  seq: i64,
+  secs: i64,
+  speaker: v1::ConversationSpeaker,
+  text: &str,
+  notice: &str,
+) -> ConversationMessage {
   ConversationMessage {
     seq,
     occurred_at: Some(ts(secs)),
     speaker: speaker as i32,
     text: text.to_owned(),
-    notice: None,
-    has_encoding_error: false,
+    notice: Some(notice.to_owned()),
   }
 }
 

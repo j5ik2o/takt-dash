@@ -245,27 +245,6 @@ fn caps_a_long_tool_name_to_the_summary_limit() {
 }
 
 #[test]
-fn tool_names_mark_only_actual_character_truncation() {
-  for character in ['T', '道', '🦀'] {
-    for length in [511, 512, 513] {
-      let fixture = Fixture::new();
-      let name = character.to_string().repeat(length);
-      append(&fixture.session_log("implement-1.jsonl"), &tool_use(&name));
-
-      let read = activity(&mut fixture.reader(), &fixture.run_dir);
-
-      let expected = if length > MAX_SUMMARY_CHARS {
-        format!("{}…", character.to_string().repeat(MAX_SUMMARY_CHARS - 1))
-      } else {
-        name
-      };
-      assert_eq!(read.latest_tool.as_deref(), Some(expected.as_str()), "{character}: {length}文字");
-      assert_eq!(read.tool_use_count, 1);
-    }
-  }
-}
-
-#[test]
 fn returns_an_empty_activity_without_session_logs() {
   let fixture = Fixture::new();
   fs::remove_dir(fixture.run_dir.join("logs").join("phase1-execution")).expect("phase1-execution を消せます");

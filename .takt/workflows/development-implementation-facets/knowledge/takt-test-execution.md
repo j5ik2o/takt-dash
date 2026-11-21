@@ -1,0 +1,1 @@
+{extends: takt-test-execution}

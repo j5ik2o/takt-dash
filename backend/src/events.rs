@@ -3,12 +3,14 @@
 //! 出来事は「前回の状態との差分」であり、前回が無い初回の読み取りでは何も出しません
 //! （基準化のみ）。変化がなければ何も出しません。接続断は接続から非接続への遷移で1回だけ出します。
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 
 use crate::{
-  domain::RunSlug,
+  domain::{GoalId, RunSlug},
   model::{ActivityEvent, ConnectionState, ConnectionTransition, EventKind, ProjectSnapshot, TaskStatus},
-  store::is_human_merge_wait,
+  store::{is_human_merge_wait, GoalTermination},
 };
 
 /// 1プロジェクトの前回状態と今回状態から、検出した出来事を返す。
@@ -22,6 +24,23 @@ pub fn detect(
   prev: Option<&ProjectSnapshot>,
   next: &ProjectSnapshot,
   transition: Option<ConnectionTransition>,
+  now: DateTime<Utc>,
+) -> Vec<ActivityEvent> {
+  detect_with_terminations(server_id, project, prev, next, transition, None, now)
+}
+
+/// 自動終了の記録を踏まえて出来事を検出する。
+///
+/// 判断待ちの射影と同じ規則（[`GoalTermination::suppresses_display`]）で除外されるゴールは、
+/// 人のマージ待ちの出来事も記録しません。判断待ちに出ないゴールを「マージ待ちになった」と
+/// 記録しないため、射影と出来事が同じ入力で判定します。
+pub fn detect_with_terminations(
+  server_id: &str,
+  project: &str,
+  prev: Option<&ProjectSnapshot>,
+  next: &ProjectSnapshot,
+  transition: Option<ConnectionTransition>,
+  terminations: Option<&BTreeMap<GoalId, GoalTermination>>,
   now: DateTime<Utc>,
 ) -> Vec<ActivityEvent> {
   let mut events = Vec::new();
@@ -59,7 +78,7 @@ pub fn detect(
   }) {
     return events;
   }
-  detect_goals(server_id, project, prev, next, now, &mut events);
+  detect_goals(server_id, project, prev, next, terminations, now, &mut events);
   detect_tasks(server_id, project, prev, next, now, &mut events);
   detect_inquiries(server_id, project, prev, next, now, &mut events);
   detect_notifications(server_id, project, prev, next, now, &mut events);
@@ -71,12 +90,13 @@ fn detect_goals(
   project: &str,
   prev: &ProjectSnapshot,
   next: &ProjectSnapshot,
+  terminations: Option<&BTreeMap<GoalId, GoalTermination>>,
   now: DateTime<Utc>,
   events: &mut Vec<ActivityEvent>,
 ) {
   for goal in &next.goals {
     let previous = prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id);
-    let name = goal.objective_display().trim().to_owned();
+    let name = goal.objective.trim().to_string();
     match previous {
       | None => events.push(event(
         now,
@@ -92,8 +112,10 @@ fn detect_goals(
         // 対象を仕上げタスクに絞ってから判定します。
         let prev_tasks: Vec<&crate::model::TaskEntry> = prev.tasks.iter().filter(|task| task.merge_task).collect();
         let next_tasks: Vec<&crate::model::TaskEntry> = next.tasks.iter().filter(|task| task.merge_task).collect();
+        let suppressed =
+          terminations.and_then(|records| records.get(&goal.goal_id)).is_some_and(GoalTermination::suppresses_display);
         let previous_wait = is_human_merge_wait(previous.status, &goal.goal_id, &prev_tasks);
-        let current_wait = is_human_merge_wait(goal.status, &goal.goal_id, &next_tasks);
+        let current_wait = !suppressed && is_human_merge_wait(goal.status, &goal.goal_id, &next_tasks);
         if !previous_wait && current_wait {
           events.push(event(
             now,

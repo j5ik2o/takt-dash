@@ -34,17 +34,6 @@ const restore = (overrides: Parameters<typeof createConversationResponse>[0] = {
 
 const firstMessage = createConversationMessages()[0]!;
 
-test("文字化けの印はJSONの既定値省略と差分統合を通して発言に対応する", () => {
-  const base = restore({ messages: [{ ...firstMessage, seq: 8, text: "読める部分���", hasEncodingError: true }] });
-  const next = restore({ messages: [{ ...firstMessage, seq: 22, text: "正常な再送", hasEncodingError: false }] });
-  const merged = mergeConversationPages(base, next);
-
-  assert.deepEqual(merged.messages.map(({ seq, text, hasEncodingError }) => ({ seq, text, hasEncodingError })), [
-    { seq: 8, text: "読める部分���", hasEncodingError: true },
-    { seq: 22, text: "正常な再送", hasEncodingError: false },
-  ]);
-});
-
 test("proto の JSON から会話を復元し、時刻・発話者・本文・続きの位置を保つ", () => {
   const message = firstMessage;
   const page = restore();

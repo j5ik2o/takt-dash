@@ -14,8 +14,6 @@ import {
   toRegistrationRevision,
   toReportFilename,
   toRunCount,
-  toStepExecutionCount,
-  toWorkflowPosition,
   toRunSlug,
   toServerId,
   toSilentMinutes,
@@ -142,16 +140,4 @@ test("指示書の ID は 1 以上の i32 の整数だけを受理する", () =>
   assert.equal(stageOf(() => toInstructionId(2_147_483_648)), "size");
   assert.equal(stageOf(() => toInstructionId(1.5)), "syntax");
   assert.equal(stageOf(() => toInstructionId("2")), "lexical");
-});
-
-test("ステップ実行回数はゼロを許し、主経路の位置は1から始まる", () => {
-  assert.equal(toStepExecutionCount(0), 0);
-  assert.equal(toStepExecutionCount(3), 3);
-  assert.equal(toWorkflowPosition(1), 1);
-  assert.equal(stageOf(() => toWorkflowPosition(0)), "size");
-  for (const convert of [toStepExecutionCount, toWorkflowPosition]) {
-    assert.equal(stageOf(() => convert(-1)), "size");
-    assert.equal(stageOf(() => convert(2_147_483_648)), "size");
-    assert.equal(stageOf(() => convert(1.5)), "syntax");
-  }
 });

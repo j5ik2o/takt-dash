@@ -22,6 +22,7 @@ import type {
   Run as ProtoRun,
   Server as ProtoServer,
 } from "../proto/taktdash";
+import { Timestamp } from "../proto/google/protobuf/timestamp";
 import {
   toGoalId,
   toInquiryId,
@@ -46,8 +47,6 @@ import {
   type ValidatedAnomalyThresholds,
 } from "./domain-primitives";
 import { enumFromWire, enumFromWireOrUnrecognizedName } from "./proto-values";
-import { toDate, recordOf, asOptionalNumber, asOptionalString, arrayOf, toStringArray } from "./wire-values";
-import { restoreWorkflowProgress } from "./workflow-progress-wire";
 
 export type ValidatedTaskStatusCounts = {
   pending: TaskCount;
@@ -120,11 +119,26 @@ export type DashboardState = Omit<
   thresholds: ValidatedAnomalyThresholds | undefined;
 };
 
+const toDate = (value: unknown): Date | undefined => {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (value instanceof Date) {
+    return value;
+  }
+  const timestamp = Timestamp.fromJSON(value);
+  return new Date(timestamp.seconds * 1_000 + Math.round(timestamp.nanos / 1_000_000));
+};
 
 const asNumber = (value: unknown): number => (typeof value === "number" ? value : Number(value ?? 0));
 
+const recordOf = (value: unknown): Record<string, unknown> =>
+  value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 
+const asOptionalNumber = (value: unknown): number | undefined => (typeof value === "number" ? value : undefined);
 
+const asOptionalString = (value: unknown): string | undefined =>
+  typeof value === "string" && value !== "" ? value : undefined;
 
 // 任意のゴール ID。欠落・空文字は未指定の run やゴール非所属の判断待ちとして undefined にする。
 const optionalGoalId = (value: unknown): GoalId | undefined => {
@@ -203,7 +217,6 @@ const toGoal = (raw: unknown): DashboardGoal => {
   const value = recordOf(raw);
   return {
     goalId: toGoalId(value.goalId),
-    nameTruncated: value.nameTruncated === true,
     serverId: toServerId(value.serverId),
     project: toProjectName(value.project),
     name: String(value.name ?? ""),
@@ -259,7 +272,6 @@ const toRun = (raw: unknown): DashboardRun => {
     totalSteps: asOptionalNumber(value.totalSteps),
     currentIteration: asOptionalNumber(value.currentIteration),
     currentStepName: asOptionalString(value.currentStepName),
-    progress: restoreWorkflowProgress(value.progress),
   };
 };
 
@@ -307,7 +319,11 @@ const toBuildInfo = (raw: unknown): BuildInfo | undefined => {
   };
 };
 
+const arrayOf = (value: unknown): Record<string, unknown>[] =>
+  Array.isArray(value) ? value.map((item) => item as Record<string, unknown>) : [];
 
+const toStringArray = (value: unknown): string[] =>
+  Array.isArray(value) ? value.map((item) => String(item)) : [];
 
 const toOptionalString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;

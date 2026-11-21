@@ -28,7 +28,6 @@ const server = (serverId: string, kind: string): Server => ({
 });
 
 const run = (serverId: string): Run => ({
-  progress: undefined,
   runSlug: `run-${serverId}`,
   sessionId: `session-${serverId}`,
   serverId,

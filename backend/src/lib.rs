@@ -18,11 +18,11 @@ pub mod grpc;
 pub mod mcp;
 pub mod model;
 pub mod poller;
-mod remote_run;
+pub mod pull_request;
 pub mod run_log;
 pub mod run_progress;
 pub mod store;
-pub mod workflow_progress;
+pub mod termination;
 
 pub mod takt_dash {
   pub mod v1 {

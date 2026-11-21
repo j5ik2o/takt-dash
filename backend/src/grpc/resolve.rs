@@ -147,17 +147,17 @@ pub(super) enum ReadSource {
 }
 
 impl ReadSource {
-  /// ログ更新用に、要約本文を読まずステップだけを takt_get_run から読む。
-  pub(super) async fn read_remote_run_logs(
+  /// takt_get_run で run の状態を読む。
+  pub(super) async fn read_remote_run(
     &mut self,
     cwd: &std::path::Path,
     run_slug: &RunSlug,
   ) -> Result<RemoteRun, ToolError> {
     match self {
-      | ReadSource::Http(handle) => handle.read_remote_run_logs(cwd, run_slug).await,
+      | ReadSource::Http(handle) => handle.read_remote_run(cwd, run_slug).await,
       | ReadSource::Stdio(handle) => {
         let mut client = handle.lock().await;
-        ReadToolSet::new(&mut *client, cwd.to_path_buf()).read_remote_run_logs(run_slug).await
+        ReadToolSet::new(&mut *client, cwd.to_path_buf()).read_remote_run(run_slug).await
       },
     }
   }
@@ -174,27 +174,11 @@ impl ReadSource {
         let mut client = handle.lock().await;
         let mut toolset = ReadToolSet::new(&mut *client, cwd.to_path_buf());
         let mut remote = toolset.read_remote_run(run_slug).await?;
-        toolset.enrich_remote_progress(run_slug, &mut remote).await;
         remote.instructions = toolset.read_remote_instructions(run_slug).await?;
         if remote.task_text.is_empty() {
           remote.task_text = toolset.read_remote_task_text(run_slug).await?;
         }
         Ok(remote)
-      },
-    }
-  }
-
-  /// workflow の定義を読む。進行図の組み立てに使う。
-  pub(super) async fn workflow_definition(
-    &mut self,
-    cwd: &std::path::Path,
-    workflow: &str,
-  ) -> Result<Option<crate::workflow_progress::WorkflowDefinition>, ToolError> {
-    match self {
-      | ReadSource::Http(handle) => handle.workflow_definition(cwd, workflow).await,
-      | ReadSource::Stdio(handle) => {
-        let mut client = handle.lock().await;
-        ReadToolSet::new(&mut *client, cwd.to_path_buf()).workflow_definition(workflow).await
       },
     }
   }

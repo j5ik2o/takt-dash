@@ -701,3 +701,55 @@ fn example_config_http_authorization_is_a_placeholder_not_a_real_token() {
     }
   }
 }
+
+#[test]
+fn auto_terminate_closed_goals_defaults_to_true() {
+  // 設定キーを省略したときは true（自動終了する）。
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [ { "name": "p", "server": "mini", "cwd": "/abs/p" } ]
+  }"#;
+  let config = parse_config(text, Path::new("/base")).expect("既定値が適用されます");
+  assert!(config.auto_terminate_closed_goals, "autoTerminateClosedGoals の既定値は true です");
+}
+
+#[test]
+fn auto_terminate_closed_goals_can_be_disabled() {
+  // false を明示すると自動終了を止める（AC3）。
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [ { "name": "p", "server": "mini", "cwd": "/abs/p" } ],
+    "autoTerminateClosedGoals": false
+  }"#;
+  let config = parse_config(text, Path::new("/base")).expect("設定ファイルを解析できます");
+  assert!(!config.auto_terminate_closed_goals, "false を指定すると自動終了しません");
+}
+
+#[test]
+fn manager_stdio_entry_is_resolved_and_excluded_from_project_servers() {
+  // manager: true の stdio エントリは manager_server に解決され、読み取り・書き込みの
+  // プロジェクトの対応付けには混ざりません。
+  let text = r#"{
+    "mcpServers": {
+      "mini": { "command": "node", "args": [] },
+      "manager": { "command": "node", "args": [], "manager": true }
+    },
+    "projects": [ { "name": "p", "server": "mini", "cwd": "/abs/p" } ]
+  }"#;
+  let config = parse_config(text, Path::new("/base")).expect("設定ファイルを解析できます");
+  assert_eq!(config.manager_server.as_deref(), Some("manager"), "manager: true のエントリを manager 用に解決します");
+}
+
+#[test]
+fn manager_entry_with_http_type_is_rejected() {
+  // manager 用エントリは stdio の起動方法に限ります。
+  let text = r#"{
+      "mcpServers": {
+        "mini": { "command": "node", "args": [] },
+        "manager": { "type": "http", "url": "http://127.0.0.1:7801/", "headers": { "Authorization": "Bearer token" }, "manager": true }
+      },
+      "projects": [ { "name": "p", "server": "mini", "cwd": "/abs/p" } ]
+    }"#;
+  let error = parse_config(text, Path::new("/base")).expect_err("manager: true と type: http は同時に指定できません");
+  assert!(matches!(error, ConfigError::Invalid(_)));
+}

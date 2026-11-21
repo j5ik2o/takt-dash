@@ -109,11 +109,6 @@ pub(super) fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
   let goal_id = domain_value("ゴール ID", GoalId::try_from(string_field(value, "id")?.as_str()))?;
   let status = parse_goal_status(value.get("status"))?;
   let execution_status = parse_goal_execution_status(value.get("executionStatus"))?;
-  let objective = optional_string(value, "objective").unwrap_or_default();
-  let objective_truncated = value
-    .pointer("/omissions/objective/totalBytes")
-    .and_then(Value::as_u64)
-    .is_some_and(|total| total > objective.len() as u64);
   let pull_request = value.get("pullRequest");
   let pull_request_number = match pull_request.and_then(|value| value.get("number")).and_then(Value::as_i64) {
     | Some(number) => Some(domain_value("プルリクエスト番号", PullRequestNumber::try_from(number))?),
@@ -124,8 +119,7 @@ pub(super) fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
     goal_id,
     status,
     execution_status,
-    objective,
-    objective_truncated,
+    objective: optional_string(value, "objective").unwrap_or_default(),
     integration_branch: optional_string(value, "integrationBranch").unwrap_or_default(),
     pull_request_number,
     pull_request_url,

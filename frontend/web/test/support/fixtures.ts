@@ -16,7 +16,6 @@ import {
   PendingDecisionType,
   RunStatus,
   TaskStatus,
-  WorkflowProgress,
   type ActivityEvent,
   type ConversationMessage,
   type DailySummary,
@@ -115,7 +114,6 @@ export function createDashboardState(): DashboardState {
     runs: [
       {
         runSlug: "run-aaa",
-        progress: createWorkflowProgress(),
         sessionId: "session-aaa",
         serverId: "mini",
         project: "corporate-site",
@@ -214,7 +212,6 @@ export function createNestedStepDashboardState(): DashboardState {
       ...run,
       steps: [{ stepName: "write_tests", model: "glm-5.3", startedAt: minutesAgo(20) }],
       currentStepName: "develop",
-      progress: WorkflowProgress.create({ initialStep: "develop", definition: [{ name: "develop", kind: "workflow_call" }], backbone: ["develop"], currentStep: "develop", currentPosition: { value: 1 } }),
       currentStepNumber: 1,
       totalSteps: 1,
       currentIteration: 3,
@@ -400,21 +397,18 @@ export function createConversationMessages(): ConversationMessage[] {
       occurredAt: minutesAgo(6),
       speaker: ConversationSpeaker.CONVERSATION_SPEAKER_USER,
       text: "採用ページの見出しを直してください。",
-      hasEncodingError: false,
     },
     {
       seq: 2,
       occurredAt: minutesAgo(5),
       speaker: ConversationSpeaker.CONVERSATION_SPEAKER_MANAGER,
       text: "見出しの文言を確認しています。",
-      hasEncodingError: false,
     },
     {
       seq: 3,
       occurredAt: minutesAgo(4),
       speaker: ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM,
       text: "作業を開始しました。",
-      hasEncodingError: false,
     },
   ];
 }
@@ -429,7 +423,6 @@ export function createGarbledConversationMessage(
     speaker: ConversationSpeaker.CONVERSATION_SPEAKER_USER,
     text: "この発言は元記録で壊れています。\uFFFD\uFFFD\uFFFD",
     notice: "元記録で文字化けしています（置換文字 3 個）",
-    hasEncodingError: true,
     ...overrides,
   };
 }
@@ -452,7 +445,6 @@ export function createConversationResponse(
 
 export function createRunDetailResponse(runSlug = "run-aaa"): GetRunDetailResponse {
   return {
-    progress: undefined,
     runSlug,
     sessionId: "session-aaa",
     serverId: "mini",
@@ -498,19 +490,8 @@ export function createRunDetailResponse(runSlug = "run-aaa"): GetRunDetailRespon
   };
 }
 
-export function createWorkflowProgress(): WorkflowProgress {
-  return WorkflowProgress.create({
-    initialStep: "plan",
-    definition: ["plan", "implement", "review", "supervise"].map((name) => ({ name, kind: "agent" })),
-    backbone: ["plan", "implement", "review", "supervise"],
-    currentStep: "implement",
-    currentPosition: { value: 2 },
-  });
-}
-
 export function createGoal(overrides: Partial<Goal> = {}): Goal {
   return {
-    nameTruncated: false,
     goalId: "goal-1",
     serverId: "mini",
     project: "corporate-site",

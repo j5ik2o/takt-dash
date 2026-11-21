@@ -40,9 +40,6 @@ pub(super) fn fill_from_run_log(
   let started_at = view.started_at(task);
   let last_log_at = view.resolve_last_log_at(started_at);
   response.task_text = view.task_text.clone().unwrap_or_default();
-  if response.summary.is_empty() {
-    response.summary = crate::run_progress::task_summary(&response.task_text);
-  }
   response.workflow = view.workflow.clone().unwrap_or_default();
   response.status = run_status(view.status) as i32;
   response.started_at = optional_timestamp(started_at);
@@ -78,11 +75,7 @@ pub(super) async fn fill_from_takt_get_run(
   };
   let started_at = remote.started_at(task);
   let last_log_at = remote.resolve_last_log_at(started_at);
-  let evidence = remote.evidence.clone();
   response.task_text = remote.task_text.clone();
-  if response.summary.is_empty() {
-    response.summary = remote.summary.clone();
-  }
   response.workflow = remote.workflow.clone().unwrap_or_default();
   response.status = run_status(remote.status) as i32;
   response.started_at = optional_timestamp(started_at);
@@ -96,45 +89,7 @@ pub(super) async fn fill_from_takt_get_run(
   response.reports = run_reports(&remote.reports);
   response.instructions = remote.instructions.iter().map(run_instruction).collect();
   response.last_log_at = optional_timestamp(last_log_at);
-  fill_progress(response, source, cwd, &evidence).await;
   Ok(last_log_at)
-}
-
-/// 進行図を組み立てて応答へ載せる。workflow の定義を読み、証拠と実行状態から進行図を作る。
-///
-/// 定義を読めないときや workflow 名が空のときは、進行図を載せません（取得済みの詳細は返します）。
-pub(super) async fn fill_progress(
-  response: &mut GetRunDetailResponse,
-  source: &mut ReadSource,
-  cwd: &std::path::Path,
-  evidence: &crate::workflow_progress::ExecutionEvidence,
-) {
-  if response.workflow.is_empty() {
-    return;
-  }
-  let definition = match source.workflow_definition(cwd, &response.workflow).await {
-    | Ok(Some(definition)) => definition,
-    | Ok(None) => return,
-    | Err(error) => {
-      tracing::warn!(error = %error, "進行図の定義を読めませんでした。取得済みの詳細を返します。");
-      return;
-    },
-  };
-  let status = match crate::takt_dash::v1::RunStatus::try_from(response.status) {
-    | Ok(crate::takt_dash::v1::RunStatus::Running) => crate::model::RunStatus::Running,
-    | Ok(crate::takt_dash::v1::RunStatus::Completed) => crate::model::RunStatus::Completed,
-    | Ok(crate::takt_dash::v1::RunStatus::Aborted) => crate::model::RunStatus::Aborted,
-    | Ok(crate::takt_dash::v1::RunStatus::Failed) => crate::model::RunStatus::Failed,
-    | _ => return,
-  };
-  let progress = crate::workflow_progress::build_progress(
-    definition,
-    evidence,
-    &response.workflow,
-    response.current_step.as_deref(),
-    status,
-  );
-  response.progress = Some(super::workflow_progress::progress(&progress));
 }
 
 /// GetRunUpdates の追記分を takt_get_run から組み立てる。
@@ -152,7 +107,7 @@ pub(super) async fn remote_run_updates(
   after: Option<LogCursor>,
   failure: RunReadFailure,
 ) -> Result<RunUpdates, Status> {
-  let remote = match source.read_remote_run_logs(cwd, run_slug).await {
+  let remote = match source.read_remote_run(cwd, run_slug).await {
     | Ok(remote) => remote,
     | Err(error) => {
       tracing::warn!(run_slug = %run_slug.as_str(), local = %failure, error = %error, "run の追記分を保存場所からも takt_get_run からも読めませんでした。");

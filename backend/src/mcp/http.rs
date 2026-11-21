@@ -295,15 +295,6 @@ impl HttpReadHandle {
     crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).read_remote_run(run_slug).await
   }
 
-  /// ログ更新用に、要約本文を読まずステップだけを読む。
-  pub async fn read_remote_run_logs(
-    &mut self,
-    cwd: &std::path::Path,
-    run_slug: &crate::domain::RunSlug,
-  ) -> Result<crate::mcp::RemoteRun, crate::mcp::ToolError> {
-    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).read_remote_run_logs(run_slug).await
-  }
-
   /// 詳細用に、指示書の一覧とタスク本文まで読む。
   pub async fn read_remote_run_detail(
     &mut self,
@@ -317,15 +308,6 @@ impl HttpReadHandle {
       remote.task_text = toolset.read_remote_task_text(run_slug).await?;
     }
     Ok(remote)
-  }
-
-  /// workflow の定義（step 名と分岐）を読む。
-  pub async fn workflow_definition(
-    &mut self,
-    cwd: &std::path::Path,
-    workflow: &str,
-  ) -> Result<Option<crate::workflow_progress::WorkflowDefinition>, crate::mcp::ToolError> {
-    crate::mcp::ReadToolSet::new(self, cwd.to_path_buf()).workflow_definition(workflow).await
   }
 
   /// takt_get_run の view instructions から指示書の一覧を読む。

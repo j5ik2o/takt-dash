@@ -7,6 +7,7 @@ use std::{
   cell::RefCell,
   collections::BTreeMap,
   io::Write,
+  os::unix::fs::PermissionsExt,
   path::{Path, PathBuf},
   sync::{Arc, Mutex, Once},
   time::{Duration, Instant},
@@ -1214,7 +1215,7 @@ async fn run_summary_is_the_first_line_of_the_meta_task() {
   let run = stored_run(&harness, "r1").expect("running の run が一覧にあります");
   poller.shutdown().await;
 
-  assert_eq!(run.summary, "認証処理を実装する…");
+  assert_eq!(run.summary, "認証処理を実装する");
 }
 
 #[tokio::test]
@@ -2738,4 +2739,354 @@ async fn restart_with_pending_history_lookup_across_the_threshold_records_the_lo
     .count();
   assert_eq!(restored_after, 1, "復帰を二重に記録しません");
   restarted.shutdown().await;
+}
+
+/// 偽の gh を書く。`state_file` の内容を `{"state":"<内容>"}` として標準出力へ出し、
+/// 内容が `EXIT:<code>` のときはその終了コードで終わる。`state_file` が無ければ空の出力で
+/// 終了する（状態を確認できない経路）。
+fn write_fake_gh(directory: &Path, state_file: &Path) -> PathBuf {
+  let script = directory.join("fake-gh.sh");
+  let body = format!(
+    "#!/bin/sh\nstate_file='{state}'\nif [ ! -f \"$state_file\" ]; then\n  exit 0\nfi\nvalue=$(cat \"$state_file\")\ncase \"$value\" in\n  EXIT:*) exit \"${{value#EXIT:}}\" ;;\nesac\nprintf '{{\"state\":\"%s\"}}' \"$value\"\n",
+    state = state_file.display()
+  );
+  std::fs::write(&script, body).expect("偽の gh を書けます");
+  std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("偽の gh を実行可能にできます");
+  script
+}
+
+/// 自動終了のテスト用に、manager 用の stdio エントリを設定へ加える。
+///
+/// manager 用エントリは `backend/tests/mock_mcp_server.mjs` を `--calls` で起動し、
+/// `takt_finish_goal` の投函を記録します。`--state` は空の状態にします。
+fn add_manager_server(harness: &Harness, calls_path: &Path) -> PathBuf {
+  let state_path = harness._directory.path().join("manager-state.json");
+  write_json(&state_path, &json!({}));
+  harness.rewrite_config(|config| {
+    config["mcpServers"]["manager"] = json!({
+      "command": "node",
+      "args": [
+        mock_script().display().to_string(),
+        "--state", state_path.display().to_string(),
+        "--calls", calls_path.display().to_string()
+      ],
+      "env": {},
+      "manager": true
+    });
+  });
+  state_path
+}
+
+/// 中止済み（aborted）のマージ待ちゴールの状態を作る。
+fn aborted_awaiting_merge_state(goal_id: &str, pull_request: i64) -> Value {
+  json!({ "goals": [ {
+    "id": goal_id,
+    "status": "awaiting_merge",
+    "executionStatus": "aborted",
+    "objective": format!("ゴール {goal_id}"),
+    "integrationBranch": format!("takt/{goal_id}"),
+    "pullRequest": { "number": pull_request, "url": format!("https://example.test/pr/{pull_request}") }
+  } ] })
+}
+
+fn recorded_tool_names(path: &Path) -> Vec<String> {
+  match std::fs::read_to_string(path) {
+    | Ok(text) => text
+      .lines()
+      .filter(|line| !line.is_empty())
+      .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+      .filter_map(|value| value.get("name").and_then(Value::as_str).map(str::to_owned))
+      .collect(),
+    | Err(_) => Vec::new(),
+  }
+}
+
+/// CLOSED の PR を持つ中止済みマージ待ちゴールは、読み取りサイクルで manager へ終了依頼され、
+/// 判断待ちから消える（SCN-C2-P1、AC1）。
+#[tokio::test]
+async fn closed_aborted_goal_is_finished_by_manager_and_leaves_the_pending_list() {
+  let harness = Harness::new(aborted_awaiting_merge_state("g1", 5));
+  let manager_calls = harness._directory.path().join("manager-calls.jsonl");
+  add_manager_server(&harness, &manager_calls);
+  let gh_state = harness._directory.path().join("gh-state");
+  std::fs::write(&gh_state, "CLOSED").expect("gh の状態を書けます");
+  let fake_gh = write_fake_gh(harness._directory.path(), &gh_state);
+
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  assert_eq!(
+    recorded_tool_names(&manager_calls),
+    vec!["takt_finish_goal".to_owned()],
+    "manager 用エントリへ takt_finish_goal を1回投函します"
+  );
+  let decisions =
+    harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge);
+  assert!(decisions.is_empty(), "終了依頼済みのゴールは判断待ちに出ません");
+
+  // 2周期目でも再投函しません（C7）。
+  poller.read_cycle_once().await.expect("2周期目を実行できます");
+  assert_eq!(
+    recorded_tool_names(&manager_calls),
+    vec!["takt_finish_goal".to_owned()],
+    "依頼済みのゴールは再投函しません"
+  );
+  poller.shutdown().await;
+}
+
+/// OPEN の PR を持つ中止済みマージ待ちゴールは、終了依頼されず判断待ちに残る（SCN-C2-N1、AC2）。
+#[tokio::test]
+async fn open_aborted_goal_stays_without_finish_request() {
+  let harness = Harness::new(aborted_awaiting_merge_state("g1", 5));
+  let manager_calls = harness._directory.path().join("manager-calls.jsonl");
+  add_manager_server(&harness, &manager_calls);
+  let gh_state = harness._directory.path().join("gh-state");
+  std::fs::write(&gh_state, "OPEN").expect("gh の状態を書けます");
+  let fake_gh = write_fake_gh(harness._directory.path(), &gh_state);
+
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  assert!(recorded_tool_names(&manager_calls).is_empty(), "OPEN の PR では終了依頼しません");
+  let decisions =
+    harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge);
+  assert_eq!(decisions.len(), 1, "OPEN の PR を持つ中止済みゴールは判断待ちに残ります");
+  poller.shutdown().await;
+}
+
+/// gh が失敗するときは終了依頼せず判断待ちに残る（SCN-C4-N1、AC4）。
+#[tokio::test]
+async fn unknown_pull_request_state_keeps_the_goal() {
+  let harness = Harness::new(aborted_awaiting_merge_state("g1", 5));
+  let manager_calls = harness._directory.path().join("manager-calls.jsonl");
+  add_manager_server(&harness, &manager_calls);
+  let gh_state = harness._directory.path().join("gh-state");
+  std::fs::write(&gh_state, "EXIT:1").expect("gh の状態を書けます");
+  let fake_gh = write_fake_gh(harness._directory.path(), &gh_state);
+
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  assert!(recorded_tool_names(&manager_calls).is_empty(), "状態を確認できないときは終了依頼しません");
+  let decisions =
+    harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge);
+  assert_eq!(decisions.len(), 1, "状態を確認できないゴールは判断待ちに残ります");
+  poller.shutdown().await;
+}
+
+/// `autoTerminateClosedGoals: false` のときは、表示補正の PR 確認は行い、終了依頼だけを
+/// 行わない（SCN-C5-N1、AC3、要件24）。
+#[tokio::test]
+async fn auto_termination_disabled_corrects_the_display_without_requesting() {
+  let harness = Harness::new(aborted_awaiting_merge_state("g1", 5));
+  let manager_calls = harness._directory.path().join("manager-calls.jsonl");
+  add_manager_server(&harness, &manager_calls);
+  harness.rewrite_config(|config| {
+    config["autoTerminateClosedGoals"] = json!(false);
+  });
+  let gh_state = harness._directory.path().join("gh-state");
+  // CLOSED のとき、設定 false でも表示補正のために gh を起動する。偽 gh は起動時に印を残す。
+  std::fs::write(&gh_state, "CLOSED").expect("gh の状態を書けます");
+  let gh_marker = harness._directory.path().join("gh-invoked");
+  let fake_gh = write_fake_gh_with_marker(harness._directory.path(), &gh_state, &gh_marker);
+
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  assert!(gh_marker.exists(), "設定 false でも表示補正のために gh を起動します");
+  assert!(recorded_tool_names(&manager_calls).is_empty(), "設定 false では終了依頼しません");
+  let decisions =
+    harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge);
+  assert!(decisions.is_empty(), "CLOSED の PR を持つゴールは、設定 false でも判断待ちに出ません");
+  poller.shutdown().await;
+}
+
+/// MERGED の PR を持つ中止済みマージ待ちゴールも、読み取りサイクルで manager へ終了依頼され、
+/// 判断待ちから消える（SCN-C2-P1 の MERGED 経路、AC1）。
+#[tokio::test]
+async fn merged_aborted_goal_is_finished_by_manager_and_leaves_the_pending_list() {
+  let harness = Harness::new(aborted_awaiting_merge_state("g1", 5));
+  let manager_calls = harness._directory.path().join("manager-calls.jsonl");
+  add_manager_server(&harness, &manager_calls);
+  let gh_state = harness._directory.path().join("gh-state");
+  std::fs::write(&gh_state, "MERGED").expect("gh の状態を書けます");
+  let fake_gh = write_fake_gh(harness._directory.path(), &gh_state);
+
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  assert_eq!(
+    recorded_tool_names(&manager_calls),
+    vec!["takt_finish_goal".to_owned()],
+    "MERGED の PR でも manager 用エントリへ takt_finish_goal を1回投函します"
+  );
+  let decisions =
+    harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge);
+  assert!(decisions.is_empty(), "終了依頼済みのゴールは判断待ちに出ません");
+  poller.shutdown().await;
+}
+
+/// 終了依頼は manager 用エントリだけで行い、読み取り・書き込み用エントリからは
+/// `takt_finish_goal` を呼ばない（C3-manager の否定契約、order.md 末尾の担保要求）。
+#[tokio::test]
+async fn finish_request_goes_only_to_the_manager_lane() {
+  let harness = Harness::new(aborted_awaiting_merge_state("g1", 5));
+  let manager_calls = harness._directory.path().join("manager-calls.jsonl");
+  add_manager_server(&harness, &manager_calls);
+  let gh_state = harness._directory.path().join("gh-state");
+  std::fs::write(&gh_state, "CLOSED").expect("gh の状態を書けます");
+  let fake_gh = write_fake_gh(harness._directory.path(), &gh_state);
+
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  assert_eq!(
+    recorded_tool_names(&manager_calls),
+    vec!["takt_finish_goal".to_owned()],
+    "manager 用エントリへだけ takt_finish_goal を投函します"
+  );
+  assert!(
+    !harness.calls().iter().any(|name| name == "takt_finish_goal"),
+    "読み取り・書き込み用エントリの呼び出し記録に takt_finish_goal は出ません"
+  );
+  poller.shutdown().await;
+}
+
+/// manager 用エントリが未設定のときは、表示補正の PR 確認は行い、終了依頼だけを行わない
+/// （C4 の manager 未設定経路、AC4）。
+#[tokio::test]
+async fn missing_manager_server_corrects_the_display_without_requesting() {
+  let harness = Harness::new(aborted_awaiting_merge_state("g1", 5));
+  let gh_state = harness._directory.path().join("gh-state");
+  std::fs::write(&gh_state, "CLOSED").expect("gh の状態を書けます");
+  let gh_marker = harness._directory.path().join("gh-invoked");
+  let fake_gh = write_fake_gh_with_marker(harness._directory.path(), &gh_state, &gh_marker);
+
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  assert!(gh_marker.exists(), "manager 未設定でも表示補正のために gh を起動します");
+  let decisions =
+    harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge);
+  assert!(decisions.is_empty(), "CLOSED の PR を持つゴールは、manager 未設定でも判断待ちに出ません");
+  poller.shutdown().await;
+}
+
+/// 中止でない（active）のマージ待ちゴールを、状態と実行状態を指定して作る。
+fn awaiting_merge_state(goal_id: &str, pull_request: i64, status: &str, execution_status: &str) -> Value {
+  json!({ "goals": [ {
+    "id": goal_id,
+    "status": status,
+    "executionStatus": execution_status,
+    "objective": format!("ゴール {goal_id}"),
+    "integrationBranch": format!("takt/{goal_id}"),
+    "pullRequest": { "number": pull_request, "url": format!("https://example.test/pr/{pull_request}") }
+  } ] })
+}
+
+/// 中止でない（active）の awaiting_merge ゴールは、PR が CLOSED でも読み取りサイクルで
+/// 終了依頼されません。表示補正は中止済みゴールに限らないため、判断待ちには出ません
+/// （issue #112 の基準、AC2、P2）。
+#[tokio::test]
+async fn active_merge_goal_is_not_auto_terminated() {
+  let harness = Harness::new(awaiting_merge_state("g1", 5, "awaiting_merge", "active"));
+  let manager_calls = harness._directory.path().join("manager-calls.jsonl");
+  add_manager_server(&harness, &manager_calls);
+  let gh_state = harness._directory.path().join("gh-state");
+  std::fs::write(&gh_state, "CLOSED").expect("gh の状態を書けます");
+  let gh_marker = harness._directory.path().join("gh-invoked");
+  let fake_gh = write_fake_gh_with_marker(harness._directory.path(), &gh_state, &gh_marker);
+
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  assert!(recorded_tool_names(&manager_calls).is_empty(), "active のゴールは終了依頼しません");
+  assert!(gh_marker.exists(), "表示補正のために gh を起動します");
+  let decisions =
+    harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge);
+  assert!(decisions.is_empty(), "CLOSED の PR を持つゴールは判断待ちに出ません");
+  poller.shutdown().await;
+}
+
+/// awaiting_merge でない中止済みゴールは、PR が CLOSED でも読み取りサイクルで終了依頼されず、
+/// 判断待ちに残る（AC2、P2）。
+///
+/// `completed` は既存パーサが受理する状態値なので、読み取りは成功し `status` 除外を通る。
+#[tokio::test]
+async fn non_awaiting_merge_aborted_goal_is_not_auto_terminated() {
+  let harness = Harness::new(awaiting_merge_state("g1", 5, "completed", "aborted"));
+  let manager_calls = harness._directory.path().join("manager-calls.jsonl");
+  add_manager_server(&harness, &manager_calls);
+  let gh_state = harness._directory.path().join("gh-state");
+  std::fs::write(&gh_state, "CLOSED").expect("gh の状態を書けます");
+  let gh_marker = harness._directory.path().join("gh-invoked");
+  let fake_gh = write_fake_gh_with_marker(harness._directory.path(), &gh_state, &gh_marker);
+
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+
+  assert!(recorded_tool_names(&manager_calls).is_empty(), "awaiting_merge でないゴールは終了依頼しません");
+  assert!(!gh_marker.exists(), "awaiting_merge でないゴールでは gh を起動しません");
+  assert!(
+    harness.calls().iter().any(|name| name == "takt_list_goals"),
+    "読み取りサイクルでゴール一覧の読み取りが成功しています"
+  );
+  poller.shutdown().await;
+}
+
+/// 終了依頼が失敗しても、WARN ログで観測でき、次のサイクルで再評価される（P1 受入条件 (2)(3)）。
+/// `takt_finish_goal` は1サイクルに1回だけ投函されます。
+///
+/// 表示方針は、PR が閉じていると確認できたゴールは、終了依頼の成否にかかわらず判断待ちに
+/// 出さないことです（issue #112 の基準）。依頼の失敗は表示へ影響せず、依頼だけが次の
+/// サイクルで再試行されます。PR を確認できない場合の表示維持は
+/// `unknown_pull_request_state_keeps_the_goal` が観測します。
+#[tokio::test]
+async fn failed_finish_request_warns_and_retries_next_cycle() {
+  let harness = Harness::new(aborted_awaiting_merge_state("g1", 5));
+  let manager_calls = harness._directory.path().join("manager-calls.jsonl");
+  let manager_state = add_manager_server(&harness, &manager_calls);
+  // manager の `takt_finish_goal` 呼び出しを失敗させる（引数の goalId で限定）。
+  write_json(&manager_state, &json!({ "isError": ["takt_finish_goal:g1"] }));
+  let gh_state = harness._directory.path().join("gh-state");
+  std::fs::write(&gh_state, "CLOSED").expect("gh の状態を書けます");
+  let fake_gh = write_fake_gh(harness._directory.path(), &gh_state);
+
+  let (logs, _guard) = capture_logs();
+  let mut poller = harness.poller().with_gh_program(fake_gh);
+
+  poller.read_cycle_once().await.expect("1周期目を実行できます");
+  assert_eq!(
+    recorded_tool_names(&manager_calls),
+    vec!["takt_finish_goal".to_owned()],
+    "失敗しても1サイクルに1回だけ投函します"
+  );
+  let output = logs.contents();
+  assert!(output.contains("WARN"), "依頼失敗を WARN で記録します: {output}");
+  assert!(output.contains("goal_id=g1"), "WARN にゴール ID を含めます: {output}");
+  let decisions =
+    harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::AwaitingMerge);
+  assert!(decisions.is_empty(), "依頼が失敗しても、CLOSED の PR を持つゴールは判断待ちに出ません");
+
+  // 2サイクル目も同じ失敗状態で、次の読み取りサイクルで再評価され再投函されます（合計2回）。
+  poller.read_cycle_once().await.expect("2周期目を実行できます");
+  assert_eq!(
+    recorded_tool_names(&manager_calls),
+    vec!["takt_finish_goal".to_owned(), "takt_finish_goal".to_owned()],
+    "次の読み取りサイクルで再評価します"
+  );
+  poller.shutdown().await;
+}
+
+/// 偽の gh で、起動されたことをマーカーファイルへ記録する版。
+fn write_fake_gh_with_marker(directory: &Path, state_file: &Path, marker: &Path) -> PathBuf {
+  let script = directory.join("fake-gh-marker.sh");
+  let body = format!(
+    "#!/bin/sh\ntouch '{marker}'\nstate_file='{state}'\nif [ ! -f \"$state_file\" ]; then\n  exit 0\nfi\nvalue=$(cat \"$state_file\")\ncase \"$value\" in\n  EXIT:*) exit \"${{value#EXIT:}}\" ;;\nesac\nprintf '{{\"state\":\"%s\"}}' \"$value\"\n",
+    marker = marker.display(),
+    state = state_file.display()
+  );
+  std::fs::write(&script, body).expect("偽の gh を書けます");
+  std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("偽の gh を実行可能にできます");
+  script
 }

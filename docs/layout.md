@@ -164,7 +164,7 @@ CSS では、コメントを除いたすべての宣言の値を調べます。
 
 ### 既存の例外
 
-部品を適用する前の既存の宣言（`.cards`、`.sum-grid` の列数と、`.dot.live`、`@keyframes pulse`、`@keyframes flash`、`.dialog-backdrop` の色、計 10 件）は、`tools/repo-gate/gate_frontend_style.py` の `EXISTING_EXCEPTIONS` に載せて通しています。
+部品を適用する前の既存の宣言（`.cards`、`.sum-grid` の列数と、`.run-row .bar.live > i`、`.dot.live`、`@keyframes pulse`、`@keyframes flash`、`.dialog-backdrop` の色、計 11 件）は、`tools/repo-gate/gate_frontend_style.py` の `EXISTING_EXCEPTIONS` に載せて通しています。
 
 - 例外は、ファイル、文脈（`@media` などの入れ子とセレクタ）、プロパティ、値（空白を 1 つに詰めたもの）が完全に一致するときだけ通します。値を変えた宣言や、同じセレクタに新しく書いた違反は検出されます。
 - 部品の適用（issue #121 など）で宣言が消えたり値が変わったりしたら、一覧から外してください。issue #120 では、概要で使わなくなった `.tiles`、`.scards`、`.scard.down` の 3 件を外しました。一覧に残った項目が CSS に見つからないと、検査が失敗します。

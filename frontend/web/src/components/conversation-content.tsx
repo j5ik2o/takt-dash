@@ -70,11 +70,6 @@ export function ConversationContent({
                 {message.notice}
               </p>
             ) : null}
-            {message.notice === undefined && message.hasEncodingError ? (
-              <p className="conversation-notice" role="note">
-                元の記録に文字化けがあります。
-              </p>
-            ) : null}
             <p className="conversation-text">{message.text}</p>
           </li>
         ))}

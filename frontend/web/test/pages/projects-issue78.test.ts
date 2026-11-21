@@ -23,7 +23,6 @@ const PROJECT = "corporate-site";
 
 const goal = (overrides: Partial<Goal> = {}): Goal => ({
   goalId: "goal-active",
-  nameTruncated: false,
   serverId: "mini",
   project: PROJECT,
   name: "アクティブな目的の見出しです。補足の文が続きます。",

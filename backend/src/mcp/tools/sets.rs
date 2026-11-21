@@ -18,7 +18,6 @@ use crate::{
   model::{GoalDetail, ProjectSnapshot, RegistrationProposalEntry, TaskDetail},
   run_log::{Instruction, RunContent},
   run_progress::RunLogHandle,
-  workflow_progress::WorkflowDefinition,
 };
 
 /// 読み取り専用の道具のまとまり。読み取りレーン（定期読み取り・画面読み取り）の接続で使います。
@@ -51,21 +50,6 @@ impl<'a> ReadToolSet<'a> {
   /// takt_get_run で run の状態を読む。画面の読み取りのフォールバックが使います。
   pub async fn read_remote_run(&mut self, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
     self.core.read_remote_run(run_slug).await
-  }
-
-  /// ログ更新用に、要約本文を読まずステップだけを読む。
-  pub async fn read_remote_run_logs(&mut self, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
-    self.core.read_remote_run_logs(run_slug).await
-  }
-
-  /// workflow の定義（step 名と分岐）を読む。進行図の組み立てが使います。
-  pub async fn workflow_definition(&mut self, workflow: &str) -> Result<Option<WorkflowDefinition>, ToolError> {
-    self.core.workflow_definition(workflow).await
-  }
-
-  /// SSH から進行証拠を読み、remote の evidence を補完します。
-  pub async fn enrich_remote_progress(&mut self, run_slug: &RunSlug, remote: &mut RemoteRun) {
-    self.core.enrich_remote_progress(run_slug, remote).await
   }
 
   /// ゴール詳細の読み取り（画面用）。

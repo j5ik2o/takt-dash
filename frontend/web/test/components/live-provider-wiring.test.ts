@@ -69,7 +69,7 @@ const renderLive = (
 ): string => {
   const props: ComponentProps<typeof StateStreamProvider> = { initialSnapshotLoaded: true,
     initialState: state,
-    children: createElement(page, { initialNowMs: Date.now() }),
+    children: createElement(page),
   };
   return renderToStaticMarkup(createElement(StateStreamProvider, props));
 };
@@ -240,7 +240,7 @@ const renderLiveWithInitialFailure = (
     initialState: state,
     initialFailure: failure,
     initialRespondedBefore: respondedBefore,
-    children: createElement(page, { initialNowMs: Date.now() }),
+    children: createElement(page),
   };
   return renderToStaticMarkup(createElement(StateStreamProvider, props));
 };
@@ -733,7 +733,7 @@ test("マウントで /api/state へ接続し、SSE の受信が Context と画�
         revalidateCalls += 1;
       },
     },
-    [createElement(Probe, { key: "probe" }), createElement(LiveDecisions, { key: "decisions", initialNowMs: Date.now() })],
+    [createElement(Probe, { key: "probe" }), createElement(LiveDecisions, { key: "decisions" })],
   );
 
   assert.equal(FakeEventSource.instances.length, 1, "マウントで接続が1つだけ開く");
@@ -762,7 +762,7 @@ test("SSE の切断が画面の通知へ反映され、再接続後の受信で�
   const { holder, Probe } = createProbe();
   const { container, unmount } = await mountLive({ initialSnapshotLoaded: true, initialState: createDashboardState() }, [
     createElement(Probe, { key: "probe" }),
-    createElement(LiveDecisions, { key: "decisions", initialNowMs: Date.now() }),
+    createElement(LiveDecisions, { key: "decisions" }),
   ]);
   const source = FakeEventSource.instances[0]!;
   assert.equal(countOccurrences(container.innerHTML, BACKEND_UNREACHABLE_MESSAGE), 0, "接続中は通知が出ない");

@@ -42,12 +42,8 @@ pub(super) async fn read_updates_response(
   cwd: &std::path::Path,
   run_slug: RunSlug,
   after: Option<LogCursor>,
-  ssh: bool,
 ) -> Result<GetRunUpdatesResponse, Status> {
-  // SSH 越しのサーバーのプロジェクトは、同名のローカル保存場所を使いません。
-  let local =
-    if ssh { Err(RunReadFailure::NotListed) } else { read_run_updates(run_logs, run_slug.clone(), after).await };
-  match local {
+  match read_run_updates(run_logs, run_slug.clone(), after).await {
     | Ok(updates) => Ok(run_updates_response(&run_slug, updates)),
     | Err(RunReadFailure::Missing) => {
       Ok(GetRunUpdatesResponse { run_slug: run_slug.as_str().to_owned(), logs_removed: true, ..Default::default() })

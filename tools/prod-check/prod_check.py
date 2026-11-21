@@ -48,7 +48,6 @@ import sys
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from urlcheck.foreign_origin import foreign_origin  # noqa: E402
 from prod_http import fetch_state, http  # noqa: E402
 from prod_log import (  # noqa: E402
     JST,
@@ -263,7 +262,6 @@ def first_task_name(main_checkout):
 def check_write_boundary(base_url):
     name = "書き込みの境界"
     origin = base_url
-    rejected_origin = foreign_origin(base_url)
     problems = []
     for path in WRITE_PATHS:
         try:
@@ -275,7 +273,7 @@ def check_write_boundary(base_url):
             elif status != 400:
                 problems.append("%s が同じオリジンで %s です（期待は 400）" % (path, status))
             status, _ = http("POST", base_url + path, timeout=10,
-                             headers={"Origin": rejected_origin,
+                             headers={"Origin": "https://example.invalid",
                                       "Content-Type": "application/json"},
                              data=b"{}")
             if status != 403:

@@ -21,8 +21,16 @@ COLUMNS = "列数"
 # 一致するときだけ通す。宣言が消えたら一覧からも外す（残すと検査が失敗する）。
 # 新しい例外は足さず、色は :root の変数、列数は部品か auto-fit で書く。
 GLOBALS_CSS = "app/globals.css"
+LIVE_ACCENT = "rgba(255, 255, 255, 0.28)"
 EXISTING_EXCEPTIONS = [
     (GLOBALS_CSS, (".cards",), "grid-template-columns", "repeat(2, minmax(0, 1fr))"),
+    (
+        GLOBALS_CSS,
+        (".run-row .bar.live > i",),
+        "background-image",
+        f"linear-gradient( 45deg, {LIVE_ACCENT} 25%, transparent 25%, transparent 50%, "
+        f"{LIVE_ACCENT} 50%, {LIVE_ACCENT} 75%, transparent 75% )",
+    ),
     (GLOBALS_CSS, (".dot.live",), "box-shadow", "0 0 0 0 rgba(15, 139, 141, 0.45)"),
     (GLOBALS_CSS, ("@keyframes pulse", "0%"), "box-shadow", "0 0 0 0 rgba(15, 139, 141, 0.5)"),
     (GLOBALS_CSS, ("@keyframes pulse", "70%"), "box-shadow", "0 0 0 7px rgba(15, 139, 141, 0)"),

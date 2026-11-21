@@ -221,6 +221,58 @@ impl fmt::Display for PullRequestNumber {
   }
 }
 
+/// プルリクエストの状態。gh の `state` の字面から作る値オブジェクトです。
+///
+/// `OPEN`・`CLOSED`・`MERGED` の大文字だけを受け付け、未知の字面・小文字・空は表現できません。
+/// 確認できなかった状態を「閉じた」として扱わないため、字面の解釈はこの型に閉じます。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PullRequestState {
+  Open,
+  Closed,
+  Merged,
+}
+
+impl PullRequestState {
+  /// この状態が、終了の対象になる閉じた PR か。`CLOSED` と `MERGED` だけが真です。
+  pub fn is_closed(self) -> bool {
+    matches!(self, PullRequestState::Closed | PullRequestState::Merged)
+  }
+
+  /// 復元・ログに使う字面を返す。
+  pub fn as_str(self) -> &'static str {
+    match self {
+      | PullRequestState::Open => "OPEN",
+      | PullRequestState::Closed => "CLOSED",
+      | PullRequestState::Merged => "MERGED",
+    }
+  }
+}
+
+impl TryFrom<&str> for PullRequestState {
+  type Error = DomainError;
+
+  fn try_from(value: &str) -> Result<Self, Self::Error> {
+    if value.is_empty() {
+      return Err(DomainError::Size("プルリクエストの状態"));
+    }
+    if !value.chars().all(|character| character.is_ascii_uppercase()) {
+      return Err(DomainError::Lexical("プルリクエストの状態"));
+    }
+    match value {
+      | "OPEN" => Ok(PullRequestState::Open),
+      | "CLOSED" => Ok(PullRequestState::Closed),
+      | "MERGED" => Ok(PullRequestState::Merged),
+      | _ => Err(DomainError::Syntax("プルリクエストの状態")),
+    }
+  }
+}
+
+impl fmt::Display for PullRequestState {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(self.as_str())
+  }
+}
+
 /// ゴール登録の承認待ちの revision。1 以上です。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegistrationRevision(i32);
@@ -443,8 +495,8 @@ impl fmt::Display for MergeUntil {
 #[cfg(test)]
 mod tests {
   use super::{
-    DailyDate, DomainError, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision,
-    RunSlug, ScreenReadLanes, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
+    DailyDate, DomainError, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, PullRequestState,
+    RegistrationRevision, RunSlug, ScreenReadLanes, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
   };
 
   #[test]
@@ -499,5 +551,17 @@ mod tests {
     assert!(matches!(MergeUntil::try_from("Prepare"), Err(DomainError::Lexical(_))));
     assert!(matches!(MergeUntil::try_from("unknown"), Err(DomainError::Syntax(_))));
     assert_eq!(MergeUntil::try_from("prepare").expect("有効です").as_str(), "prepare");
+  }
+
+  #[test]
+  fn pull_request_state_accepts_only_known_uppercase_values() {
+    assert!(matches!(PullRequestState::try_from(""), Err(DomainError::Size(_))));
+    assert!(matches!(PullRequestState::try_from("open"), Err(DomainError::Lexical(_))));
+    assert!(matches!(PullRequestState::try_from("UNKNOWN"), Err(DomainError::Syntax(_))));
+    assert!(matches!(PullRequestState::try_from("DRAFT"), Err(DomainError::Syntax(_))));
+    assert_eq!(PullRequestState::try_from("OPEN").expect("有効です"), PullRequestState::Open);
+    assert!(PullRequestState::try_from("CLOSED").expect("有効です").is_closed());
+    assert!(PullRequestState::try_from("MERGED").expect("有効です").is_closed());
+    assert!(!PullRequestState::try_from("OPEN").expect("有効です").is_closed());
   }
 }

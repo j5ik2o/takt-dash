@@ -118,12 +118,17 @@ const barMarkup = (html: string): string => {
   if (row === null) {
     assert.fail("run 行が描画されていない");
   }
-  const match = /<div[^>]*class="workflow-segments"[^>]*>[\s\S]*?<\/div>/.exec(row[1]!);
+  const match = /<div[^>]*class="[^"]*\bbar\b[^"]*"[^>]*>[\s\S]*?<\/div>/.exec(row[1]!);
   if (match === null) {
     assert.fail("進捗バーが描画されていない");
   }
   return match[0];
 };
+
+// run 行の進捗バー（bar thick）の開始タグを数える。上部のタイルの使用率バー（bar）とは
+// 区別し、位置と総数が無い run 行がバーを捏造しないことを観測する。
+const thickBars = (html: string): string[] =>
+  html.match(/<div[^>]*class="[^"]*\bbar\b[^"]*\bthick\b[^"]*"/g) ?? [];
 
 // 指定したメディアクエリの本体を波括弧の対応で切り出す。
 const mediaBlock = (css: string, query: string): string | undefined => {
@@ -845,13 +850,14 @@ test("アクティビティページは日ごとの出来事を新しい日か�
   }
 });
 
-test("概要の run 行はステップ名・背骨の位置・区切った進行表示・モデル・ゴールの目的・要約・経過を描画する", () => {
+test("概要の run 行はステップ名・位置・反復・進捗バー・モデル・ゴールの目的・要約・経過を描画する", () => {
   const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), NOW, true) });
 
   assert.match(html, /class="st live"/, "状態のラベルを実行中の見た目で出す");
   assert.match(html, /class="dot live"/, "状態の点を実行中の見た目で出す");
   assert.match(html, /ステップ\s*<b>implement<\/b>/, "今のステップ名を出す");
-  assert.match(html, /4 段階中 2 つ目/, "backend の背骨の長さと位置を出す");
+  assert.match(html, /5 ステップ中 2 つ目/, "何ステップ中の何番目かを出す");
+  assert.match(html, /反復 2 回目/, "反復回数を出す");
   assert.match(html, /モデルは GLM 5\.3 です。/, "モデルの表示名を出す");
   assert.match(html, /最後のログは 1分前/, "最後のログからの経過を出す");
   assert.match(html, /採用ページのレイアウトを直す/, "ゴールの目的を出す");
@@ -859,8 +865,8 @@ test("概要の run 行はステップ名・背骨の位置・区切った進行
 
   const bar = barMarkup(html);
   assert.match(bar, /role="img"/, "進捗バーは意味を持つ画像として扱う");
-  assert.match(bar, /aria-label="4 段階中 2 つ目"/, "背骨の位置を読み上げる");
-  assert.equal((bar.match(/class="passed"/g) ?? []).length, 2, "現在位置までを示す");
+  assert.match(bar, /aria-label="5 ステップ中 2 つ目"/, "進捗バーの読み上げ名に位置を出す");
+  assert.match(bar, /style="width:40%"/, "2/5 の進み具合をバーの幅に反映する");
 });
 
 test("入れ子 workflow の内側ログがある run 行は名前と位置を同じ currentStep から描画する", () => {
@@ -868,10 +874,11 @@ test("入れ子 workflow の内側ログがある run 行は名前と位置を�
 
   assert.match(html, /ステップ\s*<b>develop<\/b>/, "今のトップレベル step 名を出す");
   assert.doesNotMatch(html, /<b>write_tests<\/b>/, "入れ子 workflow の内側の step 名を現在ステップとして出さない");
-  assert.match(html, /1 段階中 1 つ目/, "backend の背骨の位置を出す");
+  assert.match(html, /1 ステップ中 1 つ目/, "位置は同じ currentStep 由来の 1 つ目を出す");
+  assert.match(html, /反復 3 回目/, "反復回数を出す");
   const bar = barMarkup(html);
-  assert.match(bar, /aria-label="1 段階中 1 つ目"/, "背骨の位置を読み上げる");
-  assert.equal((bar.match(/class="passed"/g) ?? []).length, 1);
+  assert.match(bar, /aria-label="1 ステップ中 1 つ目"/, "バーの読み上げ名も同じ step 集合の位置にする");
+  assert.match(bar, /style="width:100%"/, "1/1 の進み具合をバーの幅に反映する");
 });
 
 test("同じ状態でも時刻が進めば run 行の経過表示が進む", () => {
@@ -885,7 +892,7 @@ test("同じ状態でも時刻が進めば run 行の経過表示が進む", () 
   assert.match(oneMinuteLater, /最後のログは 2分前/, "状態の再配信が無くても表示だけが進む");
 });
 
-test("ログが止まった run 行は警告の点と無音の注記を出し、背骨の位置を保持する", () => {
+test("ログが止まった run 行は警告の点とバーになり、無音の注記を出す", () => {
   const tenMinutesLater = new Date(NOW.getTime() + 10 * 60_000);
   const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), tenMinutesLater, true) });
 
@@ -894,7 +901,8 @@ test("ログが止まった run 行は警告の点と無音の注記を出し、
   assert.match(html, /ログが 11分 出ていません。/, "無音の分数を注記に出す");
 
   const bar = barMarkup(html);
-  assert.match(bar, /aria-label="4 段階中 2 つ目"/, "無音でも進行位置は変えない");
+  assert.match(bar, /class="[^"]*\bbar\b[^"]*\bwarn\b/, "バーを警告の見た目にする");
+  assert.doesNotMatch(bar, /\blive\b/, "警告のバーは実行中の見た目にしない");
 });
 
 test("タスクの要約が空の run 行はタスク名を出す", () => {
@@ -913,28 +921,26 @@ test("ステップ位置が分からない run 行は進捗バーを出さない
   const base = createDashboardState();
   const state = {
     ...base,
-    runs: base.runs.map((run) => ({ ...run, progress: undefined, currentStepNumber: undefined, totalSteps: undefined })),
+    runs: base.runs.map((run) => ({ ...run, currentStepNumber: undefined, totalSteps: undefined })),
   };
   const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
 
   assert.match(html, /implement/, "ステップ名は出す");
-  assert.match(html, /最後のログは/, "進行図の情報が無くても run を表示する");
+  assert.equal(thickBars(html).length, 0, "位置と総数が無ければ run 行のバーを捏造しない");
 });
 
-test("実行中の run の点は動き、prefers-reduced-motion で止まる", async () => {
+test("実行中の run の点とバーは動き、prefers-reduced-motion で止まる", async () => {
   const css = await readFile(`${webRoot}app/globals.css`, "utf8");
 
   assert.match(css, /\.run-row\s+\.dot\.live\s*\{[^}]*animation:\s*pulse/, "実行中の点は脈打つ");
+  assert.match(css, /\.run-row\s+\.bar\.live\s*>\s*i\s*\{[^}]*animation:\s*flow/, "実行中のバーは流れる");
   assert.match(css, /\.run-row\s+\.dot\.warn\s*\{[^}]*background:\s*var\(--warn\)/, "警告の点は警告色になる");
-  assert.match(
-    css,
-    /\.run-row:has\(\.dot\.warn\) \.workflow-segments > \.passed \{[^}]*background:\s*var\(--warn\)/,
-    "警告の行は背骨の通過済みを警告色にする",
-  );
+  assert.match(css, /\.bar\.warn\s*>\s*i\s*\{[^}]*background:\s*var\(--warn\)/, "警告のバーは警告色になる");
+  assert.doesNotMatch(css, /\.bar\.warn\s*>\s*i\s*\{[^}]*animation/, "警告のバーは流れ続けない");
 
   const reduced = mediaBlock(css, "@media (prefers-reduced-motion: reduce)");
   assert.ok(reduced !== undefined, "prefers-reduced-motion の指定がある");
-  for (const selector of [".run-row .dot.live", ".run-row.flash"]) {
+  for (const selector of [".run-row .dot.live", ".run-row .bar.live > i", ".run-row.flash"]) {
     assert.ok(reduced.includes(selector), `${selector} を reduced motion の対象にする`);
   }
   assert.match(reduced, /animation:\s*none/, "reduced motion ではアニメーションを止める");

@@ -10,7 +10,6 @@ import { goalDisplayName } from "../state/goal-summary";
 import { readCountText } from "../state/read-coverage";
 import type { BackendUnavailableSituation } from "../grpc/client";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
-import { WorkflowProgressSummary } from "./workflow-progress";
 
 type OverviewContentProps = {
   view: OverviewView;
@@ -18,6 +17,14 @@ type OverviewContentProps = {
   disconnected: boolean;
   /** 切断時の通知の文面を決める状況。ライブ表示だけが渡す。 */
   unavailableSituation?: BackendUnavailableSituation;
+};
+
+const positionText = (stepNumber?: number, totalSteps?: number, iteration?: number): string => {
+  if (stepNumber === undefined || totalSteps === undefined) {
+    return "";
+  }
+  const iterationText = iteration !== undefined ? `、反復 ${iteration} 回目` : "";
+  return `（${totalSteps} ステップ中 ${stepNumber} つ目${iterationText}）`;
 };
 
 const waitText = (waitMinutes: number): string => formatDuration(Math.round(waitMinutes * 60));
@@ -263,6 +270,7 @@ export function OverviewContent({
               <tbody>
                 {view.runs.map((runView) => {
                   const flashing = flashingRunSlugs?.has(runView.run.runSlug) ?? false;
+                  const position = positionText(runView.stepNumber, runView.totalSteps, runView.iteration);
                   const lastLogText =
                     runView.elapsedSeconds !== undefined
                       ? `最後のログは ${formatDuration(runView.elapsedSeconds)}前`
@@ -280,16 +288,25 @@ export function OverviewContent({
                         </a>
                       </td>
                       <td className="run-goal">
-                        {runView.goalName ? <span className="g">{goalDisplayName(runView.goalName, runView.goalNameTruncated)}</span> : null}
+                        {runView.goalName ? <span className="g">{goalDisplayName(runView.goalName)}</span> : null}
                         <div className="task">タスク「{runView.run.summary || runView.run.taskName}」</div>
                       </td>
                       <td className="run-step">
                         {runView.currentStepName ? (
                           <div className="stp">
                             ステップ <b>{runView.currentStepName}</b>
+                            {position}
                           </div>
                         ) : null}
-                        {runView.run.progress !== undefined ? <WorkflowProgressSummary progress={runView.run.progress} /> : null}
+                        {runView.stepNumber !== undefined && runView.totalSteps ? (
+                          <div
+                            className={`bar thick ${runView.state}`}
+                            role="img"
+                            aria-label={`${runView.totalSteps} ステップ中 ${runView.stepNumber} つ目`}
+                          >
+                            <i style={{ width: `${Math.round((runView.stepNumber / runView.totalSteps) * 100)}%` }} />
+                          </div>
+                        ) : null}
                         {runView.model ? <div className="model">モデルは {formatModel(runView.model)} です。</div> : null}
                       </td>
                       <td className="run-elapsed">

@@ -80,8 +80,6 @@ const spawnLogPath = option("--spawn-log");
 const PAGE_SIZE = 50;
 // takt の入力契約では goalId は UUID（z.uuid()）。
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// レコード本文取得は設定先の z.uuid() と同じ version・variant・特殊値を受理する。
-const RECORD_UUID_PATTERN = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 
 if (spawnLogPath !== undefined) {
   appendFileSync(spawnLogPath, `start ${process.pid} ${Date.now()}\n`);
@@ -185,6 +183,9 @@ const TOOL_ARGUMENTS = {
   takt_approve_goal_registration: { required: ["cwd", "revision"], optional: [] },
   takt_reject_goal_registration: { required: ["cwd", "revision"], optional: [] },
   takt_merge_goal_pr: { required: ["cwd", "goalId", "prNumber", "until"], optional: [] },
+  // manager 専用の終了依頼。実機の takt-mcp の入力契約（reason 必須）は、窓口が takt-custom の
+  // dist の実物で確認済みです。backend が投函する {cwd, goalId, reason} を受け付けます。
+  takt_finish_goal: { required: ["cwd", "goalId", "reason"], optional: [] },
 };
 
 // 引数の検証。実契約と同じく cwd 必須・絶対パス、未知キーは拒否する。
@@ -214,13 +215,6 @@ const validateArguments = (name, args) => {
   // takt の入力契約では goalId は UUID（z.uuid()）。空文字や UUID 以外は拒否する。
   if (name === "takt_answer_goal_question" && !UUID_PATTERN.test(args.goalId)) {
     return "goalId は UUID で指定してください";
-  }
-  if (name === "takt_get_goal" && args.recordId !== undefined) {
-    for (const field of ["goalId", "recordId"]) {
-      if (typeof args[field] !== "string" || !RECORD_UUID_PATTERN.test(args[field])) {
-        return `${field} は UUID で指定してください`;
-      }
-    }
   }
   return undefined;
 };
@@ -399,9 +393,6 @@ const handleToolCall = (name, args) => {
       return asText(pagedBackward(workLog, "workLog", args.offset));
     }
     case "takt_list_standalone_inquiries":
-      if (state.standalonePages !== undefined) {
-        return asText(state.standalonePages[`${args.offset ?? 0}:${args.limit ?? PAGE_SIZE}`]);
-      }
       return asText(paged(state.standaloneInquiries ?? [], "inquiries", args.offset));
     case "takt_get_run":
       if (args.view === "report") {
@@ -415,27 +406,8 @@ const handleToolCall = (name, args) => {
       }
       return asText(runResponse(state, args));
     case "takt_get_goal": {
-      if (args.recordId !== undefined) {
-        const override = state.goalRecordPages?.[`${args.goalId}:${args.recordId}:${args.textOffset ?? 0}`];
-        if (override !== undefined) return asText(override);
-        const [collection, field] = String(args.path).split(".");
-        const detail = (state.goalDetails ?? {})[args.goalId] ?? {};
-        const records = collection === "notifications"
-          ? (state.notifications ?? {})[args.goalId] ?? []
-          : detail[collection] ?? [];
-        const record = records.find((entry) => entry.id === args.recordId);
-        if (record === undefined) {
-          return { content: [{ type: "text", text: "Goal read failed: Selected record does not exist" }], isError: true };
-        }
-        return typeof record[field] === "string"
-          ? asText(textPage(record[field], args.textOffset, args.maxBytes))
-          : goalFieldMissing();
-      }
       if (args.path === "notifications") {
-        return asText({
-          ...paged((state.notifications ?? {})[args.goalId] ?? [], "items", args.offset),
-          ...(state.notificationOmissions === undefined ? {} : { omissions: state.notificationOmissions }),
-        });
+        return asText(paged((state.notifications ?? {})[args.goalId] ?? [], "items", args.offset));
       }
       const detail = (state.goalDetails ?? {})[args.goalId] ?? {};
       if (args.path === undefined) {
@@ -463,11 +435,14 @@ const handleToolCall = (name, args) => {
       }
       return asText({ items: value });
     }
-    case "takt_get_workflow": {
-      const definition = (state.workflows ?? {})[args.workflow] ?? [];
-      const steps = Array.isArray(definition) ? definition.map((name) => ({ name })) : definition.steps;
-      return asText({ ...paged(steps, "steps", args.offset), initialStep: definition.initialStep });
-    }
+    case "takt_get_workflow":
+      return asText(
+        paged(
+          ((state.workflows ?? {})[args.workflow] ?? []).map((name) => ({ name })),
+          "steps",
+          args.offset,
+        ),
+      );
     case "takt_answer_goal_question":
       return asText({ goalId: args.goalId, questionId: args.questionId, answer: args.answer });
     case "takt_list_goal_registration_proposals":
@@ -492,6 +467,9 @@ const handleToolCall = (name, args) => {
         workflow: "merge-goal-pr",
         until: args.until,
       });
+    case "takt_finish_goal":
+      // 依頼を受け付けたことを表す最小の応答。実 takt-mcp の応答形は未確認。
+      return asText({ goalId: args.goalId, status: "finished" });
     default:
       return { content: [{ type: "text", text: `未知の道具です: ${name}` }], isError: true };
   }

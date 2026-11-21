@@ -22,12 +22,7 @@ pub(super) async fn read_report_body(
   filename: &ReportFilename,
   max_bytes: u64,
 ) -> Result<ContentRead, RunReadFailure> {
-  let local = if resolved.connection.is_ssh() {
-    Err(RunReadFailure::NotListed)
-  } else {
-    read_report_content(resolved.cwd.clone(), run_slug.clone(), filename.clone(), max_bytes).await
-  };
-  match local {
+  match read_report_content(resolved.cwd.clone(), run_slug.clone(), filename.clone(), max_bytes).await {
     | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
       match source.read_remote_report(&resolved.cwd, run_slug, filename, max_bytes).await {
         | Ok(content) => Ok(ContentRead::Found(content)),
@@ -51,12 +46,7 @@ pub(super) async fn read_instruction_body(
   instruction_id: InstructionId,
   max_bytes: u64,
 ) -> Result<ContentRead, RunReadFailure> {
-  let local = if resolved.connection.is_ssh() {
-    Err(RunReadFailure::NotListed)
-  } else {
-    run_progress::read_instruction_body(resolved.cwd.clone(), run_slug.clone(), instruction_id, max_bytes).await
-  };
-  match local {
+  match run_progress::read_instruction_body(resolved.cwd.clone(), run_slug.clone(), instruction_id, max_bytes).await {
     | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
       match source.read_remote_instruction(&resolved.cwd, run_slug, instruction_id, max_bytes).await {
         | Ok(content) => Ok(ContentRead::Found(content)),

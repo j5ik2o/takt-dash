@@ -25,13 +25,11 @@ provider:
       provider: opencode
       model: ollama/kimi-k3:cloud
   defaults:
-    # Claude の週次制限（リセットは 2026-11-15 01:00 JST）に当たっているため、
-    # 当面の既定は interim-ollama とする
-    assignment: interim-ollama
+    assignment: standard
   assignments:
     # 割り当て原則（2026-11-12 オーナー指示）: 計画・設計・レビューは強いモデル、
-    # 実装・テストは弱いモデル。やり直し（差し戻し後の再実行）は ladder の次の段へ
-    # 上がる（昇格の宣言はワークフロー側の promotion {at: N}）
+    # 実装・テストは DGX Spark から始める。同じステップの再実行で昇格するには、
+    # ステップの promotion 宣言が必要。レート制限時の切り替えは config.yaml で設定する
     standard:
       defaults:
         profile: cloud-codex
@@ -43,21 +41,10 @@ provider:
             ladder:
               - dgx-flash
               - cloud-codex
-        steps:
-          # mini-core 内のレビュー後の再実装は一段強いモデル。fix_both の並列
-          # sub-step 2 本も同じ経路（両レビュー REJECT 時の主経路）なので含める
-          mini-core/ai-antipattern-fix:
-            profile: cloud-codex
-          mini-core/supervise_fix:
-            profile: cloud-codex
-          mini-core/ai-antipattern-fix-parallel:
-            profile: cloud-codex
-          mini-core/supervise_fix_parallel:
-            profile: cloud-codex
         internal_agents:
           loop-judge:
             profile: cloud-codex
-    # codex の使用量上限中の暫定。strong を claude に置き換えた standard。
+    # codex の使用量上限中の暫定。計画・レビューと mini-core のレビュー後修正に Claude を使う
     # 発行時に --runtime-assignment interim-claude で選ぶ
     interim-claude:
       defaults:

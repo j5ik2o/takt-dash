@@ -25,17 +25,6 @@ export const RUN_STATUS = {
   FAILED: 4,
 } as const;
 
-export const WORKFLOW_NODE_STATE = {
-  UNKNOWN: 0,
-  UNVISITED: 1,
-  RUNNING: 2,
-  COMPLETED: 3,
-  SKIPPED: 4,
-  FAILED: 5,
-  ABORTED: 6,
-  UNRECOGNIZED: -1,
-} as const;
-
 export const TASK_STATUS = {
   PENDING: 1,
   RUNNING: 2,
@@ -90,16 +79,6 @@ export const CONVERSATION_SPEAKER = {
 // 数値へ戻すため、生成コードの *FromJSON と同じ対応を名称→数値で持つ。生成コードと
 // 一致することは test/state/proto-values.test.ts で検査する。
 const ENUM_NAME_TO_NUMBER: Record<string, Record<string, number>> = {
-  WorkflowNodeState: {
-    WORKFLOW_NODE_STATE_UNKNOWN: 0,
-    WORKFLOW_NODE_STATE_UNVISITED: 1,
-    WORKFLOW_NODE_STATE_RUNNING: 2,
-    WORKFLOW_NODE_STATE_COMPLETED: 3,
-    WORKFLOW_NODE_STATE_SKIPPED: 4,
-    WORKFLOW_NODE_STATE_FAILED: 5,
-    WORKFLOW_NODE_STATE_ABORTED: 6,
-    UNRECOGNIZED: -1,
-  },
   GoalStatus: {
     GOAL_STATUS_UNSPECIFIED: 0,
     GOAL_STATUS_CREATED: 1,

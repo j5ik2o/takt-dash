@@ -27,7 +27,6 @@ const LOG_TAIL_RECORDS: usize = 20;
 /// takt_get_run から読んだ run。stepLogs は全ページを集めたものです。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRun {
-  pub evidence: crate::workflow_progress::ExecutionEvidence,
   pub run_slug: RunSlug,
   pub session_id: String,
   /// 応答の summary。無ければ taskText の1行目（takt のタスク要約と同じ規則）です。
@@ -56,7 +55,6 @@ impl RemoteRun {
   pub fn run_entry(&self, task: &TaskEntry) -> RunEntry {
     let started_at = self.started_at(Some(task));
     RunEntry {
-      progress: None,
       run_slug: self.run_slug.as_str().to_owned(),
       session_id: self.session_id.clone(),
       task_name: task.name.clone(),
@@ -133,14 +131,12 @@ pub(super) fn parse_remote_run(
 ) -> Result<RemoteRun, ToolError> {
   let run_slug = domain_value("run slug", RunSlug::try_from(string_field(value, "runSlug")?.as_str()))?;
   let task_text = optional_string(value, "taskText").unwrap_or_default();
-  let summary =
-    optional_string(value, "summary").filter(|text| !text.is_empty()).unwrap_or_else(|| task_summary(&task_text));
+  let summary = optional_string(value, "summary").unwrap_or_else(|| task_summary(&task_text));
   let started_at = match parse_time(value.get("startedAt"))? {
     | Some(time) => Some(time),
     | None => parse_time(value.get("startTime"))?,
   };
   Ok(RemoteRun {
-    evidence: crate::workflow_progress::ExecutionEvidence::default(),
     run_slug,
     session_id: optional_string(value, "sessionId").unwrap_or_default(),
     summary,
@@ -393,7 +389,7 @@ impl ToolSetCore<'_> {
   /// 要約の応答はタスク本文を含まない（taskOmission だけを返す）ため、詳細の読み取りは
   /// この view で本文を取り直します。応答は `{ task: {content, nextOffset} }` で、nextOffset を
   /// たどって連結します。nextOffset が進まない場合は解析エラーにし、追従がページ数の上限に
-  /// 達したら、全文取得に失敗した解析エラーを返します。
+  /// 達したら、そこまでの本文を返します。
   pub async fn read_remote_task_text(&mut self, run_slug: &RunSlug) -> Result<String, ToolError> {
     let mut content = String::new();
     let mut offset = 0_u64;
@@ -411,7 +407,7 @@ impl ToolSetCore<'_> {
         | Some(next) if next > offset => {
           pages_taken += 1;
           if pages_taken >= super::MAX_PAGES {
-            return Err(ToolError::Parse("takt_get_run の task の全文取得が上限に達しました".to_owned()));
+            return Ok(content);
           }
           offset = next;
         },

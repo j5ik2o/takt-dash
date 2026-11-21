@@ -20,7 +20,6 @@ mod resolve;
 mod run_content;
 mod run_detail;
 mod run_updates;
-mod workflow_progress;
 
 use std::{
   path::PathBuf,
@@ -215,7 +214,6 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
   for view in views {
     for run in &view.runs {
       runs.push(Run {
-        progress:                run.progress.as_ref().map(workflow_progress::progress),
         run_slug:                run.run_slug.clone(),
         session_id:              run.session_id.clone(),
         server_id:               view.server_id.clone(),
@@ -386,18 +384,10 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .or_else(|| target.view.tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())))
       .cloned();
     let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
-    // SSH 越しのサーバーのプロジェクトは、同名のローカル保存場所を使いません。保存場所を読まない
-    // 扱いにして takt_get_run の経路へ回します。
-    let (read, instructions) = if target.resolved.connection.is_ssh() {
-      (Err(RunReadFailure::NotListed), Ok(Vec::new()))
-    } else {
-      // 指示書も run の保存場所から読みます。保存場所を読めない run は takt_get_run から
-      // 読む経路へ回るため、失敗はここで確定させず、保存場所から読めた場合にだけ返します。
-      (
-        read_run(&run_logs, run_slug.clone()).await,
-        read_run_instructions(target.resolved.cwd.clone(), run_slug.clone()).await,
-      )
-    };
+    let read = read_run(&run_logs, run_slug.clone()).await;
+    // 指示書も run の保存場所から読みます。保存場所を読めない run は takt_get_run から
+    // 読む経路へ回るため、失敗はここで確定させず、保存場所から読めた場合にだけ返します。
+    let instructions = read_run_instructions(target.resolved.cwd.clone(), run_slug.clone()).await;
     let goal_id = stored_run
       .as_ref()
       .and_then(|run| run.goal_id.clone())
@@ -430,11 +420,6 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
           "run 詳細のために本体ログを読みました。"
         );
         let last_log_at = run_detail::fill_from_run_log(&mut response, &view, stored_task.as_ref());
-        {
-          let evidence = view.evidence.clone();
-          let mut source = self.read_source(&target.resolved);
-          run_detail::fill_progress(&mut response, &mut source, &target.resolved.cwd, &evidence).await;
-        }
         response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
       },
       // 掃除済みの worktree など、run の保存場所が残っていない run はエラーにせず、状態ストアの値と
@@ -489,15 +474,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     // GetRunDetail と同じ取っ手を使い、本体ログを前回の読み位置の続きから読む。
     let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
     let mut source = self.read_source(&target.resolved);
-    let response = read_updates_response(
-      &run_logs,
-      &mut source,
-      &target.resolved.cwd,
-      run_slug,
-      after,
-      target.resolved.connection.is_ssh(),
-    )
-    .await?;
+    let response = read_updates_response(&run_logs, &mut source, &target.resolved.cwd, run_slug, after).await?;
     Ok(Response::new(response))
   }
 

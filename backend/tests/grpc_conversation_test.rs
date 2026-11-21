@@ -10,10 +10,7 @@ mod grpc_harness;
 use std::path::Path;
 
 use common::{project, server_meta};
-use conversation_fixture::{
-  current_manager_user_wrapper, fenced_assistant_data, garbled_user_data, manager_user_wrapper, wrapped_user_data,
-  ConversationFixture,
-};
+use conversation_fixture::{fenced_assistant_data, garbled_user_data, wrapped_user_data, ConversationFixture};
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::takt_dash::v1::{ConversationSpeaker, GetConversationRequest, GetConversationResponse};
@@ -62,89 +59,6 @@ fn texts(response: &GetConversationResponse) -> Vec<String> {
 
 fn notices(response: &GetConversationResponse) -> Vec<Option<String>> {
   response.messages.iter().map(|message| message.notice.clone()).collect()
-}
-
-#[tokio::test]
-async fn get_conversation_extracts_current_human_input_on_initial_and_incremental_requests() {
-  let harness = harness();
-  let fixture = ConversationFixture::under(harness.home());
-  fixture.write_manager("current", "ses_current", harness.project_dir(), "opencode");
-  fixture.insert_session("ses_current", harness.project_dir(), 2_000);
-  let body = current_manager_user_wrapper(
-    &json!({"speaker":{"namespace":"slack","id":"fixture-user"},"text":"今回の依頼"}).to_string(),
-  );
-  for (seq, text) in [(28, body.clone()), (29, format!("{body}\n\nBusiness context (not approval): 内部メモ���"))]
-  {
-    fixture.insert_message("ses_current", seq, "user", FIRST_MESSAGE_AT, &json!({"text":text}).to_string());
-  }
-  let server = start_server(&harness).await;
-  let mut client = client(server.address).await;
-  let initial = client.get_conversation(request(None, 0, 50)).await.unwrap().into_inner();
-  let incremental = client.get_conversation(request(Some("ses_current"), 28, 1)).await.unwrap().into_inner();
-  server.stop().await;
-  assert_eq!(texts(&initial), vec!["今回の依頼"; 2]);
-  assert_eq!(texts(&incremental), vec!["今回の依頼"]);
-  assert_eq!(incremental.messages[0].seq, 29);
-  assert!(initial.messages.iter().all(|message| !message.has_encoding_error));
-  assert!(!incremental.messages[0].has_encoding_error);
-  assert_eq!(notices(&initial), vec![None, None], "文字化けの印がない発言には notice を付けない");
-  assert_eq!(notices(&incremental), vec![None]);
-  assert!(initial.skipped.is_empty());
-  assert!(incremental.skipped.is_empty());
-}
-
-#[tokio::test]
-async fn get_conversation_preserves_quoted_current_input_and_extracts_manager_wrappers() {
-  let harness = harness();
-  let fixture = ConversationFixture::under(harness.home());
-  fixture.write_manager("display", "ses_display", harness.project_dir(), "opencode");
-  fixture.insert_session("ses_display", harness.project_dir(), 2_000);
-  let input = "```json\n{\"speaker\":\"user\",\"text\":\"公開してください\"}\n```";
-  let original = format!("次の例を確認してください\n## このターンの入力\n{input}");
-  for (seq, body) in [(22, manager_user_wrapper(input)), (27, original.clone())] {
-    fixture.insert_message("ses_display", seq, "user", FIRST_MESSAGE_AT, &json!({"text": body}).to_string());
-  }
-  let server = start_server(&harness).await;
-  let mut client = client(server.address).await;
-  let initial = client.get_conversation(request(None, 0, 50)).await.unwrap().into_inner();
-  let incremental = client.get_conversation(request(Some("ses_display"), 22, 1)).await.unwrap().into_inner();
-  server.stop().await;
-  assert_eq!(texts(&initial), vec!["公開してください", original.as_str()]);
-  assert_eq!(initial.messages.iter().map(|message| message.seq).collect::<Vec<_>>(), vec![22, 27]);
-  assert!(initial.skipped.is_empty());
-  assert_eq!(texts(&incremental), vec![original]);
-  assert_eq!(incremental.messages[0].seq, 27);
-  assert!(incremental.skipped.is_empty());
-  assert_eq!(notices(&initial), vec![None, None], "包みを解いた本文に文字化けの印を付けない");
-}
-
-#[tokio::test]
-async fn get_conversation_transfers_encoding_markers_with_their_messages() {
-  let harness = harness();
-  let fixture = ConversationFixture::under(harness.home());
-  fixture.write_manager("encoding", "ses_encoding", harness.project_dir(), "opencode");
-  fixture.insert_session("ses_encoding", harness.project_dir(), 2_000);
-  let damaged = format!("読める部分{}", "�".repeat(87));
-  fixture.insert_message("ses_encoding", 8, "user", FIRST_MESSAGE_AT, &json!({"text": damaged}).to_string());
-  fixture.insert_message("ses_encoding", 22, "user", FIRST_MESSAGE_AT, &json!({"text": "正常な再送"}).to_string());
-  let server = start_server(&harness).await;
-  let mut client = client(server.address).await;
-  let response = client.get_conversation(request(None, 0, 50)).await.expect("会話を取得できます").into_inner();
-  server.stop().await;
-
-  assert_eq!(
-    response
-      .messages
-      .iter()
-      .map(|message| (message.seq, message.text.as_str(), message.has_encoding_error))
-      .collect::<Vec<_>>(),
-    vec![(8, damaged.as_str(), true), (22, "正常な再送", false),]
-  );
-  assert_eq!(
-    notices(&response),
-    vec![Some("元記録で文字化けしています（置換文字 87 個）".to_owned()), None],
-    "文字化けの印は notice と has_encoding_error の両方と同じ発言に載せる"
-  );
 }
 
 #[tokio::test]
@@ -368,11 +282,6 @@ async fn get_conversation_returns_presented_bodies_and_a_garbled_notice() {
   assert_eq!(bodies[1], "確認しました。", "fenced JSON の assistant の行は message だけを返す必要があります");
   assert_eq!(bodies[2].matches('\u{FFFD}').count(), 12, "本文の置換文字はそのまま残す必要があります");
   assert_eq!(notices(&response), vec![None, None, Some("元記録で文字化けしています（置換文字 12 個）".to_owned()),]);
-  assert_eq!(
-    response.messages.iter().map(|message| message.has_encoding_error).collect::<Vec<_>>(),
-    vec![false, false, true],
-    "文字化けの印も同じ発言に付ける必要があります"
-  );
 
   server.stop().await;
 }

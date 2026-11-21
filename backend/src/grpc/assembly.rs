@@ -91,13 +91,11 @@ pub(super) fn assemble_goals(views: &[model::ProjectView]) -> Vec<v1::Goal> {
         .rev()
         .find(|task| task.goal_id.as_ref() == Some(&goal.goal_id))
         .map(|task| task_status(task.status) as i32);
-      let (name, name_truncated) = goal_name_preview(goal);
       goals.push(v1::Goal {
         goal_id: goal.goal_id.as_str().to_owned(),
         server_id: view.server_id.clone(),
         project: view.name.clone(),
-        name: name.to_owned(),
-        name_truncated,
+        name: goal.objective.clone(),
         status: goal_status(goal.status) as i32,
         execution_status: execution_status(goal.execution_status) as i32,
         task_counts: Some(task_status_counts(&goal_tasks)),
@@ -112,15 +110,6 @@ pub(super) fn assemble_goals(views: &[model::ProjectView]) -> Vec<v1::Goal> {
     }
   }
   goals
-}
-
-fn goal_name_preview(goal: &model::GoalEntry) -> (&str, bool) {
-  const PREVIEW_BYTE_LIMIT: usize = 256;
-  let mut end = goal.objective.len().min(PREVIEW_BYTE_LIMIT);
-  while !goal.objective.is_char_boundary(end) {
-    end -= 1;
-  }
-  (&goal.objective[..end], end < goal.objective.len() || goal.objective_truncated)
 }
 
 fn task_status_counts(tasks: &[&TaskEntry]) -> TaskStatusCounts {
@@ -200,12 +189,11 @@ pub(super) fn conversation_response(page: ConversationPage) -> GetConversationRe
       .messages
       .into_iter()
       .map(|message| v1::ConversationMessage {
-        seq:                message.seq,
-        occurred_at:        Some(timestamp(message.occurred_at)),
-        speaker:            conversation_speaker(message.speaker) as i32,
-        text:               message.text,
-        notice:             message.notice,
-        has_encoding_error: message.has_encoding_error,
+        seq:         message.seq,
+        occurred_at: Some(timestamp(message.occurred_at)),
+        speaker:     conversation_speaker(message.speaker) as i32,
+        text:        message.text,
+        notice:      message.notice,
       })
       .collect(),
     next_after_seq:     page.next_after_seq,
@@ -245,36 +233,5 @@ pub(super) fn assemble_state_for(
       run_log_silent_minutes:         thresholds.run_log_silent_minutes.get(),
     }),
     build_info:        Some(crate::build_info::current()),
-  }
-}
-
-#[cfg(test)]
-mod preview_tests {
-  use super::goal_name_preview;
-  use crate::{
-    domain::GoalId,
-    model::{ExecutionStatus, GoalEntry, GoalStatus},
-  };
-
-  #[test]
-  fn preview_and_source_omission_have_separate_ownership() {
-    let mut goal = GoalEntry {
-      goal_id:             GoalId::try_from("g1").expect("有効なIDです"),
-      status:              GoalStatus::Created,
-      execution_status:    ExecutionStatus::Active,
-      objective:           format!("{}あ", "a".repeat(255)),
-      objective_truncated: false,
-      integration_branch:  String::new(),
-      pull_request_number: None,
-      pull_request_url:    None,
-      awaiting_merge_at:   None,
-      paused_reason:       None,
-    };
-    assert_eq!(goal_name_preview(&goal), ("a".repeat(255).as_str(), true));
-    assert_eq!(goal.objective_display(), goal.objective);
-    goal.objective = "確認。".to_owned();
-    goal.objective_truncated = true;
-    assert_eq!(goal_name_preview(&goal), ("確認。", true));
-    assert_eq!(goal.objective_display(), "確認。…");
   }
 }

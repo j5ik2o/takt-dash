@@ -102,14 +102,6 @@ pub(crate) fn render_overview(state: &DashboardState) -> Result<String, domain::
   ))
 }
 
-fn goal_display_name(goal: &Goal) -> String {
-  if goal.name_truncated {
-    format!("{}…", goal.name)
-  } else {
-    goal.name.clone()
-  }
-}
-
 /// ゴール1件の表示行を作る。プロジェクト名・ゴール ID・件数を検証済みの型へ通す。
 fn render_goal_line(goal: &proto::v1::Goal) -> Result<String, domain::DomainError> {
   let project = ProjectName::try_from(goal.project.as_str())?;
@@ -121,7 +113,7 @@ fn render_goal_line(goal: &proto::v1::Goal) -> Result<String, domain::DomainErro
   let running = TaskCount::try_from(counts.running)?;
   Ok(format!(
     "- {project}/{goal_id}「{}」完了{completed}件・失敗{failed}件（未着手{pending}件・実行中{running}件）",
-    goal_display_name(goal)
+    goal.name
   ))
 }
 
@@ -154,7 +146,7 @@ fn decision_label(decision_type: PendingDecisionType, inquiry_kind: i32) -> Resu
 /// 会話の表示内容を日本語の文字列へ組み立てる。
 ///
 /// 発言は seq の昇順に並べ、発話者・時刻・本文を出す。unavailable_reason は会話が無い理由、
-/// skipped は理由と件数として表示する。
+/// skipped は理由と件数として表示する。notice は本文の行に続けて注意書きとして表示する。
 pub(crate) fn render_conversation(response: &GetConversationResponse) -> Result<String, domain::DomainError> {
   let project = ProjectName::try_from(response.project.as_str())?;
   let mut lines = vec![
@@ -177,14 +169,17 @@ pub(crate) fn render_conversation(response: &GetConversationResponse) -> Result<
       lines.push("（会話はありません）".to_owned());
     }
   } else {
-    lines.extend(messages.iter().map(|message| {
-      format!(
+    for message in &messages {
+      lines.push(format!(
         "- [{}] {}: {}",
         format_timestamp(message.occurred_at.as_ref()),
         conversation_speaker_label(message.speaker),
         message.text
-      )
-    }));
+      ));
+      if let Some(notice) = message.notice.as_deref() {
+        lines.push(format!("  注意: {notice}"));
+      }
+    }
   }
   Ok(lines.join("\n"))
 }
@@ -293,7 +288,7 @@ fn render_goal_row(goal: &Goal) -> String {
     goal.server_id,
     goal.project,
     goal.goal_id,
-    goal_display_name(goal),
+    goal.name,
     goal_status_label(goal.status),
     execution_status_label(goal.execution_status),
     counts.completed,

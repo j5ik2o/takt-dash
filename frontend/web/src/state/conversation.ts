@@ -13,7 +13,6 @@ export type ConversationMessageView = {
   speaker: number;
   text: string;
   notice?: string;
-  hasEncodingError: boolean;
 };
 
 export type ConversationSkippedView = {
@@ -84,7 +83,6 @@ const toMessage = (raw: Record<string, unknown>): ConversationMessageView => ({
   speaker: enumFromWireOrUnrecognizedName("ConversationSpeaker", raw.speaker),
   text: String(raw.text ?? ""),
   notice: typeof raw.notice === "string" ? raw.notice : undefined,
-  hasEncodingError: raw.hasEncodingError === true,
 });
 
 const toSkipped = (raw: Record<string, unknown>): ConversationSkippedView => ({

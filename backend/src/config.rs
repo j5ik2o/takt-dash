@@ -43,6 +43,13 @@ pub const DEFAULT_SCREEN_READ_LANES: u32 = 1;
 /// 画面読み取りレーンの本数の上限（プロジェクトごと）。子プロセスの増加を抑えるため、
 /// 設定値がこれを超える場合は上限へ丸めます。
 pub const MAX_SCREEN_READ_LANES: u32 = ScreenReadLanes::MAX;
+/// 中止済みのマージ待ちゴールを、閉じた PR の確認後に自動終了する既定値。
+pub const DEFAULT_AUTO_TERMINATE_CLOSED_GOALS: bool = true;
+
+/// `autoTerminateClosedGoals` を省略したときの既定値（true）。
+fn default_true() -> bool {
+  DEFAULT_AUTO_TERMINATE_CLOSED_GOALS
+}
 
 /// 設定ファイルの読み込みと検証で起きる失敗。
 #[derive(Debug, thiserror::Error)]
@@ -58,16 +65,21 @@ pub enum ConfigError {
 /// 検証済みの接続設定。相対パスは読み込み時に絶対パスへ解決済みです。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-  pub servers:           BTreeMap<String, McpServer>,
-  pub server_meta:       BTreeMap<String, ServerMeta>,
-  pub projects:          Vec<Project>,
-  pub interval_seconds:  u64,
+  pub servers: BTreeMap<String, McpServer>,
+  pub server_meta: BTreeMap<String, ServerMeta>,
+  pub projects: Vec<Project>,
+  pub interval_seconds: u64,
   /// 画面からの読み取りに使う takt-mcp 接続レーンの本数（プロジェクトごと、1〜3）。
   pub screen_read_lanes: ScreenReadLanes,
-  pub thresholds:        Thresholds,
-  pub sqlite_path:       PathBuf,
+  pub thresholds: Thresholds,
+  pub sqlite_path: PathBuf,
   /// gRPC サーバーの待ち受けアドレス。設定の境界で SocketAddr へ解決済みです。
-  pub listen:            SocketAddr,
+  pub listen: SocketAddr,
+  /// 中止済みのマージ待ちゴールを、PR が閉じていると確認できたとき自動終了するかどうか。
+  pub auto_terminate_closed_goals: bool,
+  /// manager 用の stdio エントリの id（`manager: true` を付けたエントリ）。複数ある場合は
+  /// サーバー id 順の先頭を使います。未設定なら None で、終了依頼は行いません。
+  pub manager_server: Option<String>,
 }
 
 /// takt-mcp への接続方法。stdio は子プロセスを起動する起動方法、http は常駐サーバーの接続先です。
@@ -94,25 +106,15 @@ pub enum McpConnection {
   Http(HttpMcpServer),
 }
 
-impl McpConnection {
-  /// SSH 越しに子プロセスを起動する接続か。コマンドの実行ファイル名が `ssh` のとき SSH
-  /// とみなします。
-  pub fn is_ssh(&self) -> bool {
-    match self {
-      | McpConnection::Stdio(server) => {
-        std::path::Path::new(&server.command).file_name().and_then(|name| name.to_str()) == Some("ssh")
-      },
-      | McpConnection::Http(_) => false,
-    }
-  }
-}
-
 /// 子プロセスとして起動する takt-mcp の起動方法。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdioMcpServer {
   pub command: String,
   pub args:    Vec<String>,
   pub env:     BTreeMap<String, String>,
+  /// manager 用の接続かどうか。真のエントリだけが終了依頼（`takt_finish_goal`）の投函先に
+  /// なります。読み取り・書き込みのレーンはこの値を使いません。
+  pub manager: bool,
 }
 
 /// 常駐する takt-mcp の HTTP サーバーへの接続先。読み取り専用の読み取り経路がこれを使います。
@@ -215,20 +217,22 @@ pub struct Thresholds {
 #[derive(Debug, Deserialize)]
 struct RawConfig {
   #[serde(rename = "mcpServers", default)]
-  mcp_servers:       BTreeMap<String, RawMcpServer>,
+  mcp_servers: BTreeMap<String, RawMcpServer>,
   #[serde(default)]
-  servers:           BTreeMap<String, RawServerMeta>,
+  servers: BTreeMap<String, RawServerMeta>,
   #[serde(default)]
-  projects:          Vec<RawProject>,
+  projects: Vec<RawProject>,
   #[serde(rename = "intervalSeconds")]
-  interval_seconds:  Option<u64>,
+  interval_seconds: Option<u64>,
   #[serde(rename = "screenReadLanes")]
   screen_read_lanes: Option<u32>,
   #[serde(default)]
-  thresholds:        RawThresholds,
+  thresholds: RawThresholds,
   #[serde(default)]
-  sqlite:            RawSqlite,
-  listen:            Option<String>,
+  sqlite: RawSqlite,
+  listen: Option<String>,
+  #[serde(rename = "autoTerminateClosedGoals", default = "default_true")]
+  auto_terminate_closed_goals: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,6 +247,8 @@ struct RawMcpServer {
   url:     Option<String>,
   #[serde(default)]
   headers: BTreeMap<String, String>,
+  /// manager 用の接続であることを示す任意項目。stdio に限り真にできます。
+  manager: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -613,7 +619,24 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
   let listen = listen_raw.parse::<SocketAddr>().map_err(|error| {
     ConfigError::Invalid(format!("listen {listen_raw} を待ち受けアドレスとして解釈できませんでした: {error}"))
   })?;
-  Ok(Config { servers, server_meta, projects, interval_seconds, screen_read_lanes, thresholds, sqlite_path, listen })
+  // manager 用エントリは stdio に限り、複数指定した場合はサーバー ID 順の先頭を使います。
+  // サーバー ID の地図が BTreeMap なので、最初に見つかったものが ID 順の先頭になります。
+  let manager_server = servers.iter().find_map(|(id, server)| match server {
+    | McpServer::Stdio(stdio) if stdio.manager => Some(id.clone()),
+    | _ => None,
+  });
+  Ok(Config {
+    servers,
+    server_meta,
+    projects,
+    interval_seconds,
+    screen_read_lanes,
+    thresholds,
+    sqlite_path,
+    listen,
+    auto_terminate_closed_goals: raw.auto_terminate_closed_goals,
+    manager_server,
+  })
 }
 
 /// 1 件の mcpServers のエントリを、stdio 起動方法か HTTP 接続先のどちらかへ解決する。
@@ -624,6 +647,11 @@ pub fn parse_config(text: &str, base_dir: &Path) -> Result<Config, ConfigError> 
 fn resolve_mcp_server(id: &str, server: RawMcpServer) -> Result<McpServer, ConfigError> {
   let is_http = matches!(server.kind.as_deref(), Some("http"));
   if is_http {
+    if server.manager == Some(true) {
+      return Err(ConfigError::Invalid(format!(
+        "サーバー {id} は manager: true と type: http を同時に指定できません。manager 用エントリは stdio の起動方法に限ります。"
+      )));
+    }
     let url =
       server.url.ok_or_else(|| ConfigError::Invalid(format!("サーバー {id} の type: http には url が必須です。")))?;
     let endpoint = HttpServerEndpoint::try_from(url.as_str())?;
@@ -640,7 +668,12 @@ fn resolve_mcp_server(id: &str, server: RawMcpServer) -> Result<McpServer, Confi
   let command = server.command.ok_or_else(|| {
     ConfigError::Invalid(format!("サーバー {id} の command がありません。stdio の起動方法には command が必須です。"))
   })?;
-  Ok(McpServer::Stdio(StdioMcpServer { command, args: server.args, env: server.env }))
+  Ok(McpServer::Stdio(StdioMcpServer {
+    command,
+    args: server.args,
+    env: server.env,
+    manager: server.manager == Some(true),
+  }))
 }
 
 fn validate_server_id(id: &str) -> Result<(), ConfigError> {

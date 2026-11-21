@@ -7,7 +7,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as grpc from "@grpc/grpc-js";
-import { JSDOM } from "jsdom";
 import { createRunDetailResponse } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
 import { closeBackendClient } from "../../src/grpc/client.ts";
@@ -54,34 +53,6 @@ test("run 詳細ページは slug 付き params で本番経路を通り、メ�
     assert.match(html, /review\.md/);
     assert.match(html, /#7/);
     assert.match(html, /implement/);
-  } finally {
-    await server.shutdown();
-  }
-});
-
-test("今のステップの回数には全体の iteration ではなく backend のステップ実行回数を表示する", async () => {
-  const response = {
-    ...createRunDetailResponse("run-aaa"),
-    currentIteration: 9,
-    currentStepExecutionCount: 3,
-  };
-  const server = await startTaktDashServer({ runDetail: response });
-  try {
-    const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
-    const dom = new JSDOM(html);
-    try {
-      const summary = dom.window.document.querySelector('section[aria-label="run の要約"]');
-      assert.ok(summary, "run の要約を表示します");
-      const current = [...summary.querySelectorAll(".f")].find(
-        (field) => field.querySelector(".k")?.textContent === "今のステップ",
-      );
-      assert.ok(current, "今のステップを表示します");
-      assert.match(current.textContent ?? "", /implement/);
-      assert.match(current.textContent ?? "", /3\s*回目/);
-      assert.doesNotMatch(current.textContent ?? "", /9\s*回目/);
-    } finally {
-      dom.window.close();
-    }
   } finally {
     await server.shutdown();
   }

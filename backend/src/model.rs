@@ -128,8 +128,6 @@ pub struct GoalEntry {
   pub status:              GoalStatus,
   pub execution_status:    ExecutionStatus,
   pub objective:           String,
-  /// 受信前に objective の続きが省略されているか。
-  pub objective_truncated: bool,
   pub integration_branch:  String,
   pub pull_request_number: Option<PullRequestNumber>,
   pub pull_request_url:    Option<String>,
@@ -152,16 +150,6 @@ pub struct TaskEntry {
   pub current_step:    Option<String>,
   /// ゴールの仕上げタスクかどうか。
   pub merge_task:      bool,
-}
-
-impl GoalEntry {
-  pub(crate) fn objective_display(&self) -> String {
-    if self.objective_truncated {
-      format!("{}…", self.objective)
-    } else {
-      self.objective.clone()
-    }
-  }
 }
 
 /// takt_get_goal から得たゴールの詳細。
@@ -297,7 +285,6 @@ pub struct ReportEntry {
 /// 実行中の run の情報。状態とステップの記録は run の保存場所から読みます。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunEntry {
-  pub progress:                Option<crate::workflow_progress::WorkflowProgress>,
   pub run_slug:                String,
   pub session_id:              String,
   pub task_name:               TaskName,

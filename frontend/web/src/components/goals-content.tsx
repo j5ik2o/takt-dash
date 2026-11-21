@@ -77,8 +77,8 @@ export function GoalsContent({ state, snapshotLoaded, project, disconnected, una
         <ul className="cards">
           {goals.map((goal) => {
             const counts = countEntries(goal);
-            const heading = goalListHeading(goal.name, goal.nameTruncated);
-            const fullName = goalDisplayName(goal.name, goal.nameTruncated);
+            const heading = goalListHeading(goal.name);
+            const fullName = goalDisplayName(goal.name);
             return (
               <li className="card" key={goal.goalId}>
                 <div className="card-head goal-card-head">
@@ -89,7 +89,7 @@ export function GoalsContent({ state, snapshotLoaded, project, disconnected, una
                 </div>
                 {fullName !== heading ? (
                   <details className="goal-full">
-                    <summary>{goal.nameTruncated ? "ゴールの目的の一部を表示します。" : "ゴールの目的の全文を表示します。"}</summary>
+                    <summary>ゴールの目的の全文を表示します。</summary>
                     <p className="goal-text">{fullName}</p>
                   </details>
                 ) : null}
@@ -117,7 +117,6 @@ export function GoalsContent({ state, snapshotLoaded, project, disconnected, una
               </li>
             );
           })}
-
         </ul>
       )}
     </main>

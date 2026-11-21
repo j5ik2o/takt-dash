@@ -253,7 +253,7 @@ test("run の行はゴール・ステップ・経過・状態をそれぞれの�
   assert.match(goal, /採用ページのレイアウトを直す/, "ゴールの列にゴール名を出す");
   assert.match(normalize(textOf(row)), /タスク「レイアウトを直しています。」/, "run の行にタスクの要約を出す");
   assert.match(step, /ステップ\s*<b>implement<\/b>/, "ステップの列に今のステップ名を出す");
-  assert.match(normalize(textOf(step)), /2\/4/, "ステップの列に背骨の位置を出す");
+  assert.match(normalize(textOf(step)), /5 ステップ中 2 つ目/, "ステップの列に位置を出す");
   assert.doesNotMatch(goal, /implement|ステップ中/, "ゴールの列にステップの表示を混ぜない");
   assert.match(elapsed, /最後のログは 1分前/, "経過の列に最後のログからの経過を出す");
   assert.match(status, /class="st live"/, "状態の列に状態のラベルを出す");
@@ -271,7 +271,7 @@ test("run の表のゴールの列は、切り詰められた preview のゴー�
   const base = createDashboardState();
   const truncated = DashboardState.create({
     ...base,
-    goals: base.goals.map((goal) => (goal.goalId === "goal-1" ? { ...goal, name: TRUNCATED_PREVIEW, nameTruncated: true } : goal)),
+    goals: base.goals.map((goal) => (goal.goalId === "goal-1" ? { ...goal, name: TRUNCATED_PREVIEW } : goal)),
   });
   const truncatedSection = runsSection(renderOverview(truncated));
   const truncatedRow = runRows(truncatedSection)[0];

@@ -16,7 +16,6 @@ import {
 import { formatDateTime } from "../../src/state/format.ts";
 import { restoreConversationResponse, type ConversationPage } from "../../src/state/conversation.ts";
 import { ConversationContent } from "../../src/components/conversation-content.tsx";
-import { JSDOM } from "jsdom";
 
 const restore = (overrides: Parameters<typeof createConversationResponse>[0] = {}): ConversationPage =>
   restoreConversationResponse(GetConversationResponse.toJSON(createConversationResponse(overrides)));
@@ -119,30 +118,6 @@ test("会話の表示は送信・返信の操作要素を持たない", () => {
   assert.doesNotMatch(html, /送信/);
 });
 
-test("文字化けの印を復元し、該当する発言だけに説明を添えて本文を保持する", () => {
-  const [user, manager] = createConversationMessages();
-  assert.ok(user && manager);
-  const damaged = `読める部分${"�".repeat(87)}`;
-  const messages = [
-    { ...user, seq: 8, text: damaged, hasEncodingError: true },
-    { ...user, seq: 22, text: "正常な再送", hasEncodingError: false },
-    { ...manager, seq: 23, text: "公開しました", hasEncodingError: false },
-  ];
-  const document = new JSDOM(render(restore({ messages }))).window.document;
-  const rows = [...document.querySelectorAll("ol.conversation > li")];
-  const row = (seq: number): Element => {
-    const found = rows.find((item) => item.querySelector(".conversation-seq")?.textContent === `seq ${seq}`);
-    assert.ok(found, `seq ${seq} の発言を描画する`);
-    return found;
-  };
-  assert.equal(row(8).querySelector(".conversation-text")?.textContent, damaged);
-  assert.ok(row(8).textContent?.includes("元の記録に文字化けがあります。"));
-  assert.equal(row(22).querySelector(".conversation-text")?.textContent, "正常な再送");
-  assert.ok(!row(22).textContent?.includes("元の記録に文字化けがあります。"));
-  assert.equal(row(23).querySelector(".conversation-text")?.textContent, "公開しました");
-  assert.ok(!row(23).textContent?.includes("元の記録に文字化けがあります。"));
-});
-
 test("元記録の文字化けの印を本文と一緒に描画する", () => {
   const garbled = createGarbledConversationMessage();
   const html = render(restore({ messages: [garbled] }));
@@ -151,29 +126,8 @@ test("元記録の文字化けの印を本文と一緒に描画する", () => {
   assert.ok(html.includes(garbled.text), "本文は変えずに描画する");
 });
 
-test("注意書きは本文の前に専用クラスと読み上げ対象として1つだけ表示する", () => {
-  const garbled = createGarbledConversationMessage();
-  assert.equal(garbled.hasEncodingError, true, "同時保持入力を観測する");
-  const document = new JSDOM(render(restore({ messages: [garbled] }))).window.document;
-  const row = document.querySelector("ol.conversation > li");
-  assert.ok(row);
-
-  const notices = [...row.querySelectorAll(".conversation-notice")];
-  assert.equal(notices.length, 1, "同時保持入力でも注意書きは1つだけ出す");
-  assert.equal(notices[0]!.getAttribute("role"), "note", "読み上げ対象にする");
-  assert.equal(notices[0]!.textContent, garbled.notice, "文言と個数はサーバー値のまま使う");
-
-  const children = [...row.children];
-  assert.ok(
-    children.indexOf(notices[0]!) < children.findIndex((child) => child.classList.contains("conversation-text")),
-    "注意書きは本文より前に置く",
-  );
-  assert.ok(!row.textContent?.includes("元の記録に文字化けがあります。"), "定型文を重ねて出さない");
-});
-
 test("印のない発言には文字化けの印を描画しない", () => {
   const html = render(restore());
 
   assert.doesNotMatch(html, /元記録で文字化けしています/);
 });
-
