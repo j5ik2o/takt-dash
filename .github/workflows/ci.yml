@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 jobs:
   done:
@@ -47,6 +48,26 @@ jobs:
           version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: make e2e
+
+  required-ci:
+    name: takt-dash required CI
+    needs: [done, e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Reject workflow cancellation
+        if: ${{ cancelled() }}
+        run: exit 1
+      - name: Require all blocking jobs to succeed
+        env:
+          DONE_RESULT: ${{ needs.done.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+        run: |
+          printf 'done=%s e2e=%s\n' "$DONE_RESULT" "$E2E_RESULT"
+          if [[ "$DONE_RESULT" != success || "$E2E_RESULT" != success ]]; then
+            exit 1
+          fi
 
   coverage:
     runs-on: ubuntu-latest
