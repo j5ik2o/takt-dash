@@ -13,6 +13,16 @@
       "headers": {
         "Authorization": "Bearer your-http-token-dummy"
       }
+    },
+    "mac-mini-manager": {
+      "command": "node",
+      "args": [
+        "/Users/you/local/takt-custom/dist/app/mcp/index.js",
+        "--tool-set",
+        "manager"
+      ],
+      "env": {},
+      "manager": true
     }
   },
   "servers": {
@@ -55,5 +65,6 @@
   },
   "sqlite": {
     "path": "data/taktdash.sqlite"
-  }
+  },
+  "autoTerminateClosedGoals": true
 }
