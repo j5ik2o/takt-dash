@@ -9,6 +9,7 @@ import { OPERATION_ANSWER_REPORT } from "../state/proto-values";
 import {
   INITIAL_DECISION_DIALOG_STATE,
   decisionActionState,
+  decisionTargetDescription,
   decisionTargetLabel,
   openDecisionDialogState,
   resolveDecisionIntent,
@@ -331,10 +332,22 @@ function buildConfirmDialogs(
   ];
 }
 
+// 一覧に同じ操作名のボタンが複数並んでも、読み上げだけで操作と対象の対応が取れるよう、
+// 対象の説明をボタン外の要素に置き、各ボタンから aria-describedby で参照する。
+// ボタンの読み上げ名は操作の文言だけにする（issue #324、候補1を採用）。
+function DecisionTargetDescription({ id, targetLabel }: { id: string; targetLabel: string }): ReactElement {
+  return (
+    <span id={id} className="visually-hidden">
+      対象: {targetLabel}
+    </span>
+  );
+}
+
 type DialogActionSectionProps = {
   triggers: DialogTrigger[];
   configs: ConfirmDialogConfig[];
   active: DialogKind | null;
+  descriptionId: string;
   targetLabel: string;
   busy: boolean;
   triggerRefs: RefObject<Record<DialogKind, HTMLButtonElement | null>>;
@@ -342,11 +355,12 @@ type DialogActionSectionProps = {
 };
 
 // 確認ダイアログを開くトリガー群と、いま開いている種別のダイアログをまとめて描画する。
-// 対象の識別子を含む aria-label と、種別ごとの見出し・本文・確定ボタン名が同じ形で並ぶ。
+// ボタン名は操作の文言だけにし、対象の識別子は aria-describedby で補う。
 function DialogActionSection({
   triggers,
   configs,
   active,
+  descriptionId,
   targetLabel,
   busy,
   triggerRefs,
@@ -355,6 +369,7 @@ function DialogActionSection({
   const current = configs.find((config) => config.dialog === active);
   return (
     <div className="actions">
+      <DecisionTargetDescription id={descriptionId} targetLabel={targetLabel} />
       {triggers.map(({ dialog, label }) => (
         <button
           key={dialog}
@@ -363,7 +378,8 @@ function DialogActionSection({
           ref={(element) => {
             triggerRefs.current[dialog] = element;
           }}
-          aria-label={`${label}（${targetLabel}）`}
+          aria-label={label}
+          aria-describedby={descriptionId}
           onClick={() => onAction({ type: "open", dialog })}
         >
           {label}
@@ -394,6 +410,12 @@ export function DecisionActionsView({
 }: DecisionActionsViewProps): ReactElement {
   const state = decisionActionState(decision);
   const targetLabel = decisionTargetLabel(decision);
+  // 操作ボタンの説明要素に出す文面。項目内にサーバーの ID も表示名も出さない既存契約に合わせ、
+  // 対象の識別に必要な情報だけを含める。
+  const descriptionLabel = decisionTargetDescription(decision);
+  // この項目の操作ボタンが参照する宛先の識別子。項目ごとに一意になり、同名ボタンが
+  // 複数並んでも各ボタンが自分の項目の対象説明だけを参照する。
+  const descriptionId = useId();
 
   // ダイアログを開いたトリガーを覚えておき、閉じたときにフォーカスを戻す。
   // 送信中はトリガーが無効なので、復帰は busy の解除まで待つ。
@@ -436,12 +458,14 @@ export function DecisionActionsView({
     case "question-options":
       return (
         <div className="actions">
+          <DecisionTargetDescription id={descriptionId} targetLabel={descriptionLabel} />
           {state.options.map((option) => (
             <button
               key={option}
               type="button"
               disabled={busy}
-              aria-label={`${option}（${targetLabel}）`}
+              aria-label={option}
+              aria-describedby={descriptionId}
               onClick={() => onAction({ type: "answer-option", option })}
             >
               {option}
@@ -459,6 +483,7 @@ export function DecisionActionsView({
             onAction({ type: "answer-text" });
           }}
         >
+          <DecisionTargetDescription id={descriptionId} targetLabel={descriptionLabel} />
           <input
             type="text"
             value={text}
@@ -469,7 +494,8 @@ export function DecisionActionsView({
           <button
             type="submit"
             disabled={busy || text.trim() === ""}
-            aria-label={`回答する（${targetLabel}）`}
+            aria-label="回答する"
+            aria-describedby={descriptionId}
           >
             回答する
           </button>
@@ -479,10 +505,12 @@ export function DecisionActionsView({
     case "operation":
       return (
         <div className="actions">
+          <DecisionTargetDescription id={descriptionId} targetLabel={descriptionLabel} />
           <button
             type="button"
             disabled={busy}
-            aria-label={`実施した（${targetLabel}）`}
+            aria-label="実施した"
+            aria-describedby={descriptionId}
             onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.COMPLETED })}
           >
             実施した
@@ -490,7 +518,8 @@ export function DecisionActionsView({
           <button
             type="button"
             disabled={busy}
-            aria-label={`対応できない（${targetLabel}）`}
+            aria-label="対応できない"
+            aria-describedby={descriptionId}
             onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.UNABLE })}
           >
             対応できない
@@ -504,7 +533,8 @@ export function DecisionActionsView({
           triggers={DIALOG_TRIGGERS.merge}
           configs={buildConfirmDialogs("merge", decision, dialogTarget)}
           active={dialog}
-          targetLabel={targetLabel}
+          descriptionId={descriptionId}
+          targetLabel={descriptionLabel}
           busy={busy}
           triggerRefs={triggerRefs}
           onAction={onAction}
@@ -517,7 +547,8 @@ export function DecisionActionsView({
           triggers={DIALOG_TRIGGERS.goalRegistration}
           configs={buildConfirmDialogs("goal-registration", decision, dialogTarget)}
           active={dialog}
-          targetLabel={targetLabel}
+          descriptionId={descriptionId}
+          targetLabel={descriptionLabel}
           busy={busy}
           triggerRefs={triggerRefs}
           onAction={onAction}

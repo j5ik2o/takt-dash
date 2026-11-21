@@ -1126,6 +1126,19 @@ ol.log-tail li {
   font-weight: 600;
 }
 
+/* 読み上げには残し、画面には出さない。対象の説明を読み上げ名とは別に補うために使う。 */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* 判断待ちの操作 UI。ボタンと入力は折り返し、ダイアログは画面中央に重ねる。 */
 .actions {
   display: flex;
