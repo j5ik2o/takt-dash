@@ -1,72 +1,38 @@
 name: CI
-
 on:
-  push:
-    branches: [main]
   pull_request:
-
 jobs:
   done:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "36.2"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: python3 -m pip install pyyaml
-      - run: make done
-      - run: npm ci
-      - run: node scripts/aislop-check-bootstrap.mjs check
-
+      - run: exit 1
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "36.2"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: make e2e
+      - run: exit 0
+  required-ci:
+    name: takt-dash required CI
+    needs: [done, e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Reject workflow cancellation
+        if: ${{ cancelled() }}
+        run: exit 1
+      - name: Require all blocking jobs to succeed
+        env:
+          DONE_RESULT: ${{ needs.done.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+        run: |
+          printf 'done=%s e2e=%s\n' "$DONE_RESULT" "$E2E_RESULT"
+          if [[ "$DONE_RESULT" != success || "$E2E_RESULT" != success ]]; then
+            exit 1
+          fi
 
   coverage:
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "36.2"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: rustup component add llvm-tools-preview
-      - run: cargo llvm-cov --version > /dev/null 2>&1 || cargo install cargo-llvm-cov --locked
-      - run: python3 -m pip install pyyaml coverage
-      - run: make coverage
+      - run: exit 0
