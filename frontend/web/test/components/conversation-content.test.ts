@@ -8,7 +8,11 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { GetConversationResponse } from "../../src/proto/taktdash.ts";
-import { createConversationMessages, createConversationResponse } from "../support/fixtures.ts";
+import {
+  createConversationMessages,
+  createConversationResponse,
+  createGarbledConversationMessage,
+} from "../support/fixtures.ts";
 import { formatDateTime } from "../../src/state/format.ts";
 import { restoreConversationResponse, type ConversationPage } from "../../src/state/conversation.ts";
 import { ConversationContent } from "../../src/components/conversation-content.tsx";
@@ -138,3 +142,38 @@ test("文字化けの印を復元し、該当する発言だけに説明を添�
   assert.equal(row(23).querySelector(".conversation-text")?.textContent, "公開しました");
   assert.ok(!row(23).textContent?.includes("元の記録に文字化けがあります。"));
 });
+
+test("元記録の文字化けの印を本文と一緒に描画する", () => {
+  const garbled = createGarbledConversationMessage();
+  const html = render(restore({ messages: [garbled] }));
+
+  assert.ok(html.includes(garbled.notice!), "印を本文と一緒に描画する");
+  assert.ok(html.includes(garbled.text), "本文は変えずに描画する");
+});
+
+test("注意書きは本文の前に専用クラスと読み上げ対象として1つだけ表示する", () => {
+  const garbled = createGarbledConversationMessage();
+  assert.equal(garbled.hasEncodingError, true, "同時保持入力を観測する");
+  const document = new JSDOM(render(restore({ messages: [garbled] }))).window.document;
+  const row = document.querySelector("ol.conversation > li");
+  assert.ok(row);
+
+  const notices = [...row.querySelectorAll(".conversation-notice")];
+  assert.equal(notices.length, 1, "同時保持入力でも注意書きは1つだけ出す");
+  assert.equal(notices[0]!.getAttribute("role"), "note", "読み上げ対象にする");
+  assert.equal(notices[0]!.textContent, garbled.notice, "文言と個数はサーバー値のまま使う");
+
+  const children = [...row.children];
+  assert.ok(
+    children.indexOf(notices[0]!) < children.findIndex((child) => child.classList.contains("conversation-text")),
+    "注意書きは本文より前に置く",
+  );
+  assert.ok(!row.textContent?.includes("元の記録に文字化けがあります。"), "定型文を重ねて出さない");
+});
+
+test("印のない発言には文字化けの印を描画しない", () => {
+  const html = render(restore());
+
+  assert.doesNotMatch(html, /元記録で文字化けしています/);
+});
+

@@ -109,7 +109,7 @@ def test_reserved_host_is_used_and_never_resolves_to_the_target() -> None:
 
 def test_target_equal_to_reserved_host_is_refused() -> None:
     """接続先が試験用ホスト名と同じ場合は、同一オリジンを黙って返さない。"""
-    from prod_check import FOREIGN_ORIGIN_HOST
+    from urlcheck.foreign_origin import FOREIGN_ORIGIN_HOST
 
     try:
         foreign_origin("http://" + FOREIGN_ORIGIN_HOST + ":3000")

@@ -473,3 +473,58 @@ async fn watch_state_reassembles_and_returns_the_new_run_log_silent() {
   poller.shutdown().await;
   server.stop().await;
 }
+
+#[tokio::test]
+async fn watch_state_sends_the_write_only_change_when_only_the_write_server_changes() {
+  // 書き込み先（writeServer）だけが変わる設定変更でも、新しい状態が届くことを観測する。
+  // 書き込み先はサーバーの「書き込み専用」の印を決めるため、表示情報やスナップショットが
+  // 変わらなくても変化として扱わなければならない。
+  let harness = seeded_harness();
+  // 書き込み先の候補サーバーを、最初から設定へ登録しておく（表示情報と接続先）。
+  // この時点では、どのプロジェクトもこのサーバーへ書き込まない。
+  let config_path = harness.config_path().to_path_buf();
+  let text = std::fs::read_to_string(&config_path).expect("設定を読めます");
+  let mut config: serde_json::Value = serde_json::from_str(&text).expect("設定を解析できます");
+  config["servers"]["write-only"] = json!({ "name": "書き込み専用サーバー", "kind": "Mac mini" });
+  config["mcpServers"]["write-only"] = config["mcpServers"]["mac-mini"].clone();
+  std::fs::write(&config_path, config.to_string()).expect("設定ファイルを書けます");
+  let mut poller = Poller::new(
+    harness.config_path().to_path_buf(),
+    harness.activity.clone(),
+    harness.store.clone(),
+    harness.changes.clone(),
+    harness.registry.clone(),
+  );
+  poller.read_cycle_once().await.expect("候補サーバーを登録するサイクルを実行できます");
+
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  let mut stream =
+    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+  let first = timeout(Duration::from_secs(5), stream.message())
+    .await
+    .expect("初回の全件は即時に届きます")
+    .expect("ストリームから読めます")
+    .expect("初回の状態があります");
+  let write_only_of = |state: &takt_dash_backend::takt_dash::v1::DashboardState| {
+    state.servers.iter().find(|server| server.server_id == "write-only").map(|server| server.write_only)
+  };
+  assert_eq!(write_only_of(&first), Some(false), "未使用の登録は書き込み専用ではありません");
+
+  // writeServer だけを変える。サーバーの表示情報もスナップショットも変わらない。
+  let text = std::fs::read_to_string(&config_path).expect("設定を読めます");
+  let mut config: serde_json::Value = serde_json::from_str(&text).expect("設定を解析できます");
+  config["projects"][0]["writeServer"] = json!("write-only");
+  std::fs::write(&config_path, config.to_string()).expect("設定ファイルを書けます");
+  poller.read_cycle_once().await.expect("writeServer を変えるサイクルを実行できます");
+
+  let second = timeout(Duration::from_secs(5), stream.message())
+    .await
+    .expect("writeServer の変化だけでも新しい状態が届きます")
+    .expect("ストリームから読めます")
+    .expect("変化後の状態があります");
+  assert_eq!(write_only_of(&second), Some(true), "書き込み先として使われ始めたサーバーは書き込み専用になります");
+
+  poller.shutdown().await;
+  server.stop().await;
+}

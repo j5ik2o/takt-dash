@@ -15,10 +15,11 @@ type LiveSidebarProps = {
 // backend のビルド情報は状態から、frontend のビルド情報はビルド時に埋め込んだ値を
 // prop で受け取り、サイドバー下端に表示します。
 export function LiveSidebar({ frontendBuild }: LiveSidebarProps): ReactElement {
-  const { state } = useLiveState();
+  const { state, snapshotLoaded } = useLiveState();
   const pathname = usePathname();
   return (
     <Sidebar
+      snapshotLoaded={snapshotLoaded}
       servers={state.servers}
       pendingCount={state.pendingDecisions.length}
       currentPath={pathname ?? undefined}

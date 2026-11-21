@@ -312,6 +312,44 @@ impl fmt::Display for TaskCount {
   }
 }
 
+/// 画面読み取りレーンの本数。1〜3 本です。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ScreenReadLanes(u32);
+
+impl ScreenReadLanes {
+  /// 本数の上限。子プロセスの増加を抑えるために設けます。
+  pub const MAX: u32 = 3;
+  /// 本数の下限。
+  pub const MIN: u32 = 1;
+
+  /// 保持している本数を返す。
+  pub fn get(self) -> u32 {
+    self.0
+  }
+
+  /// 範囲外の値を下限〜上限へ丸めて作る。設定ファイルの読み取り境界が使います。
+  pub fn clamped(value: u32) -> Self {
+    ScreenReadLanes(value.clamp(Self::MIN, Self::MAX))
+  }
+}
+
+impl TryFrom<u32> for ScreenReadLanes {
+  type Error = DomainError;
+
+  fn try_from(value: u32) -> Result<Self, Self::Error> {
+    if !(Self::MIN..=Self::MAX).contains(&value) {
+      return Err(DomainError::Size("画面読み取りレーンの本数"));
+    }
+    Ok(ScreenReadLanes(value))
+  }
+}
+
+impl fmt::Display for ScreenReadLanes {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}", self.0)
+  }
+}
+
 /// JST の日次集計の日付。`YYYY-MM-DD` の実在する日付です。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DailyDate(String);
@@ -406,7 +444,7 @@ impl fmt::Display for MergeUntil {
 mod tests {
   use super::{
     DailyDate, DomainError, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision,
-    RunSlug, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
+    RunSlug, ScreenReadLanes, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
   };
 
   #[test]
@@ -435,6 +473,15 @@ mod tests {
     assert!(matches!(SilentMinutes::try_from(i32::MAX as u32 + 1), Err(DomainError::Size(_))));
     assert!(matches!(TaskCount::try_from(-1), Err(DomainError::Size(_))));
     assert_eq!(TaskCount::try_from(3).expect("有効です").get(), 3);
+  }
+
+  #[test]
+  fn screen_read_lanes_guarantees_the_range() {
+    assert!(matches!(ScreenReadLanes::try_from(0), Err(DomainError::Size(_))));
+    assert!(matches!(ScreenReadLanes::try_from(4), Err(DomainError::Size(_))));
+    assert_eq!(ScreenReadLanes::try_from(2).expect("有効です").get(), 2);
+    assert_eq!(ScreenReadLanes::clamped(0).get(), 1, "下限未満は下限へ丸めます");
+    assert_eq!(ScreenReadLanes::clamped(9).get(), 3, "上限超は上限へ丸めます");
   }
 
   #[test]

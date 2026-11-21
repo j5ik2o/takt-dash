@@ -1,5 +1,5 @@
 //! takt_get_run の view instructions（instructionId 指定）から指示書本文を読む
-//! `ToolSet::read_remote_instruction` が、ページをたどって本文を連結し、上限で文字の境界に
+//! `ReadToolSet::read_remote_instruction` が、ページをたどって本文を連結し、上限で文字の境界に
 //! 切り詰め、不正な応答を解析エラーにすることを検証する。
 
 mod common;

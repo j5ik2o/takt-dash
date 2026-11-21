@@ -210,7 +210,7 @@ test("状態の色は状態ごとのトークンで定義し、待機中の点�
 test("ログ停止の run 行は警告の状態クラスを描画する", () => {
   const tenMinutesLater = new Date(NOW.getTime() + 10 * 60_000);
   const html = renderPage(OverviewPage, {
-    view: buildOverviewView(createDashboardState(), tenMinutesLater),
+    view: buildOverviewView(createDashboardState(), tenMinutesLater, true),
   });
 
   assert.match(html, /class="st warn"/, "状態ラベルを警告の見た目で出す");
@@ -223,7 +223,7 @@ test("応答なしのサーバーの run 行は待機の状態クラスを描画
     ...base,
     runs: base.runs.map((run) => ({ ...run, serverId: "down" })),
   });
-  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
 
   const row = /<tr class="run-row">([\s\S]*?)<\/tr>/.exec(html)?.[1];
   assert.ok(row !== undefined, "run 行が描画されている");
@@ -232,7 +232,7 @@ test("応答なしのサーバーの run 行は待機の状態クラスを描画
 });
 
 test("サーバーの状態バッジは状態ごとの色クラスを持つ", async () => {
-  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), NOW, true) });
   assert.match(html, /class="big-badge live"/, "動作中のバッジを実行中の見た目で出す");
   assert.match(html, /class="big-badge down"/, "応答なしのバッジを応答なしの見た目で出す");
 
@@ -325,7 +325,7 @@ test("一時停止のゴールは待機の色のバッジを付け、進行中�
 test("run 行の状態ラベルは状態の列のセルに入り、隣の本文へ重ならない", () => {
   const tenMinutesLater = new Date(NOW.getTime() + 10 * 60_000);
   const html = renderPage(OverviewPage, {
-    view: buildOverviewView(createDashboardState(), tenMinutesLater),
+    view: buildOverviewView(createDashboardState(), tenMinutesLater, true),
   });
 
   const rows = elementsWithClass(html, "run-row").filter((element) => element.name === "tr");
@@ -572,6 +572,7 @@ test("760px 以下でもサーバーの状態テキストを隠さない", async
   const state = createDashboardState();
   const html = renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: state.servers,
       pendingCount: 0,
       // 状態は run の件数でも決まるため、run があるサーバーが「動作中」になる

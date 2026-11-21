@@ -46,9 +46,9 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from urlcheck.foreign_origin import foreign_origin  # noqa: E402
 from prod_http import fetch_state, http  # noqa: E402
 from prod_log import (  # noqa: E402
     JST,
@@ -258,25 +258,6 @@ def first_task_name(main_checkout):
     except OSError:
         return None
     return None
-
-
-# 別オリジンに使う試験用ホスト名。`.invalid` は RFC 2606 の予約名で実在しない。
-FOREIGN_ORIGIN_HOST = "takt-dash-prod-check.invalid"
-
-
-def foreign_origin(base_url):
-    """URL として解析でき、接続先とは別のホストを持つ Origin を作る。
-
-    受信側は Origin を `new URL()` で解析し、解析できない値もホスト不一致も 403 に
-    する。解析できない値ではホスト比較に到達しないため、IPv4 に接頭辞を付ける形は
-    検査にならない。予約名を使い、スキームとポートだけ接続先から引き継ぐ。
-    """
-    parts = urlsplit(base_url)
-    if (parts.hostname or "").lower() == FOREIGN_ORIGIN_HOST:
-        raise ValueError("接続先が試験用ホスト名と同じため別オリジンを作れません: {}".format(base_url))
-    return "{}://{}{}".format(
-        parts.scheme or "http", FOREIGN_ORIGIN_HOST, ":{}".format(parts.port) if parts.port else ""
-    )
 
 
 def check_write_boundary(base_url):

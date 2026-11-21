@@ -61,7 +61,7 @@ const provide = (
   state: DashboardState,
   children: ComponentProps<typeof StateStreamProvider>["children"],
 ) => {
-  const props: ComponentProps<typeof StateStreamProvider> = { initialState: state, children };
+  const props: ComponentProps<typeof StateStreamProvider> = { initialState: state, initialSnapshotLoaded: true, children };
   return createElement(StateStreamProvider, props);
 };
 

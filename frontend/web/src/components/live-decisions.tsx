@@ -14,7 +14,7 @@ type LiveDecisionsProps = {
 const subscribe = () => () => {};
 
 export function LiveDecisions({ initialNowMs }: LiveDecisionsProps): ReactElement {
-  const { state, disconnected, failure, disconnectedSince, respondedBefore } = useLiveState();
+  const { state, snapshotLoaded, disconnected, failure, disconnectedSince, respondedBefore } = useLiveState();
   const hydrating = useSyncExternalStore(subscribe, () => false, () => true);
   const now = hydrating ? new Date(initialNowMs) : new Date();
   // 切断の文面は、失敗理由と接続履歴と切断が続いている時間から決める
@@ -29,6 +29,7 @@ export function LiveDecisions({ initialNowMs }: LiveDecisionsProps): ReactElemen
   return (
     <DecisionsContent
       state={state}
+      snapshotLoaded={snapshotLoaded}
       now={now}
       disconnected={disconnected}
       readAt={state.readAt}

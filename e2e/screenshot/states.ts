@@ -1,5 +1,5 @@
-// 撮影に使う4つのデータ状態（0件・1件・多数・長文）。各状態はモックの takt-mcp の状態を作る関数と、
-// 詳細ページ（ゴール・タスク・run）を開くための識別子を持つ。
+// 撮影に使う5つのデータ状態（0件・1件・多数・長文・プロジェクト多数）。各状態はモックの takt-mcp の
+// 状態を作る関数と、詳細ページ（ゴール・タスク・run）を開くための識別子を持つ。
 //
 // 文字列はすべて撮影の確認のために合成した文で、実物のプロンプト本文や秘密の値は含めない。
 // 名前類（タスク名・run slug・ゴール ID）は backend の検証（domain.rs の validate_text）に合わせ、
@@ -8,7 +8,7 @@ import { PROJECT_ABOUT, PROJECT_NAME } from "../support/fixture";
 import type { StackProject } from "../support/stack";
 
 export type ScreenshotState = {
-  name: "empty" | "one" | "many" | "long";
+  name: "empty" | "one" | "many" | "long" | "many-projects";
   projects: readonly StackProject[];
   mockState: (now: Date) => Record<string, unknown>;
   // 詳細ページで開く対象。0件の状態では実在しない識別子を指し、404 の画面を撮る。
@@ -107,16 +107,29 @@ const answeredQuestion = (id: string, body: string, at: string): Record<string, 
   createdAt: at,
 });
 
+// takt-mcp の状態に何も無いことを表すモック状態。0件の状態とプロジェクト多数の状態で使う。
+const EMPTY_MOCK_STATE = (): Record<string, unknown> => ({
+  goals: [],
+  tasks: [],
+  goalQuestions: {},
+  standaloneInquiries: [],
+  runs: {},
+  goalDetails: {},
+});
+
+// 詳細ページの対象が実在しない状態（0件・プロジェクト多数）で開く識別子。404 の画面を撮る。
+const MISSING_DETAIL: ScreenshotState["detail"] = {
+  goalId: goalId(999),
+  taskName: "撮影確認用の存在しないタスク",
+  runSlug: "screenshot-missing-run",
+  exists: false,
+};
+
 const empty: ScreenshotState = {
   name: "empty",
   projects: DEFAULT_PROJECTS,
-  mockState: () => ({ goals: [], tasks: [], goalQuestions: {}, standaloneInquiries: [], runs: {}, goalDetails: {} }),
-  detail: {
-    goalId: goalId(999),
-    taskName: "撮影確認用の存在しないタスク",
-    runSlug: "screenshot-missing-run",
-    exists: false,
-  },
+  mockState: EMPTY_MOCK_STATE,
+  detail: MISSING_DETAIL,
 };
 
 // 1件の状態と長文の状態は同じ構成（ゴール・タスク・run・未回答の質問を1件ずつ）で、文の長さだけが違う。
@@ -288,4 +301,20 @@ const many: ScreenshotState = {
   detail: { goalId: goalId(1), taskName: "撮影確認用のタスク 1", runSlug: "screenshot-many-run-1", exists: true },
 };
 
-export const SCREENSHOT_STATES: readonly ScreenshotState[] = [empty, one, many, long];
+// プロジェクトが多い状態（issue #273）。概要のプロジェクト欄でカードが複数の列へ折り返し、
+// 上限（6件）を超えた分が「ほか M 件のプロジェクトを見る」で /projects を指す様子を撮る。
+// プロジェクトはバックエンドの設定から作られ、モックの takt-mcp の状態には依存しないため、
+// 0件の状態と同じ空データを返し、詳細ページは 404 で撮る。
+const MANY_PROJECTS_COUNT = 7;
+
+const manyProjects: ScreenshotState = {
+  name: "many-projects",
+  projects: Array.from({ length: MANY_PROJECTS_COUNT }, (_, index) => ({
+    name: `${PROJECT_NAME}-${index + 1}`,
+    about: `撮影確認用のプロジェクトの説明 ${index + 1}`,
+  })),
+  mockState: EMPTY_MOCK_STATE,
+  detail: MISSING_DETAIL,
+};
+
+export const SCREENSHOT_STATES: readonly ScreenshotState[] = [empty, one, many, long, manyProjects];

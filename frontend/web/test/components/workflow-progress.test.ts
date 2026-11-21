@@ -168,7 +168,7 @@ test("同じ図と概要カードが応答更新後の現在名・辺・輪の�
       const restored = restoreDashboardState(DashboardState.toJSON(state));
       await act(async () => { root.render(createElement("div", null,
         createElement(WorkflowProgress, { progress: data, now }),
-        createElement(OverviewContent, { view: buildOverviewView(restored, now), disconnected: false }),
+        createElement(OverviewContent, { view: buildOverviewView(restored, now, true), disconnected: false }),
       )); });
       const graph = dom.window.document.querySelector('[aria-label="ワークフローの進行"]')!;
       const card = dom.window.document.querySelector(".run-row")!;

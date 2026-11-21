@@ -172,11 +172,11 @@ CSS では、コメントを除いたすべての宣言の値を調べます。
 
 ## 撮影
 
-画面の変更の前後を目で見比べるため、全ページを3つの幅（1280、1920、2560）と4つのデータ状態（0件、1件、多数、長文）でページ全体まで撮ります。E2E の土台（`e2e/support/stack.ts` の `startStack`）でスタックを起動して撮ります。画素の差分で落とす判定はしません。
+画面の変更の前後を目で見比べるため、全ページを3つの幅（1280、1920、2560）と5つのデータ状態（0件、1件、多数、長文、プロジェクト多数）でページ全体まで撮ります。E2E の土台（`e2e/support/stack.ts` の `startStack`）でスタックを起動して撮ります。画素の差分で落とす判定はしません。
 
 - 実行のコマンド：`make e2e-screenshots`（backend と web をビルドしてから撮ります）。ビルド済みなら `npm --prefix e2e run screenshots` でも撮れます。`make e2e` とは別の入口で、`make e2e` の対象には入りません。
 - 出力先：`e2e/screenshots/current/`。`e2e/screenshots/` は `.gitignore` で除外しているので、撮影の結果はコミットされません。環境変数 `TAKTDASH_SCREENSHOTS_DIR` で親のディレクトリを（一時ディレクトリなどへ）、`TAKTDASH_SCREENSHOTS_LABEL` で `current` の部分を変えられます。
-- ファイル名：`<ページ>--w<幅>--<状態>.png`（例：`goal-detail--w1920--many.png`）。ページは `overview`、`decisions`、`goals`、`goal-detail`、`task-detail`、`run-detail`、`activity`、`conversations`、`projects` の9つ、状態は `empty`、`one`、`many`、`long` の4つで、全部で108枚です。
+- ファイル名：`<ページ>--w<幅>--<状態>.png`（例：`goal-detail--w1920--many.png`）。ページは `overview`、`decisions`、`goals`、`goal-detail`、`task-detail`、`run-detail`、`activity`、`conversations`、`projects` の9つ、状態は `empty`、`one`、`many`、`long`、`many-projects` の5つで、全部で135枚です。
 - 変更の前後の見比べ方：変更前の checkout で `TAKTDASH_SCREENSHOTS_LABEL=before make e2e-screenshots`、変更後に `TAKTDASH_SCREENSHOTS_LABEL=after make e2e-screenshots` を実行し、`e2e/screenshots/before/` と `e2e/screenshots/after/` の同じ名前の画像を並べて見ます。同じラベルで撮り直すと、同じ名前の画像は上書きされます。
 - データ状態は `e2e/screenshot/states.ts` の fixture（モックの takt-mcp の状態）で作ります。合成の文だけを使い、実物のプロンプトや秘密の値は入れません。0件の状態の詳細ページ（ゴール・タスク・run）は対象が無いため、404 の画面になります。
 - 会話と活動は takt-mcp の状態から作らないため、どの状態でも同じ見た目になります。会話は「会話を表示できません」、活動は「出来事はありません」です（スタックごとに初回の読み取りから撮るため、状態の変化の出来事がまだありません）。

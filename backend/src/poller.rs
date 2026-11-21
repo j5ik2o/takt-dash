@@ -19,9 +19,9 @@ use tokio::sync::{broadcast, watch};
 
 use crate::{
   activity::ActivityStore,
-  config::{load_config, Config, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
+  config::{load_config, Config, HttpMcpServer, McpServer, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   events::detect,
-  mcp::{client_config, McpClientRegistry, ToolCallMetrics, ToolError, ToolSet},
+  mcp::{client_config, HttpReadHandle, McpClientRegistry, ReadToolSet, ToolCallMetrics, ToolError},
   model::{
     ConnectionState, ConnectionTransition, EventKind, PendingDecisionFilter, PendingDecisionType, ProjectSnapshot,
     TerminalReads,
@@ -30,12 +30,16 @@ use crate::{
   store::StateStore,
 };
 
+/// 読み取り 1 回のタイムアウト。常駐サーバーとの往復に十分な余裕を持たせます。
+const READ_TIMEOUT_SECONDS: u64 = 15;
+
 /// 定期読み取りを1サイクル実行するための調整役。
 pub struct Poller {
   config_path:    PathBuf,
   activity:       Arc<ActivityStore>,
   store:          Arc<StateStore>,
   registry:       McpClientRegistry,
+  reads:          BTreeMap<String, ProjectRead>,
   previous:       BTreeMap<String, ProjectSnapshot>,
   /// 最後に出来事の記録へ成功した接続状態。接続断・復帰の再検出を防ぐ比較基準。
   notified:       BTreeMap<String, ConnectionState>,
@@ -61,6 +65,14 @@ pub struct Poller {
   /// プロジェクトごとの run の集計と、その集計を作ったときの cwd。周期をまたいで持ち、
   /// run の本体ログを前回の続きから読むために使います。
   run_logs:       RunLogHandles<String>,
+}
+
+/// 1 プロジェクトの読み取りハンドルと、そのハンドルを作った接続先。接続先が変わったら
+/// ハンドルを作り直し、セッションと差分基準をリセットします。
+struct ProjectRead {
+  server: HttpMcpServer,
+  cwd:    PathBuf,
+  handle: Arc<tokio::sync::Mutex<HttpReadHandle>>,
 }
 
 /// 1サイクルで読み取った件数と、記録した出来事の件数、次の待機に使う間隔。
@@ -90,6 +102,7 @@ impl Poller {
       activity,
       store,
       registry,
+      reads: BTreeMap::new(),
       previous: BTreeMap::new(),
       notified: BTreeMap::new(),
       seeded_outages: BTreeMap::new(),
@@ -131,8 +144,14 @@ impl Poller {
     };
     self.store.set_thresholds(config.thresholds);
     self.store.set_servers(config.server_meta.clone());
+    for previous in self.store.project_views() {
+      if !config.projects.iter().any(|project| project.name == previous.name && project.server == previous.server_id) {
+        self.reset_project_baseline(&previous.name);
+      }
+    }
     self.store.set_projects(config.projects.clone());
     self.sync_clients(&config);
+    self.sync_reads(&config);
     self.run_logs.retain(|name| config.projects.iter().any(|project| &project.name == name));
     let mut report = CycleReport {
       projects_read:   0,
@@ -148,16 +167,18 @@ impl Poller {
     for project in &config.projects {
       #[cfg(test)]
       self.pause_read(rebuild_tests::ReadBoundary::BeforeAcquisition).await;
-      // 作り直したかの記録・読取ハンドル・読取先の cwd を一体で取り出す。取得したハンドルと
-      // cwd はこの周期の最後まで使うため、通知の消費・ハンドルの選択・読取先の選択が別の
-      // 世代になることはありません。登録が無い場合も記録は消費済みです。基準の準備は登録の
-      // 有無に関わらず進め、失敗の反映は結果の回収で行います。
-      let acquired = self.registry.take_for_read(&project.server, &project.name);
-      // 設定変更（読み取り側・書き込み RPC 経由の双方）でクライアントを作り直した
-      // プロジェクトは、旧接続先の差分基準を新接続先へ投影しないよう読み取り前にリセットします。
+      let acquired = self.registry.take_for_read(&project.server, &project.name, &project.write_server);
+      // 他レーンの置換ではなく、実際の読取先の変更に合わせて比較基準を捨てます。
       if acquired.as_ref().is_some_and(|read| read.rebuilt) {
         self.reset_project_baseline(&project.name);
       }
+      // 書き込みの通し番号は、読取先の取得と同じ時点で固定します。取得後に書き込みが
+      // 成功した周期の読み取り結果は、書き込み前の状態を映すため採用しません。
+      // HTTP 読み取りのプロジェクトはレジストリに読取先が無いため、その場で読みます。
+      let write_sequence_at_start = match &acquired {
+        | Some(read) => read.write_sequence,
+        | None => self.registry.write_sequence(&project.write_server, &project.name),
+      };
       #[cfg(test)]
       self.pause_read(rebuild_tests::ReadBoundary::AfterAcquisition).await;
       // 再起動や作り直しで比較基準が無いプロジェクトは、記録済みの接続の出来事から
@@ -165,29 +186,44 @@ impl Poller {
       self.seed_connection_baseline(project);
       self.forget_answered_terminal_questions(&project.name);
       let prev = self.previous.get(&project.name).cloned();
+      let http_read = self.reads.get(&project.name).map(|read| (read.handle.clone(), read.cwd.clone()));
+      if let Some((handle, cwd)) = http_read {
+        // 読み取りが HTTP 接続先のプロジェクトは、常駐サーバーのハンドルから読みます。
+        // 書き込みの通し番号は書き込み先（`write_server`）のものを使います。書き込みは
+        // stdio の書き込み先へ行くためです。
+        let run_logs = self.run_logs.handle_for(&project.name, &cwd);
+        let task = tokio::spawn(async move {
+          let read_at = Utc::now();
+          let mut handle = handle.lock().await;
+          let mut tools = ReadToolSet::new(&mut *handle, cwd);
+          let result = tools.read_snapshot(prev.as_ref(), &run_logs).await;
+          let metrics = tools.take_metrics();
+          (read_at, result, metrics)
+        });
+        handles.push(Some((task, write_sequence_at_start)));
+        continue;
+      }
       match acquired {
         | Some(read) => {
-          // 道具呼び出しとローカル run の集計は、取得したクライアントと同じ世代の cwd を
-          // 使います。周期冒頭に読み込んだ設定の cwd を使うと、取得の前後で RPC が
-          // 接続先を作り直したときに、新旧の世代を取り違えます。
           let run_logs = self.run_logs.handle_for(&project.name, &read.cwd);
           let cwd = read.cwd;
           let handle = read.client;
-          handles.push(Some(tokio::spawn(async move {
+          let task = tokio::spawn(async move {
             let read_at = Utc::now();
             let mut client = handle.lock().await;
-            let mut tools = ToolSet::new(&mut client, cwd);
+            let mut tools = ReadToolSet::new(&mut *client, cwd);
             let result = tools.read_snapshot(prev.as_ref(), &run_logs).await;
             let metrics = tools.take_metrics();
             (read_at, result, metrics)
-          })));
+          });
+          handles.push(Some((task, write_sequence_at_start)));
         },
         | None => handles.push(None),
       }
     }
     for (project, handle) in config.projects.iter().zip(handles) {
       let prev = self.previous.get(&project.name).cloned();
-      let Some(handle) = handle else {
+      let Some((handle, write_sequence_at_start)) = handle else {
         let error = ToolError::Parse(format!("プロジェクト {} の子プロセスがありません", project.name));
         self.apply_failure(project, &error, prev.as_ref(), Utc::now(), &mut report, &mut record_error);
         continue;
@@ -197,6 +233,26 @@ impl Poller {
           metrics.merge(project_metrics);
           match result {
             | Ok(snapshot) => {
+              // 書き込みゲートを保持したまま、古さの確認と反映を行います。書き込み側は
+              // 書き込み RPC の発行前から通し番号の記録まで同じゲートを保持するため、
+              // 確認と反映の間に書き込みが割り込むことはありません。
+              let gate_server = &project.write_server;
+              let write_gate = self.registry.write_gate(gate_server, &project.name);
+              let _write_gate = write_gate.lock().await;
+              // 読み取りの開始後に書き込みが成功していたら、この結果は書き込み前の状態を
+              // 映している可能性があるため、store へ反映せず、差分基準（previous）も進めず、
+              // 出来事の検出も行わずに捨てます。出来事の検出は、書き込み後の状態を読む
+              // 次のサイクルで行われます。接続状態もこの結果では進めません。
+              let write_sequence = self.registry.write_sequence(gate_server, &project.name);
+              if read_result_is_stale(write_sequence_at_start, write_sequence) {
+                tracing::info!(
+                  project = %project.name,
+                  write_sequence_at_start,
+                  write_sequence,
+                  "読み取りの開始後に書き込みがあったため、この読み取り結果を捨てます。"
+                );
+                continue;
+              }
               // 接続断・復帰の比較基準は、最後に記録へ成功した状態（`notified`）に置きます。
               // 記録に失敗したサイクルでは基準を進めず、次サイクルで同じ差分を再検出します。
               let mut outage =
@@ -415,14 +471,100 @@ impl Poller {
   }
 
   fn sync_clients(&self, config: &Config) {
-    let wanted: Vec<(String, String)> =
-      config.projects.iter().map(|project| (project.server.clone(), project.name.clone())).collect();
+    // レジストリは、読み取りと書き込みが使う stdio の子プロセスに加えて、書き込みゲートと
+    // 書き込みの通し番号も（サーバー、プロジェクト）の組ごとに管理する。保持対象は
+    // 接続方法によらず、設定にあるプロジェクトの読み取り先（`server`）と書き込み先
+    // （`write_server`、未設定なら `server`）の組すべてにする。書き込み先が HTTP 接続先の
+    // プロジェクトで保持対象から外すと、定期読み取りのたびに書き込みゲートと通し番号が
+    // 消え、書き込み前の読み取り結果が書き込み後の状態を上書きする事故を防げなくなる。
+    // 子プロセスの用意は、この後の処理が stdio の組だけに行う。読み取り先と書き込み先が
+    // 異なる stdio エントリを指す場合は、双方へレーンを用意する。書き込み先だけを残すと、
+    // 読み取りが「子プロセスがありません」で毎回失敗する。読み取りが HTTP 接続先の
+    // プロジェクトでは、読み取り用の子プロセスは起動しない。
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for project in &config.projects {
+      for server_id in [&project.server, &project.write_server] {
+        let key = (server_id.clone(), project.name.clone());
+        if !wanted.contains(&key) {
+          wanted.push(key);
+        }
+      }
+    }
     self.registry.retain(&wanted);
     for project in &config.projects {
-      let Some(server) = config.servers.get(&project.server) else {
+      let mut warmed: Vec<&String> = Vec::new();
+      for server_id in [&project.server, &project.write_server] {
+        if warmed.contains(&server_id) {
+          continue;
+        }
+        warmed.push(server_id);
+        let Some(McpServer::Stdio(server)) = config.servers.get(server_id) else {
+          continue;
+        };
+        let (write_handle, write_created) =
+          self
+            .registry
+            .ensure_lanes(server_id, &project.name, config.screen_read_lanes, || client_config(server, &project.cwd));
+        // 書き込みレーンを温めるのは、読み取りも stdio のプロジェクトだけです。
+        // 読み取りが HTTP のプロジェクトでは、読み取りの周期で子プロセスを起動しません。
+        let reads_over_stdio = matches!(config.servers.get(&project.server), Some(McpServer::Stdio(_)));
+        if write_created && server_id == &project.write_server && reads_over_stdio {
+          // 書き込みレーンは起動時に温めます。最初の書き込みが利用者の操作の裏で
+          // 子プロセスの起動と初期化を待たないようにするためです。温めは裏で進め、
+          // サイクルの進行は止めません。失敗した場合は、最初の書き込みのときに
+          // 通常の再試行の経路で扱います。
+          let project_name = project.name.clone();
+          tokio::spawn(async move {
+            let mut client = write_handle.lock().await;
+            if let Err(error) = client.warm_up().await {
+              tracing::warn!(
+                project = %project_name,
+                error = %error,
+                "書き込みレーンの子プロセスを温められませんでした。最初の書き込みで再試行します。"
+              );
+            }
+          });
+        }
+      }
+    }
+  }
+
+  /// HTTP 接続先のプロジェクトの読み取りハンドルを、設定に追随させる。
+  ///
+  /// 接続先（URL とトークン）とプロジェクトの cwd が変わらないプロジェクトはハンドルを
+  /// 使い回します。どちらかが変わったプロジェクトはハンドルを作り直し、セッションと
+  /// 差分基準をリセットします。HTTP から stdio へ切り替わってハンドルを失った
+  /// プロジェクトも、旧接続先の差分基準を新しい読み取り元へ投影しないようリセット
+  /// します。stdio 接続先のプロジェクトは読み取りハンドルを持ちません。
+  fn sync_reads(&mut self, config: &Config) {
+    let mut rebuilt = Vec::new();
+    let mut next = BTreeMap::new();
+    for project in &config.projects {
+      let Some(McpServer::Http(server)) = config.servers.get(&project.server) else {
         continue;
       };
-      self.registry.client(&project.server, &project.name, || client_config(server, &project.cwd));
+      match self.reads.remove(&project.name) {
+        | Some(read) if &read.server == server && read.cwd == project.cwd => {
+          next.insert(project.name.clone(), read);
+        },
+        | _ => {
+          let handle = HttpReadHandle::new(
+            McpServer::Http(server.clone()).connection(),
+            Duration::from_secs(READ_TIMEOUT_SECONDS),
+          );
+          next.insert(project.name.clone(), ProjectRead {
+            server: server.clone(),
+            cwd:    project.cwd.clone(),
+            handle: Arc::new(tokio::sync::Mutex::new(handle)),
+          });
+          rebuilt.push(project.name.clone());
+        },
+      }
+    }
+    let dropped: Vec<String> = self.reads.keys().filter(|name| !next.contains_key(*name)).cloned().collect();
+    self.reads = next;
+    for project in rebuilt.into_iter().chain(dropped) {
+      self.reset_project_baseline(&project);
     }
   }
 
@@ -480,6 +622,9 @@ struct ProjectSignature {
   connection_state: Option<ConnectionState>,
   snapshot:         Option<ProjectSnapshot>,
   silent_runs:      Vec<(String, bool)>,
+  // 書き込み先は、サーバーの「書き込み専用」の印を決める。書き込み先だけが変わる
+  // 設定変更でも画面の表示が変わるため、指紋に含める。
+  write_server_id:  String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -505,6 +650,7 @@ impl StoreSignature {
             .snapshot
             .map(|snapshot| ProjectSnapshot { terminal_reads: TerminalReads::default(), ..snapshot }),
           silent_runs,
+          write_server_id: view.write_server_id,
         }
       })
       .collect();
@@ -566,6 +712,136 @@ async fn sleep_until_next(started: DateTime<Utc>, interval: Duration) {
   let remaining = interval.as_millis().saturating_sub(elapsed.num_milliseconds().max(0) as u128);
   if remaining > 0 {
     tokio::time::sleep(Duration::from_millis(remaining as u64)).await;
+  }
+}
+
+/// 読み取り結果が古いかどうかを、書き込みの通し番号で判定する。
+///
+/// 読み取り開始時点の番号より現在の番号が進んでいたら、読み取りの途中で書き込みが
+/// 成功しており、結果は書き込み前の状態を映している可能性があるため古いと判定します。
+fn read_result_is_stale(write_sequence_at_start: u64, write_sequence_now: u64) -> bool {
+  write_sequence_now > write_sequence_at_start
+}
+
+#[cfg(test)]
+mod tests {
+  //! 書き込みの通し番号による古い読み取り結果の判定と、書き込みゲートによる
+  //! 確認と反映の直列化を固定する。
+
+  use super::{read_result_is_stale, McpClientRegistry};
+
+  #[test]
+  fn read_result_is_fresh_without_writes() {
+    assert!(!read_result_is_stale(0, 0), "書き込みが無ければ結果は新しい");
+    assert!(!read_result_is_stale(3, 3), "番号が同じなら結果は新しい");
+  }
+
+  #[test]
+  fn read_result_is_stale_after_a_write() {
+    assert!(read_result_is_stale(0, 1), "読み取り開始後に書き込みがあれば結果は古い");
+    assert!(read_result_is_stale(3, 4), "番号が1つでも進んでいれば結果は古い");
+  }
+
+  /// 書き込み側がゲートを保持している間は poller の反映の段が進まず、書き込みの
+  /// 完了後に読み取り結果が古いものとして捨てられることを、チャネルの合図だけで
+  /// 同期して観測します（時間の長さには依存しません）。
+  #[tokio::test]
+  async fn poller_apply_waits_for_the_write_gate_and_discards_the_stale_result() {
+    let registry = McpClientRegistry::new();
+    // 読み取り開始時点の番号。この読み取り結果は書き込み前の状態を映しています。
+    let sequence_at_start = registry.write_sequence("local", "proj");
+
+    // 書き込み側は、ゲートを保持したまま合図があるまで通し番号を進めません
+    // （gRPC の書き込み経路が、書き込み RPC の発行前から記録までゲートを保持する形）。
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel::<()>();
+    let write_registry = registry.clone();
+    let write_task = tokio::spawn(async move {
+      let gate = write_registry.write_gate("local", "proj");
+      let _guard = gate.lock().await;
+      let _ = held_tx.send(());
+      let _ = proceed_rx.await;
+      write_registry.record_write("local", "proj");
+    });
+    held_rx.await.expect("書き込み側がゲートを保持します");
+
+    // poller 側は、反映の段の入口で合図してからゲートを取得し、取得後に古さを判定します。
+    let (entering_tx, entering_rx) = tokio::sync::oneshot::channel::<()>();
+    let (decided_tx, mut decided_rx) = tokio::sync::oneshot::channel::<bool>();
+    let apply_registry = registry.clone();
+    let apply_task = tokio::spawn(async move {
+      let gate = apply_registry.write_gate("local", "proj");
+      let _ = entering_tx.send(());
+      let _guard = gate.lock().await;
+      let now = apply_registry.write_sequence("local", "proj");
+      let _ = decided_tx.send(read_result_is_stale(sequence_at_start, now));
+    });
+    entering_rx.await.expect("poller 側が反映の段に入ります");
+    // 判定の送信はゲートの取得の先にしか無いため、書き込み側がゲートを保持している
+    // 間は決して届きません。届いていないことはタイミングではなく構造で決まります。
+    assert!(
+      matches!(decided_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+      "書き込みが完了するまで、反映の段はゲートを取得できません"
+    );
+
+    // 書き込みを完了させます。通し番号が進んでからゲートが解放されます。
+    let _ = proceed_tx.send(());
+    write_task.await.expect("書き込み側のタスクが終わります");
+    let stale = decided_rx.await.expect("反映の段が判定を返します");
+    apply_task.await.expect("poller 側のタスクが終わります");
+    assert!(stale, "書き込み前の状態を映す結果は、古いものとして捨てられます");
+    assert_eq!(registry.write_sequence("local", "proj"), 1, "書き込みの通し番号は1つ進んでいます");
+  }
+
+  /// poller の反映の段がゲートを保持している間は、書き込み側の record_write が
+  /// 進まないことを、チャネルの合図だけで同期して観測します。
+  #[tokio::test]
+  async fn record_write_waits_while_the_poller_apply_holds_the_gate() {
+    let registry = McpClientRegistry::new();
+    // poller 側が反映の段のゲートを保持します。
+    let gate = registry.write_gate("local", "proj");
+    let apply_guard = gate.lock().await;
+
+    // 書き込み側は、入口で合図してからゲートを取得し、取得後に通し番号を進めます
+    // （gRPC の書き込み経路と同じ順序）。
+    let (entering_tx, entering_rx) = tokio::sync::oneshot::channel::<()>();
+    let (recorded_tx, mut recorded_rx) = tokio::sync::oneshot::channel::<u64>();
+    let write_registry = registry.clone();
+    let write_task = tokio::spawn(async move {
+      let gate = write_registry.write_gate("local", "proj");
+      let _ = entering_tx.send(());
+      let _guard = gate.lock().await;
+      let sequence = write_registry.record_write("local", "proj");
+      let _ = recorded_tx.send(sequence);
+    });
+    entering_rx.await.expect("書き込み側がゲートの取得へ入ります");
+    // 記録の送信はゲートの取得の先にしか無いため、反映の段がゲートを保持している
+    // 間は決して届きません。
+    assert!(
+      matches!(recorded_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+      "反映が終わるまで、書き込みの記録は進みません"
+    );
+    assert_eq!(registry.write_sequence("local", "proj"), 0, "通し番号も進んでいません");
+
+    // 反映が終わってゲートが解放されると、書き込みの記録が進みます。
+    drop(apply_guard);
+    let sequence = recorded_rx.await.expect("書き込みの記録が終わります");
+    write_task.await.expect("書き込み側のタスクが終わります");
+    assert_eq!(sequence, 1, "記録された通し番号は1です");
+    assert_eq!(registry.write_sequence("local", "proj"), 1, "通し番号は1つ進んでいます");
+  }
+
+  /// 書き込みゲートはプロジェクト（とサーバー）ごとに独立しており、ある
+  /// プロジェクトの保持が別のプロジェクトを待たせないことを観測します。
+  #[tokio::test]
+  async fn write_gates_are_independent_per_project() {
+    let registry = McpClientRegistry::new();
+    let gate = registry.write_gate("local", "proj");
+    let _guard = gate.lock().await;
+    let other_project = registry.write_gate("local", "other");
+    assert!(other_project.try_lock().is_ok(), "別プロジェクトのゲートは保持中のゲートに影響されません");
+    let other_server = registry.write_gate("remote", "proj");
+    assert!(other_server.try_lock().is_ok(), "別サーバーのゲートも独立です");
   }
 }
 

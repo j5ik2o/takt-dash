@@ -150,6 +150,7 @@ message Server {
   string kind = 3;                             // 表示用の機種ラベル（"Mac mini" など）
   bool connected = 4;                          // 応答の有無
   google.protobuf.Timestamp last_read_at = 5;  // 最後に読めた時刻
+  bool write_only = 7;                         // 書き込み専用（読み取りプロジェクトを持たず、書き込み先としてだけ使われる）
 
   // 同時実行の上限はサーバー単位には存在せず、プロジェクト単位であるため、
   // かつて使っていた 6 番（concurrency）は欠番にする。
@@ -603,7 +604,8 @@ message ConversationMessage {
   google.protobuf.Timestamp occurred_at = 2;  // 発言の時刻
   ConversationSpeaker speaker = 3;            // 発話者
   string text = 4;                            // 本文
-  bool has_encoding_error = 5;                // 本文に一定数以上の置換文字がある
+  optional string notice = 5;                 // 本文に添える注意書き（元記録の文字化けなど）
+  bool has_encoding_error = 6;                // 本文に一定数以上の置換文字がある
 }
 
 // 解釈できずスキップした行の理由と件数を表す。

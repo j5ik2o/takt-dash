@@ -1,8 +1,8 @@
 //! GetRunDetail の応答のうち run の状態を表す部分を、読み取り元ごとに組み立てる。
 //!
 //! 読み取り元は2つです。ローカルで読める run は run の保存場所の集計（[`RunLogView`]）から、
-//! SSH 接続の run、およびローカルの対応表に無い run と対応表を読めない run は
-//! takt-mcp の takt_get_run（[`RemoteRun`]）から組み立てます。どちらも
+//! 保存場所の対応表に無い run と対応表を読めない run（SSH 越しに扱うリモートのサーバーの
+//! プロジェクトなど）は takt-mcp の takt_get_run（[`RemoteRun`]）から組み立てます。どちらも
 //! 最終ログ時刻を返し、ログの無音の判定は呼び出し側が状態ストアの閾値で行います。
 //!
 //! 詳細では、要約に含まれない指示書の一覧とタスク本文も takt_get_run の view から読みます。
@@ -19,11 +19,12 @@ use tonic::Status;
 
 use super::{
   mapping::{optional_timestamp, run_status, step_log},
-  run_instruction, run_read_failure_status, ResolvedProject,
+  resolve::ReadSource,
+  run_instruction, run_read_failure_status,
 };
 use crate::{
   domain::RunSlug,
-  mcp::{McpClient, RemoteRun, ToolError, ToolSet},
+  mcp::RemoteRun,
   model::{ReportEntry, TaskEntry},
   run_log::SessionActivity,
   run_progress::{LogCursor, LogLine, RunLogView, RunReadFailure, RunUpdates},
@@ -62,12 +63,13 @@ pub(super) fn fill_from_run_log(
 /// takt_get_run でも読めなければ、保存場所の読み取りの失敗 `failure` のステータスを返します。
 pub(super) async fn fill_from_takt_get_run(
   response: &mut GetRunDetailResponse,
-  resolved: &ResolvedProject,
+  source: &mut ReadSource,
+  cwd: &std::path::Path,
   run_slug: &RunSlug,
   task: Option<&TaskEntry>,
   failure: RunReadFailure,
 ) -> Result<Option<DateTime<Utc>>, Status> {
-  let remote = match read_remote_run_detail(resolved, run_slug).await {
+  let remote = match source.read_remote_run_detail(cwd, run_slug).await {
     | Ok(remote) => remote,
     | Err(error) => {
       tracing::warn!(run_slug = %run_slug.as_str(), local = %failure, error = %error, "run 詳細を保存場所からも takt_get_run からも読めませんでした。");
@@ -76,6 +78,7 @@ pub(super) async fn fill_from_takt_get_run(
   };
   let started_at = remote.started_at(task);
   let last_log_at = remote.resolve_last_log_at(started_at);
+  let evidence = remote.evidence.clone();
   response.task_text = remote.task_text.clone();
   if response.summary.is_empty() {
     response.summary = remote.summary.clone();
@@ -93,73 +96,45 @@ pub(super) async fn fill_from_takt_get_run(
   response.reports = run_reports(&remote.reports);
   response.instructions = remote.instructions.iter().map(run_instruction).collect();
   response.last_log_at = optional_timestamp(last_log_at);
-  fill_progress(response, resolved, &remote.evidence).await;
+  fill_progress(response, source, cwd, &evidence).await;
   Ok(last_log_at)
 }
 
+/// 進行図を組み立てて応答へ載せる。workflow の定義を読み、証拠と実行状態から進行図を作る。
+///
+/// 定義を読めないときや workflow 名が空のときは、進行図を載せません（取得済みの詳細は返します）。
 pub(super) async fn fill_progress(
   response: &mut GetRunDetailResponse,
-  resolved: &ResolvedProject,
+  source: &mut ReadSource,
+  cwd: &std::path::Path,
   evidence: &crate::workflow_progress::ExecutionEvidence,
 ) {
   if response.workflow.is_empty() {
     return;
   }
-  let mut client = McpClient::new(resolved.client_config.clone());
-  let result = ToolSet::new(&mut client, resolved.cwd.clone()).workflow_definition(&response.workflow).await;
-  client.shutdown().await;
-  match result {
-    | Ok(Some(definition)) => {
-      let status = match crate::takt_dash::v1::RunStatus::try_from(response.status) {
-        | Ok(crate::takt_dash::v1::RunStatus::Running) => crate::model::RunStatus::Running,
-        | Ok(crate::takt_dash::v1::RunStatus::Completed) => crate::model::RunStatus::Completed,
-        | Ok(crate::takt_dash::v1::RunStatus::Aborted) => crate::model::RunStatus::Aborted,
-        | Ok(crate::takt_dash::v1::RunStatus::Failed) => crate::model::RunStatus::Failed,
-        | _ => return,
-      };
-      let progress = crate::workflow_progress::build_progress(
-        definition,
-        evidence,
-        &response.workflow,
-        response.current_step.as_deref(),
-        status,
-      );
-      response.progress = Some(super::workflow_progress::progress(&progress));
+  let definition = match source.workflow_definition(cwd, &response.workflow).await {
+    | Ok(Some(definition)) => definition,
+    | Ok(None) => return,
+    | Err(error) => {
+      tracing::warn!(error = %error, "進行図の定義を読めませんでした。取得済みの詳細を返します。");
+      return;
     },
-    | Ok(None) => {},
-    | Err(error) => tracing::warn!(error = %error, "進行図の定義を読めませんでした。取得済みの詳細を返します。"),
-  }
-}
-
-/// ログ更新では要約用の本文取得を避け、ステップログを読んで子プロセスを終了する。
-async fn read_remote_run_logs(resolved: &ResolvedProject, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
-  let mut client = McpClient::new(resolved.client_config.clone());
-  let result = ToolSet::new(&mut client, resolved.cwd.clone()).read_remote_run_logs(run_slug).await;
-  client.shutdown().await;
-  result
-}
-
-/// 詳細用に、指示書の一覧とタスク本文まで takt_get_run から読み、子プロセスを終了する。
-///
-/// 要約の応答は指示書の一覧を含まず、タスク本文も含みません（taskOmission だけを返します）。
-/// ローカルの読み取りが要約の値で詳細を組み立てるのと同じ値を返すため、同じ接続で
-/// view instructions と view task から取り直します。一覧の読み取り（poller）はこの形を
-/// 使いません。
-async fn read_remote_run_detail(resolved: &ResolvedProject, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
-  let mut client = McpClient::new(resolved.client_config.clone());
-  let result = async {
-    let mut toolset = ToolSet::new(&mut client, resolved.cwd.clone());
-    let mut remote = toolset.read_remote_run(run_slug).await?;
-    toolset.enrich_remote_progress(run_slug, &mut remote).await;
-    remote.instructions = toolset.read_remote_instructions(run_slug).await?;
-    if remote.task_text.is_empty() {
-      remote.task_text = toolset.read_remote_task_text(run_slug).await?;
-    }
-    Ok::<RemoteRun, ToolError>(remote)
-  }
-  .await;
-  client.shutdown().await;
-  result
+  };
+  let status = match crate::takt_dash::v1::RunStatus::try_from(response.status) {
+    | Ok(crate::takt_dash::v1::RunStatus::Running) => crate::model::RunStatus::Running,
+    | Ok(crate::takt_dash::v1::RunStatus::Completed) => crate::model::RunStatus::Completed,
+    | Ok(crate::takt_dash::v1::RunStatus::Aborted) => crate::model::RunStatus::Aborted,
+    | Ok(crate::takt_dash::v1::RunStatus::Failed) => crate::model::RunStatus::Failed,
+    | _ => return,
+  };
+  let progress = crate::workflow_progress::build_progress(
+    definition,
+    evidence,
+    &response.workflow,
+    response.current_step.as_deref(),
+    status,
+  );
+  response.progress = Some(super::workflow_progress::progress(&progress));
 }
 
 /// GetRunUpdates の追記分を takt_get_run から組み立てる。
@@ -171,12 +146,13 @@ async fn read_remote_run_detail(resolved: &ResolvedProject, run_slug: &RunSlug) 
 ///
 /// takt_get_run でも読めなければ、保存場所の読み取りの失敗 `failure` のステータスを返します。
 pub(super) async fn remote_run_updates(
-  resolved: &ResolvedProject,
+  source: &mut ReadSource,
+  cwd: &std::path::Path,
   run_slug: &RunSlug,
   after: Option<LogCursor>,
   failure: RunReadFailure,
 ) -> Result<RunUpdates, Status> {
-  let remote = match read_remote_run_logs(resolved, run_slug).await {
+  let remote = match source.read_remote_run_logs(cwd, run_slug).await {
     | Ok(remote) => remote,
     | Err(error) => {
       tracing::warn!(run_slug = %run_slug.as_str(), local = %failure, error = %error, "run の追記分を保存場所からも takt_get_run からも読めませんでした。");

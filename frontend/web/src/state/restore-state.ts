@@ -178,6 +178,7 @@ const toServer = (raw: unknown): DashboardServer => {
     kind: String(value.kind ?? ""),
     connected: value.connected === true,
     lastReadAt: toDate(value.lastReadAt),
+    writeOnly: value.writeOnly === true,
   };
 };
 

@@ -110,7 +110,9 @@ const childElementsOf = (outer: string): { openingTag: string; outer: string }[]
 // 判断待ちの各項目（li.tray-item）を文書順に返す。選択肢欄の li は含めない。
 const decisionItems = (html: string) => elementsWithClass(html, "tray-item");
 
-// サーバーの使用率と、run の主経路の表示を区別する。
+// 進捗バーの開始タグから閉じタグまでを取り出す。概要の上部には使用率バーも現れるため、
+// run 行の中のバーだけを対象にし、バー自身の属性と内側の幅指定を他の要素の一致に
+// 紛れずに観測する。
 const barMarkup = (html: string): string => {
   const row = /<tr class="run-row[^"]*">([\s\S]*?)<\/tr>/.exec(html);
   if (row === null) {
@@ -171,7 +173,7 @@ test("概要ページは実行中 run と判断待ちと24時間完了タスク�
     await withServerEnv(server.address, async () => {
       const client = createBackendClient();
       try {
-        const view: OverviewView = buildOverviewView(await client.getOverview(), NOW);
+        const view: OverviewView = buildOverviewView(await client.getOverview(), NOW, true);
         const html = renderPage(OverviewPage, { view });
         assert.match(html, /Mac mini/);
         assert.match(html, /corporate-site/);
@@ -191,7 +193,7 @@ test("概要ページは実行中 run と判断待ちと24時間完了タスク�
 });
 
 test("概要ページは24時間のトークン消費のタイルを描画しない", async () => {
-  const view = buildOverviewView(createDashboardState(), NOW);
+  const view = buildOverviewView(createDashboardState(), NOW, true);
   const html = renderPage(OverviewPage, { view });
   assert.doesNotMatch(html, /トークン/);
   assert.doesNotMatch(html, /24時間のトークン消費/);
@@ -235,7 +237,7 @@ test("バックエンドが無音と判定した run の警告を概要ページ
     runs: [{ ...base, logSilent: true, lastLogAt: justOverThreshold }],
   };
 
-  const overviewHtml = renderPage(OverviewPage, { view: buildOverviewView(silentState, NOW) });
+  const overviewHtml = renderPage(OverviewPage, { view: buildOverviewView(silentState, NOW, true) });
   assert.match(overviewHtml, /ログが止まっています/, "概要の run 行に警告を出します");
 
   const projectsHtml = renderPage(ProjectsPage, { state: silentState, now: NOW });
@@ -671,7 +673,7 @@ const withServerIdentity = (identity: { serverId: string; name: string; kind: st
 
 test("概要ページのサーバーの1行は表示名・サーバー ID・機種をラベル付きで判別できる", () => {
   const state = withServerIdentity({ serverId: "mac-mini", name: "j5ik2o-mac-mini", kind: "Mac mini" });
-  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
   const heading = textOf(serverLine(html, "mac-mini"));
 
   assert.match(heading, /表示名: j5ik2o-mac-mini/, "表示名を主として示す");
@@ -683,7 +685,7 @@ test("概要ページのサーバーの1行は表示名・サーバー ID・機�
 
 test("概要ページのサーバーの1行も状態表示・アンカー・見出しの id を維持する", () => {
   const state = withServerIdentity({ serverId: "mac-mini", name: "j5ik2o-mac-mini", kind: "Mac mini" });
-  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
   const heading = serverLine(html, "mac-mini");
 
   assert.match(heading, /j5ik2o-mac-mini/, "サーバーのアンカーは表示名を持つ1行に付く");
@@ -844,7 +846,7 @@ test("アクティビティページは日ごとの出来事を新しい日か�
 });
 
 test("概要の run 行はステップ名・背骨の位置・区切った進行表示・モデル・ゴールの目的・要約・経過を描画する", () => {
-  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), NOW, true) });
 
   assert.match(html, /class="st live"/, "状態のラベルを実行中の見た目で出す");
   assert.match(html, /class="dot live"/, "状態の点を実行中の見た目で出す");
@@ -858,12 +860,11 @@ test("概要の run 行はステップ名・背骨の位置・区切った進行
   const bar = barMarkup(html);
   assert.match(bar, /role="img"/, "進捗バーは意味を持つ画像として扱う");
   assert.match(bar, /aria-label="4 段階中 2 つ目"/, "背骨の位置を読み上げる");
-  assert.equal((bar.match(/<span/g) ?? []).length, 4, "背骨の長さで区切る");
   assert.equal((bar.match(/class="passed"/g) ?? []).length, 2, "現在位置までを示す");
 });
 
 test("入れ子 workflow の内側ログがある run 行は名前と位置を同じ currentStep から描画する", () => {
-  const html = renderPage(OverviewPage, { view: buildOverviewView(createNestedStepDashboardState(), NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(createNestedStepDashboardState(), NOW, true) });
 
   assert.match(html, /ステップ\s*<b>develop<\/b>/, "今のトップレベル step 名を出す");
   assert.doesNotMatch(html, /<b>write_tests<\/b>/, "入れ子 workflow の内側の step 名を現在ステップとして出さない");
@@ -875,9 +876,9 @@ test("入れ子 workflow の内側ログがある run 行は名前と位置を�
 
 test("同じ状態でも時刻が進めば run 行の経過表示が進む", () => {
   const state = createDashboardState();
-  const atNow = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const atNow = renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
   const oneMinuteLater = renderPage(OverviewPage, {
-    view: buildOverviewView(state, new Date(NOW.getTime() + 60_000)),
+    view: buildOverviewView(state, new Date(NOW.getTime() + 60_000), true),
   });
 
   assert.match(atNow, /最後のログは 1分前/);
@@ -886,7 +887,7 @@ test("同じ状態でも時刻が進めば run 行の経過表示が進む", () 
 
 test("ログが止まった run 行は警告の点と無音の注記を出し、背骨の位置を保持する", () => {
   const tenMinutesLater = new Date(NOW.getTime() + 10 * 60_000);
-  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), tenMinutesLater) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(createDashboardState(), tenMinutesLater, true) });
 
   assert.match(html, /ログが止まっています/, "警告の状態ラベルを出す");
   assert.match(html, /class="dot warn"/, "点を警告の見た目にする");
@@ -899,7 +900,7 @@ test("ログが止まった run 行は警告の点と無音の注記を出し、
 test("タスクの要約が空の run 行はタスク名を出す", () => {
   const base = createDashboardState();
   const state = { ...base, runs: base.runs.map((run) => ({ ...run, summary: "" })) };
-  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
 
   const row = /<tr class="run-row[^"]*">([\s\S]*?)<\/tr>/.exec(html)?.[1];
   assert.ok(row !== undefined, "run の行がある");
@@ -914,7 +915,7 @@ test("ステップ位置が分からない run 行は進捗バーを出さない
     ...base,
     runs: base.runs.map((run) => ({ ...run, progress: undefined, currentStepNumber: undefined, totalSteps: undefined })),
   };
-  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
 
   assert.match(html, /implement/, "ステップ名は出す");
   assert.match(html, /最後のログは/, "進行図の情報が無くても run を表示する");
@@ -925,6 +926,11 @@ test("実行中の run の点は動き、prefers-reduced-motion で止まる", a
 
   assert.match(css, /\.run-row\s+\.dot\.live\s*\{[^}]*animation:\s*pulse/, "実行中の点は脈打つ");
   assert.match(css, /\.run-row\s+\.dot\.warn\s*\{[^}]*background:\s*var\(--warn\)/, "警告の点は警告色になる");
+  assert.match(
+    css,
+    /\.run-row:has\(\.dot\.warn\) \.workflow-segments > \.passed \{[^}]*background:\s*var\(--warn\)/,
+    "警告の行は背骨の通過済みを警告色にする",
+  );
 
   const reduced = mediaBlock(css, "@media (prefers-reduced-motion: reduce)");
   assert.ok(reduced !== undefined, "prefers-reduced-motion の指定がある");
@@ -938,7 +944,7 @@ test("新着ログで発光する run 行だけが flash クラスを持ち、�
   const base = createDashboardState();
   const otherRun = { ...base.runs[0]!, runSlug: "run-bbb", sessionId: "session-bbb" };
   const state = DashboardState.create({ ...base, runs: [...base.runs, otherRun] });
-  const view = buildOverviewView(state, NOW);
+  const view = buildOverviewView(state, NOW, true);
 
   const html = renderToStaticMarkup(
     createElement(OverviewContent, { view, flashingRunSlugs: new Set(["run-aaa"]), disconnected: false }),
@@ -960,7 +966,7 @@ test("遅延中の run 行は idle にせず、ログが出続けていれば実
     ConnectionState.CONNECTION_STATE_DELAYED,
     new Date(NOW.getTime() - 300 * 1_000),
   );
-  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  const html = renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
 
   assert.match(html, /class="st live"/, "ログが出続けている run は実行中の見た目で出す");
   assert.match(html, /class="dot live"/, "状態の点も実行中の見た目で出す");

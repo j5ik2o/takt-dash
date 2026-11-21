@@ -10,7 +10,7 @@ export type DecisionsPageProps = {
 
 export default function DecisionsPage({ state, now }: DecisionsPageProps): ReactElement {
   if (state !== undefined) {
-    return <DecisionsContent state={state} now={now ?? new Date()} disconnected={false} />;
+    return <DecisionsContent state={state} snapshotLoaded={true} now={now ?? new Date()} disconnected={false} />;
   }
   // SSR とハイドレーションで待ち時間を一致させ、入力欄の再生成を防ぐ。
   // eslint-disable-next-line react-hooks/purity -- サーバーで初回描画の基準時刻を1度だけ決める

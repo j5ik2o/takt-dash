@@ -7,6 +7,7 @@ use std::path::Path;
 use takt_dash_backend::config::{
   load_config, parse_config, ConfigError, DEFAULT_CONNECTION_DELAY_SECONDS, DEFAULT_CONNECTION_FAILURE_COUNT,
   DEFAULT_INTERVAL_SECONDS, DEFAULT_LISTEN, DEFAULT_PENDING_DECISION_STALE_MINUTES, DEFAULT_RUN_LOG_SILENT_MINUTES,
+  DEFAULT_SCREEN_READ_LANES, MAX_SCREEN_READ_LANES,
 };
 
 fn repo_config_path() -> &'static Path {
@@ -20,8 +21,12 @@ fn example_config_parses_with_four_projects_and_mac_mini_server() {
   let names: Vec<&str> = config.projects.iter().map(|project| project.name.as_str()).collect();
   assert_eq!(names, vec!["corporate-site", "event-store-adapter", "takt", "takt-dash"]);
   let mini = config.servers.get("mac-mini").expect("mac-mini の起動方法があります");
-  assert_eq!(mini.command, "node");
-  assert!(mini.args.iter().any(|arg| arg.ends_with("dist/app/mcp/index.js")));
+  let stdio = match mini {
+    | takt_dash_backend::config::McpServer::Stdio(stdio) => stdio,
+    | takt_dash_backend::config::McpServer::Http(_) => panic!("既存の node 起動の設定は stdio として解決されます"),
+  };
+  assert_eq!(stdio.command, "node");
+  assert!(stdio.args.iter().any(|arg| arg.ends_with("dist/app/mcp/index.js")));
   for project in &config.projects {
     assert_eq!(project.server, "mac-mini");
     assert!(project.cwd.is_absolute(), "{} の cwd は絶対パスです", project.name);
@@ -446,4 +451,253 @@ fn project_concurrency_rejects_multi_line_plain_scalars() {
     1,
     "同行の値に継続行が続く場合も複数行の通常スカラーとして既定値1にする"
   );
+}
+
+#[test]
+fn omitted_screen_read_lanes_falls_back_to_default() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [] } },
+    "projects": [ { "name": "p", "server": "mini", "cwd": "/abs/p" } ]
+  }"#;
+  let config = parse_config(text, Path::new("/base")).expect("既定値が適用されます");
+  assert_eq!(config.screen_read_lanes.get(), DEFAULT_SCREEN_READ_LANES, "画面読み取りレーンの既定は1本です");
+}
+
+#[test]
+fn screen_read_lanes_is_clamped_into_range() {
+  let base = |lanes: u32| {
+    format!(
+      r#"{{
+        "mcpServers": {{ "mini": {{ "command": "node", "args": [] }} }},
+        "projects": [ {{ "name": "p", "server": "mini", "cwd": "/abs/p" }} ],
+        "screenReadLanes": {lanes}
+      }}"#
+    )
+  };
+  let config = parse_config(&base(2), Path::new("/base")).expect("範囲内の値はそのまま使います");
+  assert_eq!(config.screen_read_lanes.get(), 2, "範囲内の値はそのまま使います");
+  let config = parse_config(&base(0), Path::new("/base")).expect("0は下限へ丸めます");
+  assert_eq!(config.screen_read_lanes.get(), 1, "0は下限の1へ丸めます");
+  let config = parse_config(&base(9), Path::new("/base")).expect("上限超は上限へ丸めます");
+  assert_eq!(config.screen_read_lanes.get(), MAX_SCREEN_READ_LANES, "上限を超える値は上限へ丸めます");
+}
+
+fn http_entry(url: &str, authorization: &str) -> String {
+  format!(
+    r#"{{ "type": "http", "url": {}, "headers": {{ "Authorization": {} }} }}"#,
+    serde_json::to_string(url).expect("url を JSON 文字列にできます"),
+    serde_json::to_string(authorization).expect("authorization を JSON 文字列にできます"),
+  )
+}
+
+#[test]
+fn http_mcp_servers_for_multiple_homes_resolve_by_project_server() {
+  // home ごとに別の HTTP 接続先を登録し、各プロジェクトの server の対応付けで接続先を選ぶ。
+  let text = format!(
+    r#"{{
+      "mcpServers": {{
+        "mini-home": {},
+        "studio-home": {},
+        "mini-write": {{ "command": "node", "args": ["index.js"], "env": {{}} }}
+      }},
+      "projects": [
+        {{ "name": "takt-dash", "server": "mini-home", "writeServer": "mini-write", "cwd": "/abs/takt-dash" }},
+        {{ "name": "ddd-principles", "server": "studio-home", "writeServer": "mini-write", "cwd": "/abs/ddd-principles" }}
+      ]
+    }}"#,
+    http_entry("http://127.0.0.1:7801/", "Bearer mini-token"),
+    http_entry("http://127.0.0.1:7802/", "Bearer studio-token"),
+  );
+  let config =
+    parse_config(&text, Path::new("/base")).expect("HTTP 接続先と stdio の書き込み先を併せ持つ設定を読み込めます");
+
+  assert_eq!(config.projects.len(), 2);
+  let mini = config.servers.get("mini-home").expect("mini-home の接続先があります");
+  let studio = config.servers.get("studio-home").expect("studio-home の接続先があります");
+  for (server, port, token) in [(mini, 7801, "Bearer mini-token"), (studio, 7802, "Bearer studio-token")] {
+    match server {
+      | takt_dash_backend::config::McpServer::Http(http) => {
+        assert_eq!(http.endpoint.port(), port, "接続先のポートは url のとおりです");
+        assert_eq!(http.authorization, token, "Authorization は headers の値です");
+      },
+      | takt_dash_backend::config::McpServer::Stdio(_) => panic!("type: http の接続先は HTTP として解決されます"),
+    }
+  }
+  let dash = config.projects.iter().find(|project| project.name == "takt-dash").expect("takt-dash があります");
+  let ddd = config.projects.iter().find(|project| project.name == "ddd-principles").expect("ddd-principles があります");
+  assert_eq!(dash.server, "mini-home", "プロジェクトの server が接続先を選びます");
+  assert_eq!(ddd.server, "studio-home", "別ホームのプロジェクトは別の接続先を選びます");
+  assert_eq!(dash.write_server, "mini-write", "書き込み先は writeServer のとおりです");
+  assert_eq!(ddd.write_server, "mini-write", "複数プロジェクトが同じ stdio の書き込み先を共有できます");
+  let write = config.servers.get("mini-write").expect("mini-write の接続先があります");
+  assert!(matches!(write, takt_dash_backend::config::McpServer::Stdio(_)), "書き込み先は stdio として解決されます");
+}
+
+#[test]
+fn http_and_stdio_connections_coexist_in_one_config() {
+  // 読み取りの HTTP 接続先と、書き込み用の stdio 起動方法を同時に登録できる。
+  let text = format!(
+    r#"{{
+      "mcpServers": {{
+        "mac-mini-read": {},
+        "mac-mini-write": {{ "command": "node", "args": ["index.js"], "env": {{}} }}
+      }},
+      "projects": [ {{ "name": "takt-dash", "server": "mac-mini-read", "writeServer": "mac-mini-write", "cwd": "/abs/takt-dash" }} ]
+    }}"#,
+    http_entry("http://127.0.0.1:7801/", "Bearer read-token"),
+  );
+  let config = parse_config(&text, Path::new("/base")).expect("HTTP と stdio の併存を読み込めます");
+
+  assert!(matches!(config.servers.get("mac-mini-read"), Some(takt_dash_backend::config::McpServer::Http(_))));
+  assert!(matches!(config.servers.get("mac-mini-write"), Some(takt_dash_backend::config::McpServer::Stdio(_))));
+  let dash = config.projects.iter().find(|project| project.name == "takt-dash").expect("takt-dash があります");
+  assert_eq!(dash.server, "mac-mini-read", "読み取り先は server です");
+  assert_eq!(dash.write_server, "mac-mini-write", "書き込み先は writeServer です");
+}
+
+#[test]
+fn write_server_defaults_to_the_read_server() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [], "env": {} } },
+    "projects": [ { "name": "takt-dash", "server": "mini", "cwd": "/abs/takt-dash" } ]
+  }"#;
+  let config = parse_config(text, Path::new("/base")).expect("writeServer 省略の設定を読み込めます");
+  let dash = config.projects.iter().find(|project| project.name == "takt-dash").expect("takt-dash があります");
+  assert_eq!(dash.write_server, "mini", "writeServer 未設定なら server と同じ id です");
+}
+
+#[test]
+fn write_server_that_is_an_http_endpoint_is_accepted() {
+  let text = format!(
+    r#"{{
+      "mcpServers": {{
+        "mini-read": {},
+        "mini-http-write": {}
+      }},
+      "projects": [ {{ "name": "takt-dash", "server": "mini-read", "writeServer": "mini-http-write", "cwd": "/abs/takt-dash" }} ]
+    }}"#,
+    http_entry("http://127.0.0.1:7801/", "Bearer <redacted>"),
+    http_entry("http://127.0.0.1:7802/", "Bearer <redacted>"),
+  );
+  let config = parse_config(&text, Path::new("/base")).expect("HTTP 接続先を書き込み先に指す設定を読み込めます");
+  let dash = config.projects.iter().find(|project| project.name == "takt-dash").expect("takt-dash があります");
+  assert_eq!(dash.write_server, "mini-http-write", "書き込み先は writeServer です");
+  assert!(
+    matches!(config.servers.get("mini-http-write"), Some(takt_dash_backend::config::McpServer::Http(_))),
+    "書き込み先は HTTP 接続先です"
+  );
+}
+
+#[test]
+fn write_server_referencing_an_unknown_server_is_rejected() {
+  let text = r#"{
+    "mcpServers": { "mini": { "command": "node", "args": [], "env": {} } },
+    "projects": [ { "name": "takt-dash", "server": "mini", "writeServer": "missing", "cwd": "/abs/takt-dash" } ]
+  }"#;
+  let error = parse_config(text, Path::new("/base")).expect_err("未知のサーバーを指す writeServer は拒否します");
+  assert!(
+    matches!(&error, ConfigError::Invalid(message) if message.contains("missing")),
+    "未知のサーバーを知らせる検証エラーになります: {error}"
+  );
+}
+
+#[test]
+fn http_url_with_a_host_other_than_loopback_is_rejected() {
+  for url in ["http://10.0.1.60:7801/", "http://localhost:7801/", "http://0.0.0.0:7801/"] {
+    let text = format!(r#"{{ "mcpServers": {{ "remote": {} }}, "projects": [] }}"#, http_entry(url, "Bearer token"),);
+    let error =
+      parse_config(&text, Path::new("/base")).expect_err("127.0.0.1 以外のホストを指す HTTP 接続先は拒否します");
+    assert!(
+      matches!(&error, ConfigError::Invalid(message) if message.contains("127.0.0.1")),
+      "127.0.0.1 を求める検証エラーになります: {error}"
+    );
+  }
+}
+
+#[test]
+fn http_url_with_a_non_root_path_is_rejected() {
+  for url in ["http://127.0.0.1:43117/mcp", "http://127.0.0.1:43117/mcp/"] {
+    let text =
+      format!(r#"{{ "mcpServers": {{ "remote": {} }}, "projects": [] }}"#, http_entry(url, "Bearer <redacted>"));
+    let error = parse_config(&text, Path::new("/base")).expect_err("ルート以外のパスを持つ HTTP 接続先は拒否します");
+    assert!(
+      matches!(&error, ConfigError::Invalid(message) if message.contains("パス")),
+      "パスを指摘する検証エラーになります: {error}"
+    );
+  }
+}
+
+#[test]
+fn http_entry_without_authorization_header_is_rejected() {
+  let text = r#"{
+    "mcpServers": { "anonymous": { "type": "http", "url": "http://127.0.0.1:7801/" } },
+    "projects": []
+  }"#;
+  let error = parse_config(text, Path::new("/base")).expect_err("Authorization の無い HTTP 接続先は拒否します");
+  assert!(
+    matches!(&error, ConfigError::Invalid(message) if message.contains("Authorization")),
+    "Authorization を求める検証エラーになります: {error}"
+  );
+}
+
+#[test]
+fn http_entry_with_non_bearer_authorization_is_rejected() {
+  let text = format!(
+    r#"{{ "mcpServers": {{ "wrong": {} }}, "projects": [] }}"#,
+    http_entry("http://127.0.0.1:7801/", "Basic dXNlcjpwYXNz"),
+  );
+  let error = parse_config(&text, Path::new("/base")).expect_err("Bearer 以外の Authorization は拒否します");
+  assert!(
+    matches!(&error, ConfigError::Invalid(message) if message.contains("Bearer")),
+    "Bearer を求める検証エラーになります: {error}"
+  );
+}
+
+#[test]
+fn stdio_entry_without_command_is_rejected() {
+  let text = r#"{
+    "mcpServers": { "broken": { "args": [] } },
+    "projects": []
+  }"#;
+  let error = parse_config(text, Path::new("/base")).expect_err("command の無い stdio 接続先は拒否します");
+  assert!(
+    matches!(&error, ConfigError::Invalid(message) if message.contains("command")),
+    "command を求める検証エラーになります: {error}"
+  );
+}
+
+#[test]
+fn example_config_still_parses_its_stdio_connections() {
+  // HTTP の追加後も、見本の設定の stdio 起動方法と表示情報は従来どおり読める。
+  let config = load_config(repo_config_path()).expect("見本の設定ファイルを読み込めます");
+  let mini = config.servers.get("mac-mini").expect("mac-mini の接続先があります");
+  assert!(
+    matches!(mini, takt_dash_backend::config::McpServer::Stdio(_)),
+    "見本の mac-mini は stdio の起動方法のままです"
+  );
+  assert_eq!(config.server_meta.get("mac-mini").expect("表示情報があります").kind, "Mac mini");
+}
+
+#[test]
+fn example_config_http_authorization_is_a_placeholder_not_a_real_token() {
+  // 見本の設定は環境依存の値をダミーで示す。実トークン様の値を含めない。
+  let text = std::fs::read_to_string(repo_config_path()).expect("見本の設定ファイルを読めます");
+  let value: serde_json::Value = serde_json::from_str(&text).expect("見本の設定は JSON です");
+  let Some(servers) = value.get("mcpServers").and_then(|servers| servers.as_object()) else {
+    panic!("見本の設定に mcpServers があります");
+  };
+  for (id, server) in servers {
+    if let Some(authorization) =
+      server.get("headers").and_then(|headers| headers.get("Authorization")).and_then(|value| value.as_str())
+    {
+      assert!(
+        !authorization.starts_with("Bearer sk-") && !authorization.contains("eyJ"),
+        "サーバー {id} の Authorization が実トークン様の値です"
+      );
+      assert!(
+        authorization.to_lowercase().contains("dummy") || authorization.contains("your-"),
+        "サーバー {id} の Authorization はダミー値であることが読み取れます: {authorization}"
+      );
+    }
+  }
 }

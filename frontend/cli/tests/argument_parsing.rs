@@ -49,14 +49,42 @@ fn assert_parsed_then_connection_failed(args: &[&str]) {
 
 #[test]
 fn unknown_flag_before_help_is_reported_instead_of_help() {
-  assert_usage_error(&["--bogus", "--help"], "未知の引数です: --bogus");
+  assert_usage_error(&["--unknown", "--help"], "未知の引数です: --unknown");
 }
 
 #[test]
 fn help_wins_over_errors_that_appear_after_it() {
-  assert_help(&["--help", "--bogus"]);
+  assert_help(&["--help", "--unknown"]);
   assert_help(&["-h", "unknown-command"]);
   assert_help(&["merge", "--server", "s", "--help", "--pr", "0"]);
+}
+
+#[test]
+fn all_subcommands_print_the_full_help_for_both_help_flags() {
+  let expected = run_cli(&["--help"]);
+  assert_eq!(expected.status.code(), Some(0));
+  assert!(expected.stderr.is_empty());
+  assert!(String::from_utf8_lossy(&expected.stdout).starts_with(USAGE_PREFIX));
+
+  for flag in ["--help", "-h"] {
+    for command in [
+      "overview",
+      "conversation",
+      "goals",
+      "goal",
+      "answer",
+      "merge",
+      "registrations",
+      "decisions",
+      "approve-registration",
+      "reject-registration",
+    ] {
+      let output = run_cli(&[command, flag]);
+      assert_eq!(output.status.code(), Some(0), "command={command} flag={flag}");
+      assert_eq!(output.stdout, expected.stdout, "command={command} flag={flag}");
+      assert!(output.stderr.is_empty(), "command={command} flag={flag}");
+    }
+  }
 }
 
 #[test]

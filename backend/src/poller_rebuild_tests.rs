@@ -18,7 +18,7 @@ use tokio::{
 use super::Poller;
 use crate::{
   model::{EventKind, ExecutionStatus, ProjectSnapshot},
-  takt_dash::v1::ApproveGoalRegistrationRequest,
+  takt_dash::v1::{ApproveGoalRegistrationRequest, GetActivityRequest, GetProjectsRequest},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,9 +142,9 @@ async fn rebuild_through_rpc(boundary: ReadBoundary) {
   assert_events(&harness, &[]);
 
   a["goals"].as_array_mut().expect("ゴール一覧があります").push(goal(ADDED_A, "active"));
-  harness.rewrite_state(a.clone());
+  harness.rewrite_state(a);
   let after_acquisition = boundary == ReadBoundary::AfterAcquisition;
-  let mut b = if after_acquisition { state(cwd_a, cwd_b, "paused") } else { a };
+  let mut b = state(cwd_a, cwd_b, "paused");
   let b_state = cwd_b.join("state-b.json");
   std::fs::write(&b_state, b.to_string()).expect("B の状態を書けます");
   let server = start_server(&harness).await;
@@ -158,32 +158,43 @@ async fn rebuild_through_rpc(boundary: ReadBoundary) {
       serde_json::from_str(&std::fs::read_to_string(harness.config_path()).expect("設定を読めます"))
         .expect("設定を解析できます");
     config["projects"][0]["cwd"] = json!(cwd_b);
-    if after_acquisition {
-      let args = config["mcpServers"]["mac-mini"]["args"].as_array_mut().expect("起動引数があります");
-      let index = args.iter().position(|arg| arg == "--state").expect("--state があります");
-      args[index + 1] = json!(b_state);
-    }
+    let args = config["mcpServers"]["mac-mini"]["args"].as_array_mut().expect("起動引数があります");
+    let index = args.iter().position(|arg| arg == "--state").expect("--state があります");
+    args[index + 1] = json!(b_state);
     std::fs::write(harness.config_path(), config.to_string()).expect("B の設定を書けます");
+    let proposal = &b["proposalsByCwd"][cwd_b.to_str().expect("B の cwd は文字列です")][0];
+    assert_eq!(proposal["repositoryDirectory"], json!(cwd_b));
+    assert_eq!(proposal["revision"], json!(4));
+    let before_approval = harness.recorded_calls().len();
     let response = client
       .approve_goal_registration(ApproveGoalRegistrationRequest {
         server_id: "mac-mini".to_owned(),
         project:   "takt-dash".to_owned(),
-        revision:  3,
+        revision:  4,
       })
       .await
       .expect("実 RPC が B を登録して成功します")
       .into_inner();
-    assert_eq!(response.revision, 3);
+    assert_eq!(json!(response.revision), proposal["revision"]);
+    let approvals: Vec<_> = harness
+      .recorded_calls()
+      .into_iter()
+      .skip(before_approval)
+      .filter(|call| call.name == "takt_approve_goal_registration")
+      .collect();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].arguments["cwd"], proposal["repositoryDirectory"]);
+    assert_eq!(approvals[0].arguments["revision"], proposal["revision"]);
     resume.send(()).expect("対象周期へ再開許可を渡せます");
   };
   let (interrupted, ()) = timeout(Duration::from_secs(15), async { tokio::join!(poller.read_cycle_once(), control) })
     .await
     .expect("到達、RPC 成功、再開の順で完了します");
   let interrupted = interrupted.expect("割込み周期が成功します");
-  assert_eq!(interrupted.projects_read, 1);
+  let expected_reads = if after_acquisition { 0 } else { 1 };
+  assert_eq!(interrupted.projects_read, expected_reads, "取得後に書き込みが成功した結果は採用しません");
   assert_eq!(interrupted.projects_failed, 0);
 
-  let expected_cwd = if after_acquisition { cwd_a } else { cwd_b };
   let reads: Vec<_> = harness
     .recorded_calls()
     .into_iter()
@@ -193,51 +204,197 @@ async fn rebuild_through_rpc(boundary: ReadBoundary) {
   assert_eq!(reads.len(), 2, "割込み周期の道具呼出しだけを検査します");
   if after_acquisition {
     assert_snapshot(&harness, ExecutionStatus::Active, 3, "plan");
-    assert_eq!(snapshot(&harness).goals.len(), 2);
-    assert_eq!(interrupted.events_recorded, 1, "A の比較基準を保持しています");
-    assert_events(&harness, &[ADDED_A]);
-    let first_b = poller.read_cycle_once().await.expect("同じ Poller で B 初回を読めます");
-    assert_eq!(first_b.projects_read, 1);
-    assert_eq!(first_b.events_recorded, 0, "B 初回は基準化のみです");
-    assert_snapshot(&harness, ExecutionStatus::Paused, 4, "implement");
     assert_eq!(snapshot(&harness).goals.len(), 1);
-    assert_events(&harness, &[ADDED_A]);
-  } else {
-    assert_eq!(interrupted.events_recorded, 0, "割込み周期が B 初回なので基準化のみです");
-    assert_snapshot(&harness, ExecutionStatus::Active, 4, "implement");
-    assert_eq!(snapshot(&harness).goals.len(), 2);
+    assert_eq!(interrupted.events_recorded, 0, "破棄した A の読み取りから出来事を記録しません");
     assert_events(&harness, &[]);
+  } else {
+    assert_eq!(interrupted.events_recorded, 1, "書き込みレーンの置換だけでは A の比較基準を失いません");
+    assert_snapshot(&harness, ExecutionStatus::Active, 3, "plan");
+    assert_eq!(snapshot(&harness).goals.len(), 2);
+    assert_events(&harness, &[ADDED_A]);
   }
   for read in reads {
-    assert_eq!(read.arguments["cwd"], json!(expected_cwd), "{} の読取先が世代に対応します", read.name);
+    assert_eq!(read.arguments["cwd"], json!(cwd_a), "{} は準備済みの poller レーンの読取先を使います", read.name);
   }
 
+  let created_before_b = if after_acquisition { vec![] } else { vec![ADDED_A] };
+  let calls_before_b = harness.recorded_calls().len();
+  let first_b = poller.read_cycle_once().await.expect("同じ Poller で B 初回を読めます");
+  assert_eq!(first_b.projects_read, 1);
+  assert_eq!(first_b.projects_failed, 0);
+  assert_eq!(first_b.events_recorded, 0, "B 初回は基準化のみです");
+  assert_snapshot(&harness, ExecutionStatus::Paused, 4, "implement");
+  assert_eq!(snapshot(&harness).goals.len(), 1);
+  assert_events(&harness, &created_before_b);
+
   b["goals"].as_array_mut().expect("ゴール一覧があります").push(goal(ADDED_B, "active"));
-  if after_acquisition {
-    std::fs::write(&b_state, b.to_string()).expect("B 内の実変化を書けます");
-  } else {
-    harness.rewrite_state(b);
-  }
+  std::fs::write(&b_state, b.to_string()).expect("B 内の実変化を書けます");
   let next_b = poller.read_cycle_once().await.expect("同じ Poller で B の次周期を読めます");
   assert_eq!(next_b.projects_read, 1);
+  assert_eq!(next_b.projects_failed, 0);
   assert_eq!(next_b.events_recorded, 1, "B 内の実変化を1件だけ記録します");
-  let execution = if after_acquisition { ExecutionStatus::Paused } else { ExecutionStatus::Active };
-  assert_snapshot(&harness, execution, 4, "implement");
+  assert_snapshot(&harness, ExecutionStatus::Paused, 4, "implement");
+  assert_eq!(snapshot(&harness).goals.len(), 2);
   assert!(snapshot(&harness).goals.iter().any(|goal| goal.goal_id.as_str() == ADDED_B));
-  let created = if after_acquisition { vec![ADDED_A, ADDED_B] } else { vec![ADDED_B] };
+  let created = if after_acquisition { vec![ADDED_B] } else { vec![ADDED_A, ADDED_B] };
   assert_events(&harness, &created);
+  let reads: Vec<_> = harness
+    .recorded_calls()
+    .into_iter()
+    .skip(calls_before_b)
+    .filter(|call| call.name == "takt_list_goals" || call.name == "takt_list_goal_registration_proposals")
+    .collect();
+  assert_eq!(reads.len(), 4, "B の初回と次周期の道具呼出しを検査します");
+  for read in reads {
+    assert_eq!(read.arguments["cwd"], json!(cwd_b), "{} は切り替え後の読取先を使います", read.name);
+  }
   poller.shutdown().await;
   drop(client);
   server.stop().await;
 }
 
 #[tokio::test]
-async fn rpc_rebuild_before_acquisition_uses_the_registered_cwd() {
+async fn rpc_rebuild_before_acquisition_keeps_the_prepared_poller_cwd() {
   rebuild_through_rpc(ReadBoundary::BeforeAcquisition).await;
 }
 
+async fn assert_assignment_events(harness: &GrpcHarness, created_ids: &[&str]) {
+  assert_events(harness, created_ids);
+  let server = start_server(harness).await;
+  let mut client = client(server.address).await;
+  let projects = client.get_projects(GetProjectsRequest {}).await.expect("一覧 API が成功します").into_inner();
+  let activity = client.get_activity(GetActivityRequest {}).await.expect("活動 API が成功します").into_inner();
+  assert_eq!(projects.recent_events, activity.events);
+  assert_eq!(activity.events.len(), created_ids.len());
+  for id in created_ids {
+    let event = activity.events.iter().find(|event| event.body.contains(id)).expect("追加を API で読めます");
+    assert_eq!(event.server_id, "mini-two");
+    assert_eq!(event.project.as_deref(), Some("takt-dash"));
+  }
+  drop(client);
+  server.stop().await;
+}
+
+async fn reassign_server(first_read_fails: bool, remove_first: bool) {
+  let harness = harness();
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active")]}));
+  let mut poller = poller(&harness);
+  assert_eq!(poller.read_cycle_once().await.unwrap().events_recorded, 0);
+  let old = harness.store.project_views().remove(0);
+  assert!(old.last_read_at.is_some());
+  let b_state = harness.project_cwd("takt-dash").join("server-b.json");
+  let mut b = json!({"goals": [goal(ADDED_A, "active")]});
+  let initial_b = if first_read_fails { json!({"isError": ["takt_list_goals"]}) } else { b.clone() };
+  std::fs::write(&b_state, initial_b.to_string()).unwrap();
+  let mut config: Value = serde_json::from_str(&std::fs::read_to_string(harness.config_path()).unwrap()).unwrap();
+  if remove_first {
+    let mut removed = config.clone();
+    removed["projects"] = json!([]);
+    std::fs::write(harness.config_path(), removed.to_string()).unwrap();
+    let report = poller.read_cycle_once().await.unwrap();
+    assert_eq!(report.projects_read, 0);
+    assert_eq!(report.projects_failed, 0);
+    assert_eq!(report.events_recorded, 0);
+    assert!(harness.store.project_views().is_empty(), "削除設定を1周期採用します");
+    assert_assignment_events(&harness, &[]).await;
+  }
+  config["mcpServers"]["mini-two"] = config["mcpServers"]["mac-mini"].clone();
+  let args = config["mcpServers"]["mini-two"]["args"].as_array_mut().unwrap();
+  let index = args.iter().position(|arg| arg == "--state").unwrap();
+  args[index + 1] = json!(b_state);
+  config["servers"]["mini-two"] = config["servers"]["mac-mini"].clone();
+  config["projects"][0]["server"] = json!("mini-two");
+  std::fs::write(harness.config_path(), config.to_string()).unwrap();
+  let (reached, resume) = arm(&mut poller, ReadBoundary::BeforeAcquisition);
+  let (report, exposed) = timeout(Duration::from_secs(15), async {
+    tokio::join!(poller.read_cycle_once(), async {
+      reached.await.unwrap();
+      let exposed = harness.store.project_views().remove(0);
+      resume.send(()).unwrap();
+      exposed
+    })
+  })
+  .await
+  .unwrap();
+  let report = report.unwrap();
+  let first = harness.store.project_views().remove(0);
+  assert_eq!(exposed.server_id, "mini-two");
+  assert!(exposed.snapshot.is_none(), "新所属の公開時点で旧 snapshot を持ち越しません");
+  assert!(exposed.last_read_at.is_none(), "新所属へ旧成功時刻を持ち越しません");
+  assert!(exposed.goals.is_empty());
+  if first_read_fails {
+    assert_eq!(report.projects_failed, 1);
+    assert_eq!(report.projects_read, 0);
+    assert!(first.snapshot.is_none());
+    assert!(first.last_read_at.is_none());
+    assert!(first.goals.is_empty());
+    assert_assignment_events(&harness, &[]).await;
+    std::fs::write(&b_state, b.to_string()).unwrap();
+    let recovered = poller.read_cycle_once().await.unwrap();
+    assert_eq!(recovered.events_recorded, 0);
+  } else {
+    assert_eq!(report.projects_read, 1);
+    assert_eq!(report.projects_failed, 0);
+    assert_eq!(report.events_recorded, 0);
+  }
+  let first_success = harness.store.project_views().remove(0);
+  assert_eq!(first_success.server_id, "mini-two");
+  assert_eq!(first_success.goals.len(), 1);
+  assert_eq!(first_success.goals[0].goal_id.as_str(), ADDED_A);
+  assert!(first_success.last_read_at.is_some());
+  assert_assignment_events(&harness, &[]).await;
+  b["goals"].as_array_mut().unwrap().push(goal(ADDED_B, "active"));
+  std::fs::write(&b_state, b.to_string()).unwrap();
+  assert_eq!(poller.read_cycle_once().await.unwrap().events_recorded, 1);
+  let goals = harness.store.project_views().remove(0).goals;
+  assert_eq!(goals.len(), 2);
+  assert!(goals.iter().any(|goal| goal.goal_id.as_str() == ADDED_A));
+  assert!(goals.iter().any(|goal| goal.goal_id.as_str() == ADDED_B));
+  assert_assignment_events(&harness, &[ADDED_B]).await;
+  assert_eq!(poller.read_cycle_once().await.unwrap().events_recorded, 0);
+  assert_assignment_events(&harness, &[ADDED_B]).await;
+  poller.shutdown().await;
+}
+
 #[tokio::test]
-async fn rpc_rebuild_after_acquisition_keeps_the_same_poller_baseline() {
+async fn server_reassignment_baselines_the_first_success() {
+  reassign_server(false, false).await;
+}
+
+#[tokio::test]
+async fn server_reassignment_clears_old_projection_before_first_failure_and_recovers() {
+  reassign_server(true, false).await;
+}
+
+#[tokio::test]
+async fn server_readdition_baselines_the_first_success() {
+  reassign_server(false, true).await;
+}
+
+#[tokio::test]
+async fn server_readdition_baselines_recovery_after_the_first_failure() {
+  reassign_server(true, true).await;
+}
+
+#[tokio::test]
+async fn unchanged_server_failure_keeps_the_last_success() {
+  let harness = harness();
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active")]}));
+  let mut poller = poller(&harness);
+  poller.read_cycle_once().await.unwrap();
+  let before = harness.store.project_views().remove(0);
+  harness.rewrite_state(json!({"isError": ["takt_list_goals"]}));
+  assert_eq!(poller.read_cycle_once().await.unwrap().projects_failed, 1);
+  let after = harness.store.project_views().remove(0);
+  assert_eq!(after.server_id, before.server_id);
+  assert_eq!(after.snapshot, before.snapshot);
+  assert_eq!(after.last_read_at, before.last_read_at);
+  assert_events(&harness, &[]);
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn rpc_rebuild_after_acquisition_discards_the_stale_read() {
   rebuild_through_rpc(ReadBoundary::AfterAcquisition).await;
 }
 
