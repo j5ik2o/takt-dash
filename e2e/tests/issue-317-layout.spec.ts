@@ -44,18 +44,37 @@ test("390px でサイドバーは本文の上に並び、本文を押し下げ�
   expect(sidebar!.y + sidebar!.height).toBeLessThanOrEqual(main!.y + 1);
 });
 
-test("390px でサイドバー下端の情報は閉じた折りたたみになり、開くと読める", async ({ page, isolatedStack: stack }) => {
-  await page.setViewportSize(MOBILE);
+for (const width of [MOBILE.width, 760]) {
+  test(`${width}px でサイドバー下端の情報は閉じた折りたたみになり、開くと読める`, async ({ page, isolatedStack: stack }) => {
+    await page.setViewportSize({ width, height: MOBILE.height });
+    await page.goto(`${stack.webUrl}/decisions`);
+    const foot = page.locator("details.side-foot");
+    const summary = foot.locator("summary");
+    const firstParagraph = foot.locator("p").first();
+    await expect(summary).toBeVisible();
+    await expect(page.locator("div.side-foot")).toBeHidden();
+    await expect(foot).not.toHaveAttribute("open");
+    await expect(firstParagraph).toBeHidden();
+
+    await summary.click();
+    await expect(firstParagraph).toBeVisible();
+    await summary.click();
+    await expect(firstParagraph).toBeHidden();
+  });
+}
+
+test("通常幅ではサイドバー下端の情報を操作せずに読める", async ({ page, isolatedStack: stack }) => {
+  await page.setViewportSize(DESKTOP);
   await page.goto(`${stack.webUrl}/decisions`);
-  const foot = page.locator("details.side-foot");
-  await expect(foot).toBeVisible();
-
-  // 閉じた状態では中身の最初の段落は見えない。
-  const firstParagraph = foot.locator("p").first();
-  await expect(firstParagraph).toBeHidden();
-
-  await foot.locator("summary").click();
-  await expect(firstParagraph).toBeVisible();
+  const foot = page.locator("div.side-foot");
+  for (const width of [DESKTOP.width, 761]) {
+    await page.setViewportSize({ width, height: DESKTOP.height });
+    await expect(page.locator("details.side-foot")).toBeHidden();
+    await expect(foot.getByText(/最終読み取り時刻/)).toBeVisible();
+    await expect(foot.getByText(/台から読めています/)).toBeVisible();
+    await expect(foot.getByText(/^frontend /)).toBeVisible();
+    await expect(foot.getByText(/^backend /)).toBeVisible();
+  }
 });
 
 test("390px で現在のページのナビ項目が画面の横方向に収まる", async ({ page, isolatedStack: stack }) => {

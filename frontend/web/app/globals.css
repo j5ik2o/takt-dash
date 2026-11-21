@@ -1340,6 +1340,10 @@ ol.log-tail li {
   color: var(--muted);
 }
 
+details.side-foot {
+  display: none;
+}
+
 .side-foot > summary {
   cursor: pointer;
   list-style: none;
@@ -1390,6 +1394,14 @@ ol.log-tail li {
     border-bottom: 1px solid var(--line);
     gap: var(--space-8);
     padding: var(--space-12) var(--space-14) var(--space-8);
+  }
+
+  div.side-foot {
+    display: none;
+  }
+
+  details.side-foot {
+    display: block;
   }
 
   .side-block {

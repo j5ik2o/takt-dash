@@ -82,6 +82,28 @@ export function Sidebar({
   const readableServers = servers.filter((server) => !server.writeOnly);
   const connectedCount = readableServers.filter((server) => server.connected).length;
   const notResponding = notRespondingProjects(projects ?? []);
+  const footerContent = (
+    <>
+      <p>最終読み取り時刻 {readAt ? formatClock(readAt) : "不明"}</p>
+      <p>
+        {snapshotLoaded
+          ? `${readableServers.length}台中${connectedCount}台から読めています`
+          : "サーバーの総数・接続台数は不明です。"}
+      </p>
+      {notResponding.map((project) => (
+        <p className="stale-note" key={`${project.serverId}:${project.name}`}>
+          {notRespondingProjectText(project)}
+        </p>
+      ))}
+      <p style={{ overflowWrap: "anywhere" }}>
+        frontend {frontendBuild.commit} ({frontendBuild.branch})
+      </p>
+      <p style={{ overflowWrap: "anywhere" }}>
+        backend {backendBuild.commit} ({backendBuild.branch})
+      </p>
+      {commitsDiffer(frontendBuild, backendBuild) ? <p>コミットが不一致です</p> : null}
+    </>
+  );
   return (
     <nav className="sidebar" aria-label="画面と集約対象のサーバー">
       <Link className="brand" href="/">
@@ -136,26 +158,10 @@ export function Sidebar({
           })}
         </ul>
       </div>
+      <div className="side-foot">{footerContent}</div>
       <details className="side-foot">
         <summary>詳細</summary>
-        <p>最終読み取り時刻 {readAt ? formatClock(readAt) : "不明"}</p>
-        <p>
-          {snapshotLoaded
-            ? `${readableServers.length}台中${connectedCount}台から読めています`
-            : "サーバーの総数・接続台数は不明です。"}
-        </p>
-        {notResponding.map((project) => (
-          <p className="stale-note" key={`${project.serverId}:${project.name}`}>
-            {notRespondingProjectText(project)}
-          </p>
-        ))}
-        <p style={{ overflowWrap: "anywhere" }}>
-          frontend {frontendBuild.commit} ({frontendBuild.branch})
-        </p>
-        <p style={{ overflowWrap: "anywhere" }}>
-          backend {backendBuild.commit} ({backendBuild.branch})
-        </p>
-        {commitsDiffer(frontendBuild, backendBuild) ? <p>コミットが不一致です</p> : null}
+        {footerContent}
       </details>
     </nav>
   );
