@@ -1,8 +1,9 @@
-// サイドバーの現在ページの契約（AC77-2）。
+// サイドバーの現在ページの契約（AC77-2 / issue #317 D27）。
 //
-// 現在のパスがナビの href と完全一致したときだけ、そのリンクを現在ページとして
-// 強調し、aria-current="page" を付ける。ナビに無い run 詳細のパスではどのリンクも
-// 現在ページにしない。描画結果の HTML と、強調の CSS を観測する。
+// 現在のパスとナビの href が一致したときだけ、そのリンクを現在ページとして強調し、
+// aria-current="page" を付ける。ゴール詳細（/goals/...）とゴール配下のタスク詳細
+// （/tasks/...）はゴールのリンクを現在ページにし、ナビに無い run 詳細のパスでは
+// どのリンクも現在ページにしない。描画結果の HTML と、強調の CSS を観測する。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -96,6 +97,42 @@ test("現在のパスが渡されないときはどのリンクも現在ペー�
   for (const link of navLinks(html)) {
     assert.equal(hasOnClass(link), false, `${link.href} は強調しない`);
   }
+});
+
+test("ゴール詳細のパスではゴールのリンクだけを現在ページにする", () => {
+  for (const path of ["/goals/goal-1", "/goals/goal-1?project=esa"]) {
+    const html = renderSidebar(path);
+    const current = currentLinks(html);
+    assert.equal(current.length, 1, `${path} で aria-current=\"page\" を持つリンクは1件だけ`);
+    assert.equal(current[0]?.href, "/goals", `${path} の現在ページはゴールのリンク`);
+    assert.equal(hasOnClass(current[0]!), true, `${path} でゴールのリンクを強調する`);
+    for (const link of navLinks(html).filter((candidate) => candidate.href !== "/goals")) {
+      assert.equal(hasOnClass(link), false, `${path} で ${link.href} は強調しない`);
+    }
+  }
+});
+
+test("ゴール配下のタスク詳細のパスでもゴールのリンクを現在ページにする", () => {
+  const path = "/tasks/corporate-site";
+  const current = currentLinks(renderSidebar(path));
+  assert.equal(current.length, 1, "タスク詳細のパスで現在ページは1件だけ");
+  assert.equal(current[0]?.href, "/goals", "ゴール詳細の導線としてゴールのリンクを現在ページにする");
+});
+
+test("先頭セグメントが同じでも別のパスのときは現在ページにしない", () => {
+  for (const path of ["/goalsx", "/runs/run-aaa", "/activityx"]) {
+    const html = renderSidebar(path);
+    assert.equal(currentLinks(html).length, 0, `${path} はどのリンクも現在ページにしない`);
+    for (const link of navLinks(html)) {
+      assert.equal(hasOnClass(link), false, `${path} で ${link.href} は強調しない`);
+    }
+  }
+});
+
+test("プロジェクト詳細のパスではプロジェクトのリンクを現在ページにする", () => {
+  const current = currentLinks(renderSidebar("/projects/corporate-site"));
+  assert.equal(current.length, 1, "プロジェクト詳細のパスで現在ページは1件だけ");
+  assert.equal(current[0]?.href, "/projects", "プロジェクト詳細ではプロジェクトのリンクを現在ページにする");
 });
 
 test("現在ページのリンクは淡い緑の背景で強調される", async () => {

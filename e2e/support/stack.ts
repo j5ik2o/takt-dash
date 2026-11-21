@@ -248,9 +248,11 @@ export type StackProject = {
 
 // 開始するスタックの構成。プロジェクトを渡すとその件数・内容で起動し、
 // 省略すると既定の1プロジェクト（PROJECT_NAME / PROJECT_ABOUT）で起動する。
+// serverName を渡すと、その名前でサーバーを設定する（長いサーバー名の表示を測る検証用）。
 // mockState を渡すと起動時のモックの状態をその関数で作り、省略すると既定の buildMockState を使う。
 export type StartStackOptions = {
   projects?: readonly StackProject[];
+  serverName?: string;
   mockState?: (now: Date) => Record<string, unknown>;
 };
 
@@ -262,6 +264,7 @@ type StackConfigInput = {
   mockPidPath: string;
   delayPath: string;
   projects: readonly StackProject[];
+  serverName: string;
 };
 
 const buildConfig = (input: StackConfigInput): Record<string, unknown> => ({
@@ -285,7 +288,7 @@ const buildConfig = (input: StackConfigInput): Record<string, unknown> => ({
     },
   },
   servers: {
-    [SERVER_ID]: { name: SERVER_NAME, kind: "mac-mini", concurrency: 1 },
+    [SERVER_ID]: { name: input.serverName, kind: "mac-mini", concurrency: 1 },
   },
   projects: input.projects.map((project) => ({ name: project.name, server: SERVER_ID, about: project.about, cwd: input.projectDir })),
   intervalSeconds: 1,
@@ -440,6 +443,7 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
   // 明示が無ければ既定の1プロジェクトで起動し、既存 spec の起動経路と設定を変えない。
   const projects: readonly StackProject[] =
     options.projects ?? [{ name: PROJECT_NAME, about: PROJECT_ABOUT }];
+  const serverName = options.serverName ?? SERVER_NAME;
 
   try {
     const startedAt = new Date();
@@ -457,7 +461,7 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     backendAddress = `127.0.0.1:${backendPort}`;
     await writeFile(
       configPath,
-      JSON.stringify(buildConfig({ backendAddress, projectDir, statePath, callsPath, mockPidPath, delayPath, projects })),
+      JSON.stringify(buildConfig({ backendAddress, projectDir, statePath, callsPath, mockPidPath, delayPath, projects, serverName })),
       "utf8",
     );
     const webPort = await freePort();

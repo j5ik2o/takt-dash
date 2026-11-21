@@ -76,24 +76,29 @@ export function LiveConversation({ projects, initialProject, initialPage }: Live
   }, [follow, view.project]);
 
   return (
-    <>
-      <div className="conversation-picker">
-        <label htmlFor="conversation-project">プロジェクト</label>
-        <select
-          id="conversation-project"
-          value={view.project}
-          onChange={(event) => {
-            setView(beginConversationSwitch(event.target.value));
-          }}
-        >
-          {projects.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
-      </div>
-      <ConversationContent project={view.project} page={view.page} loading={view.loading} error={view.error} />
-    </>
+    <ConversationContent
+      project={view.project}
+      page={view.page}
+      loading={view.loading}
+      error={view.error}
+      picker={
+        <div className="conversation-picker">
+          <label htmlFor="conversation-project">プロジェクト</label>
+          <select
+            id="conversation-project"
+            value={view.project}
+            onChange={(event) => {
+              setView(beginConversationSwitch(event.target.value));
+            }}
+          >
+            {projects.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </div>
+      }
+    />
   );
 }
