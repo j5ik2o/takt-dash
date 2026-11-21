@@ -7,7 +7,6 @@ jobs:
     steps:
       - run: exit 0
   e2e:
-    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     steps:
       - run: exit 0
