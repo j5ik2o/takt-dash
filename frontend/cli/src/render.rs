@@ -146,7 +146,7 @@ fn decision_label(decision_type: PendingDecisionType, inquiry_kind: i32) -> Resu
 /// 会話の表示内容を日本語の文字列へ組み立てる。
 ///
 /// 発言は seq の昇順に並べ、発話者・時刻・本文を出す。unavailable_reason は会話が無い理由、
-/// skipped は理由と件数として表示する。
+/// skipped は理由と件数として表示する。notice は本文の行に続けて注意書きとして表示する。
 pub(crate) fn render_conversation(response: &GetConversationResponse) -> Result<String, domain::DomainError> {
   let project = ProjectName::try_from(response.project.as_str())?;
   let mut lines = vec![
@@ -169,14 +169,17 @@ pub(crate) fn render_conversation(response: &GetConversationResponse) -> Result<
       lines.push("（会話はありません）".to_owned());
     }
   } else {
-    lines.extend(messages.iter().map(|message| {
-      format!(
+    for message in &messages {
+      lines.push(format!(
         "- [{}] {}: {}",
         format_timestamp(message.occurred_at.as_ref()),
         conversation_speaker_label(message.speaker),
         message.text
-      )
-    }));
+      ));
+      if let Some(notice) = message.notice.as_deref() {
+        lines.push(format!("  注意: {notice}"));
+      }
+    }
   }
   Ok(lines.join("\n"))
 }

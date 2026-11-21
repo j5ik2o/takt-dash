@@ -1,7 +1,9 @@
 //! 会話の取得と表示。
 
 use super::{
-  fixtures::{conversation_message, conversation_page, formatted_time, sample_overview},
+  fixtures::{
+    conversation_message, conversation_message_with_notice, conversation_page, formatted_time, sample_overview,
+  },
   support::{reserve_closed_addr, run_cli, start_conversation_server},
 };
 use crate::{
@@ -145,6 +147,43 @@ fn conversation_command_shows_skipped_rows() {
   assert!(
     stdout.contains("スキップした行: 解釈できない行 2件"),
     "スキップした行の理由と件数を表示する必要があります: {stdout}"
+  );
+}
+
+#[test]
+fn conversation_rendering_shows_notice_for_garbled_message() {
+  let secs = 1_731_600_000;
+  let page = conversation_page(
+    "corporate-site",
+    "session-1",
+    vec![
+      conversation_message(1, secs, v1::ConversationSpeaker::User, "正常な発言"),
+      conversation_message_with_notice(
+        2,
+        secs + 60,
+        v1::ConversationSpeaker::User,
+        "文字化けした発言\u{FFFD}\u{FFFD}",
+        "元記録で文字化けしています（置換文字 12 個）",
+      ),
+    ],
+    2,
+    false,
+  );
+
+  let rendered = render_conversation(&page).expect("有効です");
+
+  assert!(
+    rendered.contains("元記録で文字化けしています（置換文字 12 個）"),
+    "注意書き（文字化けの印）を表示する必要があります: {rendered}"
+  );
+  assert!(
+    rendered.contains("文字化けした発言\u{FFFD}\u{FFFD}"),
+    "注意書きを付けても本文そのものは変えない: {rendered}"
+  );
+  assert_eq!(
+    rendered.matches("元記録で文字化けしています").count(),
+    1,
+    "注意書きの無い発言には印を出さない: {rendered}"
   );
 }
 
