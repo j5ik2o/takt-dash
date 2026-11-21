@@ -65,10 +65,17 @@ export function ConversationContent({
                 {message.occurredAt !== undefined ? formatDateTime(message.occurredAt) : "時刻不明"}
               </time>
             </p>
-            <p className="conversation-text">{message.text}</p>
-            {message.hasEncodingError ? (
-              <p className="note">元の記録に文字化けがあります。</p>
+            {message.notice !== undefined ? (
+              <p className="conversation-notice" role="note">
+                {message.notice}
+              </p>
             ) : null}
+            {message.notice === undefined && message.hasEncodingError ? (
+              <p className="conversation-notice" role="note">
+                元の記録に文字化けがあります。
+              </p>
+            ) : null}
+            <p className="conversation-text">{message.text}</p>
           </li>
         ))}
       </ol>

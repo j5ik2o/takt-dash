@@ -2,11 +2,11 @@
 //!
 //! 状態ストアの投影と activity のクエリから、proto のメッセージ型どおりの応答を組み立てます。
 //! unary の4つ（GetOverview・GetProjects・GetPendingDecisions・GetActivity）はストアから読みます。
-//! GetRunDetail は状態ストアと run の保存場所から組み立て、進行図の定義を takt_get_workflow
-//! から読みます。SSH 接続の run は対象サーバーの takt_get_run を使い、同名のローカル
-//! 保存場所を使いません。ローカルの対応表に無い run と対応表を読めない run も takt_get_run
-//! を呼びます。 GetRunContent はレポートか指示書の本文を1件だけ読みます。本文は、GetRunDetail
-//! と同じ 条件の run だけ takt_get_run から読みます。GetConversation は保存領域の manager
+//! GetRunDetail は状態ストアと run の保存場所から組み立て、ローカルで保存場所を読めた run では
+//! takt-mcp を起動しません。保存場所の対応表に無い run と対応表を読めない run（SSH 越しに扱う
+//! リモートのサーバーのプロジェクトなど）だけ、要求時に takt-mcp の takt_get_run を呼びます。
+//! GetRunContent はレポートか指示書の本文を1件だけ読みます。本文は、GetRunDetail と同じ
+//! 条件の run だけ takt_get_run から読みます。GetConversation は保存領域の manager
 //! の会話を読みます。GetGoals・ GetGoalDetail・GetTaskDetail はゴールの一覧と詳細を
 //! 返し、GetGoalDetail と GetTaskDetail は要求時に takt-mcp を呼びます。WatchState は接続時に
 //! 全件を返し、定期読み取りの変化通知を受けるたびに状態を組み立て直して送ります。
@@ -14,7 +14,9 @@
 //! に置きます。
 
 pub mod assembly;
+mod lanes;
 pub mod mapping;
+mod resolve;
 mod run_content;
 mod run_detail;
 mod run_updates;
@@ -32,6 +34,7 @@ use mapping::{
   execution_status, goal_question, goal_status, goal_task, goal_work_log, optional_timestamp, run_status, task_status,
   timestamp,
 };
+use resolve::{resolve_project_in, ResolvedProject};
 use run_updates::{parse_log_cursor, read_updates_response};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
@@ -39,13 +42,13 @@ use tonic::{Request, Response, Status};
 
 use crate::{
   activity::ActivityStore,
-  config::{load_config, Config},
+  config::load_config,
   conversation::{ConversationQuery, ConversationReader},
   domain::{
     GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ReportFilename,
     RunSlug, ServerId, TaskName,
   },
-  mcp::{client_config, McpClient, McpClientRegistry, ToolError, ToolSet},
+  mcp::{McpClientRegistry, ToolError},
   model::{self},
   run_log::{ContentRead, InitialRead, Instruction},
   run_progress::{read_run, read_run_instructions, RunLogHandle, RunLogHandles, RunReadFailure},
@@ -73,6 +76,8 @@ const WATCH_CHANNEL_CAPACITY: usize = 16;
 ///
 /// 開いている画面が自動更新を確認できるよう、読み取り間隔（既定30秒）より短い15秒で再送します。
 const WATCH_RESEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+/// 画面の要求時の読み取りで常駐 HTTP サーバーへ送る 1 呼び出しの期限。
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// run 詳細が、読み位置を持たない本体ログを初めて読むときに読む末尾の大きさ（1 MiB）。
 ///
 /// 実行中の run の詳細を2秒以内に返すため、大きな本体ログの全体を読みません。代わりに、この大きさを
@@ -160,7 +165,7 @@ impl TaktDashServiceImpl {
   /// 同じレジストリから同じプロジェクトの子プロセスを取得します。
   ///
   /// GetRunDetail と GetRunContent は要求のたびに設定のパスからプロジェクトの cwd を解決し、
-  /// run の保存場所を読みます。GetRunDetail は図の定義を takt_get_workflow から取得します。
+  /// run の保存場所だけを読みます。takt-mcp の子プロセスは起動しません。
   pub fn new(deps: ServiceDeps) -> Self {
     Self::with_clock(deps, Arc::new(Utc::now))
   }
@@ -289,73 +294,6 @@ enum ContentTarget {
   Instruction(InstructionId),
 }
 
-/// 状態ストアから解決した run のプロジェクトと、設定から解決したその cwd。
-struct RunTarget {
-  view:     model::ProjectView,
-  resolved: ResolvedProject,
-}
-
-/// 設定から解決した、対象サーバーの起動方法とプロジェクトの cwd。
-struct ResolvedProject {
-  server_id:     ServerId,
-  project:       ProjectName,
-  client_config: crate::mcp::McpClientConfig,
-  cwd:           PathBuf,
-}
-
-/// 読み込み済みの設定から、`server_id` と `project` の起動方法と cwd を解決する。
-///
-/// 設定に無いサーバー・プロジェクトは `unavailable` で返し、takt-mcp を起動しません。
-fn resolve_project_in(config: &Config, server_id: &ServerId, project: &ProjectName) -> Result<ResolvedProject, Status> {
-  let server = config
-    .servers
-    .get(server_id.as_str())
-    .ok_or_else(|| Status::unavailable(format!("サーバー {} の起動方法が設定にありません。", server_id.as_str())))?
-    .clone();
-  let cwd = config
-    .projects
-    .iter()
-    .find(|entry| entry.name == project.as_str() && entry.server == server_id.as_str())
-    .map(|entry| entry.cwd.clone())
-    .ok_or_else(|| Status::unavailable(format!("プロジェクト {} の cwd が設定にありません。", project.as_str())))?;
-  Ok(ResolvedProject {
-    server_id: server_id.clone(),
-    project: project.clone(),
-    client_config: client_config(&server, &cwd),
-    cwd,
-  })
-}
-
-impl TaktDashServiceImpl {
-  /// 設定を読み、`server_id` と `project` から対象サーバーの起動方法と cwd を解決する。
-  ///
-  /// 設定に無いサーバー・プロジェクトは `unavailable` で返し、takt-mcp を起動しません。
-  fn resolve_project(&self, server_id: &ServerId, project: &ProjectName) -> Result<ResolvedProject, Status> {
-    let config = load_config(&self.config_path)
-      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
-    resolve_project_in(&config, server_id, project)
-  }
-
-  /// 状態ストアで run のプロジェクトを探し、設定からその cwd を解決する。takt-mcp は起動しません。
-  fn resolve_run_target(&self, run_slug: &RunSlug) -> Result<RunTarget, Status> {
-    let view = self
-      .store
-      .find_run_project(run_slug)
-      .ok_or_else(|| Status::not_found(format!("runSlug {} は状態ストアにありません。", run_slug.as_str())))?;
-    let server_id = ServerId::try_from(view.server_id.as_str())
-      .map_err(|error| Status::internal(format!("状態ストアの server_id が不正です: {error}")))?;
-    let project = ProjectName::try_from(view.name.as_str())
-      .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
-    let resolved = self.resolve_project(&server_id, &project)?;
-    Ok(RunTarget { view, resolved })
-  }
-
-  /// 書き込み RPC の共通の入口。型で検証済みの対象を解決する。
-  fn resolve_write_target(&self, server_id: &ServerId, project: &ProjectName) -> Result<ResolvedProject, Status> {
-    self.resolve_project(server_id, project)
-  }
-}
-
 #[tonic::async_trait]
 impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
   type WatchStateStream = ReceiverStream<Result<DashboardState, Status>>;
@@ -448,12 +386,16 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       .or_else(|| target.view.tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())))
       .cloned();
     let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
-    let (read, instructions) = if target.resolved.client_config.is_ssh() {
-      (Err(RunReadFailure::NotListed), Vec::new())
+    // SSH 越しのサーバーのプロジェクトは、同名のローカル保存場所を使いません。保存場所を読まない
+    // 扱いにして takt_get_run の経路へ回します。
+    let (read, instructions) = if target.resolved.connection.is_ssh() {
+      (Err(RunReadFailure::NotListed), Ok(Vec::new()))
     } else {
+      // 指示書も run の保存場所から読みます。保存場所を読めない run は takt_get_run から
+      // 読む経路へ回るため、失敗はここで確定させず、保存場所から読めた場合にだけ返します。
       (
         read_run(&run_logs, run_slug.clone()).await,
-        read_run_instructions(target.resolved.cwd.clone(), run_slug.clone()).await.map_err(run_read_failure_status)?,
+        read_run_instructions(target.resolved.cwd.clone(), run_slug.clone()).await,
       )
     };
     let goal_id = stored_run
@@ -474,21 +416,26 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       goal_id: goal_id.map(|goal_id| goal_id.as_str().to_owned()).unwrap_or_default(),
       task_name,
       summary: stored_run.as_ref().map(|run| run.summary.clone()).unwrap_or_default(),
-      instructions: instructions.iter().map(run_instruction).collect(),
+      instructions: instructions.as_ref().map(|list| list.iter().map(run_instruction).collect()).unwrap_or_default(),
       server_connected: target.view.connected,
       server_last_read_at: optional_timestamp(target.view.last_read_at),
       ..Default::default()
     };
     match read {
       | Ok(view) => {
+        instructions.map_err(run_read_failure_status)?;
         tracing::info!(
           run_slug = %run_slug.as_str(),
           body_log_bytes_read = view.body_log_bytes_read,
           "run 詳細のために本体ログを読みました。"
         );
         let last_log_at = run_detail::fill_from_run_log(&mut response, &view, stored_task.as_ref());
+        {
+          let evidence = view.evidence.clone();
+          let mut source = self.read_source(&target.resolved);
+          run_detail::fill_progress(&mut response, &mut source, &target.resolved.cwd, &evidence).await;
+        }
         response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
-        run_detail::fill_progress(&mut response, &target.resolved, &view.evidence).await;
       },
       // 掃除済みの worktree など、run の保存場所が残っていない run はエラーにせず、状態ストアの値と
       // ログが残っていないことを返します。
@@ -509,13 +456,20 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
         response.last_log_at = optional_timestamp(last_log_at);
         response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
       },
-      // SSH 接続、およびローカルの対応表に無い run と対応表を読めない run は
-      // takt_get_run から読みます。takt_get_run でも読めなければ、保存場所の
+      // 保存場所の対応表に無い run と、対応表を読めない run（SSH 越しに扱うリモートのサーバーの
+      // プロジェクトなど）は takt_get_run から読みます。takt_get_run でも読めなければ、保存場所の
       // 読み取りの失敗を返します。
       | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
-        let last_log_at =
-          run_detail::fill_from_takt_get_run(&mut response, &target.resolved, &run_slug, stored_task.as_ref(), failure)
-            .await?;
+        let mut source = self.read_source(&target.resolved);
+        let last_log_at = run_detail::fill_from_takt_get_run(
+          &mut response,
+          &mut source,
+          &target.resolved.cwd,
+          &run_slug,
+          stored_task.as_ref(),
+          failure,
+        )
+        .await?;
         response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
       },
       | Err(failure) => return Err(run_read_failure_status(failure)),
@@ -534,7 +488,16 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let target = self.resolve_run_target(&run_slug)?;
     // GetRunDetail と同じ取っ手を使い、本体ログを前回の読み位置の続きから読む。
     let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
-    let response = read_updates_response(&run_logs, &target.resolved, run_slug, after).await?;
+    let mut source = self.read_source(&target.resolved);
+    let response = read_updates_response(
+      &run_logs,
+      &mut source,
+      &target.resolved.cwd,
+      run_slug,
+      after,
+      target.resolved.connection.is_ssh(),
+    )
+    .await?;
     Ok(Response::new(response))
   }
 
@@ -557,13 +520,15 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
       | None => return Err(Status::invalid_argument("レポートの名前か指示書の ID のどちらかを指定してください。")),
     };
     let resolved = self.resolve_run_target(&run_slug)?.resolved;
+    let mut source = self.read_source(&resolved);
     let (read, missing) = match target {
       | ContentTarget::Report(filename) => (
-        run_content::read_report_body(&resolved, &run_slug, &filename, RUN_CONTENT_MAX_BYTES).await,
+        run_content::read_report_body(&mut source, &resolved, &run_slug, &filename, RUN_CONTENT_MAX_BYTES).await,
         format!("run {} にレポート {} はありません。", run_slug.as_str(), filename.as_str()),
       ),
       | ContentTarget::Instruction(instruction_id) => (
-        run_content::read_instruction_body(&resolved, &run_slug, instruction_id, RUN_CONTENT_MAX_BYTES).await,
+        run_content::read_instruction_body(&mut source, &resolved, &run_slug, instruction_id, RUN_CONTENT_MAX_BYTES)
+          .await,
         format!("run {} に指示書 #{} はありません。", run_slug.as_str(), instruction_id.get()),
       ),
     };
@@ -604,15 +569,11 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let view_project = ProjectName::try_from(view.name.as_str())
       .map_err(|error| Status::internal(format!("状態ストアの project が不正です: {error}")))?;
     let resolved = self.resolve_project(&view_server_id, &view_project)?;
-    let mut client = McpClient::new(resolved.client_config);
-    let detail = match ToolSet::new(&mut client, resolved.cwd.clone()).read_goal_detail(&goal_id).await {
+    let mut source = self.read_source(&resolved);
+    let detail = match source.read_goal_detail(&resolved.cwd, &goal_id).await {
       | Ok(detail) => detail,
-      | Err(error) => {
-        client.shutdown().await;
-        return Err(tool_error_status(error));
-      },
+      | Err(error) => return Err(tool_error_status(error)),
     };
-    client.shutdown().await;
     Ok(Response::new(GetGoalDetailResponse {
       goal_id:             detail.goal_id.as_str().to_owned(),
       server_id:           view.server_id.clone(),
@@ -664,25 +625,17 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let configured_server_id = ServerId::try_from(configured.server.as_str())
       .map_err(|error| Status::internal(format!("設定のサーバー ID が不正です: {error}")))?;
     let resolved = resolve_project_in(&config, &configured_server_id, &project)?;
-    let mut client = McpClient::new(resolved.client_config);
-    let detail = match ToolSet::new(&mut client, resolved.cwd.clone())
-      .read_task_detail(&project, &task_name, goal_id.as_ref())
-      .await
-    {
+    let mut source = self.read_source(&resolved);
+    let detail = match source.read_task_detail(&resolved.cwd, &project, &task_name, goal_id.as_ref()).await {
       | Ok(Some(detail)) => detail,
       | Ok(None) => {
-        client.shutdown().await;
         return Err(Status::not_found(format!(
           "タスク {} はプロジェクト {} にありません。",
           request.task_name, request.project
         )));
       },
-      | Err(error) => {
-        client.shutdown().await;
-        return Err(tool_error_status(error));
-      },
+      | Err(error) => return Err(tool_error_status(error)),
     };
-    client.shutdown().await;
     Ok(Response::new(GetTaskDetailResponse {
       project:             detail.project.as_str().to_owned(),
       task_name:           detail.task_name.as_str().to_owned(),
@@ -870,13 +823,10 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let project = ProjectName::try_from(request.project.as_str())
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
-    let client =
-      self.registry.client(resolved.server_id.as_str(), resolved.project.as_str(), || resolved.client_config.clone());
-    let mut client = client.lock().await;
-    ToolSet::new(&mut client, resolved.cwd.clone())
-      .answer_goal_question(&goal_id, &question_id, answer)
-      .await
-      .map_err(tool_error_status)?;
+    let _write_gate = self.write_gate(&resolved).await;
+    let mut source = self.write_source(&resolved);
+    source.answer_goal_question(&resolved.cwd, &goal_id, &question_id, answer).await.map_err(tool_error_status)?;
+    self.record_write(&resolved);
     // 回答したゴールは、終端でも次の周期で質問を読み直させて判断待ちから外します。
     self.store.invalidate_goal_questions(resolved.project.as_str(), goal_id);
     Ok(Response::new(AnswerInquiryResponse { inquiry_id: question_id.as_str().to_owned() }))
@@ -913,13 +863,10 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let project = ProjectName::try_from(request.project.as_str())
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
-    let client =
-      self.registry.client(resolved.server_id.as_str(), resolved.project.as_str(), || resolved.client_config.clone());
-    let mut client = client.lock().await;
-    let result = ToolSet::new(&mut client, resolved.cwd.clone())
-      .merge_goal_pr(&goal_id, pr_number, until)
-      .await
-      .map_err(tool_error_status)?;
+    let _write_gate = self.write_gate(&resolved).await;
+    let mut source = self.write_source(&resolved);
+    let result = source.merge_goal_pr(&resolved.cwd, &goal_id, pr_number, until).await.map_err(tool_error_status)?;
+    self.record_write(&resolved);
     Ok(Response::new(ApproveGoalMergeResponse {
       task_name: result.task_name.as_str().to_owned(),
       workflow:  result.workflow,
@@ -947,13 +894,10 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let project = ProjectName::try_from(request.project.as_str())
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
-    let client =
-      self.registry.client(resolved.server_id.as_str(), resolved.project.as_str(), || resolved.client_config.clone());
-    let mut client = client.lock().await;
-    let result = ToolSet::new(&mut client, resolved.cwd.clone())
-      .approve_goal_registration(revision)
-      .await
-      .map_err(tool_error_status)?;
+    let _write_gate = self.write_gate(&resolved).await;
+    let mut source = self.write_source(&resolved);
+    let result = source.approve_goal_registration(&resolved.cwd, revision).await.map_err(tool_error_status)?;
+    self.record_write(&resolved);
     Ok(Response::new(ApproveGoalRegistrationResponse {
       revision: result.revision.get(),
       goal_id:  result.goal_id.as_str().to_owned(),
@@ -981,13 +925,10 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     let project = ProjectName::try_from(request.project.as_str())
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
     let resolved = self.resolve_write_target(&server_id, &project)?;
-    let client =
-      self.registry.client(resolved.server_id.as_str(), resolved.project.as_str(), || resolved.client_config.clone());
-    let mut client = client.lock().await;
-    let rejected = ToolSet::new(&mut client, resolved.cwd.clone())
-      .reject_goal_registration(revision)
-      .await
-      .map_err(tool_error_status)?;
+    let _write_gate = self.write_gate(&resolved).await;
+    let mut source = self.write_source(&resolved);
+    let rejected = source.reject_goal_registration(&resolved.cwd, revision).await.map_err(tool_error_status)?;
+    self.record_write(&resolved);
     Ok(Response::new(RejectGoalRegistrationResponse { revision: rejected.get() }))
   }
 

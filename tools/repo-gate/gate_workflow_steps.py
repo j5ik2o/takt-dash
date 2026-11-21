@@ -1,4 +1,6 @@
 """ワークフローのステップと規則を読み取る補助と、修正ステップの遷移先を限る検査。"""
+import re
+
 from gate_common import GateError
 
 
@@ -36,6 +38,11 @@ def check_fix_step_transitions(fix_name, fix_rules, return_to):
             f"{fix_name} に許可されない遷移先があります: {unexpected!r}。"
             f"修正ステップの遷移先は {return_to} か ABORT に限ります"
         )
+    for rule in fix_rules:
+        if rule.get("next") == return_to:
+            break
+        if re.fullmatch(r"when\(\s*true\s*\)", str(rule.get("condition") or "").strip()):
+            raise GateError(f"{fix_name} の無条件規則が {return_to} への戻りを遮っています")
 
 
 def transition(rules, predicate):

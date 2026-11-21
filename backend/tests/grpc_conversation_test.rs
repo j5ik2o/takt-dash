@@ -10,7 +10,10 @@ mod grpc_harness;
 use std::path::Path;
 
 use common::{project, server_meta};
-use conversation_fixture::{current_manager_user_wrapper, manager_user_wrapper, ConversationFixture};
+use conversation_fixture::{
+  current_manager_user_wrapper, fenced_assistant_data, garbled_user_data, manager_user_wrapper, wrapped_user_data,
+  ConversationFixture,
+};
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::takt_dash::v1::{ConversationSpeaker, GetConversationRequest, GetConversationResponse};
@@ -57,6 +60,10 @@ fn texts(response: &GetConversationResponse) -> Vec<String> {
   response.messages.iter().map(|message| message.text.clone()).collect()
 }
 
+fn notices(response: &GetConversationResponse) -> Vec<Option<String>> {
+  response.messages.iter().map(|message| message.notice.clone()).collect()
+}
+
 #[tokio::test]
 async fn get_conversation_extracts_current_human_input_on_initial_and_incremental_requests() {
   let harness = harness();
@@ -80,6 +87,8 @@ async fn get_conversation_extracts_current_human_input_on_initial_and_incrementa
   assert_eq!(incremental.messages[0].seq, 29);
   assert!(initial.messages.iter().all(|message| !message.has_encoding_error));
   assert!(!incremental.messages[0].has_encoding_error);
+  assert_eq!(notices(&initial), vec![None, None], "文字化けの印がない発言には notice を付けない");
+  assert_eq!(notices(&incremental), vec![None]);
   assert!(initial.skipped.is_empty());
   assert!(incremental.skipped.is_empty());
 }
@@ -106,6 +115,7 @@ async fn get_conversation_preserves_quoted_current_input_and_extracts_manager_wr
   assert_eq!(texts(&incremental), vec![original]);
   assert_eq!(incremental.messages[0].seq, 27);
   assert!(incremental.skipped.is_empty());
+  assert_eq!(notices(&initial), vec![None, None], "包みを解いた本文に文字化けの印を付けない");
 }
 
 #[tokio::test]
@@ -129,6 +139,11 @@ async fn get_conversation_transfers_encoding_markers_with_their_messages() {
       .map(|message| (message.seq, message.text.as_str(), message.has_encoding_error))
       .collect::<Vec<_>>(),
     vec![(8, damaged.as_str(), true), (22, "正常な再送", false),]
+  );
+  assert_eq!(
+    notices(&response),
+    vec![Some("元記録で文字化けしています（置換文字 87 個）".to_owned()), None],
+    "文字化けの印は notice と has_encoding_error の両方と同じ発言に載せる"
   );
 }
 
@@ -316,6 +331,47 @@ async fn get_conversation_does_not_return_a_session_owned_by_another_configured_
   assert_eq!(
     response.unavailable_reason.as_deref(),
     Some("manager の記録のセッションが別のプロジェクトに属しています")
+  );
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_conversation_returns_presented_bodies_and_a_garbled_notice() {
+  let harness = harness();
+  let fixture = ConversationFixture::under(harness.home());
+  let project_cwd = harness.project_dir();
+  fixture.write_manager("alpha", "ses_alpha", project_cwd, "opencode");
+  fixture.insert_session("ses_alpha", project_cwd, 2_000);
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &wrapped_user_data("前のターンの本文", "見出しを直してください。", FIRST_MESSAGE_AT),
+  );
+  fixture.insert_message(
+    "ses_alpha",
+    4,
+    "assistant",
+    1_794_613_222_000,
+    &fenced_assistant_data("確認しました。", Some("README を追加する"), 1_794_613_222_000),
+  );
+  fixture.insert_message("ses_alpha", 7, "user", 1_794_613_223_000, &garbled_user_data(12, 1_794_613_223_000));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let response = client.get_conversation(request(None, 0, 50)).await.expect("会話を取得できます").into_inner();
+
+  let bodies = texts(&response);
+  assert_eq!(bodies[0], "見出しを直してください。", "包み付きの user の行は人の発言だけを返す必要があります");
+  assert_eq!(bodies[1], "確認しました。", "fenced JSON の assistant の行は message だけを返す必要があります");
+  assert_eq!(bodies[2].matches('\u{FFFD}').count(), 12, "本文の置換文字はそのまま残す必要があります");
+  assert_eq!(notices(&response), vec![None, None, Some("元記録で文字化けしています（置換文字 12 個）".to_owned()),]);
+  assert_eq!(
+    response.messages.iter().map(|message| message.has_encoding_error).collect::<Vec<_>>(),
+    vec![false, false, true],
+    "文字化けの印も同じ発言に付ける必要があります"
   );
 
   server.stop().await;

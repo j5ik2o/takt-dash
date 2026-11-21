@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{string_field, ToolError, ToolSet, MAX_PAGES};
+use super::{string_field, ToolError, ToolSetCore, MAX_PAGES};
 
 pub(super) fn field_is_omitted(value: &Value, path: &str) -> bool {
   let Some(omissions) = value.get("omissions") else { return false };
@@ -18,7 +18,7 @@ pub(super) fn field_is_omitted(value: &Value, path: &str) -> bool {
   })
 }
 
-impl ToolSet<'_> {
+impl ToolSetCore<'_> {
   pub(super) async fn restore_goal_record_body(
     &mut self,
     goal_id: &str,

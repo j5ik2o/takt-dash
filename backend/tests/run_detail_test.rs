@@ -101,12 +101,37 @@ async fn request_detail(harness: &GrpcHarness, run_slug: &str) -> Result<GetRunD
 }
 
 /// run の本文はローカルから読み、追加の MCP 読取は図の定義だけであることを確かめる。
+///
+/// 画面読み取りレーンの子プロセスは最初の詳細要求で遅延生成されるため、
+/// 基準は1回目の要求の後で取ります。 2回目以降の要求で子プロセスが増えず、道具呼び出しだけが
+/// `takt_get_workflow` で増えることを確かめ、 要求ごとに接続を起動し直す退行を検出します。
+/// `processes_before` は既にレーンが温まっている状態の プロセス数（poller 済みなど）を渡します。
 fn assert_only_workflow_definition_reads(harness: &GrpcHarness, processes_before: usize, calls_before: usize) {
   let processes = harness.recorded_processes();
   let calls = harness.recorded_calls();
   let added = &calls[calls_before..];
   assert!(added.iter().all(|call| call.name == "takt_get_workflow"), "run の内容を MCP で再取得しません: {added:?}");
-  assert_eq!(processes.len() - processes_before, added.len(), "各詳細要求は定義取得用の接続を終了します");
+  assert_eq!(processes.len(), processes_before, "2回目以降の詳細要求は子プロセスを増やしません: {processes:?}");
+}
+
+/// 同一サーバーに詳細を2回要求し、1回目の要求後のプロセス数を基準に、2回目の要求が同じ接続を
+/// 再利用することを確かめる。子プロセスの遅延生成を1回目で済ませるため、
+/// 基準は2回目の直前で取ります。
+async fn assert_single_reuse_of_screen_lane(harness: &GrpcHarness, run_slug: &str) {
+  let server = start_server(harness).await;
+  let mut client = client(server.address).await;
+  client
+    .get_run_detail(GetRunDetailRequest { run_slug: run_slug.to_owned() })
+    .await
+    .expect("1回目の詳細要求は成功します");
+  let processes_before = harness.recorded_processes().len();
+  let calls_before = harness.recorded_calls().len();
+  client
+    .get_run_detail(GetRunDetailRequest { run_slug: run_slug.to_owned() })
+    .await
+    .expect("2回目の詳細要求は成功します");
+  server.stop().await;
+  assert_only_workflow_definition_reads(harness, processes_before, calls_before);
 }
 
 fn timestamp(text: &str) -> prost_types::Timestamp {
@@ -301,16 +326,8 @@ async fn get_run_detail_reads_only_the_workflow_definition_from_takt_mcp() {
   let fixture = running_run_files(&harness);
   fixture.write_report("run-1", "plan.md", "計画のレポート");
   fixture.write_interventions("run-1", &[issued_event(1, "2026-11-13T08:50:00Z", "指示の本文")]);
-  let server = start_server(&harness).await;
-  let mut client = client(server.address).await;
-
-  for _ in 0..2 {
-    client.get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() }).await.expect("run 詳細を取得できます");
-  }
-  server.stop().await;
-
+  assert_single_reuse_of_screen_lane(&harness, "run-1").await;
   assert_eq!(harness.recorded_calls().len(), 2, "2回の詳細要求で定義を2回読みます");
-  assert_only_workflow_definition_reads(&harness, 0, 0);
 }
 
 #[tokio::test]
@@ -532,7 +549,7 @@ async fn get_run_detail_reads_a_run_in_its_worktree() {
   assert!(!detail.logs_removed);
   assert_eq!(detail.current_step.as_deref(), Some("review"), "状態は worktree 側の meta.json の値です");
   assert_eq!(step_log_names(&detail), vec!["worktree-step".to_owned()], "ステップは worktree 側の本体ログです");
-  assert_only_workflow_definition_reads(&harness, 0, 0);
+  assert_single_reuse_of_screen_lane(&harness, "run-1").await;
 }
 
 #[tokio::test]
@@ -581,7 +598,7 @@ async fn get_run_detail_reads_a_resumed_run_from_its_source_run_slug() {
   assert_eq!(step_log_names(&detail), vec!["resumed-step".to_owned()], "worktree 側の run-source の本体ログです");
   assert_eq!(detail.goal_id, "g-resume", "ゴールは source_run_slug が一致するタスクから取ります");
   assert_eq!(detail.task_name, "resume-task", "タスク名は source_run_slug が一致するタスクから取ります");
-  assert_only_workflow_definition_reads(&harness, 0, 0);
+  assert_single_reuse_of_screen_lane(&harness, "run-source").await;
 }
 
 #[tokio::test]
@@ -607,7 +624,7 @@ async fn get_run_detail_reports_logs_removed_for_a_cleaned_worktree() {
   assert_eq!(detail.goal_id, "g1");
   assert_eq!(detail.task_name, "implement");
   assert_eq!(detail.session_id, "sess-1");
-  assert_only_workflow_definition_reads(&harness, 0, 0);
+  assert_single_reuse_of_screen_lane(&harness, "run-1").await;
 }
 
 #[tokio::test]
@@ -1223,8 +1240,6 @@ async fn get_run_detail_resolves_a_completed_task_that_only_has_a_source_run_slu
   );
   poller.read_cycle_once().await.expect("1サイクルを実行できます");
   poller.shutdown().await;
-  let processes_before = harness.recorded_processes().len();
-  let calls_before = harness.recorded_calls().len();
 
   let detail = request_detail(&harness, "run-source")
     .await
@@ -1233,7 +1248,7 @@ async fn get_run_detail_resolves_a_completed_task_that_only_has_a_source_run_slu
   assert_eq!(detail.project, "takt-dash", "sourceRunSlug からプロジェクトを解決します");
   assert_eq!(detail.goal_id, "g1", "ゴールは sourceRunSlug が一致する完了タスクから取ります");
   assert_eq!(detail.task_name, "implement", "タスク名は sourceRunSlug が一致する完了タスクから取ります");
-  assert_only_workflow_definition_reads(&harness, processes_before, calls_before);
+  assert_single_reuse_of_screen_lane(&harness, "run-source").await;
 
   let status =
     request_detail(&harness, "does-not-exist").await.expect_err("sourceRunSlug と異なる slug は解決しません");

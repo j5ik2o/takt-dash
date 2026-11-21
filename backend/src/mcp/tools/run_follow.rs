@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use super::{
-  parse_remote_run, step_entries, step_log_entries, step_log_next_offset, Page, RemoteRun, ToolError, ToolSet,
+  parse_remote_run, step_entries, step_log_entries, step_log_next_offset, Page, RemoteRun, ToolError, ToolSetCore,
   MAX_PAGES,
 };
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
   workflow_progress::{build_progress, DefinitionNode, ExecutionEvidence, WorkflowDefinition},
 };
 
-impl ToolSet<'_> {
+impl ToolSetCore<'_> {
   /// takt_get_run から run を読む。stepLogs は先頭のウィンドウだけが返るため、
   /// stepLogPage.nextOffset が残っていれば追加のページを取得して全件を集めます。
   pub async fn read_remote_run(&mut self, run_slug: &RunSlug) -> Result<RemoteRun, ToolError> {
@@ -52,17 +52,6 @@ impl ToolSet<'_> {
     Ok(run)
   }
 
-  /// 概要・詳細が消費する進行証拠を補完する。ログ追記取得はこの操作を呼ばない。
-  pub(crate) async fn enrich_remote_progress(&mut self, run_slug: &RunSlug, remote: &mut RemoteRun) {
-    match crate::remote_run::read_evidence(self.client.config(), &self.cwd, run_slug, &remote.step_logs).await {
-      | Ok(Some(evidence)) => remote.evidence = evidence,
-      | Ok(None) => {},
-      | Err(error) => {
-        tracing::warn!(run_slug = %run_slug.as_str(), error = %error, "SSH から進行情報を読めませんでした。取得済みの run を返します。")
-      },
-    }
-  }
-
   /// workflow の step 名一覧から、run の現在ステップの位置と全ステップ数を補う。
   ///
   /// workflow を読めないときや現在ステップが一覧に無いときは、位置と総数を設定しません。
@@ -78,7 +67,7 @@ impl ToolSet<'_> {
     };
     run.progress =
       Some(build_progress(definition.clone(), evidence, workflow, run.current_step.as_deref(), run.status));
-    let steps: Vec<_> = definition.nodes.iter().map(|node| &node.name).collect();
+    let steps: Vec<_> = definition.nodes.iter().map(|node| node.name.clone()).collect();
     // meta.json の currentStep は takt_get_workflow が返す workflow の step 名に対応する。
     // ステップの記録の末尾は入れ子 workflow の内側の step になり得るため、位置の算出には使わない。
     // currentStep が無い run だけ、従来どおりステップの記録の末尾で補う。
@@ -90,7 +79,7 @@ impl ToolSet<'_> {
     else {
       return Ok(());
     };
-    let Some(index) = steps.iter().position(|name| name.as_str() == current) else {
+    let Some(index) = steps.iter().position(|name| name == current) else {
       return Ok(());
     };
     let Some(step_number) = i32::try_from(index + 1).ok() else {
@@ -104,22 +93,22 @@ impl ToolSet<'_> {
     Ok(())
   }
 
-  /// workflow の step 名一覧を取得する。同じ workflow の結果は道具のまとまりの中で再利用します。
+  /// workflow の step 名と分岐を持つ定義を取得する。同じ workflow の結果は再利用します。
   pub async fn workflow_definition(&mut self, workflow: &str) -> Result<Option<WorkflowDefinition>, ToolError> {
-    if let Some(cached) = self.workflows.get(workflow) {
+    if let Some(cached) = self.workflow_definitions.get(workflow) {
       return Ok(cached.clone());
     }
-    let steps = match self.fetch_workflow_definition(workflow).await {
-      | Ok(steps) => steps,
+    let definition = match self.fetch_workflow_definition(workflow).await {
+      | Ok(definition) => definition,
       | Err(ToolError::Transport(error)) => return Err(ToolError::Transport(error)),
       | Err(_) => None,
     };
-    self.workflows.insert(workflow.to_owned(), steps.clone());
-    Ok(steps)
+    self.workflow_definitions.insert(workflow.to_owned(), definition.clone());
+    Ok(definition)
   }
 
   async fn fetch_workflow_definition(&mut self, workflow: &str) -> Result<Option<WorkflowDefinition>, ToolError> {
-    let mut steps = Vec::new();
+    let mut nodes = Vec::new();
     let mut initial_step = None;
     let mut offset = 0;
     let mut total_count = None;
@@ -134,18 +123,32 @@ impl ToolSet<'_> {
         let Some(node) = DefinitionNode::from_value(item) else {
           return Ok(None);
         };
-        steps.push(node);
+        nodes.push(node);
       }
       match page.next_offset {
         | Some(next) => offset = next,
         | None => {
-          if total_count.is_some_and(|total| total != steps.len()) {
+          if total_count.is_some_and(|total| total != nodes.len()) {
             return Ok(None);
           }
-          return Ok(if steps.is_empty() { None } else { Some(WorkflowDefinition { initial_step, nodes: steps }) });
+          return Ok(if nodes.is_empty() { None } else { Some(WorkflowDefinition { initial_step, nodes }) });
         },
       }
     }
     Err(ToolError::Parse("takt_get_workflow のページ追従が上限に達しました".to_owned()))
+  }
+
+  /// SSH から進行証拠を読み、remote の evidence を補完する。
+  pub(crate) async fn enrich_remote_progress(&mut self, run_slug: &RunSlug, remote: &mut crate::mcp::RemoteRun) {
+    let Some(config) = self.client.config() else {
+      return;
+    };
+    match crate::remote_run::read_evidence(config, &self.cwd, run_slug, &remote.step_logs).await {
+      | Ok(Some(evidence)) => remote.evidence = evidence,
+      | Ok(None) => {},
+      | Err(error) => {
+        tracing::warn!(run_slug = %run_slug.as_str(), error = %error, "SSH から進行情報を読めませんでした。取得済みの run を返します。")
+      },
+    }
   }
 }

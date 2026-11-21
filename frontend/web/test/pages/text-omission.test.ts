@@ -23,7 +23,7 @@ test("判断待ちの質問本文に渡された省略記号を保持する", ()
   const inquiry = base.pendingDecisions.find((item) => item.type === PendingDecisionType.PENDING_DECISION_TYPE_INQUIRY);
   assert.ok(inquiry);
   const state = { ...base, pendingDecisions: [{ ...inquiry, body: "確認。…" }] };
-  const html = renderToStaticMarkup(createElement(DecisionsContent, { state, now: NOW, disconnected: false }));
+  const html = renderToStaticMarkup(createElement(DecisionsContent, { state, snapshotLoaded: true, now: NOW, disconnected: false }));
   assert.ok(new JSDOM(html).window.document.body.textContent?.includes("確認。…"));
 });
 

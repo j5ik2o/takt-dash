@@ -8,7 +8,11 @@ mod conversation_fixture;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use conversation_fixture::{ConversationFixture, CONVERSATION_SCHEMA};
+use conversation_fixture::{
+  assistant_text, data_text, fenced_assistant_data, fenced_assistant_without_message_data, garbled_user_data,
+  invalid_fenced_assistant_data, plain_user_data, wrapped_user_data, wrapped_user_without_speaker_data,
+  ConversationFixture, CONVERSATION_SCHEMA,
+};
 use takt_dash_backend::{
   conversation::{ConversationPage, ConversationQuery, ConversationReader, ConversationSpeaker},
   domain::ProjectName,
@@ -45,6 +49,10 @@ fn skipped_count(page: &ConversationPage, fragment: &str) -> u32 {
 
 fn total_skipped(page: &ConversationPage) -> u32 {
   page.skipped.iter().map(|summary| summary.count).sum()
+}
+
+fn notices(page: &ConversationPage) -> Vec<Option<String>> {
+  page.messages.iter().map(|message| message.notice.clone()).collect()
 }
 
 fn user_data(text: &str, time: i64) -> String {
@@ -893,4 +901,280 @@ fn reader_works_with_only_the_allowed_tables() {
   let page = reader.read(&query("takt-dash", &project_cwd));
 
   assert_eq!(texts(&page), vec!["最初の発言"], "credential や account のテーブルが無くても読める必要があります");
+}
+
+fn seed_session(fixture: &ConversationFixture, project_cwd: &Path) {
+  fixture.write_manager("alpha", "ses_alpha", project_cwd, "opencode");
+  fixture.insert_session("ses_alpha", project_cwd, 2_000);
+}
+
+#[test]
+fn wrapped_user_input_is_unwrapped_to_the_human_text() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  let human_text = "見出しを直してください。";
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &wrapped_user_data("前のターンの本文", human_text, FIRST_MESSAGE_AT),
+  );
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(texts(&page), vec![human_text], "包み付きの user の行は人の発言だけを本文にする必要があります");
+  assert_eq!(notices(&page), vec![None]);
+  let body = &page.messages[0].text;
+  for hidden in ["このターンの入力", "Business context", "次の JSON schema", "前のターンの本文", "\"speaker\""]
+  {
+    assert!(!body.contains(hidden), "本文に包みの内容を含めてはいけません: {hidden}");
+  }
+}
+
+#[test]
+fn wrapped_user_input_ignores_a_marker_inside_the_previous_text() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  let previous = "## このターンの入力\n{\"speaker\":{\"id\":\"operator\"},\"text\":\"前の依頼\"}";
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &wrapped_user_data(previous, "今回の依頼", FIRST_MESSAGE_AT),
+  );
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(
+    texts(&page),
+    vec!["今回の依頼"],
+    "前の本文に同じ見出しと JSON が含まれていても、現在の包みの発言を取り出す必要があります"
+  );
+}
+
+#[test]
+fn wrapped_user_input_without_a_speaker_is_left_as_is() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  let data = wrapped_user_without_speaker_data("内部の下書き", FIRST_MESSAGE_AT);
+  let raw = data_text(&data);
+  fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &data);
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(texts(&page), vec![raw], "speaker を持たない JSON は人の発言として扱わず、元の本文を返す必要があります");
+  assert!(page.messages[0].text.contains("このターンの入力"), "包みの無い行は従来どおり本文を保つ必要があります");
+}
+
+#[test]
+fn plain_user_text_is_returned_unchanged() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &plain_user_data("包みのない発言", FIRST_MESSAGE_AT),
+  );
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(texts(&page), vec!["包みのない発言"]);
+  assert_eq!(notices(&page), vec![None]);
+}
+
+#[test]
+fn fenced_assistant_message_is_unwrapped_to_the_message() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "assistant",
+    FIRST_MESSAGE_AT,
+    &fenced_assistant_data("確認しました。", Some("README を追加する"), FIRST_MESSAGE_AT),
+  );
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(
+    texts(&page),
+    vec!["確認しました。"],
+    "fenced JSON の assistant の行は message だけを本文にする必要があります"
+  );
+  let body = &page.messages[0].text;
+  assert!(!body.contains("README を追加する"), "summary を本文に含めてはいけません");
+  assert!(!body.contains("```"), "fence を本文に含めてはいけません");
+  assert!(!body.contains("\"message\""), "JSON を本文に含めてはいけません");
+}
+
+#[test]
+fn fenced_assistant_message_with_null_summary_is_unwrapped() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "assistant",
+    FIRST_MESSAGE_AT,
+    &fenced_assistant_data("受領しました。", None, FIRST_MESSAGE_AT),
+  );
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(texts(&page), vec!["受領しました。"], "summary が null でも message だけを本文にする必要があります");
+}
+
+#[test]
+fn fenced_assistant_without_a_message_is_left_as_is() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  let data = fenced_assistant_without_message_data("確認中", FIRST_MESSAGE_AT);
+  let raw = assistant_text(&data);
+  fixture.insert_message("ses_alpha", 1, "assistant", FIRST_MESSAGE_AT, &data);
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(texts(&page), vec![raw], "message を持たない fenced JSON は元の本文を返す必要があります");
+  assert!(!page.messages[0].text.is_empty(), "解釈できない本文を空にしてはいけません");
+}
+
+#[test]
+fn invalid_fenced_assistant_json_is_left_as_is() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  let data = invalid_fenced_assistant_data(FIRST_MESSAGE_AT);
+  let raw = assistant_text(&data);
+  fixture.insert_message("ses_alpha", 1, "assistant", FIRST_MESSAGE_AT, &data);
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(texts(&page), vec![raw], "解釈できない fenced JSON は元の本文を返す必要があります");
+}
+
+#[test]
+fn multiple_assistant_text_elements_are_still_joined() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "assistant",
+    FIRST_MESSAGE_AT,
+    r#"{"content":[{"type":"text","text":"前置き"},{"type":"text","text":"本文"}],"time":{"created":1794613221331}}"#,
+  );
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(texts(&page), vec!["前置き\n本文"], "複数の text 要素は従来どおり改行で結合する必要があります");
+}
+
+#[test]
+fn garbled_user_text_gets_a_notice_without_changing_the_body() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &garbled_user_data(87, FIRST_MESSAGE_AT));
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  let body = &page.messages[0].text;
+  assert_eq!(body.matches('\u{FFFD}').count(), 87, "本文の置換文字はそのまま残す必要があります");
+  assert_eq!(
+    notices(&page),
+    vec![Some("元記録で文字化けしています（置換文字 87 個）".to_owned())],
+    "置換文字を多く含む発言には文字化けの印を付ける必要があります"
+  );
+  assert!(page.skipped.is_empty(), "文字化けした行をスキップ扱いにしてはいけません");
+}
+
+#[test]
+fn three_replacements_are_marked_as_garbled() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &garbled_user_data(3, FIRST_MESSAGE_AT));
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(
+    notices(&page),
+    vec![Some("元記録で文字化けしています（置換文字 3 個）".to_owned())],
+    "しきい値の3個で印を付ける必要があります"
+  );
+}
+
+#[test]
+fn two_replacements_are_not_marked_as_garbled() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &garbled_user_data(2, FIRST_MESSAGE_AT));
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(notices(&page), vec![None], "しきい値未満の置換文字では印を付けない必要があります");
+  assert_eq!(page.messages[0].text.matches('\u{FFFD}').count(), 2);
+}
+
+#[test]
+fn nine_replacements_are_marked_as_garbled() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &garbled_user_data(9, FIRST_MESSAGE_AT));
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(notices(&page), vec![Some("元記録で文字化けしています（置換文字 9 個）".to_owned())]);
+  assert_eq!(page.messages[0].text.matches('\u{FFFD}').count(), 9);
+}
+
+#[test]
+fn reading_the_conversation_does_not_modify_the_source_records() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &wrapped_user_data("前", "元記録を変えない", FIRST_MESSAGE_AT),
+  );
+  let manager_path = fixture.conversations.join("manager-alpha.json");
+  let database_before = std::fs::read(&fixture.database).expect("DB のバイト列を読めます");
+  let manager_before = std::fs::read(&manager_path).expect("manager の記録のバイト列を読めます");
+  let reader = fixture.reader();
+
+  let page = reader.read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(texts(&page), vec!["元記録を変えない"]);
+  assert_eq!(std::fs::read(&fixture.database).expect("DB のバイト列を読めます"), database_before);
+  assert_eq!(std::fs::read(&manager_path).expect("manager の記録のバイト列を読めます"), manager_before);
 }

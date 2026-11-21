@@ -18,7 +18,7 @@ import GoalsPage from "../../app/goals/page.tsx";
 // 切断時の通知の契約は live-disconnected.test.ts と live-provider-wiring.test.ts が担う。
 const renderGoals = (state = createDashboardState(), project?: string): string =>
   renderToStaticMarkup(
-    createElement(GoalsContent, { state: dashboardStateFromProto(state), project, disconnected: false }),
+    createElement(GoalsContent, { snapshotLoaded: true, state: dashboardStateFromProto(state), project, disconnected: false }),
   );
 
 // ページは RSC で searchParams を受け取り、SSE の state を配る Provider の内側で一覧を描く。
@@ -29,7 +29,7 @@ const renderGoalsPage = async (project?: string): Promise<string> => {
     searchParams: Promise.resolve(project === undefined ? {} : { project }),
   });
   // children は Provider の props の必須項目のため、型付けした props ごと渡す。
-  const props: ComponentProps<typeof StateStreamProvider> = {
+  const props: ComponentProps<typeof StateStreamProvider> = { initialSnapshotLoaded: true,
     initialState: createDashboardState(),
     children: page,
   };
@@ -212,7 +212,7 @@ test("ゴール一覧はマージの承認待ちでないゴールに承認待�
   });
 
   // 同じ画面に、承認待ちの肯定文と、承認待ちでないゴールを並べる。行単位で分けて
-  // 観測し、肯定文が服装の取り違えで全行へ漏れていないことを確かめる。
+  // 観測し、承認待ちの文が承認待ちでないゴールの行へ漏れていないことを確かめる。
   const runningRow = rowFor(html, "実行中のゴール");
   assert.doesNotMatch(runningRow, /マージの承認待ち/);
 

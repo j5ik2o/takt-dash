@@ -52,6 +52,7 @@ fn sample_overview_servers() -> Vec<ServerInfo> {
       kind:         "Mac mini".to_owned(),
       connected:    true,
       last_read_at: Some(ts(1_731_599_000)),
+      write_only:   false,
     },
     ServerInfo {
       server_id:    "studio".to_owned(),
@@ -59,6 +60,7 @@ fn sample_overview_servers() -> Vec<ServerInfo> {
       kind:         "Mac Studio".to_owned(),
       connected:    false,
       last_read_at: None,
+      write_only:   false,
     },
   ]
 }
@@ -343,6 +345,7 @@ pub(super) fn conversation_message(
     occurred_at: Some(ts(secs)),
     speaker: speaker as i32,
     text: text.to_owned(),
+    notice: None,
     has_encoding_error: false,
   }
 }

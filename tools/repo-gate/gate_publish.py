@@ -201,6 +201,9 @@ def check_publish_retry_rule(retry, publish_failure_next, publish_name):
         raise GateError(f"{publish_failure_next} の遷移に ABORT があります")
     if publish_name not in retry_nexts:
         raise GateError(f"{publish_failure_next} から {publish_name} へ戻る遷移がありません")
+    unexpected = [next_value for next_value in retry_nexts if next_value not in (publish_name, "machine_gate")]
+    if unexpected:
+        raise GateError(f"{publish_failure_next} に許可されない遷移先があります: {unexpected!r}")
     retry_instruction = retry.get("instruction")
     retry_text = (
         "\n".join(retry_instruction)

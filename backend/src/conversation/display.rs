@@ -52,6 +52,14 @@ pub(super) fn has_encoding_error(text: &str) -> bool {
     == ENCODING_ERROR_THRESHOLD
 }
 
+/// 表示する本文に添える注意書き。本文の置換文字がしきい値以上のときだけ、元記録の文字化けを示す。
+///
+/// 本文そのものは変更しません。
+pub(super) fn notice(text: &str) -> Option<String> {
+  let count = text.chars().filter(|character| *character == '\u{fffd}').count();
+  (count >= ENCODING_ERROR_THRESHOLD).then(|| format!("元記録で文字化けしています（置換文字 {count} 個）"))
+}
+
 fn current_input_section(text: &str) -> Option<(&str, bool)> {
   let mut previous_input = false;
   let mut start = None;
@@ -69,9 +77,10 @@ fn current_input_section(text: &str) -> Option<(&str, bool)> {
         | None => fence = Some((marker, length)),
       }
     } else if fence.is_none() {
-      if trimmed == "## 前のターンで受け取った人の発言" && start.is_none() {
+      if trimmed == "## 前のターンで受け取った人の発言" {
         previous_input = true;
-      } else if trimmed == "## このターンの入力" && start.is_none() {
+        start = None;
+      } else if trimmed == "## このターンの入力" {
         start = Some(offset + line.len());
       } else if start.is_some() && (trimmed.starts_with("# ") || trimmed.starts_with("## ")) {
         return start.map(|start| (&text[start..offset], previous_input));

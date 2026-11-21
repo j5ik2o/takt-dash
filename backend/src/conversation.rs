@@ -151,13 +151,18 @@ impl ConversationReader {
     let mut skipped: BTreeMap<String, u32> = BTreeMap::new();
     for row in examined {
       match classify(row) {
-        | Ok((speaker, text)) => page.messages.push(ConversationMessage {
-          seq: row.seq,
-          occurred_at: DateTime::<Utc>::from_timestamp_millis(row.time_created).unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-          speaker,
-          has_encoding_error: display::has_encoding_error(&text),
-          text,
-        }),
+        | Ok((speaker, raw_text)) => {
+          let presented = present_body(speaker, raw_text);
+          page.messages.push(ConversationMessage {
+            seq: row.seq,
+            occurred_at: DateTime::<Utc>::from_timestamp_millis(row.time_created)
+              .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+            speaker,
+            has_encoding_error: display::has_encoding_error(&presented.text),
+            text: presented.text,
+            notice: presented.notice,
+          });
+        },
         | Err(reason) => *skipped.entry(reason).or_insert(0) += 1,
       }
     }
@@ -348,7 +353,7 @@ fn classify(row: &MessageRow) -> Result<(ConversationSpeaker, String), String> {
     | "user" => {
       let value = parse_data(&row.data)?;
       let text = text_field(&value).ok_or_else(|| "本文が無い".to_owned())?;
-      Ok((ConversationSpeaker::User, display::user_text(text)))
+      Ok((ConversationSpeaker::User, text))
     },
     | "assistant" => {
       let value = parse_data(&row.data)?;
@@ -367,7 +372,7 @@ fn classify(row: &MessageRow) -> Result<(ConversationSpeaker, String), String> {
       if texts.is_empty() {
         return Err("本文が無い".to_owned());
       }
-      Ok((ConversationSpeaker::Manager, display::assistant_text(texts.join("\n"))))
+      Ok((ConversationSpeaker::Manager, texts.join("\n")))
     },
     | "system" => {
       let value = parse_data(&row.data)?;
@@ -376,6 +381,32 @@ fn classify(row: &MessageRow) -> Result<(ConversationSpeaker, String), String> {
     },
     | other => Err(format!("対応していない type {other}")),
   }
+}
+
+/// 表示用に整形した本文と、本文に添える注意書き。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PresentedBody {
+  text:   String,
+  notice: Option<String>,
+}
+
+/// 整形済みの本文に、元記録の文字化けの印を添える。
+///
+/// 本文そのものは変更しません。包みの解釈は `display` が担います。
+fn present_body(speaker: ConversationSpeaker, raw_text: String) -> PresentedBody {
+  let text = match speaker {
+    | ConversationSpeaker::User => display::user_text(raw_text),
+    | ConversationSpeaker::Manager => display::assistant_text(raw_text),
+    | ConversationSpeaker::System => raw_text,
+  };
+  let notice = garbled_notice(&text);
+  PresentedBody { text, notice }
+}
+
+/// 表示する本文に添える注意書き。判定と文面は [`display::notice`] と同じ規則を使い、
+/// `has_encoding_error` の印と同じ発言に同じしきい値で載せます。
+fn garbled_notice(text: &str) -> Option<String> {
+  display::notice(text)
 }
 
 fn parse_data(data: &str) -> Result<Value, String> {
@@ -450,6 +481,7 @@ pub struct ConversationMessage {
   pub occurred_at:        DateTime<Utc>,
   pub speaker:            ConversationSpeaker,
   pub text:               String,
+  pub notice:             Option<String>,
   pub has_encoding_error: bool,
 }
 

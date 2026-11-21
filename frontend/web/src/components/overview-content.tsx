@@ -7,6 +7,7 @@ import { decisionKey, decisionTypeLabel } from "../state/decision-actions";
 import { formatClock, formatDateTime, formatDuration, formatModel } from "../state/format";
 import { decisionHref, projectHref, serverAnchorId } from "../state/anchors";
 import { goalDisplayName } from "../state/goal-summary";
+import { readCountText } from "../state/read-coverage";
 import type { BackendUnavailableSituation } from "../grpc/client";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { WorkflowProgressSummary } from "./workflow-progress";
@@ -39,24 +40,32 @@ export function OverviewContent({
   unavailableSituation,
 }: OverviewContentProps): ReactElement {
   const { pendingCounts } = view;
-  const hasUnresponsiveServer = view.unresponsiveServers.length > 0;
-  const hasUnresponsiveProject = view.unresponsiveProjects.length > 0;
-  const partialRead = hasUnresponsiveServer || hasUnresponsiveProject;
-  // 応答なしの主語をサーバーとプロジェクトで分ける。サーバーが connected のまま配下の
-  // プロジェクトだけが応答なしのときに「サーバー」と主張しない。
-  let partialReadSubject = "プロジェクト";
-  if (hasUnresponsiveServer) {
-    partialReadSubject = hasUnresponsiveProject ? "サーバーとプロジェクト" : "サーバー";
-  }
+  const partialReadSubject = view.partialReadSubject;
+  const partialRead = partialReadSubject !== undefined;
   const partialReadTime = view.partialReadAt
     ? `${formatClock(view.partialReadAt)} 時点`
     : "最後に読めた時刻は不明";
+  const firstProjectReadAt = view.projects[0]?.lastReadAt;
+  const commonProjectReadAt = firstProjectReadAt !== undefined && view.projects.every(
+    (project) => project.lastReadAt?.getTime() === firstProjectReadAt.getTime(),
+  ) ? firstProjectReadAt : undefined;
+  const emptyRunText = view.coverage !== "complete"
+    ? "まだ読めていないため、run があるかどうかは分かりません。"
+    : (partialRead || disconnected) && view.projects.length > 0
+      ? commonProjectReadAt !== undefined
+        ? `最後に読めた時点（${formatClock(commonProjectReadAt)} 時点）では、走っている run はありませんでした。`
+        : "各プロジェクトで最後に取得した結果には、走っている run はありませんでした。"
+      : "走っている run はありません。";
   const lastReadText = view.readAt
     ? `最終読み取り時刻 ${formatClock(view.readAt)}（${formatDateTime(view.readAt)}）時点の内容を表示しています。`
-    : "takt-mcp からまだ読めていません。";
+    : view.snapshotLoaded && view.projects.length === 0
+      ? "取得済みの概要を表示しています。"
+      : "takt-mcp からまだ読めていません。";
   const longestWait = view.pendingDecisions[0];
   const shownProjects = view.projects.slice(0, OVERVIEW_PROJECT_CARD_LIMIT);
   const hiddenProjectCount = view.projects.length - shownProjects.length;
+  const knownEmptyRuns = view.coverage === "complete" && view.runs.length === 0;
+  const hasConfiguration = view.projects.length > 0 || view.snapshotLoaded;
   return (
     <main className="page overview">
       {disconnected ? <BackendUnavailableNotice situation={unavailableSituation} /> : null}
@@ -64,9 +73,21 @@ export function OverviewContent({
         <div>
           <h1>概要</h1>
           <p>
-            {view.servers.length}台のサーバーを集約し、{view.runningRuns}件の run が動いています。
+            {view.snapshotLoaded ? (
+              <>
+                {view.servers.length}台のサーバーを集約{knownEmptyRuns ? "しています。" : <>し、{view.coverage === "complete"
+                  ? `${view.runningRuns}件の run が動いています。`
+                  : `実行中の run は${readCountText(view.runningRuns, view.coverage)}です。`}</>}
+              </>
+            ) : "サーバーの台数は不明です。実行中の run は不明です。"}
           </p>
-          {partialRead ? (
+          {view.snapshotLoaded && view.coverage !== "complete" ? (
+            <p className="stale-note">まだ読めていないプロジェクトがあります。run・判断待ち・ゴールの件数には未読の分を含めていません。</p>
+          ) : null}
+          {partialRead && (view.coverage !== "complete" || knownEmptyRuns) ? (
+            <p className="stale-note">応答のない{partialReadSubject}があります（{partialReadTime}）。</p>
+          ) : null}
+          {partialRead && view.coverage === "complete" && !knownEmptyRuns ? (
             <p className="stale-note">
               応答のない{partialReadSubject}があります。実行中の run は、最後に読めた時点で {view.runningRuns} 件です（
               {partialReadTime}）。
@@ -100,17 +121,21 @@ export function OverviewContent({
         <div className="tile">
           <div className="label">実行中の run（全サーバー）</div>
           <div className="num">
-            {view.runningRuns}
-            <small>/ {view.runLimit} 件</small>
+            {knownEmptyRuns ? <>上限 {view.runLimit}<small>件</small></>
+              : view.coverage === "complete" ? <>{view.runningRuns}<small>/ {view.runLimit} 件</small></>
+                : <>{readCountText(view.runningRuns, view.coverage)}{hasConfiguration ? <small>上限 {view.runLimit} 件</small> : null}</>}
           </div>
-          <div
+          {view.coverage === "complete" && !knownEmptyRuns ? <div
             className="bar live"
             role="img"
             aria-label={`実行上限 ${view.runLimit} 件に対して ${view.runningRuns} 件`}
           >
             <i style={{ width: `${runUsagePercent(view.runningRuns, view.runLimit)}%` }} />
-          </div>
-          {partialRead ? (
+          </div> : null}
+          {partialRead && view.coverage !== "complete" ? (
+            <div className="t-note">応答のない{partialReadSubject}があります（{partialReadTime}）。</div>
+          ) : null}
+          {partialRead && view.coverage === "complete" && !knownEmptyRuns ? (
             <div className="t-note">
               応答のない{partialReadSubject}があるため、最後に読めた時点で {view.runningRuns} 件です（
               {partialReadTime}）。
@@ -120,21 +145,20 @@ export function OverviewContent({
         <div className={`tile${pendingCounts.total > 0 ? " attention" : ""}`}>
           <div className="label">判断待ち（全サーバー）</div>
           <div className="num">
-            {pendingCounts.total}
-            <small>件</small>
+            {view.coverage === "complete" ? <>{pendingCounts.total}<small>件</small></> : readCountText(pendingCounts.total, view.coverage)}
           </div>
           <ul className="kv">
             <li>
               <span>未回答の問い合わせ</span>
-              <b>{pendingCounts.inquiries}件</b>
+              <b>{readCountText(pendingCounts.inquiries, view.coverage)}</b>
             </li>
             <li>
               <span>人のマージ待ち</span>
-              <b>{pendingCounts.awaitingMerge}件</b>
+              <b>{readCountText(pendingCounts.awaitingMerge, view.coverage)}</b>
             </li>
             <li>
               <span>ゴール登録の承認待ち</span>
-              <b>{pendingCounts.goalRegistration}件</b>
+              <b>{readCountText(pendingCounts.goalRegistration, view.coverage)}</b>
             </li>
           </ul>
           {longestWait !== undefined ? (
@@ -146,9 +170,13 @@ export function OverviewContent({
         <div className="tile">
           <div className="label">24時間に完了したタスク</div>
           <div className="num">
-            {view.completedTasks24h}
-            <small>件</small>
+            {view.coverage === "complete" || view.completedTasks24h > 0
+              ? <>{view.completedTasks24h}<small>件</small></> : "不明"}
           </div>
+          <div className="t-note">保存済みの履歴を全プロジェクト分集計しています。</div>
+          {view.coverage !== "complete" ? (
+            <div className="t-note">未読のプロジェクトの最新状態はまだ確認できていません。</div>
+          ) : null}
           {view.failedTaskCount > 0 ? (
             <div className="t-note">{FAILED_TASK_KINDS_LABEL}のタスクが {view.failedTaskCount}件残っています。</div>
           ) : null}
@@ -187,9 +215,11 @@ export function OverviewContent({
                 <span className="kind">機種: {server.kind}</span>
               </span>
               <span className="read-at">
-                {server.lastReadAt
-                  ? `takt-mcp から ${formatClock(server.lastReadAt)} に読みました。`
-                  : "takt-mcp からまだ読めていません。"}
+                {server.writeOnly
+                  ? "書き込み専用のため、takt-mcp からは読み取りません。"
+                  : server.lastReadAt
+                    ? `takt-mcp から ${formatClock(server.lastReadAt)} に読みました。`
+                    : "takt-mcp からまだ読めていません。"}
               </span>
               <span className={`big-badge ${state}`}>{stateLabel}</span>
               {state === "down" ? (
@@ -219,7 +249,7 @@ export function OverviewContent({
       <section className="l-section" aria-labelledby="h-runs">
         <h2 id="h-runs">実行中の run</h2>
         {view.runs.length > 0 ? (
-          <div className="l-table">
+          <div className="l-table runs-table">
             <table>
               <thead>
                 <tr>
@@ -281,7 +311,7 @@ export function OverviewContent({
             </table>
           </div>
         ) : (
-          <p className="empty">走っている run はありません。</p>
+          <p className="empty">{emptyRunText}</p>
         )}
       </section>
 
@@ -289,16 +319,31 @@ export function OverviewContent({
         <h2 className="sec" id="h-projects">
           プロジェクト
         </h2>
+        <p>進行中のゴールは {readCountText(view.inProgressGoalCount, view.coverage)}です。</p>
         <ul className="overview-cards">
           {shownProjects.map((project) => (
             <li key={project.name}>
               <Link className="card card-link" href={projectHref(project.name)}>
                 <h3>{project.name}</h3>
                 <p className="about">{project.about}</p>
-                <p>直近24時間に完了したタスクは {project.completedTasks24h}件です。</p>
-                <p>
-                  実行中の run は {project.runningRuns} 件で、同時実行の上限は {project.concurrency} 件です。
-                </p>
+                {project.lastReadAt !== undefined || project.completedTasks24h > 0 ? (
+                  <>
+                    <p>直近24時間に完了したタスクは {project.completedTasks24h}件です。</p>
+                    <p>保存済みの履歴です。</p>
+                  </>
+                ) : null}
+                {project.lastReadAt === undefined ? (
+                  <>
+                    <p>{project.completedTasks24h > 0 ? "まだ読めていないため、run の件数は不明です。" : "まだ読めていないため、完了タスクと run の件数は不明です。"}</p>
+                    <p>同時実行の上限は {project.concurrency} 件です。</p>
+                  </>
+                ) : (
+                  <>
+                    <p>
+                      実行中の run は {project.runningRuns} 件で、同時実行の上限は {project.concurrency} 件です。
+                    </p>
+                  </>
+                )}
               </Link>
               <a className="view" href={`/goals?project=${encodeURIComponent(project.name)}`}>
                 ゴール一覧を見る

@@ -186,6 +186,15 @@ fn reading_display_messages_does_not_rewrite_stored_data() {
     limit:         50,
   });
   assert_eq!(page.messages.len(), 3);
+  assert_eq!(
+    page.messages.iter().map(|message| message.notice.as_deref()).collect::<Vec<_>>(),
+    vec![
+      Some("元記録で文字化けしています（置換文字 87 個）"),
+      None,
+      Some("元記録で文字化けしています（置換文字 3 個）")
+    ],
+    "表示する本文の置換文字から注意書きを決め、保存データは変えない"
+  );
   let connection = rusqlite::Connection::open(&fixture.database).unwrap();
   let mut statement = connection.prepare("SELECT data FROM session_message ORDER BY seq").unwrap();
   let stored = statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();

@@ -45,7 +45,7 @@ const openingTagWithAttribute = (html: string, attribute: string, value: string)
 };
 
 const renderOverviewWithState = (state = createDashboardState()): string =>
-  renderPage(OverviewPage, { view: buildOverviewView(state, NOW) });
+  renderPage(OverviewPage, { view: buildOverviewView(state, NOW, true) });
 
 const renderProjectsWithState = (state = createDashboardState()): string =>
   renderPage(ProjectsPage, { state, now: NOW });
@@ -53,6 +53,7 @@ const renderProjectsWithState = (state = createDashboardState()): string =>
 const renderSidebarWithState = (state = createDashboardState()): string =>
   renderToStaticMarkup(
     createElement(Sidebar, {
+      snapshotLoaded: true,
       servers: state.servers,
       pendingCount: 0,
       frontendBuild: { commit: "a1b2c3d", branch: "takt/frontend" },
@@ -141,7 +142,7 @@ test("サーバー ID が既存の見出し id と衝突してもサーバーの
   const base = createDashboardState();
   const state = {
     ...base,
-    servers: [{ serverId: "h-servers", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW }],
+    servers: [{ serverId: "h-servers", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, writeOnly: false }],
     runs: [],
   };
   const sidebar = renderSidebarWithState(state);
@@ -277,7 +278,7 @@ test("ID に % を含むサーバーでもサイドバーのリンクが該当�
   const base = createDashboardState();
   const state = {
     ...base,
-    servers: [{ serverId: "100%", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW }],
+    servers: [{ serverId: "100%", name: "Mac mini", kind: "Mac mini", connected: true, lastReadAt: NOW, writeOnly: false }],
     runs: [],
   };
   const sidebar = renderSidebarWithState(state);

@@ -126,14 +126,14 @@ test("proto の JSON（時刻は ISO 文字列、列挙型は名称文字列）�
 
   const now = new Date("2026-11-13T07:30:30.000Z");
   // 概要: 実行中の run が件数に入り、判断待ちの内訳が送信値に対応する。
-  const overview = buildOverviewView(state, now);
+  const overview = buildOverviewView(state, now, true);
   assert.equal(overview.runningRuns, 1, "実行中の run が1件として数えられる");
   assert.equal(overview.pendingCounts.total, 2);
   assert.equal(overview.pendingCounts.inquiries, 1, "問い合わせが1件として数えられる");
   assert.equal(overview.pendingCounts.awaitingMerge, 1, "人のマージ待ちが1件として数えられる");
 
   // 判断待ち: 種類表示が送信値に対応する（マージ待ちは「人のマージ待ち」）。
-  const decisionsHtml = renderToStaticMarkup(createElement(DecisionsContent, { state, now, disconnected: false }));
+  const decisionsHtml = renderToStaticMarkup(createElement(DecisionsContent, { snapshotLoaded: true, state, now, disconnected: false }));
   assert.match(decisionsHtml, /人のマージ待ち/);
   assert.match(decisionsHtml, /問い合わせ（質問）/);
 
@@ -333,7 +333,7 @@ test("SSE を受信して状態が置き換わっても backend のビルド情�
   const before = createDashboardState();
   // 受信前は切断中としておき、受信で接続中へ戻ることも同じ実体で観測する。
   // Context 値は内部型の状態を持つため、初期値も proto から変換してそろえる。
-  let live: StateStreamContextValue = { state: dashboardStateFromProto(before), disconnected: true };
+  let live: StateStreamContextValue = { state: dashboardStateFromProto(before), snapshotLoaded: true, disconnected: true };
   const stream = open(Ctor, {
     onState: (next) => {
       live = reduceLiveState(live, { type: "state", state: next });

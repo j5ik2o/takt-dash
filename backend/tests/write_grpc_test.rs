@@ -1236,10 +1236,28 @@ fn process_exists(pid: u32) -> bool {
     .unwrap_or(false)
 }
 
+/// 記録された子プロセスが `expected` 件になるまで短い間隔で待ち、その記録を返す。
+///
+/// 書き込みレーンの温めは読み取りサイクルの裏で進むため、件数の観測は完了を待ってから
+/// 行います。待ちは最大で約5秒です。
+async fn wait_for_processes(harness: &GrpcHarness, expected: usize) -> Vec<u32> {
+  for _ in 0..100 {
+    let processes = harness.recorded_processes();
+    if processes.len() >= expected {
+      return processes;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
+  harness.recorded_processes()
+}
+
 #[tokio::test]
-async fn write_rpcs_reuse_the_poller_mcp_process() {
-  // 読み取り1サイクルで起動した子プロセスを、続く AnswerInquiry がそのまま使う。
-  // pid の記録が増えないことで、書き込みごとに新しい接続を作っていないことを観測する。
+async fn write_rpcs_use_a_dedicated_write_lane_process() {
+  // 読み取りは定期読み取りレーンの子プロセスを使い、書き込みは書き込みレーンの
+  // 子プロセスを使う。書き込みレーンは読み取りサイクルのセットアップで温められ、
+  // 続く AnswerInquiry はその子プロセスをそのまま使う。pid の記録が増えないことで、
+  // 書き込みごとに新しい接続を作っていないことと、読み取りと接続を共有していない
+  // ことを観測する。
   let harness = harness_with(json!({}));
   let mut poller = Poller::new(
     harness.config_path().to_path_buf(),
@@ -1251,9 +1269,12 @@ async fn write_rpcs_reuse_the_poller_mcp_process() {
   harness.rewrite_state(state_with_goal_inquiry("question"));
   poller.read_cycle_once().await.expect("状態を取り込むサイクルを実行できます");
 
-  let processes_after_read = harness.recorded_processes();
-  assert_eq!(processes_after_read.len(), 1, "読み取りで takt-mcp を1つ起動します");
-  let pid = processes_after_read[0];
+  let processes_after_read = wait_for_processes(&harness, 2).await;
+  assert_eq!(
+    processes_after_read.len(),
+    2,
+    "読み取りレーンと温めた書き込みレーンで takt-mcp を2つ起動します: {processes_after_read:?}"
+  );
 
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
@@ -1267,18 +1288,20 @@ async fn write_rpcs_reuse_the_poller_mcp_process() {
       report:     None,
     })
     .await
-    .expect("同じ子プロセスで回答できます");
+    .expect("書き込みレーンの子プロセスで回答できます");
 
   let calls = calls_named(&harness, "takt_answer_goal_question");
   assert_eq!(calls.len(), 1, "回答の道具を1回だけ呼びます: {calls:?}");
   assert_eq!(
     harness.recorded_processes(),
     processes_after_read,
-    "書き込みでも読み取りと同じ takt-mcp の子プロセスを使います"
+    "書き込みは温めた書き込みレーンの子プロセスをそのまま使います"
   );
 
   poller.shutdown().await;
-  assert!(!process_exists(pid), "停止後は共有していた子プロセスが残りません");
+  for pid in processes_after_read {
+    assert!(!process_exists(pid), "停止後はレーンの子プロセスが残りません");
+  }
 
   server.stop().await;
 }
@@ -1380,6 +1403,9 @@ async fn write_rpc_rebuild_resets_the_baseline_before_the_next_poll_cycle() {
     harness.registry.clone(),
   );
   poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+  // 定期読み取りレーンと、温めた書き込みレーンの2プロセスが立つまで待ちます。
+  let initial_processes = wait_for_processes(&harness, 2).await;
+  assert_eq!(initial_processes.len(), 2, "初回は読み取りレーンと書き込みレーンの2つです: {initial_processes:?}");
 
   let alternate_directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let alternate_state = alternate_directory.path().join("state-alternate.json");
@@ -1409,7 +1435,7 @@ async fn write_rpc_rebuild_resets_the_baseline_before_the_next_poll_cycle() {
     })
     .await
     .expect("設定変更後の書き込みは成功します");
-  assert_eq!(harness.recorded_processes().len(), 2, "書き込みが設定変更後の子プロセスを作ります");
+  assert_eq!(harness.recorded_processes().len(), 3, "書き込みが設定変更後の書き込みレーンの子プロセスを作ります");
 
   let report = poller.read_cycle_once().await.expect("設定変更後のサイクルを実行できます");
   poller.shutdown().await;
@@ -1559,5 +1585,93 @@ async fn failed_answer_to_a_terminal_goal_question_does_not_force_a_reread() {
   );
 
   poller.shutdown().await;
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn write_over_http_read_project_routes_to_the_stdio_write_server() {
+  // 読み取りを HTTP へ切り替えたプロジェクトでも、書き込みは `writeServer` の stdio で成功し、
+  // 書き込み道具が HTTP サーバーへ渡らないことを観測する。書き込み先は読み取り先と別 id。
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", std::path::Path::new("/abs/takt-dash")), server_meta(), json!({}))
+    .http_read()
+    .build();
+  harness.store.record_success(
+    "takt-dash",
+    snapshot_with(vec![inquiry_entry(
+      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e",
+      "11111111-1111-4111-8111-111111111111",
+      InquiryKind::Question,
+    )]),
+    time("2026-11-13T12:00:00Z"),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "takt-dash".to_owned(),
+      goal_id:    Some("11111111-1111-4111-8111-111111111111".to_owned()),
+      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect("HTTP 読み取りのプロジェクトでも writeServer の stdio で回答できます");
+
+  let calls = calls_named(&harness, "takt_answer_goal_question");
+  assert_eq!(calls.len(), 1, "書き込みは stdio の子プロセスへ渡ります");
+  let http_calls = harness.http_recorded_calls();
+  assert!(
+    !http_calls.iter().any(|call| call["name"] == "takt_answer_goal_question"),
+    "書き込み道具を HTTP サーバーへ渡しません: {http_calls:?}"
+  );
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn write_over_http_routes_to_the_http_write_server() {
+  // 書き込み先にも常駐 HTTP サーバーを指すプロジェクトでは、書き込み道具が HTTP サーバーへ
+  // 渡り、stdio の子プロセスへは渡らないことを観測する。
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", std::path::Path::new("/abs/takt-dash")), server_meta(), json!({}))
+    .http_read()
+    .http_write()
+    .build();
+  harness.store.record_success(
+    "takt-dash",
+    snapshot_with(vec![inquiry_entry(
+      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e",
+      "11111111-1111-4111-8111-111111111111",
+      InquiryKind::Question,
+    )]),
+    time("2026-11-13T12:00:00Z"),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  client
+    .answer_inquiry(AnswerInquiryRequest {
+      server_id:  "mac-mini".to_owned(),
+      project:    "takt-dash".to_owned(),
+      goal_id:    Some("11111111-1111-4111-8111-111111111111".to_owned()),
+      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:       Some("はい".to_owned()),
+      report:     None,
+    })
+    .await
+    .expect("書き込み先の HTTP サーバーで回答できます");
+
+  let http_calls = harness.http_recorded_calls();
+  assert_eq!(
+    http_calls.iter().filter(|call| call["name"] == "takt_answer_goal_question").count(),
+    1,
+    "書き込みは HTTP サーバーへ渡ります: {http_calls:?}"
+  );
+  let calls = calls_named(&harness, "takt_answer_goal_question");
+  assert!(calls.is_empty(), "書き込み道具を stdio の子プロセスへ渡しません");
+
   server.stop().await;
 }

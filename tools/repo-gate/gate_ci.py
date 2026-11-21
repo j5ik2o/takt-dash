@@ -2,7 +2,7 @@
 import re
 
 from gate_aislop import AISLOP_CHECK_COMMAND, AISLOP_FAILURE_NOTE, invokes_aislop_check
-from gate_common import GateError, read_text, read_workflow
+from gate_common import GateError, read_workflow
 
 
 def check_ci(root):
@@ -19,6 +19,9 @@ def check_ci(root):
     for path in files:
         workflow = read_workflow(path)
         ordered_runs = []
+        has_stable = False
+        has_nightly_rustfmt = False
+        has_node = False
         # チェックアウト順の不変条件はジョブ単位で判定する。ファイル全体で 1 回だけ
         # 初期化すると、先のジョブの checkout が後続ジョブへ累積し、aislop を含む
         # ジョブ自身に checkout が無くても合格してしまう。
@@ -34,8 +37,23 @@ def check_ci(root):
                 uses = str(step.get("uses") or "")
                 if uses.startswith("actions/checkout"):
                     checkout_seen = True
+                options = step.get("with") or {}
+                if uses == "dtolnay/rust-toolchain@stable":
+                    has_stable = True
+                if uses == "dtolnay/rust-toolchain@nightly":
+                    components = re.split(r"[\s,]+", str(options.get("components", "")))
+                    has_nightly_rustfmt |= "rustfmt" in components
+                if uses.startswith("actions/setup-node@"):
+                    version = str(options.get("node-version", "")).strip()
+                    has_node |= re.fullmatch(r"[0-9.x]+", version) is not None
                 run = step.get("run")
                 if not isinstance(run, str):
+                    continue
+                continue_on_error = step.get("continue-on-error", False)
+                if continue_on_error is not False and (
+                    not isinstance(continue_on_error, str)
+                    or re.fullmatch(r"\s*\$\{\{\s*false\s*\}\}\s*", continue_on_error) is None
+                ):
                     continue
                 ordered_runs.append(run)
                 if not invokes_aislop_check(run):
@@ -56,18 +74,12 @@ def check_ci(root):
         if not make_done:
             continue
         aislop_called = bool(aislop_ordered_jobs)
-        text = read_text(path)
-        toolchains = re.findall(r"dtolnay/rust-toolchain@(stable|nightly)", text)
-        components = re.findall(r"components:\s*([^\n]+)", text)
-        flattened = " ".join(components)
-        node_versions = re.findall(r"node-version:\s*['\"]?([0-9.x]+)", text)
-        has_node_action = "actions/setup-node" in text
         problems = []
-        if "stable" not in toolchains:
+        if not has_stable:
             problems.append("Rust の stable をセットアップしていません")
-        if "nightly" not in toolchains or "rustfmt" not in flattened:
+        if not has_nightly_rustfmt:
             problems.append("Rust の nightly と rustfmt をセットアップしていません")
-        if not has_node_action or not node_versions:
+        if not has_node:
             problems.append("Node をセットアップしていません")
         if not aislop_called:
             problems.append(

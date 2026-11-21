@@ -17,7 +17,7 @@ const goalState = (name: string, nameTruncated: boolean) => ({
 test("省略された目的を展開しても全文とは表示せず第一文と詳細リンクを保つ", () => {
   const state = goalState("確認する。次の作業を始め", true);
   const html = renderToStaticMarkup(createElement(GoalsContent, {
-    state: dashboardStateFromProto(state), disconnected: false,
+    state: dashboardStateFromProto(state), snapshotLoaded: true, disconnected: false,
   }));
   const document = new JSDOM(html).window.document;
   const heading = document.querySelector("h3 a");
@@ -48,7 +48,7 @@ test("プロジェクトの省略された目的には一部の表示と当該�
 test("完全な256バイトの目的には長さだけで省略記号を付けない", () => {
   const name = "a".repeat(256);
   const html = renderToStaticMarkup(createElement(GoalsContent, {
-    state: dashboardStateFromProto(goalState(name, false)), disconnected: false,
+    state: dashboardStateFromProto(goalState(name, false)), snapshotLoaded: true, disconnected: false,
   }));
   const document = new JSDOM(html).window.document;
   assert.equal(document.querySelector("h3 a")?.textContent, name);
@@ -60,7 +60,7 @@ test("ゴールの題名は引用内の句点で切らず閉じ忘れの引用�
     ["手順「確認。続行", "手順「確認。続行"],
   ] as const) {
     const html = renderToStaticMarkup(createElement(GoalsContent, {
-      state: dashboardStateFromProto(goalState(name, false)), disconnected: false,
+      state: dashboardStateFromProto(goalState(name, false)), snapshotLoaded: true, disconnected: false,
     }));
     const document = new JSDOM(html).window.document;
     assert.equal(document.querySelector("h3 a")?.textContent, expected);
