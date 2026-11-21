@@ -1,6 +1,6 @@
 // 判断待ちの識別子と表示ラベルの組み立て。
 //
-// 一覧の React key、操作結果の項目名、操作要素の accessible name は同じ識別子を使う。
+// 一覧の React key、操作結果の項目名、操作要素の対象説明は同じ識別子を使う。
 // 種別を増やすときの更新をここだけに閉じ込め、表示のずれと key の重複を防ぐ。
 import type { PendingDecision } from "../proto/taktdash";
 import { INQUIRY_KIND, PENDING_DECISION_TYPE } from "./proto-values";
@@ -75,13 +75,26 @@ export function decisionLabel(decision: PendingDecision): string {
   return composeDecisionLabel(decisionLabelParts(decision));
 }
 
-// 操作要素の accessible name と入力欄の label に使う。一覧は全サーバー・全プロジェクトの
-// 判断待ちの和集合なので、同じ固定名の操作要素が複数並ぶ。種別と行固有の識別子を含めて
-// 対象を一意に識別できるようにする。問い合わせだけは本文も添えて区別する。
+// 操作ボタンの説明参照（aria-describedby）と入力欄の label に使う。一覧は全サーバー・全
+// プロジェクトの判断待ちの和集合なので、同じ固定名の操作要素が複数並ぶ。種別と行固有の
+// 識別子を含めて対象を一意に識別できるようにする。問い合わせだけは本文も添えて区別する。
+// 操作ボタンの読み上げ名は操作の文言だけにし、この値はボタン外の説明要素から補う（issue #324）。
+// 入力欄は対象を識別できる名前として、この値を aria-label に含める。
 export function decisionTargetLabel(decision: PendingDecision): string {
   const parts = decisionLabelParts(decision);
   if (decision.type === PENDING_DECISION_TYPE.INQUIRY) {
     return `${parts.base} ${parts.identifier}（${decision.body}）`;
   }
   return composeDecisionLabel(parts);
+}
+
+// 操作ボタンの説明要素に出す文面。判断待ちの項目にはサーバーの ID も表示名も出さない
+// 既存契約があるため、対象の識別に必要なプロジェクト・種別・行固有の識別子だけを使う。
+export function decisionTargetDescription(decision: PendingDecision): string {
+  const parts = decisionLabelParts(decision);
+  const base = `${decision.project} の${decisionTypeLabel(decision)}`;
+  if (decision.type === PENDING_DECISION_TYPE.INQUIRY) {
+    return `${base} ${parts.identifier}（${decision.body}）`;
+  }
+  return parts.identifier === "" ? base : `${base} ${parts.identifier}`;
 }

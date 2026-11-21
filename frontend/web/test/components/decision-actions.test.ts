@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { JSDOM } from "jsdom";
 import { PendingDecisionType, type DashboardState, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { createActionableDashboardState, NOW } from "../support/fixtures.ts";
 import { DecisionsContent } from "../../src/components/decisions-content.tsx";
@@ -510,20 +511,135 @@ test("選択肢の回答は先頭以外を選んでも、選んだ選択肢を�
   assert.equal(answered.action.payload.text, "来週", "選んだ選択肢をそのまま送信する");
 });
 
-test("同じ inquiryId でもゴールが違う問い合わせは別の項目として描画し、操作要素の name も区別する", () => {
+// ボタンの aria-describedby が指す識別子を解決し、要素の本文を返す。要素が無ければ undefined。
+// 読み上げ名は操作の文言だけにし、対象の識別子は別要素から補う新契約を、描画結果から観測する。
+const descriptionTexts = (html: string): Map<string, string> => {
+  const byId = new Map<string, string>();
+  for (const match of html.matchAll(/<[^>]*\bid="([^"]+)"[^>]*>([\s\S]*?)<\/[^>]+>/g)) {
+    byId.set(match[1]!, match[2]!);
+  }
+  return byId;
+};
+
+// 指定した操作文言のボタンを1件取り出し、その aria-label と、aria-describedby が指す説明文を返す。
+const describedButton = (html: string, actionName: string) => {
+  const descriptions = descriptionTexts(html);
+  const button = new RegExp(`<button\\b[^>]*\\baria-label="${actionName}"[^>]*>([\\s\\S]*?)</button>`).exec(html);
+  if (button === null) {
+    throw new Error(`操作ボタン「${actionName}」が描画されていない`);
+  }
+  const describedBy = /\baria-describedby="([^"]+)"/.exec(button[0])?.[1];
+  if (describedBy === undefined) {
+    throw new Error(`操作ボタン「${actionName}」は aria-describedby を持たない`);
+  }
+  const text = describedBy
+    .split(/\s+/)
+    .map((id) => descriptions.get(id) ?? "")
+    .join(" ");
+  return { label: actionName, description: text };
+};
+
+test("一覧の操作ボタンは操作の文言だけを読み上げ名にし、対象の識別子は説明から補う", () => {
+  const mergeButton = describedButton(renderDecisions(stateWith([merge()])), "マージを承認");
+  assert.equal(mergeButton.label, "マージを承認");
+  assert.match(mergeButton.description, /corporate-site/);
+  assert.match(mergeButton.description, /PR #418/);
+
+  const registrationHtml = renderDecisions(stateWith([registration()]));
+  const approveButton = describedButton(registrationHtml, "承認");
+  assert.match(approveButton.description, /takt/);
+  assert.match(approveButton.description, /revision 7/);
+  const rejectButton = describedButton(registrationHtml, "却下");
+  assert.match(rejectButton.description, /takt/);
+  assert.match(rejectButton.description, /revision 7/);
+
+  const optionsHtml = renderDecisions(
+    stateWith([findDecision((decision) => decision.inquiryId === "inquiry-options")]),
+  );
+  const optionButton = describedButton(optionsHtml, "今週");
+  assert.match(optionButton.description, /inquiry-options/);
+
+  const operationHtml = renderDecisions(
+    stateWith([findDecision((decision) => decision.inquiryId === "inquiry-operation")]),
+  );
+  const completedButton = describedButton(operationHtml, "実施した");
+  assert.match(completedButton.description, /inquiry-operation/);
+
+  // 削除された自由記述送信の対象識別ケース。入力欄ではなく「回答する」ボタンについて、
+  // 名前が操作文言のみであることと、説明参照先が当該の問い合わせを示すことを確認する。
+  const textHtml = renderDecisions(
+    stateWith([findDecision((decision) => decision.inquiryId === "inquiry-text")]),
+  );
+  const submitButton = describedButton(textHtml, "回答する");
+  assert.equal(submitButton.label, "回答する");
+  assert.match(submitButton.description, /inquiry-text/);
+});
+
+test("操作ボタンの読み上げ名は対象の識別子を埋め込まず、複数の対象が並んでも説明で区別できる", () => {
+  const html = renderDecisions(createActionableDashboardState());
+
+  // 同じ「承認」「却下」が複数並んでも、aria-label は操作の文言のまま。
+  const approveNames = [...html.matchAll(/<button\b[^>]*\baria-label="承認"/g)];
+  assert.equal(approveNames.length, 1, "操作文言そのものを name にし、対象の括弧書きを name に含めない");
+
+  // 操作ボタンの aria-label に対象の括弧書きを残さない。入力欄は対象付きラベルを保つ別契約なので対象外。
+  const buttonLabels = [...html.matchAll(/<button\b[^>]*\baria-label="([^"]*)"/g)].map((match) => match[1] ?? "");
+  assert.ok(buttonLabels.length > 0, "操作ボタンが読み上げ名を持つ");
+  for (const label of buttonLabels) {
+    assert.doesNotMatch(label, /（/, `操作ボタンの読み上げ名「${label}」は対象の括弧書きを含まない`);
+  }
+});
+
+test("自由記述の入力欄は対象を識別できる名前を保つ", () => {
+  const html = renderDecisions(
+    stateWith([findDecision((decision) => decision.inquiryId === "inquiry-text")]),
+  );
+  const input = /<input[^>]*\baria-label="([^"]+)"/.exec(html)?.[1];
+  assert.ok(input !== undefined, "自由記述の入力欄が描画されている");
+  assert.match(input, /inquiry-text/, "入力欄の読み上げ名は対象の識別子を含む");
+});
+
+test("同じ inquiryId でもゴールが違う問い合わせは別の項目として描画し、各項目の操作ボタンが自分の対象を参照する", () => {
   const base = findDecision((decision) => decision.inquiryId === "inquiry-options");
   const first: PendingDecision = { ...base, goalId: "goal-2" };
   const second: PendingDecision = { ...base, goalId: "goal-3" };
 
-  const html = renderDecisions(stateWith([first, second]));
+  const document = new JSDOM(renderDecisions(stateWith([first, second]))).window.document;
 
-  assert.equal((html.match(/class="tray-item/g) ?? []).length, 2);
+  const rows = Array.from(document.querySelectorAll(".tray-item"));
+  assert.equal(rows.length, 2, "2件の判断待ち項目を描画する");
 
-  const labels = [...html.matchAll(/aria-label="今週（([^"]*)）"/g)].map((match) => match[1]!);
-  assert.equal(labels.length, 2);
-  assert.equal(new Set(labels).size, 2);
-  assert.ok(labels.some((label) => label.includes("goal-2")));
-  assert.ok(labels.some((label) => label.includes("goal-3")));
+  // 項目ごとに、その行の対象（ゴール）と「今週」ボタンの説明参照先を解決し、
+  // ボタンが同じ行の対象だけを説明していることを確認する。集合の一致では参照の交換を検出できない。
+  const resolvedGoals = new Map<string, string>();
+  for (const row of rows) {
+    const rowTarget = row.querySelector(".target")?.textContent ?? "";
+    const goal = /ゴール (goal-\d)/.exec(rowTarget)?.[1];
+    assert.ok(goal !== undefined, `行に対象のゴールが表示されている（対象: ${rowTarget}）`);
+
+    const button = row.querySelector('button[aria-label="今週"]');
+    assert.ok(button !== null, "行の「今週」ボタンが描画されている");
+    assert.equal(button.getAttribute("aria-label"), "今週", "読み上げ名は操作文言のみ");
+
+    const describedBy = button.getAttribute("aria-describedby");
+    assert.ok(describedBy !== null, "「今週」ボタンは説明参照を持つ");
+    const descriptionIds = describedBy.split(/\s+/);
+    const description = descriptionIds
+      .map((id) => {
+        const element = document.getElementById(id);
+        assert.ok(element !== null, `説明参照先 ${id} が文書内に存在する`);
+        return element.textContent ?? "";
+      })
+      .join(" ");
+
+    assert.match(description, new RegExp(goal), `行の対象 ${goal} を説明に含む`);
+    assert.match(description, /inquiry-options/, "説明は同じ問い合わせを指す");
+    resolvedGoals.set(goal, description);
+  }
+
+  // 2件の説明参照先は別要素で、それぞれ別の対象説明へ到達する（交換・衝突を検出する）。
+  assert.equal(new Set(resolvedGoals.keys()).size, 2, "2行の対象が区別できる");
+  assert.notEqual(resolvedGoals.get("goal-2"), resolvedGoals.get("goal-3"), "2行の説明は別の対象を示す");
 });
 
 test("操作の結果は成功を status、失敗を alert として表示する", () => {

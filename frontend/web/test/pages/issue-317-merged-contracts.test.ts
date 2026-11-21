@@ -1,8 +1,9 @@
-// issue #317 と main の合流後の契約（D30 の維持要件 / 取り下げ要件 / main の読み上げ名）。
+// issue #317 と main の合流後の契約（D30 の維持要件 / 取り下げ要件 / 読み上げ名）。
 //
-// 裁定により、D30 の読み上げ名要件（aria-label から対象識別子を外す）と見出し階層の変更は
-// 取り下げ、main の既存契約を正とする。D30 のうち、エラー以外の状態通知の role と
-// 会話ページの select の配置は維持する。ゴール一覧の見出しは main の h3 を保ちつつ、
+// 見出し階層の変更は裁定により取り下げ、main の既存契約を正とする。D30 のうち、
+// エラー以外の状態通知の role と会話ページの select の配置は維持する。読み上げ名は
+// issue #324 で候補1（aria-describedby）を採用し、操作ボタンの読み上げ名から対象識別子を
+// 外して別要素の説明で補う形へ更新した。ゴール一覧の見出しは main の h3 を保ちつつ、
 // レベルを飛ばさない（h1 の次は h2 までに留める）。
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -98,10 +99,11 @@ const renderActions = (decision: PendingDecision): string =>
     }),
   );
 
-// issue-317-a11y.test.ts の読み上げ名契約は、この合流で main の aria-label 契約を正と
-// する裁定により取り下げた。操作ボタンの読み上げ名は main どおり対象識別子を含む形で
-// 描画され、対象識別子を外した簡潔な操作名へは置き換わらないことを観測する。
-test("判断待ちの操作ボタンは main どおり対象識別子を含む読み上げ名のまま描画する", () => {
+// issue-317-a11y.test.ts の読み上げ名契約は、issue #324 で候補1（aria-describedby）を採用する
+// 裁定により、操作ボタンの読み上げ名から対象識別子を外し、別要素の説明で補う形へ更新した。
+// ここでは、操作ボタンの読み上げ名が対象識別子を含まない簡潔な操作名であり、
+// 対象は aria-describedby の説明要素から読めることを観測する。
+test("判断待ちの操作ボタンの読み上げ名は操作の文言だけにし、対象は説明要素で補う", () => {
   const merge = findDecision(
     (decision) => decision.type === PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE,
   );
@@ -109,7 +111,12 @@ test("判断待ちの操作ボタンは main どおり対象識別子を含む�
   const labels = Array.from(html.matchAll(/<button\b[^>]*\baria-label="([^"]*)"/g), (match) => match[1] ?? "");
   assert.ok(labels.length > 0, "操作ボタンが読み上げ名を持つ");
   for (const label of labels) {
-    assert.match(label, /（/, `読み上げ名「${label}」は「操作名（対象）」の形を保つ`);
-    assert.notEqual(label, "マージを承認", `読み上げ名「${label}」から対象識別子を外していない`);
+    assert.doesNotMatch(label, /（/, `読み上げ名「${label}」は操作名（対象）の形ではなく対象を括弧書きしない`);
   }
+
+  const describedButtons = Array.from(
+    html.matchAll(/<button\b[^>]*\baria-label="[^"]*"[^>]*\baria-describedby="([^"]+)"/g),
+    (match) => match[1] ?? "",
+  );
+  assert.ok(describedButtons.length > 0, "操作ボタンは説明参照を持つ");
 });
