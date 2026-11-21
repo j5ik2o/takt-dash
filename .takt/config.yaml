@@ -8,16 +8,12 @@ base_branch: main
 workflow_system_commands:
   custom_scripts: true
 
-# provider が rate limit に達したときの切替先（順に試す）。同格のクラウド provider に
-# 限る。chain が尽きた run は失敗で止まり、成果は .takt/runs/ と作業ツリーに残る
-# （直接実行の run は takt resume、manager タスクは requeue で再開）
+# レート制限・使用枠切れで同じ工程をやり直す場合の切替先。全 assignment に共通。
+# 実行中の provider と model が切替先と同じ場合は候補から外れる。
 rate_limit_fallback:
   switch_chain:
-    - provider: claude
-    # Ollama Cloud の Opus 級。Claude の週次制限に当たった run を止めずに
-    # 判断級の作業を続けるための受け皿
     - provider: opencode
-      model: ollama/glm-5.3:cloud
+      model: dgx/deepseek-v4.1-flash
 
 # マージ用タスク（takt_merge_goal_pr の until: merge）が使うワークフロー。builtin の
 # merge-review-fix-simple は caccia が skipped のとき未解決スレッドがあっても merge へ

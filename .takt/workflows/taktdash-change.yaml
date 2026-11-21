@@ -146,6 +146,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -168,6 +170,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -190,6 +194,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -212,6 +218,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -234,6 +242,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -256,6 +266,8 @@ steps:
     capabilities: edit
     edit: true
     persona: coder
+    promotion:
+      - at: 2
     policy: coding
     knowledge: taktdash-rules
     required_permission_mode: edit
@@ -277,6 +289,9 @@ steps:
     description: aislop の警告以上の指摘をコードの修正で解消し、検証してから機械ゲートへ戻る
     capabilities: edit
     edit: true
+    persona: coder
+    promotion:
+      - at: 2
     instruction:
       - aislop の指摘を直す
       - |
