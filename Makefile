@@ -59,7 +59,7 @@ coverage:
 		--reporter text --check-coverage --lines 80 --extension .ts --extension .tsx npm run test
 	@echo "== tools/repo-gate (coverage.py) =="
 	mkdir -p target/coverage
-	test -x $(COVERAGE_PY) || python3 -m venv $(COVERAGE_VENV)
+	$(COVERAGE_PY) -m pip --version > /dev/null 2>&1 || { rm -rf $(COVERAGE_VENV); python3 -m venv $(COVERAGE_VENV); }
 	$(COVERAGE_PY) -m pip install --quiet --upgrade pip
 	$(COVERAGE_PY) -m pip install --quiet coverage pyyaml
 	$(COVERAGE_PY) -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py,tools/repo-gate/gate_*.py' tools/repo-gate/repo_gate_test.py

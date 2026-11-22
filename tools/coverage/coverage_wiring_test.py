@@ -18,6 +18,10 @@
   4. done から coverage が除かれていれば、層の計測が実行されない。
   5. 動作を保つ表記変更（`$(MAKE) coverage` を `$(MAKE) --no-print-directory coverage`
      にする等）では、合否が変わらない。
+  6. ensurepip 失敗後に python だけが残った venv でも、前提（python3-venv）復旧後の
+     同じ venv パスへの再実行で正常化し、全層判定まで到達する。pip を使えないまま
+     失敗する現行の判定条件を、この連続実行で検出する。
+  7. pip を使える正常な venv は再初期化しない。
 """
 import json
 import os
@@ -25,6 +29,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -107,9 +112,13 @@ with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as handle:
     handle.write("python " + " ".join(args) + "\\n")
 
 if args[:2] == ["-m", "pip"]:
-    sys.exit(0)
+    sys.exit(int(os.environ.get("STUB_PIP_EXIT", "0")))
 if args and args[0].endswith("coverage_threshold.py"):
     # 実閾値補助へ委譲する。JSON の読込みと整数判定を実際に通す。
+    record = os.environ.get("STUB_PIP_RECOVERED")
+    if record:
+        with open(record, "w", encoding="utf-8") as handle:
+            handle.write("pip\\n")
     sys.exit(subprocess.run([sys.executable] + args).returncode)
 if args[:2] == ["-m", "coverage"]:
     action = args[2]
@@ -155,6 +164,33 @@ def strip_non_coverage_prerequisites(makefile_text):
     return "\n".join(result) + "\n"
 
 
+VENV_PY = """#!/bin/sh
+# `python3 -m venv <path>` の代用。呼び出しを STUB_CALLS へ記録する（P2: 初期化呼び出しの
+# 観測）。前提（python3-venv）が復旧していれば、同じ venv パスへ pip を使える python を作る。
+# 前提未復旧なら、実 ensurepip の失敗と同様に、対象パスへ pip を使えない python を残して
+# 非0で終わる（P1: 初期化失敗後の部分状態の再現）。
+echo "python3 $@" >> "$STUB_CALLS"
+case "$1 $2" in
+  "-m venv")
+    venv="$3"
+    mkdir -p "$venv/bin"
+    if [ "$VENV_PREREQUISITE_RESTORED" = 1 ]; then
+      cp "$VENV_PY_TEMPLATE" "$venv/bin/python"
+      chmod +x "$venv/bin/python"
+      cp "$VENV_PIP_TEMPLATE" "$venv/bin/pip"
+      chmod +x "$venv/bin/pip"
+      exit 0
+    fi
+    # 前提未復旧: pip を作れず python だけ残す。実 ensurepip 失敗と同じ非0で終わる。
+    cp "$VENV_PARTIAL_PY_TEMPLATE" "$venv/bin/python"
+    chmod +x "$venv/bin/python"
+    rm -f "$venv/bin/pip"
+    exit 1 ;;
+esac
+exit 0
+"""
+
+
 class Workspace:
     """出荷 Makefile と計測器の代用品を持つ一時リポジトリ。"""
 
@@ -168,6 +204,11 @@ class Workspace:
         (self.venv / "bin").mkdir(parents=True)
         self.calls = self.base / "calls.log"
         self.makefile_text = makefile_text
+        # venv の部分初期化を再現する設定。既定は正常な venv（python も pip も使える）。
+        self.pip_available = True
+        self.prerequisite_restored = True
+        self.real_python = shutil.which("python3") or sys.executable
+        self.pip_recovered = self.base / "pip-recovered"
 
     def __enter__(self):
         (self.root / "Cargo.toml").write_text(CARGO_TOML, encoding="utf-8")
@@ -192,13 +233,71 @@ class Workspace:
 
         for name in ("cargo", "rustup", "npm", "npx"):
             self._write_executable(self.bin / name, STUB)
-        self._write_executable(self.venv / "bin/python", RUN_PY)
+        self._write_executable(self.bin / "python3", VENV_PY)
+        self.python_template = self.base / "python-template"
+        self.pip_template = self.base / "pip-template"
+        self.partial_py_template = self.base / "partial-python-template"
+        self._write_executable(
+            self.python_template,
+            RUN_PY.replace(
+                'sys.exit(int(os.environ.get("STUB_PIP_EXIT", "0")))', "sys.exit(0)"
+            ).replace("#!/usr/bin/env python3", f"#!{self.real_python}", 1),
+        )
+        # pip を使えない python（ensurepip 失敗後に残る状態）。
+        self._write_executable(
+            self.partial_py_template,
+            RUN_PY.replace(
+                'sys.exit(int(os.environ.get("STUB_PIP_EXIT", "0")))', "sys.exit(1)"
+            ).replace("#!/usr/bin/env python3", f"#!{self.real_python}", 1),
+        )
+        self._write_executable(self.pip_template, STUB)
+        self.write_venv_python()
         self._write_executable(self.venv / "bin/pip", STUB)
         # 実閾値補助をそのまま使う。JSON の生成から判定までを実際に通す。
         threshold_dest = self.root / "tools/coverage/coverage_threshold.py"
         threshold_dest.parent.mkdir(parents=True, exist_ok=True)
         threshold_dest.write_text(REAL_THRESHOLD.read_text(encoding="utf-8"), encoding="utf-8")
         return self
+
+    def write_venv_python(self):
+        """venv の python を書く。この時点の pip 状態を起動時に固定する。
+
+        `-m pip` は、その python が pip を持っているかを表現する。初期化失敗後に残った
+        python は pip を持たない。前提が復旧した後に再実行すると、新しい python
+        （起動時の pip 利用可否を反映したもの）が使われる。
+
+        shebang は PATH 上の python3 ではなく実インタプリタを指す。テスト用の python3
+        代用品が PATH を握っていても、venv の python がそれに化けないようにする。
+        """
+        stub_text = RUN_PY.replace(
+            'sys.exit(int(os.environ.get("STUB_PIP_EXIT", "0")))',
+            f"sys.exit({0 if self.pip_available else 1})",
+        )
+        stub_text = stub_text.replace(
+            "#!/usr/bin/env python3", f"#!{self.real_python}", 1
+        )
+        self._write_executable(self.venv / "bin/python", stub_text)
+
+    def make_partial_venv(self):
+        """python だけが残り pip を使えない venv を再現する。
+
+        ensurepip の失敗で pip を作れず python だけが残った状態を作る。システムの
+        python3-venv（ensurepip）の前提が復旧した後に `python3 -m venv` で同じ venv パスを
+        再初期化した場合にだけ、pip を使えるようになる。
+        """
+        self.pip_available = False
+        self.prerequisite_restored = False
+        self.write_venv_python()
+        if (self.venv / "bin/pip").exists():
+            (self.venv / "bin/pip").unlink()
+
+    def restore_prerequisite(self):
+        """システムの python3-venv（ensurepip）の前提を復旧させる。
+
+        これは Makefile の外側の環境変化である。venv は再初期化しない。make 側が pip の
+        利用可否を確かめて必要なときだけ再初期化するかどうかは、実装に委ねる。
+        """
+        self.prerequisite_restored = True
 
     def _write_executable(self, path, text):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,6 +318,11 @@ class Workspace:
         environment = {
             "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
             "STUB_CALLS": str(self.calls),
+            "STUB_PIP_RECOVERED": str(self.pip_recovered),
+            "VENV_PREREQUISITE_RESTORED": "1" if self.prerequisite_restored else "0",
+            "VENV_PY_TEMPLATE": str(self.python_template),
+            "VENV_PARTIAL_PY_TEMPLATE": str(self.partial_py_template),
+            "VENV_PIP_TEMPLATE": str(self.pip_template),
             "HOME": str(self.base / "home"),
             "PYTHONPATH": "",
             "PYTHONHOME": "",
@@ -226,6 +330,8 @@ class Workspace:
         environment.update(env_overrides)
         if self.calls.exists():
             self.calls.unlink()
+        if self.pip_recovered.exists():
+            self.pip_recovered.unlink()
         return subprocess.run(
             ["make", target],
             cwd=self.root,
@@ -239,6 +345,30 @@ class Workspace:
         if not self.calls.exists():
             return []
         return [line for line in self.calls.read_text(encoding="utf-8").splitlines() if line]
+
+    def venv_creation_calls(self):
+        """`python3 -m venv` の初期化呼び出しの記録（引数と対象パスを含む）を返す。"""
+        return [call for call in self.recorded_calls() if "-m venv" in call]
+
+    def venv_python_exists(self) -> bool:
+        """venv パスに実行可能な python が存在するか。"""
+        python = self.venv / "bin/python"
+        return python.exists() and os.access(python, os.X_OK)
+
+    def venv_pip_usable(self) -> bool:
+        """venv の python で `-m pip --version` が成功するか（実プロセスで確認）。"""
+        python = self.venv / "bin/python"
+        if not (python.exists() and os.access(python, os.X_OK)):
+            return False
+        env = dict(os.environ, STUB_CALLS=str(self.calls))
+        completed = subprocess.run(
+            [str(python), "-m", "pip", "--version"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return completed.returncode == 0
 
 
 def good_env():
@@ -388,6 +518,84 @@ def test_repo_gate_real_threshold_reads_generated_json():
         )
 
 
+def test_repo_gate_failure_detail_reaches_make_stderr():
+    # repo-gate の make 失敗報告（tools/repo-gate/gate_makefile.py の check_machine_gate）は、
+    # make done の標準エラーだけを使って失敗理由を組み立てる。coverage 閾値の判定失敗が
+    # 標準出力にしか出ないと、この経路では層名も FAIL も失われる。実 make の標準エラーに
+    # 失敗層と FAIL が乗ることを、実閾値補助を通して確かめる。
+    with Workspace() as workspace:
+        result = workspace.run_done(dict(good_env(), COVERED_REPO_GATE="1078"))
+        assert result.returncode != 0, "repo-gate 未達が done に伝わりません"
+        assert "repo-gate" in result.stderr and "FAIL" in result.stderr, (
+            "make done の標準エラーに repo-gate の失敗層と FAIL がありません: "
+            f"stderr={result.stderr[-2000:]!r}"
+        )
+
+
+def test_partially_initialized_venv_recovers_after_prerequisite_restored():
+    # ensurepip が失敗して python だけが残った venv を、前提（python3-venv）復旧後に
+    # 同じ venv パスへ再実行したときに正常化できるかを観測する。venv を削除して作り直さず、
+    # 部分初期化の状態から連続実行して確かめる。pip を無条件に成功させる代用品ではなく、
+    # 部分初期化では pip を使えず、前提復旧後の再初期化でだけ使えるようになる状態を再現する。
+    with Workspace() as workspace:
+        workspace.make_partial_venv()
+
+        # 前提復旧前の 1 回目: 初期化失敗は非0で終わり、対象パスへ pip を使えない python が
+        # 残る（実 ensurepip 失敗と同じ部分初期化状態）。
+        first = workspace.run_done(good_env())
+        assert first.returncode != 0, "pip を使えないのに done が成功しました"
+        assert not workspace.pip_recovered.exists(), (
+            "pip を使えない状態なのに repo-gate 判定まで到達しました: "
+            f"{workspace.recorded_calls()!r}"
+        )
+        # 1 回目終了後の残存状態: 同じ venv パスに python が存在し、pip は使えない。
+        assert workspace.venv_python_exists(), (
+            "初期化失敗後に venv の python が残っていません: "
+            f"{workspace.recorded_calls()!r}"
+        )
+        assert not workspace.venv_pip_usable(), (
+            "初期化失敗後に venv の pip が使えてしまいます（部分初期化を再現できていません）"
+        )
+        # 1 回目が実際に同じパスへ初期化を試みたこと（削除→再初期化の経路を通ったこと）。
+        assert workspace.venv_creation_calls(), "初期化呼び出しが記録されていません"
+
+        # 前提（python3-venv）を復旧してから、同じ venv パスのまま再実行する。
+        workspace.restore_prerequisite()
+        # 復旧直後・再実行前も、同じパスの python は存在し pip は使えない（前提だけ復旧）。
+        assert workspace.venv_python_exists(), "前提復旧後に venv の python が消えています"
+        assert not workspace.venv_pip_usable(), "前提復旧だけで pip が使えてしまいます"
+
+        second = workspace.run_done(good_env())
+        assert second.returncode == 0, (
+            "前提復旧後の再実行で venv が正常化しませんでした: "
+            f"stdout={second.stdout[-2000:]!r} stderr={second.stderr[-2000:]!r}"
+        )
+        assert workspace.pip_recovered.exists(), (
+            "正常化後も repo-gate 判定が venv の pip を使えませんでした: "
+            f"{workspace.recorded_calls()!r}"
+        )
+        assert workspace.venv_pip_usable(), "再実行後の venv で pip が使えません"
+        for layer in ("backend", "cli", "web", "repo-gate-threshold"):
+            assert layer_calls(workspace.recorded_calls())[layer], (
+                f"正常化後も {layer} が実行されませんでした: {workspace.recorded_calls()!r}"
+            )
+
+
+def test_initialized_venv_is_not_reinitialized():
+    # pip を使える正常な venv では、前提の再初期化をしないことも観測する。毎回 venv を
+    # 作り直す実装は、既存の依存導入・計測を無駄にやり直すため、正常時は初期化をしない。
+    # 初期化担当（VENV_PY）は呼び出しを記録するので、再初期化されればこの記録に現れる。
+    with Workspace() as workspace:
+        result = workspace.run_done(good_env())
+        assert result.returncode == 0, f"正常な venv で done が失敗しました: {result.stderr[-2000:]!r}"
+        calls = workspace.recorded_calls()
+        assert not workspace.venv_creation_calls(), (
+            f"正常な venv を再初期化しています: {workspace.venv_creation_calls()!r}"
+        )
+        for layer in ("backend", "cli", "web", "repo-gate-threshold"):
+            assert layer_calls(calls)[layer], f"{layer} が実行されませんでした: {calls!r}"
+
+
 def main() -> int:
     tests = [
         test_all_layers_reached_and_done_passes,
@@ -400,6 +608,9 @@ def main() -> int:
         test_done_without_coverage_runs_no_layer,
         test_preserving_make_flag_spelling_does_not_change_result,
         test_repo_gate_real_threshold_reads_generated_json,
+        test_repo_gate_failure_detail_reaches_make_stderr,
+        test_partially_initialized_venv_recovers_after_prerequisite_restored,
+        test_initialized_venv_is_not_reinitialized,
     ]
     failures = 0
     for test in tests:
