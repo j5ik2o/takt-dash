@@ -14,6 +14,34 @@ all_steps:
       position: before_instruction
 max_steps: 70
 initial_step: mark_in_progress
+loop_monitors:
+  # 修正対象が変わっても、同じ機械ゲートへ戻った周回を数える。
+  - cycle: [machine_gate]
+    ignore_steps:
+      - fix_machine_gate_fmt
+      - fix_machine_gate_clippy
+      - fix_machine_gate_test
+      - fix_machine_gate_typecheck
+      - fix_machine_gate_lint
+      - fix_machine_gate_proto_check
+      - aislop_gate
+      - fix_aislop_gate
+    threshold: 3
+    judge:
+      persona: supervisor
+      instruction: |
+        機械検査から修正を経て機械検査に戻る経路を {cycle_count} 周しました。
+        {report_dir} と同じ run の logs・context にある直近の検査出力と修正応答を時系列で読み、
+        git diff とコミット履歴で実際の変更を確認してください。
+        同じ指摘と原因が繰り返され、受け入れ条件に関係する差分、新しい検証結果、新たに確認した事実の
+        いずれにも進展がないと確認できた場合は停止してください。修正したという報告や同じ失敗の再出力は
+        進展の根拠に含めません。意味のある変化がある場合、または比較に足る証拠がない場合は続行してください。
+        比較した指摘と、差分・検証・知見について判定の根拠を記録してください。
+      rules:
+        - condition: 進展あり、または比較の証拠が不足
+          next: machine_gate
+        - condition: 同じ指摘と原因が続き差分・検証結果・知見に進展がないと確認した
+          next: ABORT
 steps:
   - name: mark_in_progress
     description: 開始時に対象 issue を解決し、ボードの Status を In Progress にする（失敗は非致命）
