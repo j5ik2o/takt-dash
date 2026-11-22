@@ -11,16 +11,17 @@
 # コピー時の builtin との差分は次の (a)-(f) である。
 #   (a) name と description
 #   (b) この冒頭コメント
-#   (c) max_steps を 75 から 86 にする（後述）
+#   (c) max_steps に再同期・スレッド検査とループ判定の分を加える（後述）
 #   (d) wait_ci の最後の規則の next: merge を next: check_review_threads にする
 #   (e) merge ステップの直前に check_review_threads と unresolved_review_threads を足す
 #   (f) CI の再確認と待機から同じ失敗調査に戻る経路へ loop_monitors を足す
 #
-# max_steps について: TAKT は builtin 名のワークフローにだけ mergeResyncBudget
+# コピー元の TAKT 0.75.0 は builtin 名のワークフローにだけ mergeResyncBudget
 # （5 * max(2, concurrency-1)）を上乗せする（dist/features/tasks/execute/taskWorkflowExecution.js）。
 # 独自名のワークフローではこの上乗せが 0 になる。既定 concurrency 2 では上乗せが 10 なので、
 # 同じだけの余裕を保つため max_steps を 75 + 10 + 1（関門のステップ）= 86 にする。
 # 再同期の上限 resyncLimit はワークフロー名に依存せず sync_with_root が与えるので変わらない。
+# 判定も1工程として数える。従来の86工程で、最短8工程ごとに判定しても最大10回。
 #
 # builtin を更新するときの追随手順:
 #   1. 新しい版の builtin（ja）の merge-review-fix-simple.yaml を取得する。
@@ -30,25 +31,27 @@
 #      `python3 tools/merge-gate/review_threads_gate_test.py` を再実行する。
 name: merge-review-fix-simple-thread-gate
 description: 1体の読み取り専用レビューと裁定・修正・検証を経て、CI通過後に未解決レビュースレッドが0件のときだけPRをマージする
-max_steps: 86
+max_steps: 96
 initial_step: identify
 loop_monitors:
-  # 再確認が待機に戻り、待機が再び失敗を返す周回を数える。修正・再実行には既存の回数制限がある。
-  - cycle: [collect_ci_failure, investigate_ci, refresh_ci, wait_ci]
+  # 最新の失敗を収集した直後に判定する。修正・再実行には既存の回数制限がある。
+  - cycle: [investigate_ci, refresh_ci, wait_ci, collect_ci_failure]
     threshold: 2
     judge:
-      persona: supervisor
+      persona: taktdash-loop-judge
       instruction: |
         CI 失敗の調査後に再確認と待機を経て、再び失敗収集に戻る経路を {cycle_count} 周しました。
-        {report_dir} と同じ run の logs・context にある直近の失敗、調査報告、CI の実行結果を比較し、
-        git diff とコミット履歴で実際の変更も確認してください。
+        最新の失敗証拠を先に読み、{report_dir} と同じ run の logs・context にある直前までの失敗、
+        調査報告、CI の実行結果と比較してください。git diff とコミット履歴で実際の変更も確認してください。
+        最新の失敗証拠: {context:collect_ci_failure.failure.promptEvidence}
         同じ失敗の指摘と原因が繰り返され、修正差分・検証結果・知見に進展がないと確認できた場合は停止してください。
         同じログの再取得や同じ CI 実行の状態の揺れは進展に含めません。新しい検証結果や原因の特定、
-        意味のある修正がある場合、または比較に足る証拠がない場合は続行してください。
+        意味のある修正がある場合は続行してください。新たに失敗した検査やジョブがある場合と、
+        最新の失敗を比較できるだけの証拠がない場合も続行し、調査に委ねてください。
         比較した失敗と、差分・検証・知見について判定の根拠を記録してください。
       rules:
         - condition: 進展あり、または比較の証拠が不足
-          next: collect_ci_failure
+          next: investigate_ci
         - condition: 同じ指摘と原因が続き差分・検証結果・知見に進展がないと確認した
           next: ABORT
 steps:

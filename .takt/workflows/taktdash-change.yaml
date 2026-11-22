@@ -12,7 +12,8 @@ all_steps:
       position: before_instruction
     - ref: taktdash-coding-rules
       position: before_instruction
-max_steps: 70
+# 判定も1工程として数える。従来の70工程で、最短6工程ごとに判定しても最大11回。
+max_steps: 81
 initial_step: mark_in_progress
 loop_monitors:
   # 修正対象が変わっても、同じ機械ゲートへ戻った周回を数える。
@@ -28,7 +29,7 @@ loop_monitors:
       - fix_aislop_gate
     threshold: 3
     judge:
-      persona: supervisor
+      persona: taktdash-loop-judge
       instruction: |
         機械検査から修正を経て機械検査に戻る経路を {cycle_count} 周しました。
         {report_dir} と同じ run の logs・context にある直近の検査出力と修正応答を時系列で読み、
