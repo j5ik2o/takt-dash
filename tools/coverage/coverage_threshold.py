@@ -41,14 +41,19 @@ def evaluate(payload, layer):
 
 
 def evaluate_file(path, layer):
-    """JSON ファイルを読み、1 層を評価する。"""
+    """JSON ファイルを読み、1 層を評価する。
+
+    判定結果は成功時は標準出力、失敗時は標準エラーへ出す。下流の repo-gate の失敗報告
+    （tools/repo-gate/gate_makefile.py の check_machine_gate）は make done の標準エラー
+    だけを使うため、失敗時に標準出力だけへ出すと失敗層が失われる。
+    """
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         print(f"{layer}: coverage JSON を読めません: {error}", file=sys.stderr)
         raise SystemExit(2)
     result, line = evaluate(payload, layer)
-    print(line)
+    print(line, file=sys.stdout if result["ok"] else sys.stderr)
     return result
 
 
