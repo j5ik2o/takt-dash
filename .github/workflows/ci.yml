@@ -4,12 +4,57 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 jobs:
+  ci-revision:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.revision.outputs.sha }}
+    steps:
+      - name: Fetch the PR test merge
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v5
+        with:
+          # An edited event can carry the test merge from before a base change.
+          ref: ${{ github.event.action == 'edited' && format('refs/pull/{0}/merge', github.event.number) || github.sha }}
+          persist-credentials: false
+      - name: Verify the CI revision
+        id: revision
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          revision="$EVENT_SHA"
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            revision=$(git rev-parse HEAD)
+            # Read raw parent headers even with a shallow checkout.
+            parents=$(git cat-file commit "$revision" | sed -n '1,/^$/{s/^parent //p;}')
+            printf 'Test merge %s\nEvent base %s\nEvent head %s\nActual parents:\n%s\n' "$revision" "$BASE_SHA" "$HEAD_SHA" "$parents"
+            if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" || "$parents" != "$BASE_SHA"$'\n'"$HEAD_SHA" ]]; then
+              echo '::error::The test merge does not have the event base and head as its ordered parents.'
+              exit 1
+            fi
+          fi
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::The CI revision is missing or invalid.'
+            exit 1
+          fi
+          printf 'sha=%s\n' "$revision" >> "$GITHUB_OUTPUT"
+
   done:
+    needs: ci-revision
+    if: needs.ci-revision.outputs.sha != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.ci-revision.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -32,9 +77,13 @@ jobs:
       - run: node scripts/aislop-check-bootstrap.mjs check
 
   e2e:
+    needs: ci-revision
+    if: needs.ci-revision.outputs.sha != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.ci-revision.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
@@ -47,6 +96,27 @@ jobs:
           version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: make e2e
+
+  required-ci:
+    name: takt-dash required CI
+    needs: [ci-revision, done, e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Reject workflow cancellation
+        if: ${{ cancelled() }}
+        run: exit 1
+      - name: Require all blocking jobs to succeed
+        env:
+          REVISION_RESULT: ${{ needs.ci-revision.result }}
+          DONE_RESULT: ${{ needs.done.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+        run: |
+          printf 'ci-revision=%s done=%s e2e=%s\n' "$REVISION_RESULT" "$DONE_RESULT" "$E2E_RESULT"
+          if [[ "$REVISION_RESULT" != success || "$DONE_RESULT" != success || "$E2E_RESULT" != success ]]; then
+            exit 1
+          fi
 
   coverage:
     runs-on: ubuntu-latest
