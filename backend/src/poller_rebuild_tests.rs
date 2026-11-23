@@ -5,7 +5,7 @@ mod common;
 #[path = "../tests/grpc_harness/mod.rs"]
 mod grpc_harness;
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use common::{project, running_meta, server_meta, RunFixture, RunTaskLine};
 use grpc_harness::{client, start_server, GrpcHarness};
@@ -17,6 +17,8 @@ use tokio::{
 
 use super::Poller;
 use crate::{
+  config::{load_config, McpServer},
+  mcp::{client_config, Lane},
   model::{EventKind, ExecutionStatus, ProjectSnapshot},
   takt_dash::v1::{ApproveGoalRegistrationRequest, GetActivityRequest, GetProjectsRequest},
 };
@@ -25,6 +27,7 @@ use crate::{
 pub(super) enum ReadBoundary {
   BeforeAcquisition,
   AfterAcquisition,
+  BeforeApply,
 }
 
 pub(super) struct ReadBarrier {
@@ -70,6 +73,100 @@ fn poller(harness: &GrpcHarness) -> Poller {
 const GOAL: &str = "3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11";
 const ADDED_A: &str = "7c1f4b06-6d24-4b7f-9c1a-2b3c4d5e6f70";
 const ADDED_B: &str = "8c1f4b06-6d24-4b7f-9c1a-2b3c4d5e6f70";
+
+#[tokio::test]
+async fn same_server_stdio_to_http_retires_children_and_keeps_write_order() {
+  let harness = harness();
+  let mut poller = poller(&harness);
+  let registry = &harness.registry;
+  let write_gate = registry.write_gate("mac-mini", "takt-dash");
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active")]}));
+  assert_eq!(poller.read_cycle_once().await.unwrap().projects_read, 1);
+
+  let grpc = start_server(&harness).await;
+  let mut client = client(grpc.address).await;
+  let approval = |revision| ApproveGoalRegistrationRequest {
+    server_id: "mac-mini".to_owned(),
+    project: "takt-dash".to_owned(),
+    revision,
+  };
+  client.approve_goal_registration(approval(1)).await.expect("stdio で書き込めます");
+  assert_eq!(registry.write_sequence("mac-mini", "takt-dash"), 1);
+
+  // 画面読み取りレーンも起動してから、ハンドルをレジストリだけが所有する状態にします。
+  let stdio_config = load_config(harness.config_path()).unwrap();
+  let McpServer::Stdio(stdio) = &stdio_config.servers["mac-mini"] else {
+    panic!("切替前の接続は stdio です");
+  };
+  let (screen, _) =
+    registry.client("mac-mini", "takt-dash", Lane::Screen, || client_config(stdio, harness.project_dir()));
+  screen.lock().await.warm_up().await.unwrap();
+  drop(screen);
+  let old_pids = harness.recorded_processes();
+  assert_eq!(old_pids.len(), 3, "定期読み取り、画面読み取り、書き込みの子プロセスが起動します");
+  assert!(old_pids.iter().copied().all(common::process_exists));
+
+  let http_state = harness.project_dir().join("http-state.json");
+  std::fs::write(&http_state, json!({"goals": [goal(ADDED_A, "paused")]}).to_string()).unwrap();
+  let http = common::HttpMockServer::start(&http_state, None);
+  let mut config: Value = serde_json::from_str(&std::fs::read_to_string(harness.config_path()).unwrap()).unwrap();
+  config["mcpServers"]["mac-mini"] = json!({
+    "type": "http",
+    "url": http.url(),
+    "headers": { "Authorization": format!("Bearer {}", http.token()) },
+  });
+  std::fs::write(harness.config_path(), config.to_string()).unwrap();
+  // HTTP への切替周期と次周期のそれぞれで、読み取りが完了した直後に書き込みを挟みます。
+  for (revision, write_sequence) in [(2, 2), (3, 3)] {
+    let (reached, resume) = arm(&mut poller, ReadBoundary::BeforeApply);
+    let control = async {
+      reached.await.expect("HTTP の読み取りが完了します");
+      assert!(Arc::ptr_eq(&write_gate, &registry.write_gate("mac-mini", "takt-dash")));
+      assert_eq!(registry.write_sequence("mac-mini", "takt-dash"), write_sequence - 1);
+      client.approve_goal_registration(approval(revision)).await.expect("HTTP で書き込めます");
+      assert_eq!(registry.write_sequence("mac-mini", "takt-dash"), write_sequence);
+      resume.send(()).expect("読み取り結果の反映を再開できます");
+    };
+    let (cycle, ()) = timeout(Duration::from_secs(15), async { tokio::join!(poller.read_cycle_once(), control) })
+      .await
+      .expect("読み取り、書き込み、反映の判定が完了します");
+    let cycle = cycle.unwrap();
+    assert_eq!(cycle.projects_failed, 0);
+    assert_eq!(cycle.projects_read, 0, "書き込み前に取得した結果を捨てます");
+    assert_eq!(cycle.events_recorded, 0);
+    let slot = harness.store.slot("takt-dash").expect("切替後も同じプロジェクトが残ります");
+    assert!(slot.snapshot.is_none(), "切替時に初期化した状態に古い HTTP 結果を反映しません");
+
+    if revision == 2 {
+      assert_stdio_children_exit(&old_pids).await;
+    }
+  }
+  std::fs::write(&http_state, json!({"goals": [goal(ADDED_B, "active")]}).to_string()).unwrap();
+  assert_eq!(poller.read_cycle_once().await.unwrap().projects_read, 1);
+  assert_eq!(snapshot(&harness).goals[0].goal_id.as_str(), ADDED_B, "書き込み後に取得した HTTP 結果は反映します");
+  assert_eq!(harness.recorded_processes(), old_pids, "切替後に stdio の子プロセスを起動しません");
+  let writes: Vec<_> = http
+    .recorded_calls()
+    .into_iter()
+    .filter(|call| call["name"] == "takt_approve_goal_registration")
+    .map(|call| call["arguments"]["revision"].clone())
+    .collect();
+  assert_eq!(writes, [json!(2), json!(3)], "切替後の書き込みは HTTP に届きます");
+  poller.shutdown().await;
+  drop(client);
+  grpc.stop().await;
+}
+
+async fn assert_stdio_children_exit(old_pids: &[u32]) {
+  let exited = timeout(Duration::from_secs(3), async {
+    while old_pids.iter().copied().any(common::process_exists) {
+      tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+  })
+  .await;
+  let remaining: Vec<_> = old_pids.iter().copied().filter(|pid| common::process_exists(*pid)).collect();
+  assert!(exited.is_ok(), "HTTP への切替後に旧 stdio 子プロセスが残っています: {remaining:?}");
+}
 
 fn goal(id: &str, execution: &str) -> Value {
   json!({

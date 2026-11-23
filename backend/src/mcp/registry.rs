@@ -272,17 +272,17 @@ impl McpClientRegistry {
     entry.map(|(client, cwd)| ClientRead { client, cwd, rebuilt, write_sequence })
   }
 
-  /// 指定したプロジェクト以外のクライアントをレジストリから外す。
+  /// 有効なキーの書き込み状態を保持し、stdio 接続先にだけ子プロセスのレーンを残す。
   ///
   /// 誰も保持していないクライアントはここで破棄され、子プロセスは
   /// [`McpClient`] の `kill_on_drop` で停止します。利用者がまだ同じハンドルを
   /// 保持している場合は、その操作が終わってハンドルが消えた時点で停止します。
-  pub fn retain(&self, wanted: &[(String, String)]) {
+  pub(crate) fn retain_configured(&self, wanted: &BTreeSet<ProjectKey>, is_stdio: impl Fn(&str) -> bool) {
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-    let wanted: BTreeSet<&ProjectKey> = wanted.iter().collect();
-    inner.clients.retain(|(server_id, project, _), _| wanted.contains(&(server_id.clone(), project.clone())));
-    inner.rebuilt.retain(|key| wanted.contains(key));
-    inner.screen_next.retain(|key, _| wanted.contains(key));
+    let keep_stdio = |key: &ProjectKey| is_stdio(&key.0) && wanted.contains(key);
+    inner.clients.retain(|(server_id, project, _), _| keep_stdio(&(server_id.clone(), project.clone())));
+    inner.rebuilt.retain(keep_stdio);
+    inner.screen_next.retain(|key, _| keep_stdio(key));
     inner.write_counts.retain(|key, _| wanted.contains(key));
     inner.write_gates.retain(|key, _| wanted.contains(key));
   }
