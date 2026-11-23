@@ -2,6 +2,12 @@
 
 BASE_URL ?= http://127.0.0.1:3000
 
+# coverage.py と PyYAML を、システム Python を汚さずに用意する。CI の done ジョブは
+# PyYAML しか導入しないため、通常の make done でも coverage 判定を実行できるよう、
+# target 配下の仮想環境を使う（PEP668 の強制回避やシステムへの導入はしない）。
+COVERAGE_VENV ?= target/coverage/venv
+COVERAGE_PY := $(COVERAGE_VENV)/bin/python
+
 fmt:
 	cargo +nightly fmt --all -- --check
 
@@ -13,6 +19,8 @@ test:
 	npm --prefix frontend/web run test
 	python3 tools/repo-gate/repo_gate_test.py
 	python3 tools/test-summary/test_summary_test.py
+	python3 tools/coverage/coverage_threshold_test.py
+	python3 tools/coverage/coverage_wiring_test.py
 
 typecheck:
 	npm --prefix frontend/web run typecheck
@@ -40,19 +48,23 @@ coverage:
 	@echo "== backend (cargo-llvm-cov) =="
 	@cargo llvm-cov --version > /dev/null 2>&1 || cargo install cargo-llvm-cov --locked
 	rustup component add llvm-tools-preview
-	cargo llvm-cov -p takt-dash-backend --ignore-filename-regex '(^|/)(target|tests)/|(^|/)tests\.rs$$|_tests\.rs$$|/\.cargo/registry/|/rustc/'
+	cargo llvm-cov -p takt-dash-backend --fail-under-lines 80 --ignore-filename-regex '(^|/)(target|tests)/|(^|/)tests\.rs$$|_tests\.rs$$|/\.cargo/registry/|/rustc/'
 	@echo "== frontend/cli (cargo-llvm-cov) =="
-	cargo llvm-cov -p takt-dash-cli --ignore-filename-regex '(^|/)(target|tests)/|(^|/)tests\.rs$$|_tests\.rs$$|/\.cargo/registry/|/rustc/'
+	cargo llvm-cov -p takt-dash-cli --fail-under-lines 80 --ignore-filename-regex '(^|/)(target|tests)/|(^|/)tests\.rs$$|_tests\.rs$$|/\.cargo/registry/|/rustc/'
 	@echo "== frontend/web (c8) =="
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
 	cd frontend/web && npx --yes c8@12.0.0 --all --src . \
 		--include 'app/**/*.{ts,tsx}' --include 'src/**/*.{ts,tsx}' \
 		--exclude 'src/proto/**' --exclude '**/*.test.ts' --exclude 'test/**' --exclude '**/*.d.ts' \
-		--reporter text --extension .ts --extension .tsx npm run test
+		--reporter text --check-coverage --lines 80 --extension .ts --extension .tsx npm run test
 	@echo "== tools/repo-gate (coverage.py) =="
 	mkdir -p target/coverage
-	python3 -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py,tools/repo-gate/gate_*.py' tools/repo-gate/repo_gate_test.py
-	python3 -m coverage report --data-file=target/coverage/.coverage --show-missing
+	"$(COVERAGE_PY)" -m pip --version > /dev/null 2>&1 || python3 -m venv "$(COVERAGE_VENV)"
+	"$(COVERAGE_PY)" -m pip install --quiet --upgrade pip
+	"$(COVERAGE_PY)" -m pip install --quiet coverage pyyaml
+	"$(COVERAGE_PY)" -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py,tools/repo-gate/gate_*.py' tools/repo-gate/repo_gate_test.py
+	"$(COVERAGE_PY)" -m coverage json --data-file=target/coverage/.coverage -o target/coverage/repo-gate.json
+	"$(COVERAGE_PY)" tools/coverage/coverage_threshold.py --json target/coverage/repo-gate.json --layer repo-gate
 
 done:
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
@@ -62,6 +74,7 @@ done:
 	$(MAKE) test
 	$(MAKE) typecheck
 	$(MAKE) lint
+	$(MAKE) coverage
 
 e2e-skip-only-check:
 	! grep -RInE 'test\.(skip|only)([^A-Za-z0-9_]|$$)' e2e/tests e2e/smoke

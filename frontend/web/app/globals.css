@@ -129,7 +129,7 @@ a {
 .side-title {
   font-size: var(--font-size-12);
   letter-spacing: 0.08em;
-  color: var(--faint);
+  color: var(--muted);
   margin: 0 var(--space-8) var(--space-6);
   font-weight: 700;
 }
@@ -149,7 +149,9 @@ a {
 
 .srv-list a {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .srv-state {
@@ -943,7 +945,7 @@ a {
 }
 
 .tray-item.stale .wait b {
-  color: var(--orange);
+  color: var(--orange-d);
 }
 
 .tray-item .target {
@@ -995,7 +997,7 @@ a {
 
 .ev {
   display: grid;
-  grid-template-columns: 56px 150px minmax(0, 1fr) 200px;
+  grid-template-columns: 56px auto minmax(0, 1fr) 200px;
   gap: var(--space-4) var(--space-14);
   padding: var(--space-10) var(--space-18);
   border-top: 1px solid var(--line2);
@@ -1124,6 +1126,19 @@ ol.log-tail li {
   font-weight: 600;
 }
 
+/* 読み上げには残し、画面には出さない。対象の説明を読み上げ名とは別に補うために使う。 */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* 判断待ちの操作 UI。ボタンと入力は折り返し、ダイアログは画面中央に重ねる。 */
 .actions {
   display: flex;
@@ -1141,6 +1156,7 @@ ol.log-tail li {
   border: 1px solid var(--line);
   border-radius: var(--radius-6);
   padding: var(--space-4) var(--space-12);
+  min-height: 44px;
   cursor: pointer;
 }
 
@@ -1324,6 +1340,27 @@ ol.log-tail li {
   color: var(--muted);
 }
 
+details.side-foot {
+  display: none;
+}
+
+.side-foot > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.side-foot > summary::-webkit-details-marker {
+  display: none;
+}
+
+.side-foot > summary::before {
+  content: "▸ ";
+}
+
+.side-foot[open] > summary::before {
+  content: "▾ ";
+}
+
 .side-foot p {
   margin: var(--space-2) 0;
 }
@@ -1338,7 +1375,7 @@ ol.log-tail li {
   }
 
   .ev {
-    grid-template-columns: 52px 130px minmax(0, 1fr) 110px;
+    grid-template-columns: 52px auto minmax(0, 1fr) 110px;
   }
 }
 
@@ -1359,6 +1396,14 @@ ol.log-tail li {
     padding: var(--space-12) var(--space-14) var(--space-8);
   }
 
+  div.side-foot {
+    display: none;
+  }
+
+  details.side-foot {
+    display: block;
+  }
+
   .side-block {
     display: flex;
     align-items: center;
@@ -1376,6 +1421,10 @@ ol.log-tail li {
     flex-direction: row;
     display: flex;
     gap: var(--space-4);
+  }
+
+  .nav {
+    flex-wrap: wrap;
   }
 
   .srv-list li {

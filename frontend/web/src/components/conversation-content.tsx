@@ -11,20 +11,24 @@ type ConversationContentProps = {
   page?: ConversationPage;
   loading?: boolean;
   error?: string;
+  picker?: ReactElement;
 };
 
 // 会話の表示は読み取り専用とし、発話者・時刻・本文を seq の昇順で出す。
 // unavailable_reason は会話が無い理由として、skipped は理由と件数として補足表示する。
 // 取得中・取得失敗は本文を出さず、ヘッダのプロジェクトと食い違わせない。
+// picker は対象プロジェクトの選択 UI で、main の先頭に置く（補助技術が main の中として読む）。
 export function ConversationContent({
   project,
   page,
   loading = false,
   error,
+  picker,
 }: ConversationContentProps): ReactElement {
   const messages = page === undefined ? [] : sortConversationMessages(page.messages);
   return (
     <main className="page">
+      {picker}
       <header className="page-head">
         <div>
           <h1>会話</h1>

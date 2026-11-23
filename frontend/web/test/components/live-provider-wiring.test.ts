@@ -484,7 +484,7 @@ for (const respondedBefore of [false, true]) {
         createElement(LiveSidebar, { key: "sidebar", frontendBuild: { commit: "test", branch: "test" } })],
     };
     const page = new JSDOM(renderToStaticMarkup(createElement(StateStreamProvider, props))).window.document;
-    for (const selector of [".page-head > div > p", ".side-foot > p:nth-child(2)"]) {
+    for (const selector of [".page-head > div > p", ".side-foot > p:nth-of-type(2)"]) {
       const count = page.querySelector(selector);
       assert.ok(count);
       assert.match(count.textContent ?? "", /サーバー.*不明/);
@@ -502,7 +502,7 @@ test("同じ概要とサイドバーは台数不明から取得、切断中の�
     initialState: DashboardState.create({}), initialSnapshotLoaded: false, initialFailure: "unreachable",
   }, [createElement(LiveOverview, { key: "overview", initialNowMs: NOW.getTime() }),
     createElement(LiveSidebar, { key: "sidebar", frontendBuild: { commit: "test", branch: "test" } })]);
-  const counts = (): string[] => [".page-head > div > p", ".side-foot > p:nth-child(2)"].map((selector) => {
+  const counts = (): string[] => [".page-head > div > p", ".side-foot > p:nth-of-type(2)"].map((selector) => {
     const element = container.querySelector(selector);
     assert.ok(element);
     return element.textContent ?? "";
