@@ -19,6 +19,16 @@ use takt_dash_backend::{
   },
 };
 
+/// 指定した pid のプロセスが存在するか。停止後の子プロセスの後始末を観測するために使う。
+pub fn process_exists(pid: u32) -> bool {
+  std::process::Command::new("ps")
+    .arg("-p")
+    .arg(pid.to_string())
+    .output()
+    .map(|output| output.status.success())
+    .unwrap_or(false)
+}
+
 /// mock MCP サーバのスクリプトへの絶対パス。
 pub fn mock_script() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("mock_mcp_server.mjs")

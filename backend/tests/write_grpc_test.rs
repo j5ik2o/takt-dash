@@ -1226,16 +1226,6 @@ async fn answer_inquiry_rejects_ambiguous_inquiry_id_without_calling_takt() {
   server.stop().await;
 }
 
-/// 指定した pid のプロセスが存在するか。停止後の子プロセスの後始末を観測するために使う。
-fn process_exists(pid: u32) -> bool {
-  std::process::Command::new("ps")
-    .arg("-p")
-    .arg(pid.to_string())
-    .output()
-    .map(|output| output.status.success())
-    .unwrap_or(false)
-}
-
 /// 記録された子プロセスが `expected` 件になるまで短い間隔で待ち、その記録を返す。
 ///
 /// 書き込みレーンの温めは読み取りサイクルの裏で進むため、件数の観測は完了を待ってから

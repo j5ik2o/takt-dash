@@ -205,8 +205,7 @@ impl Poller {
       let http_read = self.reads.get(&project.name).map(|read| (read.handle.clone(), read.cwd.clone()));
       if let Some((handle, cwd)) = http_read {
         // 読み取りが HTTP 接続先のプロジェクトは、常駐サーバーのハンドルから読みます。
-        // 書き込みの通し番号は書き込み先（`write_server`）のものを使います。書き込みは
-        // stdio の書き込み先へ行くためです。
+        // 書き込みの通し番号は書き込み先（`write_server`）のものを使います。
         let run_logs = self.run_logs.handle_for(&project.name, &cwd);
         let task = tokio::spawn(async move {
           let read_at = Utc::now();
@@ -253,6 +252,8 @@ impl Poller {
           metrics.merge(project_metrics);
           match result {
             | Ok(snapshot) => {
+              #[cfg(test)]
+              self.pause_read(rebuild_tests::ReadBoundary::BeforeApply).await;
               // 書き込みゲートを保持したまま、古さの確認と反映を行います。書き込み側は
               // 書き込み RPC の発行前から通し番号の記録まで同じゲートを保持するため、
               // 確認と反映の間に書き込みが割り込むことはありません。
@@ -671,31 +672,31 @@ impl Poller {
     // （`write_server`、未設定なら `server`）の組すべてにする。書き込み先が HTTP 接続先の
     // プロジェクトで保持対象から外すと、定期読み取りのたびに書き込みゲートと通し番号が
     // 消え、書き込み前の読み取り結果が書き込み後の状態を上書きする事故を防げなくなる。
-    // 子プロセスの用意は、この後の処理が stdio の組だけに行う。読み取り先と書き込み先が
+    // 子プロセスの保持と用意は stdio の組だけに行う。読み取り先と書き込み先が
     // 異なる stdio エントリを指す場合は、双方へレーンを用意する。書き込み先だけを残すと、
     // 読み取りが「子プロセスがありません」で毎回失敗する。読み取りが HTTP 接続先の
     // プロジェクトでは、読み取り用の子プロセスは起動しない。
-    let mut wanted: Vec<(String, String)> = Vec::new();
+    let mut wanted = BTreeSet::new();
     for project in &config.projects {
       for server_id in [&project.server, &project.write_server] {
-        let key = (server_id.clone(), project.name.clone());
-        if !wanted.contains(&key) {
-          wanted.push(key);
-        }
+        wanted.insert((server_id.clone(), project.name.clone()));
       }
       // manager 用エントリは終了依頼の投函先で、プロジェクトごとに manager レーンの
-      // 子プロセスを持ちます。retain で外れないよう、対象プロジェクトのキーを残します。
+      // 子プロセスを持ちます。対象プロジェクトのキーを保持対象に加えます。
       // 子プロセスの起動は終了依頼のときまで遅延させます。
       if let Some(manager_server) = &config.manager_server {
         if matches!(config.servers.get(manager_server), Some(McpServer::Stdio(_))) {
-          let key = (manager_server.clone(), project.name.clone());
-          if !wanted.contains(&key) {
-            wanted.push(key);
-          }
+          wanted.insert((manager_server.clone(), project.name.clone()));
         }
       }
     }
-    self.registry.retain(&wanted);
+    let http_servers = config
+      .servers
+      .iter()
+      .filter(|(_, server)| matches!(server, McpServer::Http(_)))
+      .map(|(id, _)| id.clone())
+      .collect();
+    self.registry.retain_configured(&wanted, http_servers);
     for project in &config.projects {
       let mut warmed: Vec<&String> = Vec::new();
       for server_id in [&project.server, &project.write_server] {
