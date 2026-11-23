@@ -59,12 +59,12 @@ coverage:
 		--reporter text --check-coverage --lines 80 --extension .ts --extension .tsx npm run test
 	@echo "== tools/repo-gate (coverage.py) =="
 	mkdir -p target/coverage
-	$(COVERAGE_PY) -m pip --version > /dev/null 2>&1 || { rm -rf $(COVERAGE_VENV); python3 -m venv $(COVERAGE_VENV); }
-	$(COVERAGE_PY) -m pip install --quiet --upgrade pip
-	$(COVERAGE_PY) -m pip install --quiet coverage pyyaml
-	$(COVERAGE_PY) -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py,tools/repo-gate/gate_*.py' tools/repo-gate/repo_gate_test.py
-	$(COVERAGE_PY) -m coverage json --data-file=target/coverage/.coverage -o target/coverage/repo-gate.json
-	$(COVERAGE_PY) tools/coverage/coverage_threshold.py --json target/coverage/repo-gate.json --layer repo-gate
+	"$(COVERAGE_PY)" -m pip --version > /dev/null 2>&1 || python3 -m venv "$(COVERAGE_VENV)"
+	"$(COVERAGE_PY)" -m pip install --quiet --upgrade pip
+	"$(COVERAGE_PY)" -m pip install --quiet coverage pyyaml
+	"$(COVERAGE_PY)" -m coverage run --data-file=target/coverage/.coverage --include='tools/repo-gate/repo_gate.py,tools/repo-gate/gate_*.py' tools/repo-gate/repo_gate_test.py
+	"$(COVERAGE_PY)" -m coverage json --data-file=target/coverage/.coverage -o target/coverage/repo-gate.json
+	"$(COVERAGE_PY)" tools/coverage/coverage_threshold.py --json target/coverage/repo-gate.json --layer repo-gate
 
 done:
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci

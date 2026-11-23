@@ -18,10 +18,10 @@
   4. done から coverage が除かれていれば、層の計測が実行されない。
   5. 動作を保つ表記変更（`$(MAKE) coverage` を `$(MAKE) --no-print-directory coverage`
      にする等）では、合否が変わらない。
-  6. ensurepip 失敗後に python だけが残った venv でも、前提（python3-venv）復旧後の
-     同じ venv パスへの再実行で正常化し、全層判定まで到達する。pip を使えないまま
-     失敗する現行の判定条件を、この連続実行で検出する。
-  7. pip を使える正常な venv は再初期化しない。
+  6. ensurepip 失敗後に前提（python3-venv）が復旧すれば、同じ venv パスで正常化し、
+     全層判定まで到達する。初回失敗時と復旧時の両方で既存ファイルが残る。
+  7. 空白を含む venv パスを使える。
+  8. pip を使える正常な venv は再初期化しない。
 """
 import json
 import os
@@ -194,13 +194,13 @@ exit 0
 class Workspace:
     """出荷 Makefile と計測器の代用品を持つ一時リポジトリ。"""
 
-    def __init__(self, makefile_text=None):
+    def __init__(self, makefile_text=None, venv_name="venv"):
         self.base = Path(tempfile.mkdtemp(prefix="coverage-wiring-"))
         self.root = self.base / "repo"
         self.root.mkdir()
         self.bin = self.base / "bin"
         self.bin.mkdir()
-        self.venv = self.base / "venv"
+        self.venv = self.base / venv_name
         (self.venv / "bin").mkdir(parents=True)
         self.calls = self.base / "calls.log"
         self.makefile_text = makefile_text
@@ -227,7 +227,7 @@ class Workspace:
 
         shipped = self.makefile_text or SHIPPED_MAKEFILE.read_text(encoding="utf-8")
         (self.root / "Makefile").write_text(
-            strip_non_coverage_prerequisites(shipped).replace("target/coverage/venv", str(self.venv)),
+            strip_non_coverage_prerequisites(shipped),
             encoding="utf-8",
         )
 
@@ -310,7 +310,7 @@ class Workspace:
 
     def write_makefile(self, text):
         (self.root / "Makefile").write_text(
-            strip_non_coverage_prerequisites(text).replace("target/coverage/venv", str(self.venv)),
+            strip_non_coverage_prerequisites(text),
             encoding="utf-8",
         )
 
@@ -333,7 +333,7 @@ class Workspace:
         if self.pip_recovered.exists():
             self.pip_recovered.unlink()
         return subprocess.run(
-            ["make", target],
+            ["make", f"COVERAGE_VENV={self.venv}", target],
             cwd=self.root,
             env=environment,
             capture_output=True,
@@ -539,6 +539,8 @@ def test_partially_initialized_venv_recovers_after_prerequisite_restored():
     # 部分初期化では pip を使えず、前提復旧後の再初期化でだけ使えるようになる状態を再現する。
     with Workspace() as workspace:
         workspace.make_partial_venv()
+        sentinel = workspace.venv / "keep.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
 
         # 前提復旧前の 1 回目: 初期化失敗は非0で終わり、対象パスへ pip を使えない python が
         # 残る（実 ensurepip 失敗と同じ部分初期化状態）。
@@ -556,8 +558,9 @@ def test_partially_initialized_venv_recovers_after_prerequisite_restored():
         assert not workspace.venv_pip_usable(), (
             "初期化失敗後に venv の pip が使えてしまいます（部分初期化を再現できていません）"
         )
-        # 1 回目が実際に同じパスへ初期化を試みたこと（削除→再初期化の経路を通ったこと）。
-        assert workspace.venv_creation_calls(), "初期化呼び出しが記録されていません"
+        assert workspace.venv_creation_calls() == [f"python3 -m venv {workspace.venv}"]
+        assert sentinel.is_file(), "初期化失敗時に venv 内の既存ファイルが削除されました"
+        assert sentinel.read_text(encoding="utf-8") == "keep\n"
 
         # 前提（python3-venv）を復旧してから、同じ venv パスのまま再実行する。
         workspace.restore_prerequisite()
@@ -575,10 +578,26 @@ def test_partially_initialized_venv_recovers_after_prerequisite_restored():
             f"{workspace.recorded_calls()!r}"
         )
         assert workspace.venv_pip_usable(), "再実行後の venv で pip が使えません"
+        assert workspace.venv_creation_calls() == [f"python3 -m venv {workspace.venv}"]
+        assert sentinel.is_file(), "復旧時に venv 内の既存ファイルが削除されました"
+        assert sentinel.read_text(encoding="utf-8") == "keep\n"
         for layer in ("backend", "cli", "web", "repo-gate-threshold"):
             assert layer_calls(workspace.recorded_calls())[layer], (
                 f"正常化後も {layer} が実行されませんでした: {workspace.recorded_calls()!r}"
             )
+
+
+def test_venv_path_with_spaces_can_be_recovered():
+    with Workspace(venv_name="coverage environment") as workspace:
+        workspace.make_partial_venv()
+        workspace.restore_prerequisite()
+        sentinel = workspace.venv / "keep.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        result = workspace.run_done(good_env())
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert workspace.venv_creation_calls() == [f"python3 -m venv {workspace.venv}"]
+        assert sentinel.read_text(encoding="utf-8") == "keep\n"
+        assert layer_calls(workspace.recorded_calls())["repo-gate-threshold"]
 
 
 def test_initialized_venv_is_not_reinitialized():
@@ -610,6 +629,7 @@ def main() -> int:
         test_repo_gate_real_threshold_reads_generated_json,
         test_repo_gate_failure_detail_reaches_make_stderr,
         test_partially_initialized_venv_recovers_after_prerequisite_restored,
+        test_venv_path_with_spaces_can_be_recovered,
         test_initialized_venv_is_not_reinitialized,
     ]
     failures = 0
