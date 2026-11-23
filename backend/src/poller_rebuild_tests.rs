@@ -18,6 +18,7 @@ use tokio::{
 use super::Poller;
 use crate::{
   config::{load_config, McpServer},
+  domain::RegistrationRevision,
   mcp::{client_config, Lane},
   model::{EventKind, ExecutionStatus, ProjectSnapshot},
   takt_dash::v1::{ApproveGoalRegistrationRequest, GetActivityRequest, GetProjectsRequest},
@@ -152,6 +153,24 @@ async fn same_server_stdio_to_http_retires_children_and_keeps_write_order() {
     .map(|call| call["arguments"]["revision"].clone())
     .collect();
   assert_eq!(writes, [json!(2), json!(3)], "切替後の書き込みは HTTP に届きます");
+
+  // 切替前の設定でゲートを待っていた書き込みが、切替後にレーンを取得する順序を再現します。
+  {
+    let _guard = write_gate.lock().await;
+    let (late_write, _) =
+      registry.client("mac-mini", "takt-dash", Lane::Write, || client_config(stdio, harness.project_dir()));
+    let mut late_client = late_write.lock().await;
+    let revision = RegistrationRevision::try_from(4).unwrap();
+    let result = common::write_tool_set(&mut late_client, harness.project_dir())
+      .approve_goal_registration(revision)
+      .await
+      .expect("切替前に解決した接続先で書き込みを完了できます");
+    assert_eq!(result.revision, revision);
+    assert_eq!(registry.record_write("mac-mini", "takt-dash"), 4);
+  }
+  let pids = harness.recorded_processes();
+  assert_eq!(pids.len(), old_pids.len() + 1, "待機していた要求は解決済みの stdio 接続先を使えます");
+  assert_stdio_children_exit(&pids[old_pids.len()..]).await;
   poller.shutdown().await;
   drop(client);
   grpc.stop().await;

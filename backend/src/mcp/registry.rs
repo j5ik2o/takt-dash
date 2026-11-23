@@ -105,6 +105,9 @@ struct Entry {
 struct RegistryInner {
   clients:      BTreeMap<ClientKey, Entry>,
   rebuilt:      BTreeSet<ProjectKey>,
+  /// 設定再読込で HTTP
+  /// と分かったサーバー。旧設定で開始済みの要求にレーンを再登録させないために使います。
+  http_servers: BTreeSet<String>,
   /// 画面読み取りレーンの次回割り当て位置。プロジェクトごとにラウンドロビンで進めます。
   screen_next:  BTreeMap<ProjectKey, u32>,
   /// プロジェクトごとの書き込みの通し番号。書き込みが成功するたびに1つ進めます。
@@ -232,14 +235,19 @@ impl McpClientRegistry {
     wanted: McpClientConfig,
   ) -> (ClientHandle, bool) {
     let key = (server_id.to_owned(), project.to_owned(), lane_key.clone());
+    let make_handle = || Arc::new(AsyncMutex::new(McpClient::with_lane(wanted.clone(), &lane_key.label())));
     let (handle, created, replaced) = {
       let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+      if inner.http_servers.contains(server_id) {
+        // 旧設定を解決済みの要求には元の接続先を渡し、要求が終われば子プロセスを解放します。
+        return (make_handle(), true);
+      }
       if let Some(entry) = inner.clients.get(&key) {
         if entry.config == wanted {
           return (entry.client.clone(), false);
         }
       }
-      let handle = Arc::new(AsyncMutex::new(McpClient::with_lane(wanted.clone(), &lane_key.label())));
+      let handle = make_handle();
       let replaced = inner.clients.insert(key, Entry { config: wanted, client: handle.clone() });
       // 作り直しの記録は、既存のクライアントを設定の違いで置き換えた場合だけに残します。
       // 新しいレーンの追加（画面読み取りレーンの増設など）では定期読み取りの接続先は
@@ -277,14 +285,15 @@ impl McpClientRegistry {
   /// 誰も保持していないクライアントはここで破棄され、子プロセスは
   /// [`McpClient`] の `kill_on_drop` で停止します。利用者がまだ同じハンドルを
   /// 保持している場合は、その操作が終わってハンドルが消えた時点で停止します。
-  pub(crate) fn retain_configured(&self, wanted: &BTreeSet<ProjectKey>, is_stdio: impl Fn(&str) -> bool) {
+  pub(crate) fn retain_configured(&self, wanted: &BTreeSet<ProjectKey>, http_servers: BTreeSet<String>) {
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-    let keep_stdio = |key: &ProjectKey| is_stdio(&key.0) && wanted.contains(key);
+    let keep_stdio = |key: &ProjectKey| !http_servers.contains(&key.0) && wanted.contains(key);
     inner.clients.retain(|(server_id, project, _), _| keep_stdio(&(server_id.clone(), project.clone())));
     inner.rebuilt.retain(keep_stdio);
     inner.screen_next.retain(|key, _| keep_stdio(key));
     inner.write_counts.retain(|key, _| wanted.contains(key));
     inner.write_gates.retain(|key, _| wanted.contains(key));
+    inner.http_servers = http_servers;
   }
 
   /// プロジェクトの現在の書き込みの通し番号を返す。書き込みがまだ無ければ0です。
@@ -343,7 +352,7 @@ mod tests {
   //! クライアントは子プロセスを起動しないまま作れるため、ハンドルの同一性だけで
   //! レーンの割り当てを観測します。
 
-  use std::{path::PathBuf, sync::Arc, time::Duration};
+  use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
 
   use super::{Lane, LaneKey, McpClientRegistry};
   use crate::{domain::ScreenReadLanes, mcp::McpClientConfig};
@@ -371,6 +380,22 @@ mod tests {
     let (poller_again, created) = registry.client("local", "proj", Lane::Poller, config);
     assert!(Arc::ptr_eq(&poller, &poller_again), "同じレーンは同じクライアントを返します");
     assert!(!created, "既存のクライアントは新規作成ではありません");
+  }
+
+  #[test]
+  fn http_switch_preserves_other_lanes_and_allows_reuse_after_switching_back_to_stdio() {
+    let registry = McpClientRegistry::new();
+    let wanted = BTreeSet::from([("switching".to_owned(), "proj".to_owned()), ("local".to_owned(), "proj".to_owned())]);
+    let (local, _) = registry.client("local", "proj", Lane::Write, config);
+    registry.retain_configured(&wanted, BTreeSet::from(["switching".to_owned()]));
+    let (late, _) = registry.client("switching", "proj", Lane::Write, config);
+    assert!(Arc::ptr_eq(&local, &registry.client("local", "proj", Lane::Write, config).0));
+
+    registry.retain_configured(&wanted, BTreeSet::new());
+    let (switched_back, created) = registry.client("switching", "proj", Lane::Write, config);
+    assert!(created, "HTTP に切り替えた後に到着した旧レーンは、再利用のために残しません");
+    assert!(!Arc::ptr_eq(&late, &switched_back));
+    assert!(Arc::ptr_eq(&switched_back, &registry.client("switching", "proj", Lane::Write, config).0));
   }
 
   #[test]

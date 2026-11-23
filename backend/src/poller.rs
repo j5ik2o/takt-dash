@@ -690,9 +690,13 @@ impl Poller {
         }
       }
     }
-    self
-      .registry
-      .retain_configured(&wanted, |server_id| matches!(config.servers.get(server_id), Some(McpServer::Stdio(_))));
+    let http_servers = config
+      .servers
+      .iter()
+      .filter(|(_, server)| matches!(server, McpServer::Http(_)))
+      .map(|(id, _)| id.clone())
+      .collect();
+    self.registry.retain_configured(&wanted, http_servers);
     for project in &config.projects {
       let mut warmed: Vec<&String> = Vec::new();
       for server_id in [&project.server, &project.write_server] {
