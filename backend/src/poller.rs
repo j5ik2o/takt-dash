@@ -166,6 +166,8 @@ impl Poller {
       }
     }
     self.store.set_projects(config.projects.clone());
+    #[cfg(test)]
+    self.pause_read(rebuild_tests::ReadBoundary::AfterProjectsPublished).await;
     self.sync_clients(&config);
     self.sync_reads(&config);
     self.run_logs.retain(|name| config.projects.iter().any(|project| &project.name == name));
