@@ -38,8 +38,11 @@ export function DecisionActions({ decision, onResult }: DecisionActionsProps): R
     }
     setBusy(true);
     const attempt = decisionAttempt(action, unsettledAttempt.current);
+    unsettledAttempt.current = attempt;
     const outcome = await submitDecisionAction(action, fetch, attempt.idempotencyKey);
-    unsettledAttempt.current = outcome.ok ? undefined : attempt;
+    if (outcome.ok) {
+      unsettledAttempt.current = undefined;
+    }
     setBusy(false);
     setDialogState(INITIAL_DECISION_DIALOG_STATE);
     onResult(toDecisionResult(decision, outcome));

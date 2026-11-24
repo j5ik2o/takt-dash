@@ -152,8 +152,8 @@ impl WriteLedger {
       },
       | Begin::Replay(Settled::Unknown(_)) => {
         return Err(Status::deadline_exceeded(
-          "この操作は前回の結果が不明のため再送していません。画面を読み込み直して状態を確かめ、\
-           必要ならもう一度操作してください。",
+          "この操作は前回の結果が不明のため再送していません。状態を確かめ、まだ必要なら数分おいてから\
+           もう一度操作してください。",
         ));
       },
       | Begin::Replay(settled) => settled,

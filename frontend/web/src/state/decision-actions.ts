@@ -191,11 +191,17 @@ const COMMUNICATION_FAILURE_MESSAGE = "操作を送信できませんでした�
 
 type WriteResponseBody = { ok?: boolean; error?: string };
 
-// 1 回の操作の送信。決着するまでのやり直しは同じ鍵を使い、backend が同じ操作として扱う。
+// 1 回の操作の送信。やり直しは、短い時間のうちなら同じ鍵を使い、backend が同じ操作として扱う。
 export type DecisionAttempt = {
   fingerprint: string;
   idempotencyKey: string;
+  submittedAt: number;
 };
+
+// 同じ鍵でやり直す時間の上限（ミリ秒）。Web と backend の期限より長く、状態の定期読み取りが
+// 数回済む長さにする。これを過ぎたやり直しは、利用者が新しい状態を見たうえでの新しい操作として
+// 扱う。古い鍵を使い続けると、後から同じ操作をもう一度行ったときに、前の結果が返ってしまう。
+export const IDEMPOTENCY_KEY_REUSE_MS = 2 * 60 * 1000;
 
 // backend が受け付ける鍵（32 桁の 16 進数）を作る。crypto.randomUUID は http の LAN 上の
 // アドレスでは使えないため、どの文脈でも使える getRandomValues から作る。
@@ -204,19 +210,21 @@ export function newIdempotencyKey(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-// 今回の送信に使う鍵を決める。previous は成功していない直前の送信で、同じ操作のやり直しなら
-// その鍵を使い続ける。応答を受け取れなかった操作は backend で済んでいることがあり、同じ鍵で
-// 送れば backend は書き込みを重ねない。内容や種類が違う操作は別の操作として新しい鍵を使う。
+// 今回の送信に使う鍵を決める。previous は成功していない直前の送信で、同じ操作の間を置かない
+// やり直しならその鍵を使い続ける。応答を受け取れなかった操作は backend で済んでいることがあり、
+// 同じ鍵で送れば backend は書き込みを重ねない。内容や種類が違う操作は新しい鍵を使う。
 export function decisionAttempt(
   action: DecisionAction,
   previous: DecisionAttempt | undefined,
+  now: number = Date.now(),
   newKey: () => string = newIdempotencyKey,
 ): DecisionAttempt {
   const fingerprint = JSON.stringify([action.kind, action.payload]);
-  if (previous !== undefined && previous.fingerprint === fingerprint) {
-    return previous;
-  }
-  return { fingerprint, idempotencyKey: newKey() };
+  const reused =
+    previous !== undefined &&
+    previous.fingerprint === fingerprint &&
+    now - previous.submittedAt < IDEMPOTENCY_KEY_REUSE_MS;
+  return { fingerprint, idempotencyKey: reused ? previous.idempotencyKey : newKey(), submittedAt: now };
 }
 
 export async function submitDecisionAction(

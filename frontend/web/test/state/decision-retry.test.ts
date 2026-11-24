@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { createActionableDashboardState } from "../support/fixtures.ts";
 import {
   buildAnswerAction,
+  IDEMPOTENCY_KEY_REUSE_MS,
   buildMergeAction,
   decisionAttempt,
   newIdempotencyKey,
@@ -50,22 +51,36 @@ test("鍵を付けた送信は、payload に idempotencyKey を加えて POST �
   assert.deepEqual(bodies, [{ ...action.payload, idempotencyKey: "key-1" }]);
 });
 
-test("決着していない操作のやり直しは、同じ鍵を使う", () => {
+const T0 = 1_800_000_000_000;
+
+test("間を置かないやり直しは、同じ鍵を使う", () => {
   const newKey = sequentialKeys();
-  const first = decisionAttempt(answerAction("補足します"), undefined, newKey);
+  const first = decisionAttempt(answerAction("補足します"), undefined, T0, newKey);
 
-  const retried = decisionAttempt(answerAction("補足します"), first, newKey);
+  const retried = decisionAttempt(answerAction("補足します"), first, T0 + 60_000, newKey);
+  const retriedAgain = decisionAttempt(answerAction("補足します"), retried, T0 + 60_000 + IDEMPOTENCY_KEY_REUSE_MS - 1, newKey);
 
-  assert.equal(first.idempotencyKey, "key-1");
-  assert.equal(retried.idempotencyKey, "key-1");
+  assert.deepEqual(
+    [first.idempotencyKey, retried.idempotencyKey, retriedAgain.idempotencyKey],
+    ["key-1", "key-1", "key-1"],
+  );
+});
+
+test("時間を置いたやり直しは、新しい操作として新しい鍵を使う", () => {
+  const newKey = sequentialKeys();
+  const first = decisionAttempt(mergeAction(), undefined, T0, newKey);
+
+  const later = decisionAttempt(mergeAction(), first, T0 + IDEMPOTENCY_KEY_REUSE_MS, newKey);
+
+  assert.deepEqual([first.idempotencyKey, later.idempotencyKey], ["key-1", "key-2"]);
 });
 
 test("内容や種類の違う操作は、別の鍵を使う", () => {
   const newKey = sequentialKeys();
-  const first = decisionAttempt(answerAction("補足します"), undefined, newKey);
+  const first = decisionAttempt(answerAction("補足します"), undefined, T0, newKey);
 
-  const edited = decisionAttempt(answerAction("書き直しました"), first, newKey);
-  const other = decisionAttempt(mergeAction(), edited, newKey);
+  const edited = decisionAttempt(answerAction("書き直しました"), first, T0 + 1, newKey);
+  const other = decisionAttempt(mergeAction(), edited, T0 + 2, newKey);
 
   assert.deepEqual(
     [first.idempotencyKey, edited.idempotencyKey, other.idempotencyKey],
@@ -73,11 +88,11 @@ test("内容や種類の違う操作は、別の鍵を使う", () => {
   );
 });
 
-test("決着した操作のあとは、同じ内容でも新しい鍵を使う", () => {
+test("成功した操作のあとは、同じ内容でも新しい鍵を使う", () => {
   const newKey = sequentialKeys();
-  decisionAttempt(mergeAction(), undefined, newKey);
+  decisionAttempt(mergeAction(), undefined, T0, newKey);
 
-  const next = decisionAttempt(mergeAction(), undefined, newKey);
+  const next = decisionAttempt(mergeAction(), undefined, T0 + 1, newKey);
 
   assert.equal(next.idempotencyKey, "key-2");
 });
