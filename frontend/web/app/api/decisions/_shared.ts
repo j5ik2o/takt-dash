@@ -171,7 +171,32 @@ export const isNonEmptyString = (value: unknown): value is string =>
 export const isPositiveInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value > 0;
 
-// 書き込みを実行し、成功・入力不正・接続不能を HTTP の応答へ一度だけ変換する。
+// 鍵の形は backend の検証と同じ（1〜128 文字の ASCII 表示文字）。
+const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7e]{1,128}$/;
+
+export type ReadIdempotencyKeyResult =
+  | { kind: "ok"; idempotencyKey: string | undefined }
+  | { kind: "error"; response: Response };
+
+// やり直しで書き込みを重ねないための鍵を読む。鍵は省略でき、鍵の無い既存の利用は変わらない。
+export function readIdempotencyKey(body: Record<string, unknown>): ReadIdempotencyKeyResult {
+  const value = body.idempotencyKey;
+  if (value === undefined) {
+    return { kind: "ok", idempotencyKey: undefined };
+  }
+  if (typeof value !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(value)) {
+    return {
+      kind: "error",
+      response: badRequest("idempotencyKey は 1 から 128 文字の ASCII 表示文字で指定してください。"),
+    };
+  }
+  return { kind: "ok", idempotencyKey: value };
+}
+
+const UNKNOWN_OUTCOME_MESSAGE =
+  "操作の結果は不明です。期限内に応答がありませんでした。状態を確かめてから、必要ならやり直してください。";
+
+// 書き込みを実行し、成功・入力不正・結果不明・接続不能を HTTP の応答へ一度だけ変換する。
 export async function runWrite(call: (client: BackendClient) => Promise<unknown>): Promise<Response> {
   const client = getBackendClient();
   try {
@@ -179,6 +204,14 @@ export async function runWrite(call: (client: BackendClient) => Promise<unknown>
     return jsonResponse(200, { ok: true });
   } catch (error) {
     if (error instanceof BackendUnavailableError) {
+      // 期限内に応答が無い書き込みは、backend（takt 側）では済んでいることがある。
+      // 接続できない旨に置き換えず、結果が不明であることを伝える（issue #305）。
+      if (error.failure === "no-response") {
+        return jsonResponse(504, {
+          ok: false,
+          error: error.kind === "server" && error.details !== "" ? error.details : UNKNOWN_OUTCOME_MESSAGE,
+        });
+      }
       // backend が応答の中で UNAVAILABLE を返した場合は、接続障害ではないため
       // 接続できない旨に置き換えず、backend が返した理由を伝える。
       if (error.kind === "server") {

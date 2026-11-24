@@ -6,8 +6,9 @@
 
 use takt_dash_backend::{
   domain::{
-    DailyDate, DomainError, GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber,
-    RegistrationRevision, ReportFilename, RunSlug, ServerId, SilentMinutes, StaleMinutes, TaskCount, TaskName,
+    DailyDate, DomainError, GoalId, IdempotencyKey, InquiryId, InstructionId, MergeUntil, ProjectName,
+    PullRequestNumber, RegistrationRevision, ReportFilename, RunSlug, ServerId, SilentMinutes, StaleMinutes, TaskCount,
+    TaskName,
   },
   model::RunStatus,
 };
@@ -103,6 +104,19 @@ fn pull_request_number_rejects_zero_and_negative_values() {
 
   assert_eq!(PullRequestNumber::try_from(1_i64).expect("1 は有効です").get(), 1);
   assert_eq!(PullRequestNumber::try_from(i64::MAX).expect("i64 の上限は有効です").get(), i64::MAX);
+}
+
+#[test]
+fn idempotency_key_accepts_only_bounded_printable_ascii() {
+  assert_size(IdempotencyKey::try_from(""), "空の鍵");
+  assert_size(IdempotencyKey::try_from("k".repeat(IdempotencyKey::MAX_LEN + 1).as_str()), "上限より長い鍵");
+  assert_lexical(IdempotencyKey::try_from("  "), "空白だけの鍵");
+  assert_lexical(IdempotencyKey::try_from("a b"), "空白を含む鍵");
+  assert_lexical(IdempotencyKey::try_from("改行\nを含む鍵"), "ASCII 以外と制御文字を含む鍵");
+
+  let longest = "k".repeat(IdempotencyKey::MAX_LEN);
+  assert_eq!(IdempotencyKey::try_from(longest.as_str()).expect("上限の長さは有効です").as_str(), longest);
+  assert_eq!(IdempotencyKey::try_from("0123-abc_DEF").expect("表示文字は有効です").as_str(), "0123-abc_DEF");
 }
 
 #[test]

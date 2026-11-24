@@ -2,13 +2,15 @@
 
 // 判断待ち1件分の操作の状態を持つ。確認ダイアログの開閉、入力中の本文、送信中を所有し、
 // 送信結果は項目ごとに一意な key を添えて親へ渡す。
-import { useState, type ReactElement } from "react";
+import { useRef, useState, type ReactElement } from "react";
 import type { PendingDecision } from "../proto/taktdash";
 import {
   INITIAL_DECISION_DIALOG_STATE,
+  decisionAttempt,
   submitDecisionAction,
   toDecisionResult,
   type DecisionAction,
+  type DecisionAttempt,
   type DecisionDialogState,
   type DecisionResult,
 } from "../state/decision-actions";
@@ -27,13 +29,20 @@ export function DecisionActions({ decision, onResult }: DecisionActionsProps): R
   const [text, setText] = useState("");
   const [dialogState, setDialogState] = useState<DecisionDialogState>(INITIAL_DECISION_DIALOG_STATE);
   const [busy, setBusy] = useState(false);
+  // 成功していない直前の送信。同じ操作のやり直しを、同じ鍵で backend へ送るために持つ。
+  const unsettledAttempt = useRef<DecisionAttempt | undefined>(undefined);
 
   const run = async (action: DecisionAction | undefined): Promise<void> => {
     if (action === undefined) {
       return;
     }
     setBusy(true);
-    const outcome = await submitDecisionAction(action);
+    const attempt = decisionAttempt(action, unsettledAttempt.current);
+    unsettledAttempt.current = attempt;
+    const outcome = await submitDecisionAction(action, fetch, attempt.idempotencyKey);
+    if (outcome.ok) {
+      unsettledAttempt.current = undefined;
+    }
     setBusy(false);
     setDialogState(INITIAL_DECISION_DIALOG_STATE);
     onResult(toDecisionResult(decision, outcome));

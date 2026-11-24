@@ -75,6 +75,36 @@ macro_rules! text_value {
   };
 }
 
+/// 書き込み要求の重複を防ぐ鍵。1 から 128 文字の ASCII 表示文字です。
+///
+/// 利用者の 1 回の操作を表します。同じ鍵の要求は、同じ操作の再試行として扱います。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IdempotencyKey(String);
+
+impl IdempotencyKey {
+  /// 鍵の長さの上限。
+  pub const MAX_LEN: usize = 128;
+
+  /// 保持している文字列を返す。
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+}
+
+impl TryFrom<&str> for IdempotencyKey {
+  type Error = DomainError;
+
+  fn try_from(value: &str) -> Result<Self, Self::Error> {
+    if value.is_empty() || value.len() > Self::MAX_LEN {
+      return Err(DomainError::Size("idempotency_key"));
+    }
+    if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+      return Err(DomainError::Lexical("idempotency_key"));
+    }
+    Ok(IdempotencyKey(value.to_owned()))
+  }
+}
+
 text_value!(ServerId, "サーバー ID", "takt-mcp のサーバー ID。");
 text_value!(ProjectName, "プロジェクト名", "集約対象のプロジェクト名。");
 text_value!(GoalId, "ゴール ID", "ゴールの識別子。");

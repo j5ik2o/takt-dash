@@ -101,6 +101,13 @@ impl HttpReadHandle {
     id
   }
 
+  /// セッションを確立する。確立済みなら何もしません。
+  ///
+  /// 書き込みの前に呼ぶと、道具を送る前の失敗と、送ったあとの失敗を呼び出し側が区別できます。
+  pub async fn connect(&mut self) -> Result<(), TransportError> {
+    self.ensure_session().await.map(|_| ())
+  }
+
   async fn ensure_session(&mut self) -> Result<String, TransportError> {
     if let Some(session) = &self.session_id {
       return Ok(session.clone());

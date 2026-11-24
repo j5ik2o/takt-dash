@@ -487,6 +487,36 @@ fn blank_project_is_rejected_without_calling_backend() {
 // ----------------------------------------------------------------------------
 
 #[test]
+fn merge_reports_an_unknown_outcome_without_calling_it_a_connection_failure() {
+  // backend は、takt が期限内に応答しなかった書き込みを DEADLINE_EXCEEDED で返す。
+  let rt = runtime();
+  let server = rt.block_on(start_dummy_server(DummyConfig {
+    error: Some(("ApproveGoalMerge", Status::deadline_exceeded("takt-mcp から 15 秒以内に応答がありませんでした。"))),
+    ..DummyConfig::default()
+  }));
+
+  let (code, stdout, stderr) = run_against(&server, &[
+    "merge",
+    "--server",
+    "mac-mini",
+    "--project",
+    "takt-dash",
+    "--goal",
+    "g-1",
+    "--pr",
+    "42",
+    "--until",
+    "merge",
+  ]);
+  rt.block_on(server.shutdown());
+
+  assert_eq!(code, EXIT_FAILURE, "結果が不明の書き込みは成功として終わってはいけません: {stdout}");
+  assert!(stderr.contains("結果は不明です"), "結果が不明であることを表示する必要があります: {stderr}");
+  assert!(stderr.contains("15 秒以内に応答がありませんでした"), "backend の説明を表示する必要があります: {stderr}");
+  assert!(!stderr.contains("接続できません"), "backend が応答した失敗を接続不能として表示してはいけません: {stderr}");
+}
+
+#[test]
 fn merge_sends_goal_pr_number_and_until() {
   let rt = runtime();
   let server = rt.block_on(start_dummy_server(DummyConfig::default()));
