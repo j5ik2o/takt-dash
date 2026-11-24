@@ -2,7 +2,7 @@
 //
 // ここでは内容コンポーネントへ disconnected を prop として直接渡し、通知が出ることと、
 // 切断時も最後に読めた状態の表示が残ることを観測する。Provider から useLiveState を経由する
-// 配線層の観測は live-provider-wiring.test.ts が担う。docs/requirements.md:47 のキャッシュ表示を
+// 配線層の観測は live-provider-wiring.test.ts が担う。docs/requirements.md:50 のキャッシュ表示を
 // 消さないことも確かめる。
 import test from "node:test";
 import assert from "node:assert/strict";
