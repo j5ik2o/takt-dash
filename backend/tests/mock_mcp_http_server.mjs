@@ -18,7 +18,7 @@
 //   --calls <path>         受け取った tools/call を {"name","arguments"} の JSONL で追記する
 //   --session-log <path>   セッション採番と再利用のたびに "new" / "reuse" を追記する
 //   --require-auth <token> 期待する Authorization の値（未指定なら "Bearer test-token"）
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { isAbsolute } from "node:path";
 
@@ -430,7 +430,10 @@ server.listen(port, "127.0.0.1", () => {
   const address = server.address();
   const url = `http://127.0.0.1:${address.port}/`;
   if (readyFile !== undefined) {
-    writeFileSync(readyFile, JSON.stringify({ port: address.port, url }));
+    // テストは ready ファイルが現れたらすぐ読む。書きかけを読ませないよう、別名で書き終えてから置き換える。
+    const partial = `${readyFile}.partial`;
+    writeFileSync(partial, JSON.stringify({ port: address.port, url }));
+    renameSync(partial, readyFile);
   }
   process.stdout.write(`MCP HTTP listening on ${url}\n`);
 });
