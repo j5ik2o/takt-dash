@@ -47,7 +47,7 @@ pub(super) struct WriteLane {
 impl WriteLane {
   /// プロジェクトの書き込みゲートを取得する。
   ///
-  /// 書き込み RPC を発行する前から、結果を [`Self::settle`] へ渡すまで保持します。
+  /// 書き込み RPC を発行する前から、成功後の [`Self::record_write`] まで保持します。
   /// 定期読み取りは結果の反映の段で同じゲートを保持するため、書き込みの適用と
   /// 通し番号の前進が、読み取り結果の古さの確認と反映に対して原子的になります。
   pub(super) async fn gate(&self) -> tokio::sync::OwnedMutexGuard<()> {
@@ -81,16 +81,11 @@ impl WriteLane {
     Ok(source)
   }
 
-  /// 書き込みの結果を受け取り、書き込みが takt に届いた、または届いたかもしれないときに、
-  /// そのプロジェクトの書き込みの通し番号を進める。
+  /// 書き込みの成功を記録し、そのプロジェクトの書き込みの通し番号を進める。
   ///
   /// 定期読み取りは、読み取り開始時点の番号と現在の番号を比べ、進んでいたら
   /// 読み取り結果を捨てます。書き込み前の状態で新しい状態を上書きしないためです。
-  /// 結果が不明な書き込みも takt では済んでいることがあるため、同じように進めます。
-  pub(super) fn settle<T>(&self, result: Result<T, WriteFailure>) -> Result<T, WriteFailure> {
-    if !matches!(result, Err(WriteFailure::Failed(_))) {
-      self.registry.record_write(self.resolved.write_server_id.as_str(), self.resolved.project.as_str());
-    }
-    result
+  pub(super) fn record_write(&self) {
+    self.registry.record_write(self.resolved.write_server_id.as_str(), self.resolved.project.as_str());
   }
 }

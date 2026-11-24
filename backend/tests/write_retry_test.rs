@@ -274,3 +274,28 @@ async fn a_write_that_was_never_sent_can_be_retried_with_the_same_key() {
 
   server.stop().await;
 }
+
+#[tokio::test]
+async fn a_write_whose_connection_drops_after_it_was_received_is_not_resent() {
+  // 常駐 HTTP サーバーが書き込みを受け取ったあと、応答を返す前に接続を切る。
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", std::path::Path::new("/abs/takt-dash")), server_meta(), json!({}))
+    .http_read()
+    .http_write()
+    .http_behavior("drop-connection-once")
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  let merges = || harness.http_recorded_calls().iter().filter(|call| call["name"] == "takt_merge_goal_pr").count();
+
+  let status = client.approve_goal_merge(merge(Some("merge-1"))).await.expect_err("応答を受け取れません");
+  assert_eq!(status.code(), Code::DeadlineExceeded, "受け取られた書き込みは接続の失敗と区別します: {status:?}");
+  assert!(status.message().contains("結果は不明"), "{}", status.message());
+  assert_eq!(merges(), 1, "takt は書き込みを受け取っています");
+
+  let retried = client.approve_goal_merge(merge(Some("merge-1"))).await.expect_err("結果不明の操作は送り直しません");
+  assert!(retried.message().contains("再送していません"), "{}", retried.message());
+  assert_eq!(merges(), 1, "同じ鍵の再試行で書き込みを重ねません");
+
+  server.stop().await;
+}

@@ -272,14 +272,32 @@ fn idempotency_key(key: &Option<String>) -> Result<Option<IdempotencyKey>, Statu
 
 /// 書き込み道具のエラーを、書き込みの失敗へ変換する境界。
 ///
-/// takt が期限内に応答しなかった書き込みは、適用されたかどうか分かりません。接続の失敗と
-/// 区別して DEADLINE_EXCEEDED で返し、結果が不明であることを利用者へ伝えます。
+/// 接続の確立は道具を送る前に済んでいるため、ここへ来るのは道具を送ったあとの失敗です。
+/// takt が拒否を返した失敗（道具のエラー、JSON-RPC のエラー、HTTP のエラーステータス）は、
+/// 書き込みが適用されていないと分かります。応答を受け取れなかった失敗と応答を読めなかった失敗は、
+/// 適用されたかどうか分かりません。接続の失敗と区別して DEADLINE_EXCEEDED で返し、結果が不明で
+/// あることを利用者へ伝えます。
 fn write_failure(error: ToolError) -> WriteFailure {
+  const CHECK: &str = "状態を確かめてから、必要ならやり直してください。";
   match error {
-    | ToolError::Transport(TransportError::Timeout(seconds)) => WriteFailure::Unknown(Status::deadline_exceeded(format!(
-      "takt-mcp から {seconds} 秒以内に応答がなく、操作の結果は不明です。状態を確かめてから、必要ならやり直してください。"
+    | ToolError::Transport(TransportError::Timeout(seconds)) => WriteFailure::Unknown(Status::deadline_exceeded(
+      format!("takt-mcp から {seconds} 秒以内に応答がなく、操作の結果は不明です。{CHECK}"),
+    )),
+    | ToolError::Transport(
+      error @ (TransportError::Io(_)
+      | TransportError::ProcessExited
+      | TransportError::InvalidJson(_)
+      | TransportError::Protocol(_)),
+    ) => WriteFailure::Unknown(Status::deadline_exceeded(format!(
+      "takt-mcp の応答を受け取れず、操作の結果は不明です（{error}）。{CHECK}"
     ))),
-    | error => WriteFailure::Failed(tool_error_status(error)),
+    | ToolError::Parse(message) => WriteFailure::Unknown(Status::deadline_exceeded(format!(
+      "takt-mcp の応答を解析できず、操作の結果は不明です（{message}）。{CHECK}"
+    ))),
+    | error @ (ToolError::Tool(_)
+    | ToolError::Transport(
+      TransportError::Rpc { .. } | TransportError::Http(_) | TransportError::Spawn(_) | TransportError::Backoff(_),
+    )) => WriteFailure::Failed(tool_error_status(error)),
   }
 }
 
