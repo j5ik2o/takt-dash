@@ -2162,6 +2162,8 @@ async fn failed_event_record_keeps_the_connection_lost_event_once_after_recovery
   let mut poller = harness.poller();
   lose_connection_without_recording_it(&harness, &mut poller).await;
   let lost_before = chrono::Utc::now();
+  // 記録の時刻はミリ秒へ丸めるため、次のサイクルが同じミリ秒に入らないようにします。
+  tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
   allow_event_recording(&harness.activity_db_path);
   harness.rewrite_state(state_with_goal("g1"));
@@ -2273,6 +2275,8 @@ async fn failed_connection_lost_record_keeps_the_baseline_and_records_it_once_wh
 
   // サイクル3: 記録だけを回復する。読み取り失敗は続くので、未記録だった接続断を記録する。
   let detected_before = chrono::Utc::now();
+  // 記録の時刻はミリ秒へ丸めるため、次のサイクルが同じミリ秒に入らないようにします。
+  tokio::time::sleep(std::time::Duration::from_millis(20)).await;
   allow_event_recording(&harness.activity_db_path);
   let recovered = poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
   assert_eq!(recovered.events_recorded, 1, "未記録だった接続断だけを回復後に記録します");
