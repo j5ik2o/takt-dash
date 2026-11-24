@@ -2301,45 +2301,53 @@ async fn stop_request_during_the_wait_returns_promptly() {
   // interval 30 秒の待機中に停止要求を送ると、interval の満了を待たずに戻る。
   // 子プロセスの起動時間は並列に動くほかのテストの負荷で揺れるため、先に1周期読んで起動しておき、
   // 期限には起動済みの子プロセスでの周期と待機だけを含める。
+  // 準備完了の待機と停止応答の待機は別の期限に分け、片方の遅れが他方の合否を曖昧にしない。
   let harness = Harness::new(state_with_goal("g1"));
   let mut poller = harness.poller();
   poller.read_cycle_once().await.expect("子プロセスを起動する 1 サイクル目を実行できます");
   let warmed_up_at = harness.store.slot("takt-dash").and_then(|slot| slot.last_read_at);
+  // ここから先の呼び出しだけを数え、run_until_stopped が回した周期の数を後で確かめる。
+  harness.clear_calls();
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-  let (sent_at_tx, sent_at_rx) = tokio::sync::oneshot::channel();
   let store = harness.store.clone();
-  let signal = tokio::spawn(async move {
-    // run_until_stopped の最初のサイクルが終わって待機に入ったことを、読めた時刻が進んだことで
-    // 観測してから停止を送る。
-    for _ in 0..500 {
-      if store.slot("takt-dash").is_some_and(|slot| slot.is_connected() && slot.last_read_at != warmed_up_at) {
-        break;
-      }
-      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  let run = run_until_stopped(&mut poller, stop_rx);
+  tokio::pin!(run);
+
+  // run_until_stopped の最初のサイクルが終わったことを、読めた時刻が進んだことで観測する。
+  // 準備が整わないまま停止を送ったり、停止応答の期限に準備の待機を含めたりしない。
+  let ready_deadline = Duration::from_secs(10);
+  let wait_ready = async {
+    while !store.slot("takt-dash").is_some_and(|slot| slot.is_connected() && slot.last_read_at != warmed_up_at) {
+      tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let sent = std::time::Instant::now();
-    stop_tx.send(true).expect("停止要求を送れます");
-    let _ = sent_at_tx.send(sent);
-  });
+  };
+  tokio::select! {
+    _ = &mut run => panic!("停止要求を送る前に run_until_stopped が戻りました"),
+    ready = tokio::time::timeout(ready_deadline, wait_ready) => ready.expect("run_until_stopped の最初のサイクルが期限内に完了します"),
+  }
 
-  tokio::time::timeout(std::time::Duration::from_secs(2), run_until_stopped(&mut poller, stop_rx))
-    .await
-    .expect("停止要求で待機を抜けて戻ります");
-  signal.await.expect("停止要求の送信タスクが完了します");
+  let sent_at = std::time::Instant::now();
+  stop_tx.send(true).expect("停止要求を送れます");
+  tokio::time::timeout(Duration::from_secs(2), &mut run).await.expect("停止要求で待機を抜けて戻ります");
 
-  let sent_at = sent_at_rx.await.expect("停止要求を送った時刻を受け取れます");
   assert!(
     sent_at.elapsed() < std::time::Duration::from_secs(1),
     "30秒の interval を待たずに戻ります: {:?}",
     sent_at.elapsed()
   );
-  poller.shutdown().await;
+  // 読めた時刻が進んだだけでは、次周期までの待機に入ったとは言えない。待機を飛ばす実装は
+  // 最初のサイクルの直後に次の読み取りを始め、その周期が短ければ上の期限も満たす。停止は周期の
+  // 切れ目でしか見ないので、始まった周期は戻る前に必ず最後まで走り、呼び出しの記録に残る。
+  // 戻るまでに読んだ周期が1回だけであることで、最初のサイクルの後は待機していたことを確かめる。
+  let cycles = harness.calls().iter().filter(|name| name.as_str() == "takt_list_goals").count();
+  assert_eq!(cycles, 1, "停止要求までに読むのは最初の1周期だけで、待機を飛ばして次の周期を始めません");
 }
 
 #[tokio::test]
 async fn stop_request_shuts_down_the_mcp_child_process() {
   // 停止要求で run_until_stopped が戻ったとき、起動済みの MCP 子プロセスが終了している。
   // ループを抜けるだけで shutdown を呼ばない実装では、子プロセスが残る。
+  // 準備完了の待機と停止応答の待機は別の期限に分け、片方の遅れが他方の合否を曖昧にしない。
   let harness = Harness::new(state_with_goal("g1"));
   let pid_path = harness._directory.path().join("mock.pid");
   let pid_for_config = pid_path.clone();
@@ -2352,26 +2360,27 @@ async fn stop_request_shuts_down_the_mcp_child_process() {
   let mut poller = harness.poller();
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
   let store = harness.store.clone();
-  let pid_wait = pid_path.clone();
-  let signal = tokio::spawn(async move {
-    // 子プロセスの起動（PID ファイル）と最初のサイクル完了を観測してから停止を送る。
-    for _ in 0..500 {
-      if store.slot("takt-dash").is_some_and(|slot| slot.is_connected()) && pid_wait.exists() {
-        break;
-      }
-      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    stop_tx.send(true).expect("停止要求を送れます");
-  });
+  let run = run_until_stopped(&mut poller, stop_rx);
+  tokio::pin!(run);
 
-  tokio::time::timeout(std::time::Duration::from_secs(5), run_until_stopped(&mut poller, stop_rx))
-    .await
-    .expect("停止要求で待機を抜けて戻ります");
-  signal.await.expect("停止要求の送信タスクが完了します");
+  // 子プロセスの起動（PID ファイル）と最初のサイクル完了を観測する。準備が整わないまま
+  // 停止を送ったり、停止応答の期限に準備の待機を含めたりしない。
+  let ready_deadline = Duration::from_secs(10);
+  let wait_ready = async {
+    while !(store.slot("takt-dash").is_some_and(|slot| slot.is_connected()) && pid_path.exists()) {
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  };
+  tokio::select! {
+    _ = &mut run => panic!("停止要求を送る前に run_until_stopped が戻りました"),
+    ready = tokio::time::timeout(ready_deadline, wait_ready) => ready.expect("子プロセスの起動と最初のサイクルが期限内に完了します"),
+  }
+
+  stop_tx.send(true).expect("停止要求を送れます");
+  tokio::time::timeout(Duration::from_secs(5), &mut run).await.expect("停止要求で待機を抜けて戻ります");
 
   let pid = read_pid_file(&pid_path);
   assert!(!process_is_running(pid), "停止後は MCP 子プロセスが終了しています: pid={pid}");
-  poller.shutdown().await;
 }
 
 #[tokio::test]
