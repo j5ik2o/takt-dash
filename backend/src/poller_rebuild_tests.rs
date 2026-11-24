@@ -576,6 +576,24 @@ async fn server_reassignment_publishes_the_new_server_without_the_old_projection
     Some("mac-mini"),
     "変更前は旧 run を旧 server のプロジェクトへ解決します"
   );
+  // find_run_project はタスクの runSlug だけでも解決するので、run 一覧に r1 が載っていることは
+  // 切り替え後と同じ gRPC 状態取得で別に確かめる。これが無いと、切り替え前から一覧が空でも通る。
+  let grpc = start_server(&harness).await;
+  let mut client = client(grpc.address).await;
+  assert!(before.runs.iter().any(|run| run.run_slug == "r1"), "変更前は状態ストアの run 一覧に旧 run があります");
+  let before_state = client
+    .get_pending_decisions(GetPendingDecisionsRequest {})
+    .await
+    .expect("変更前の状態取得が成功します")
+    .into_inner()
+    .state
+    .expect("変更前の状態があります");
+  assert_eq!(before_state.projects.first().expect("プロジェクトがあります").server_id, "mac-mini");
+  assert!(
+    before_state.runs.iter().any(|run| run.run_slug == "r1"),
+    "変更前は gRPC 状態取得の run 一覧に旧 run があります"
+  );
+  assert!(before_state.goals.iter().any(|goal| goal.goal_id == GOAL), "変更前は gRPC 状態取得に旧ゴールがあります");
 
   let b_state = cwd_a.join("server-b.json");
   let b = json!({"goals": [goal(ADDED_A, "active")]});
@@ -592,8 +610,6 @@ async fn server_reassignment_publishes_the_new_server_without_the_old_projection
   config["projects"][0]["writeServer"] = json!("mini-two");
   std::fs::write(harness.config_path(), config.to_string()).expect("mini-two の設定を書けます");
 
-  let grpc = start_server(&harness).await;
-  let mut client = client(grpc.address).await;
   let (reached, resume) = arm(&mut poller, ReadBoundary::AfterProjectsPublished);
   let (cycle, ()) = timeout(Duration::from_secs(15), async {
     tokio::join!(poller.read_cycle_once(), async {

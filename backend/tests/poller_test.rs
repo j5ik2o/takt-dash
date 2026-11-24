@@ -2306,13 +2306,15 @@ async fn stop_request_during_the_wait_returns_promptly() {
   let mut poller = harness.poller();
   poller.read_cycle_once().await.expect("子プロセスを起動する 1 サイクル目を実行できます");
   let warmed_up_at = harness.store.slot("takt-dash").and_then(|slot| slot.last_read_at);
+  // ここから先の呼び出しだけを数え、run_until_stopped が回した周期の数を後で確かめる。
+  harness.clear_calls();
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
   let store = harness.store.clone();
   let run = run_until_stopped(&mut poller, stop_rx);
   tokio::pin!(run);
 
-  // run_until_stopped の最初のサイクルが終わって待機に入ったことを、読めた時刻が進んだことで
-  // 観測する。準備が整わないまま停止を送ったり、停止応答の期限に準備の待機を含めたりしない。
+  // run_until_stopped の最初のサイクルが終わったことを、読めた時刻が進んだことで観測する。
+  // 準備が整わないまま停止を送ったり、停止応答の期限に準備の待機を含めたりしない。
   let ready_deadline = Duration::from_secs(10);
   let wait_ready = async {
     while !store.slot("takt-dash").is_some_and(|slot| slot.is_connected() && slot.last_read_at != warmed_up_at) {
@@ -2333,6 +2335,12 @@ async fn stop_request_during_the_wait_returns_promptly() {
     "30秒の interval を待たずに戻ります: {:?}",
     sent_at.elapsed()
   );
+  // 読めた時刻が進んだだけでは、次周期までの待機に入ったとは言えない。待機を飛ばす実装は
+  // 最初のサイクルの直後に次の読み取りを始め、その周期が短ければ上の期限も満たす。停止は周期の
+  // 切れ目でしか見ないので、始まった周期は戻る前に必ず最後まで走り、呼び出しの記録に残る。
+  // 戻るまでに読んだ周期が1回だけであることで、最初のサイクルの後は待機していたことを確かめる。
+  let cycles = harness.calls().iter().filter(|name| name.as_str() == "takt_list_goals").count();
+  assert_eq!(cycles, 1, "停止要求までに読むのは最初の1周期だけで、待機を飛ばして次の周期を始めません");
 }
 
 #[tokio::test]
