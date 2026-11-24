@@ -4,14 +4,14 @@ taktDash の計画・実装・テスト・レビューでは、このルール�
 
 ## 製品の形
 
-- taktDash は、Mac mini と Mac Studio で動く takt manager 群の状態を集約するダッシュボードであり、判断待ちへの回答とプルリクエストのマージ承認とゴール登録の承認・却下を画面と CLI から行えます。
-- プロジェクトの担当は、Mac Studio が ddd-principles と modern-ddd-book、Mac mini が corporate-site と ESA と takt と takt-dash です。サーバーとプロジェクトの対応はバックエンドの設定が持ちます。
+- taktDash は、Mac mini で動く takt manager 群の状態を集約するダッシュボードであり、判断待ちへの回答とプルリクエストのマージ承認とゴール登録の承認・却下を画面と CLI から行えます。
+- 集約対象のサーバーは Mac mini だけであり、すべてのプロジェクトを Mac mini が担当します。Mac Studio は現行要件の対象外であり、Mac Studio の集約・SSH 接続・配置を必須条件にしません。サーバーとプロジェクトの対応と対象プロジェクトの一覧はバックエンドの設定が持ちます。taktdash.config.example.json のプロジェクトは書き方の例であり、運用中の一覧ではありません。
 - バックエンドと Next.js と SQLite は Mac mini で動きます。アクセス範囲は自宅 LAN と Tailscale であり、認証は設けません。Tailscale の認証と ACL が防御です。認証を足す変更は要件の外です。
 
 ## 構成
 
 - リポジトリの配置は、ルートに proto/（.proto、API 定義の正）と backend/（Rust バックエンド）と frontend/cli（Rust の CLI）と frontend/web（Next.js）を置く形とします。ルートの Cargo.toml がワークスペースであり、メンバーは backend と frontend/cli です。3者は対等に proto/ へ依存し、フロントエンドがバックエンドの内部へ依存する形にはしません。
-- バックエンドは1つだけ置き、バックエンドが複数サーバーを集約します。バックエンドは Rust で実装し、API は tonic による gRPC で、API 定義の正は .proto です。
+- バックエンドは1つだけ置き、サーバーとプロジェクトの集約はバックエンドが担います。バックエンドは Rust で実装し、API は tonic による gRPC で、API 定義の正は .proto です。
 - フロントエンドは Next.js と CLI の2つです。Next.js はサーバー側（RSC と Route Handlers）が gRPC クライアントとしてバックエンドと通信する BFF 構成であり、ブラウザはバックエンドへ直接つながりません。gRPC-Web は使いません。CLI は Rust で実装し、同じ .proto から生成したクライアントでネイティブ gRPC により接続し、最初の版から全機能を持ちます。
 - フロントエンドが takt-mcp や .takt のファイルへ直接触れる実装は作りません。状態の取得と操作は、すべてバックエンドの API を経由します。
 - 開いている画面への自動更新は、gRPC のサーバーストリーミングを Next.js の Route Handler が SSE へ中継して届けます。初回接続時は全件を即時に返します。
@@ -19,8 +19,8 @@ taktDash の計画・実装・テスト・レビューでは、このルール�
 ## データ源と集約
 
 - バックエンドは takt-mcp の道具で状態を取り、操作も同じ接続で行います。道具の範囲は read-only ではなく、操作を含む tool-set（manager または all）と、要件定義の4章で追加する道具を使います。
-- Mac mini の takt-mcp は子プロセスとして起動して標準入出力で話し、Mac Studio の takt-mcp は SSH 越しに起動して標準入出力を運びます。起動設定は .mcp.json と同じ mcpServers 形式の設定ファイルで持ち、プロジェクトとサーバーの対応と各プロジェクトの cwd とログのパスと読み取り間隔と異常判定の閾値も同じ設定ファイルに持ちます。
-- run 詳細のログ（本体と provider-events と usage-events の JSONL）と、24時間トークン集計に使う usage-events は、バックエンドがファイルを直接読みます。Mac mini 上はローカルで読み、Mac Studio 上は SSH 越しに読みます。対象の run が worktree で動く場合は worktree 側の .takt/runs を読みます。
+- バックエンドは同じ Mac mini の上の takt-mcp と、子プロセスを起動する stdio 接続か、127.0.0.1 で待ち受ける常駐 HTTP サーバーへの HTTP 接続で話します。現行の運用は、読み取りと書き込みの両方を常駐 HTTP サーバーへ向けています。HTTP サーバーの認証情報は設定ファイルにだけ持ち、文書とリポジトリには書きません。接続の設定は .mcp.json と同じ mcpServers 形式の設定ファイルで持ち、プロジェクトとサーバーの対応と各プロジェクトの cwd とログのパスと読み取り間隔と異常判定の閾値も同じ設定ファイルに持ちます。
+- run 詳細のログ（本体と provider-events と usage-events の JSONL）と、24時間トークン集計に使う usage-events は、バックエンドが Mac mini 上のファイルをローカルで直接読みます。対象の run が worktree で動く場合は worktree 側の .takt/runs を読みます。
 - バックエンドは30秒ごとに状態を読み取り、読み取りのたびに検出した出来事（ゴール登録、run 開始、タスク完了、問い合わせ、マージ待ち、一時停止、blocked、接続断）を Mac mini 上の SQLite へ記録します。アクティビティは7日分の日次集計と出来事の一覧を SQLite から出します。
 - サーバーから応答がない間は、最後に読めた時点の状態をキャッシュとして保持し、読めた時点の時刻とともに画面へ表示します。
 - 異常判定の閾値は、判断待ちの滞留240分とログの無音10分です。これらは takt の基準ではなく taktDash の基準であり、設定で変更できます。
@@ -32,7 +32,7 @@ taktDash の計画・実装・テスト・レビューでは、このルール�
 
 ## 先行条件と範囲外
 
-- takt-mcp への追加道具（問い合わせへ回答する道具、ゴール登録の承認待ちを一覧で取得する道具、ゴール登録を承認する道具と却下する道具）は takt 側の先行作業であり、Mac mini と Mac Studio の両方へ配置が済むまで taktDash の実装は始まりません。追加道具が無い前提の回避策を taktDash 側に作りません。
+- takt-mcp への追加道具（問い合わせへ回答する道具、ゴール登録の承認待ちを一覧で取得する道具、ゴール登録を承認する道具と却下する道具）は takt 側の先行作業であり、Mac mini へ配置が済むまで taktDash の実装は始まりません。Mac Studio への配置は前提条件に含めません。追加道具が無い前提の回避策を taktDash 側に作りません。
 - takt manager と takt director の起動・停止・自動起動は最初の版の対象外です。自動起動は launchd など OS 側の設定で担保します。
 - ネイティブの iOS 版と Android 版は後の版の範囲であり、最初の版には含めません。API は後からネイティブ版が同じ gRPC API を使える形に設計します。
 
