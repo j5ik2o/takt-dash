@@ -546,3 +546,42 @@ async fn get_goal_detail_keeps_multibyte_text_intact_across_text_offset_pages() 
 
   server.stop().await;
 }
+
+/// mock が受け取った path なしの takt_get_goal（takt が PR の状態を gh で読む呼び出し）の数。
+fn summary_reads(harness: &GrpcHarness) -> usize {
+  harness
+    .recorded_calls()
+    .iter()
+    .filter(|call| call.name == "takt_get_goal" && call.arguments.get("path").is_none())
+    .count()
+}
+
+async fn read_goal_detail_three_times(harness: &GrpcHarness) {
+  let server = start_server(harness).await;
+  let mut client = client(server.address).await;
+  for _ in 0..3 {
+    client.get_goal_detail(GetGoalDetailRequest { goal_id: "g1".to_owned() }).await.expect("ゴール詳細を取得できます");
+  }
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_goal_detail_reuses_the_summary_of_a_goal_with_a_pull_request() {
+  let mut state = goal_detail_state();
+  state["goalDetails"]["g1"]["summary"]["pullRequest"] =
+    json!({ "number": 42, "url": "https://github.com/j5ik2o/takt-dash/pull/42" });
+  let harness = detail_harness(state);
+
+  read_goal_detail_three_times(&harness).await;
+
+  assert_eq!(summary_reads(&harness), 1, "PR を持つゴールの summary は覚えている間は読み直しません");
+}
+
+#[tokio::test]
+async fn get_goal_detail_reads_the_summary_every_time_for_a_goal_without_a_pull_request() {
+  let harness = detail_harness(goal_detail_state());
+
+  read_goal_detail_three_times(&harness).await;
+
+  assert_eq!(summary_reads(&harness), 3, "PR を持たないゴールは gh を呼ばないので、状態を毎回読みます");
+}

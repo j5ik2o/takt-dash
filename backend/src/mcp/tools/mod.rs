@@ -7,6 +7,7 @@
 use std::{
   collections::{BTreeMap, BTreeSet, HashMap},
   path::PathBuf,
+  sync::{LazyLock, Mutex},
   time::{Duration, Instant},
 };
 
@@ -127,6 +128,19 @@ const MAX_PAGES: usize = 100;
 /// takt のゴール仕様の記法。takt_get_goal は省略した大きい値だけを omissions に載せるため、
 /// 仕様の有無を omissions で判定せず、既知の記法を順に読みます。
 const SPECIFICATION_NOTATIONS: [&str; 3] = ["gherkin", "quint", "alloy"];
+
+/// PR を持つゴールの summary（path なしの takt_get_goal）を覚えておく期間。
+///
+/// takt は path なしの takt_get_goal のたびに PR の状態を gh で読みます。画面の詳細は1秒ごとに
+/// 読み直すため、そのまま呼ぶと開いている間ずっと毎秒 gh を呼び、GitHub の上限を使い切ります。
+/// PR を持たないゴールは gh を呼ばないので覚えず、状態を毎回読みます。
+const GOAL_SUMMARY_TTL: Duration = Duration::from_secs(180);
+
+/// (cwd, goalId) ごとの、読んだ時刻と path なしの takt_get_goal の応答。
+type GoalSummaries = HashMap<(PathBuf, String), (Instant, Value)>;
+
+/// 要求をまたいで使う、PR を持つゴールの summary。
+static GOAL_SUMMARIES: LazyLock<Mutex<GoalSummaries>> = LazyLock::new(Default::default);
 
 impl<'a> ToolSetCore<'a> {
   pub fn new(client: &'a mut dyn ToolCaller, cwd: PathBuf) -> Self {
@@ -627,7 +641,7 @@ impl<'a> ToolSetCore<'a> {
   /// 全文を集めます。作業記録と質問は専用の一覧道具を全ページ追従します。紐づくタスクは
   /// takt_list_tasks を全ページ取得して goal_id で絞ります。
   pub async fn read_goal_detail(&mut self, goal_id: &GoalId) -> Result<GoalDetail, ToolError> {
-    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id.as_str() })).await?;
+    let value = self.read_goal_summary(goal_id.as_str()).await?;
     let goal =
       value.get("goal").ok_or_else(|| ToolError::Parse("takt_get_goal の応答に goal がありません".to_owned()))?;
     let returned_id = string_field(goal, "id")?;
@@ -673,6 +687,26 @@ impl<'a> ToolSetCore<'a> {
       questions,
       tasks,
     })
+  }
+
+  /// path なしの takt_get_goal を読む。PR を持つゴールは [`GOAL_SUMMARY_TTL`]
+  /// の間、前の応答を使い回します。
+  async fn read_goal_summary(&mut self, goal_id: &str) -> Result<Value, ToolError> {
+    let key = (self.cwd.clone(), goal_id.to_owned());
+    if let Some((read_at, value)) = GOAL_SUMMARIES.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+      if read_at.elapsed() < GOAL_SUMMARY_TTL {
+        return Ok(value.clone());
+      }
+    }
+    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id })).await?;
+    let mut summaries = GOAL_SUMMARIES.lock().unwrap_or_else(|e| e.into_inner());
+    summaries.retain(|_, (read_at, _)| read_at.elapsed() < GOAL_SUMMARY_TTL);
+    if value.pointer("/goal/pullRequest").is_some() {
+      summaries.insert(key, (Instant::now(), value.clone()));
+    } else {
+      summaries.remove(&key);
+    }
+    Ok(value)
   }
 
   /// takt_get_goal の文字列フィールドを textOffset で全ページ連結する。
@@ -775,7 +809,7 @@ impl<'a> ToolSetCore<'a> {
   /// takt_get_goal（path なし）の goal summary から、タスク詳細に載せる
   /// ブランチとプルリクエスト URL を読む。
   async fn read_task_link_fields(&mut self, goal_id: &str) -> Result<TaskLinkFields, ToolError> {
-    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id })).await?;
+    let value = self.read_goal_summary(goal_id).await?;
     let goal =
       value.get("goal").ok_or_else(|| ToolError::Parse("takt_get_goal の応答に goal がありません".to_owned()))?;
     Ok(TaskLinkFields {
