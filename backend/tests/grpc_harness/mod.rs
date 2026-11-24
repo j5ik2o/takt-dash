@@ -44,30 +44,32 @@ pub struct GrpcHarness {
 
 /// gRPC サーバの土台を作るための設定。
 pub struct GrpcHarnessBuilder {
-  servers:    BTreeMap<String, ServerMeta>,
-  projects:   Vec<Project>,
-  state:      Value,
-  interval:   u64,
-  thresholds: Thresholds,
-  http_read:  bool,
-  http_write: bool,
+  servers:       BTreeMap<String, ServerMeta>,
+  projects:      Vec<Project>,
+  state:         Value,
+  interval:      u64,
+  thresholds:    Thresholds,
+  http_read:     bool,
+  http_write:    bool,
+  http_behavior: Option<&'static str>,
 }
 
 impl Default for GrpcHarnessBuilder {
   fn default() -> Self {
     GrpcHarnessBuilder {
-      servers:    BTreeMap::new(),
-      projects:   Vec::new(),
-      state:      json!({}),
-      interval:   30,
-      thresholds: Thresholds {
+      servers:       BTreeMap::new(),
+      projects:      Vec::new(),
+      state:         json!({}),
+      interval:      30,
+      thresholds:    Thresholds {
         pending_decision_stale_minutes: StaleMinutes::try_from(240).expect("テストの閾値は有効です"),
         run_log_silent_minutes:         SilentMinutes::try_from(10).expect("テストの閾値は有効です"),
         connection_failure_count:       3,
         connection_delay_seconds:       120,
       },
-      http_read:  false,
-      http_write: false,
+      http_read:     false,
+      http_write:    false,
+      http_behavior: None,
     }
   }
 }
@@ -103,6 +105,12 @@ impl GrpcHarnessBuilder {
   /// サーバーへ渡ることを観測するテストで使います。`http_read` と組み合わせて使います。
   pub fn http_write(mut self) -> Self {
     self.http_write = true;
+    self
+  }
+
+  /// 常駐 HTTP サーバーの mock に、障害を再現する挙動を指定する。
+  pub fn http_behavior(mut self, behavior: &'static str) -> Self {
+    self.http_behavior = Some(behavior);
     self
   }
 
@@ -156,7 +164,7 @@ impl GrpcHarnessBuilder {
     // 既定では stdio のまま維持するため、stdio 起動方法を別 id（`<id>-write`）で登録し、
     // 各プロジェクトの `writeServer` に指す。`http_write` を指定したテストでは、
     // `writeServer` も読み取りと同じ HTTP サーバーへ指す。
-    let http = if self.http_read { Some(common::HttpMockServer::start(&state_path, None)) } else { None };
+    let http = if self.http_read { Some(common::HttpMockServer::start(&state_path, self.http_behavior)) } else { None };
     let http_write = self.http_write;
     let stdio_entry = |backing: &Path| {
       json!({

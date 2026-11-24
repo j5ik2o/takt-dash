@@ -328,14 +328,27 @@ fn merge_conversation_pages(
 enum WriteError {
   /// backend に接続できない、または backend が gRPC として応答しない（`is_connection_failure`）。
   Unavailable(String),
+  /// backend が、書き込みの結果は不明だと応答した。takt 側では書き込みが済んでいることがある。
+  UnknownOutcome(String),
   /// backend は応答したが、接続不能以外の理由で失敗した。
   Call(Status),
   /// backend の応答に、検証済みの型として扱えない値が含まれていた。
   Invalid(domain::DomainError),
 }
 
-/// 書き込み RPC の失敗を、接続不能と backend の失敗に分類する。
+/// 書き込み RPC の失敗を、結果不明と接続不能と backend の失敗に分類する。
+///
+/// backend は、takt が期限内に応答しなかった書き込みを `DEADLINE_EXCEEDED` で返します。CLI 自身の
+/// 期限切れは tonic が `CANCELLED` にするため、`DEADLINE_EXCEEDED` は backend の応答です。
 fn write_call_error(addr: SocketAddr, operation: &str, status: Status) -> WriteError {
+  if status.code() == Code::DeadlineExceeded {
+    return WriteError::UnknownOutcome(status.message().to_owned());
+  }
+  listing_call_error(addr, operation, status)
+}
+
+/// 書き込みコマンドのうち読み取りだけを行う RPC の失敗を、接続不能と backend の失敗に分類する。
+fn listing_call_error(addr: SocketAddr, operation: &str, status: Status) -> WriteError {
   if is_connection_failure(status.code()) {
     WriteError::Unavailable(format!("接続先 {addr} から{operation}に失敗しました: {}", status.message()))
   } else {
@@ -394,7 +407,7 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
       let response = client
         .list_goal_registration_proposals(request)
         .await
-        .map_err(|status| write_call_error(addr, operation, status))?
+        .map_err(|status| listing_call_error(addr, operation, status))?
         .into_inner();
       render_registrations(&response.proposals).map_err(WriteError::Invalid)
     },
@@ -496,6 +509,10 @@ fn run_with(
       },
       | Err(WriteError::Unavailable(message)) => {
         let _ = writeln!(stderr, "backend に接続できません。{message}");
+        EXIT_FAILURE
+      },
+      | Err(WriteError::UnknownOutcome(message)) => {
+        let _ = writeln!(stderr, "{}の結果は不明です。{message}", command.operation());
         EXIT_FAILURE
       },
       | Err(WriteError::Call(status)) => {

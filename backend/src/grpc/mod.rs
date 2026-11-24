@@ -46,7 +46,7 @@ use crate::{
   activity::ActivityStore,
   config::load_config,
   conversation::{ConversationQuery, ConversationReader},
-  domain::{GoalId, InstructionId, ProjectName, ReportFilename, RunSlug, ServerId, TaskName},
+  domain::{GoalId, IdempotencyKey, InstructionId, ProjectName, ReportFilename, RunSlug, ServerId, TaskName},
   mcp::{McpClientRegistry, ToolError, TransportError},
   model::{self},
   run_log::{ContentRead, InitialRead, Instruction},
@@ -261,6 +261,13 @@ fn tool_error_status(error: ToolError) -> Status {
     | ToolError::Tool(error) => Status::unavailable(format!("takt-mcp の道具が失敗しました: {error}")),
     | ToolError::Transport(error) => Status::unavailable(format!("takt-mcp へ接続できませんでした: {error}")),
   }
+}
+
+/// 書き込み要求の鍵を検証する境界。鍵の無い要求は `None` のまま通します。
+fn idempotency_key(key: &Option<String>) -> Result<Option<IdempotencyKey>, Status> {
+  key.as_deref().map(IdempotencyKey::try_from).transpose().map_err(|error| {
+    Status::invalid_argument(format!("idempotency_key が不正です（1 から 128 文字の ASCII 表示文字）: {error}"))
+  })
 }
 
 /// 書き込み道具のエラーを、書き込みの失敗へ変換する境界。
@@ -753,8 +760,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     request: Request<AnswerInquiryRequest>,
   ) -> Result<Response<AnswerInquiryResponse>, Status> {
     let request = request.into_inner();
-    let key = request.idempotency_key.clone();
-    self.write_ledger.run("AnswerInquiry", key.as_deref(), &request, || self.prepare_answer(request.clone())).await
+    let key = idempotency_key(&request.idempotency_key)?;
+    self.write_ledger.run("AnswerInquiry", key, &request, || self.prepare_answer(request.clone())).await
   }
 
   async fn approve_goal_merge(
@@ -762,8 +769,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     request: Request<ApproveGoalMergeRequest>,
   ) -> Result<Response<ApproveGoalMergeResponse>, Status> {
     let request = request.into_inner();
-    let key = request.idempotency_key.clone();
-    self.write_ledger.run("ApproveGoalMerge", key.as_deref(), &request, || self.prepare_merge(request.clone())).await
+    let key = idempotency_key(&request.idempotency_key)?;
+    self.write_ledger.run("ApproveGoalMerge", key, &request, || self.prepare_merge(request.clone())).await
   }
 
   async fn approve_goal_registration(
@@ -771,10 +778,10 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     request: Request<ApproveGoalRegistrationRequest>,
   ) -> Result<Response<ApproveGoalRegistrationResponse>, Status> {
     let request = request.into_inner();
-    let key = request.idempotency_key.clone();
+    let key = idempotency_key(&request.idempotency_key)?;
     self
       .write_ledger
-      .run("ApproveGoalRegistration", key.as_deref(), &request, || self.prepare_registration_approval(request.clone()))
+      .run("ApproveGoalRegistration", key, &request, || self.prepare_registration_approval(request.clone()))
       .await
   }
 
@@ -783,10 +790,10 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     request: Request<RejectGoalRegistrationRequest>,
   ) -> Result<Response<RejectGoalRegistrationResponse>, Status> {
     let request = request.into_inner();
-    let key = request.idempotency_key.clone();
+    let key = idempotency_key(&request.idempotency_key)?;
     self
       .write_ledger
-      .run("RejectGoalRegistration", key.as_deref(), &request, || self.prepare_registration_rejection(request.clone()))
+      .run("RejectGoalRegistration", key, &request, || self.prepare_registration_rejection(request.clone()))
       .await
   }
 

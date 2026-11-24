@@ -250,3 +250,27 @@ async fn a_write_takt_never_acknowledges_reports_an_unknown_outcome_and_is_not_r
 
   server.stop().await;
 }
+
+#[tokio::test]
+async fn a_write_that_was_never_sent_can_be_retried_with_the_same_key() {
+  // 常駐 HTTP サーバーが最初のセッションの確立に応答しない。backend の期限（15 秒）で時間切れに
+  // なるが、書き込みの道具は一度も送られていない。
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", std::path::Path::new("/abs/takt-dash")), server_meta(), json!({}))
+    .http_read()
+    .http_write()
+    .http_behavior("hang-initialize-once")
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  let merges = || harness.http_recorded_calls().iter().filter(|call| call["name"] == "takt_merge_goal_pr").count();
+
+  let status = client.approve_goal_merge(merge(Some("merge-1"))).await.expect_err("接続を確立できません");
+  assert_eq!(status.code(), Code::Unavailable, "送る前の失敗は結果不明ではありません: {status:?}");
+  assert_eq!(merges(), 0, "書き込みは takt へ送られていません");
+
+  client.approve_goal_merge(merge(Some("merge-1"))).await.expect("送られなかった操作は、同じ鍵でやり直せます");
+  assert_eq!(merges(), 1, "やり直しで書き込みが1回だけ届きます");
+
+  server.stop().await;
+}

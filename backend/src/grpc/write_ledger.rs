@@ -20,8 +20,8 @@ use std::{
 use tokio::sync::watch;
 use tonic::{Response, Status};
 
-/// 鍵の長さの上限。
-const KEY_MAX_LEN: usize = 128;
+use crate::domain::IdempotencyKey;
+
 /// 決着した書き込みの記録を保つ時間。
 const RETENTION: Duration = Duration::from_secs(60 * 60);
 
@@ -125,7 +125,7 @@ impl WriteLedger {
   pub(super) async fn run<Request, Reply, Write>(
     &self,
     rpc: &'static str,
-    key: Option<&str>,
+    key: Option<IdempotencyKey>,
     request: &Request,
     prepare: impl FnOnce() -> Result<Write, Status>,
   ) -> Result<Response<Reply>, Status>
@@ -136,15 +136,10 @@ impl WriteLedger {
     let Some(key) = key else {
       return prepare()?.await.map(Response::new).map_err(WriteFailure::into_status);
     };
-    if key.is_empty() || key.len() > KEY_MAX_LEN || !key.bytes().all(|byte| byte.is_ascii_graphic()) {
-      return Err(Status::invalid_argument(format!(
-        "idempotency_key は 1 から {KEY_MAX_LEN} 文字の ASCII 表示文字で指定してください。"
-      )));
-    }
     let mut fingerprint = rpc.as_bytes().to_vec();
     fingerprint.push(0);
     fingerprint.extend(request.encode_to_vec());
-    let settled = match self.begin(key, fingerprint, Instant::now()) {
+    let settled = match self.begin(key.as_str(), fingerprint, Instant::now()) {
       | Begin::Mismatch => {
         return Err(Status::invalid_argument(
           "同じ idempotency_key が別の内容の操作に使われています。操作ごとに新しい鍵を指定してください。",

@@ -1570,6 +1570,44 @@ async fn answered_question_of_a_terminal_goal_leaves_pending_decisions_on_the_ne
 }
 
 #[tokio::test]
+async fn an_answer_with_an_unknown_outcome_forces_a_reread_of_a_terminal_goal_question() {
+  // takt が回答を受け取ったまま応答しないと、回答が保存されたかどうか分からない。次の周期で
+  // 完了ゴールの質問を読み直させ、利用者が一覧で結果を確かめられるようにする。
+  let inquiry_id = "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e";
+  let (harness, mut poller) = polled_harness(state_with_completed_goal_inquiry("pending")).await;
+  let mut hanging = state_with_completed_goal_inquiry("pending");
+  hanging["hang"] = json!(["takt_answer_goal_question"]);
+  harness.rewrite_state(hanging);
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  assert_eq!(pending_inquiry_ids(&mut client).await, vec![inquiry_id.to_owned()]);
+
+  let status = client
+    .answer_inquiry(AnswerInquiryRequest {
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         None,
+      inquiry_id:      inquiry_id.to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
+    })
+    .await
+    .expect_err("takt が応答しません");
+  assert_eq!(status.code(), Code::DeadlineExceeded);
+  // takt は回答を保存していた。
+  harness.rewrite_state(state_with_completed_goal_inquiry("answered"));
+
+  let before_refresh = harness.recorded_calls().len();
+  poller.read_cycle_once().await.expect("回答の後の周期を実行できます");
+  assert_eq!(goal_question_reads_since(&harness, before_refresh), 1, "結果が不明の回答のあとは質問を読み直します");
+  assert!(pending_inquiry_ids(&mut client).await.is_empty(), "保存されていた回答は判断待ちから消えます");
+
+  poller.shutdown().await;
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn failed_answer_to_a_terminal_goal_question_does_not_force_a_reread() {
   // 回答が takt で失敗したときは、完了ゴールの質問の読み取りを省いたままにする。
   // 回答を送る前、または失敗した回答でも読み直させる実装はここで落ちる。

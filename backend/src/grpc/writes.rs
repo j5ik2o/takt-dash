@@ -92,11 +92,16 @@ impl TaktDashServiceImpl {
     let store = self.store.clone();
     Ok(async move {
       let _write_gate = lane.gate().await;
-      let mut source = lane.source();
-      source.answer_goal_question(&lane.resolved.cwd, &goal_id, &question_id, answer).await.map_err(write_failure)?;
-      lane.record_write();
-      // 回答したゴールは、終端でも次の周期で質問を読み直させて判断待ちから外します。
-      store.invalidate_goal_questions(lane.resolved.project.as_str(), goal_id);
+      let mut source = lane.connected_source().await?;
+      let answered = lane.settle(
+        source.answer_goal_question(&lane.resolved.cwd, &goal_id, &question_id, answer).await.map_err(write_failure),
+      );
+      if !matches!(answered, Err(WriteFailure::Failed(_))) {
+        // 回答した、または回答が届いたかもしれないゴールは、
+        // 終端でも次の周期で質問を読み直させます。
+        store.invalidate_goal_questions(lane.resolved.project.as_str(), goal_id);
+      }
+      answered?;
       Ok(AnswerInquiryResponse { inquiry_id: question_id.as_str().to_owned() })
     })
   }
@@ -134,9 +139,9 @@ impl TaktDashServiceImpl {
     let lane = self.write_lane(self.resolve_write_target(&server_id, &project)?);
     Ok(async move {
       let _write_gate = lane.gate().await;
-      let mut source = lane.source();
-      let result = source.merge_goal_pr(&lane.resolved.cwd, &goal_id, pr_number, until).await.map_err(write_failure)?;
-      lane.record_write();
+      let mut source = lane.connected_source().await?;
+      let result = lane
+        .settle(source.merge_goal_pr(&lane.resolved.cwd, &goal_id, pr_number, until).await.map_err(write_failure))?;
       Ok(ApproveGoalMergeResponse { task_name: result.task_name.as_str().to_owned(), workflow: result.workflow })
     })
   }
@@ -165,9 +170,9 @@ impl TaktDashServiceImpl {
     let lane = self.write_lane(self.resolve_write_target(&server_id, &project)?);
     Ok(async move {
       let _write_gate = lane.gate().await;
-      let mut source = lane.source();
-      let result = source.approve_goal_registration(&lane.resolved.cwd, revision).await.map_err(write_failure)?;
-      lane.record_write();
+      let mut source = lane.connected_source().await?;
+      let result =
+        lane.settle(source.approve_goal_registration(&lane.resolved.cwd, revision).await.map_err(write_failure))?;
       Ok(ApproveGoalRegistrationResponse {
         revision: result.revision.get(),
         goal_id:  result.goal_id.as_str().to_owned(),
@@ -199,9 +204,9 @@ impl TaktDashServiceImpl {
     let lane = self.write_lane(self.resolve_write_target(&server_id, &project)?);
     Ok(async move {
       let _write_gate = lane.gate().await;
-      let mut source = lane.source();
-      let rejected = source.reject_goal_registration(&lane.resolved.cwd, revision).await.map_err(write_failure)?;
-      lane.record_write();
+      let mut source = lane.connected_source().await?;
+      let rejected =
+        lane.settle(source.reject_goal_registration(&lane.resolved.cwd, revision).await.map_err(write_failure))?;
       Ok(RejectGoalRegistrationResponse { revision: rejected.get() })
     })
   }

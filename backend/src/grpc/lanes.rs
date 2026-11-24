@@ -4,7 +4,10 @@
 //! レーンを使います。レーンごとに子プロセスが分かれるため、重い読み取りが
 //! 書き込みを待たせることはありません。
 
-use super::{resolve::WriteSource, ResolvedProject, TaktDashServiceImpl, READ_TIMEOUT};
+use super::{
+  resolve::WriteSource, tool_error_status, write_ledger::WriteFailure, ResolvedProject, TaktDashServiceImpl,
+  READ_TIMEOUT,
+};
 use crate::{
   config::McpConnection,
   mcp::{client_config, ClientHandle, HttpReadHandle, Lane, McpClientRegistry},
@@ -44,7 +47,7 @@ pub(super) struct WriteLane {
 impl WriteLane {
   /// プロジェクトの書き込みゲートを取得する。
   ///
-  /// 書き込み RPC を発行する前から、成功後の [`Self::record_write`] まで保持します。
+  /// 書き込み RPC を発行する前から、結果を [`Self::settle`] へ渡すまで保持します。
   /// 定期読み取りは結果の反映の段で同じゲートを保持するため、書き込みの適用と
   /// 通し番号の前進が、読み取り結果の古さの確認と反映に対して原子的になります。
   pub(super) async fn gate(&self) -> tokio::sync::OwnedMutexGuard<()> {
@@ -53,7 +56,7 @@ impl WriteLane {
 
   /// 書き込み元を作る。HTTP 接続先は常駐サーバーのハンドル、stdio 接続先は書き込みレーンの
   /// クライアントを使います。
-  pub(super) fn source(&self) -> WriteSource {
+  fn source(&self) -> WriteSource {
     match &self.resolved.write_connection {
       | McpConnection::Http(_) => {
         WriteSource::Http(Box::new(HttpReadHandle::new_for_write(self.resolved.write_connection.clone(), READ_TIMEOUT)))
@@ -71,11 +74,23 @@ impl WriteLane {
     }
   }
 
-  /// 書き込みの成功を記録し、そのプロジェクトの書き込みの通し番号を進める。
+  /// 接続を済ませた書き込み元を返す。接続の失敗は、書き込みを送る前の失敗として返します。
+  pub(super) async fn connected_source(&self) -> Result<WriteSource, WriteFailure> {
+    let mut source = self.source();
+    source.connect().await.map_err(|error| WriteFailure::Failed(tool_error_status(error)))?;
+    Ok(source)
+  }
+
+  /// 書き込みの結果を受け取り、書き込みが takt に届いた、または届いたかもしれないときに、
+  /// そのプロジェクトの書き込みの通し番号を進める。
   ///
   /// 定期読み取りは、読み取り開始時点の番号と現在の番号を比べ、進んでいたら
   /// 読み取り結果を捨てます。書き込み前の状態で新しい状態を上書きしないためです。
-  pub(super) fn record_write(&self) {
-    self.registry.record_write(self.resolved.write_server_id.as_str(), self.resolved.project.as_str());
+  /// 結果が不明な書き込みも takt では済んでいることがあるため、同じように進めます。
+  pub(super) fn settle<T>(&self, result: Result<T, WriteFailure>) -> Result<T, WriteFailure> {
+    if !matches!(result, Err(WriteFailure::Failed(_))) {
+      self.registry.record_write(self.resolved.write_server_id.as_str(), self.resolved.project.as_str());
+    }
+    result
   }
 }

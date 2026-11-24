@@ -6,6 +6,10 @@ use super::*;
 
 const REQUEST: &str = "要求";
 
+fn key_of(key: &str) -> IdempotencyKey {
+  IdempotencyKey::try_from(key).expect("テストの鍵は有効です")
+}
+
 /// 書き込みの回数を数え、`outcome` を返す書き込みを実行する。
 async fn run_counted(
   ledger: &WriteLedger,
@@ -15,7 +19,7 @@ async fn run_counted(
 ) -> Result<String, Status> {
   let writes = writes.clone();
   ledger
-    .run("Rpc", Some(key), &REQUEST.to_owned(), || {
+    .run("Rpc", Some(key_of(key)), &REQUEST.to_owned(), || {
       Ok(async move {
         writes.fetch_add(1, Ordering::SeqCst);
         outcome
@@ -45,7 +49,7 @@ async fn a_write_that_stops_without_an_outcome_is_recorded_as_unknown() {
   let ledger = WriteLedger::default();
 
   let status = ledger
-    .run::<_, String, _>("Rpc", Some("k"), &REQUEST.to_owned(), || {
+    .run::<_, String, _>("Rpc", Some(key_of("k")), &REQUEST.to_owned(), || {
       Ok(async { panic!("書き込みの途中で止まります") })
     })
     .await
@@ -65,7 +69,7 @@ async fn a_write_keeps_running_after_its_caller_stops_waiting() {
     let ledger = ledger.clone();
     tokio::spawn(async move {
       ledger
-        .run::<_, String, _>("Rpc", Some("k"), &REQUEST.to_owned(), || {
+        .run::<_, String, _>("Rpc", Some(key_of("k")), &REQUEST.to_owned(), || {
           Ok(async move {
             released.await.expect("書き込みを進める合図が届きます");
             Ok("適用済み".to_owned())
@@ -91,9 +95,12 @@ async fn a_failed_validation_is_not_recorded() {
   let ledger = WriteLedger::default();
 
   let status = ledger
-    .run::<_, String, std::future::Ready<Result<String, WriteFailure>>>("Rpc", Some("k"), &REQUEST.to_owned(), || {
-      Err(Status::invalid_argument("入力が正しくありません"))
-    })
+    .run::<_, String, std::future::Ready<Result<String, WriteFailure>>>(
+      "Rpc",
+      Some(key_of("k")),
+      &REQUEST.to_owned(),
+      || Err(Status::invalid_argument("入力が正しくありません")),
+    )
     .await
     .expect_err("検証で失敗します");
   assert_eq!(status.code(), Code::InvalidArgument);
