@@ -355,6 +355,7 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
         | Answer::Report(report) => (None, Some(*report as i32)),
       };
       let mut request = Request::new(AnswerInquiryRequest {
+        idempotency_key: None,
         server_id: server_id.as_str().to_owned(),
         project: project.as_str().to_owned(),
         goal_id: goal_id.as_ref().map(|goal_id| goal_id.as_str().to_owned()),
@@ -369,11 +370,12 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
     },
     | WriteCommand::Merge { server_id, project, goal_id, pr_number, until } => {
       let mut request = Request::new(ApproveGoalMergeRequest {
-        server_id: server_id.as_str().to_owned(),
-        project:   project.as_str().to_owned(),
-        goal_id:   goal_id.as_str().to_owned(),
-        pr_number: pr_number.get(),
-        until:     until.as_str().to_owned(),
+        idempotency_key: None,
+        server_id:       server_id.as_str().to_owned(),
+        project:         project.as_str().to_owned(),
+        goal_id:         goal_id.as_str().to_owned(),
+        pr_number:       pr_number.get(),
+        until:           until.as_str().to_owned(),
       });
       request.set_timeout(WRITE_TIMEOUT);
       let response = client
@@ -398,9 +400,10 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
     },
     | WriteCommand::ApproveRegistration { server_id, project, revision } => {
       let mut request = Request::new(ApproveGoalRegistrationRequest {
-        server_id: server_id.as_str().to_owned(),
-        project:   project.as_str().to_owned(),
-        revision:  revision.get(),
+        idempotency_key: None,
+        server_id:       server_id.as_str().to_owned(),
+        project:         project.as_str().to_owned(),
+        revision:        revision.get(),
       });
       request.set_timeout(WRITE_TIMEOUT);
       let response = client
@@ -412,9 +415,10 @@ async fn execute_write(addr: SocketAddr, command: &WriteCommand) -> Result<Strin
     },
     | WriteCommand::RejectRegistration { server_id, project, revision } => {
       let mut request = Request::new(RejectGoalRegistrationRequest {
-        server_id: server_id.as_str().to_owned(),
-        project:   project.as_str().to_owned(),
-        revision:  revision.get(),
+        idempotency_key: None,
+        server_id:       server_id.as_str().to_owned(),
+        project:         project.as_str().to_owned(),
+        revision:        revision.get(),
       });
       request.set_timeout(WRITE_TIMEOUT);
       let response = client

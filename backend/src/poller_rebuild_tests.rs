@@ -88,6 +88,7 @@ async fn same_server_stdio_to_http_retires_children_and_keeps_write_order() {
   let grpc = start_server(&harness).await;
   let mut client = client(grpc.address).await;
   let approval = |revision| ApproveGoalRegistrationRequest {
+    idempotency_key: None,
     server_id: "mac-mini".to_owned(),
     project: "takt-dash".to_owned(),
     revision,
@@ -285,9 +286,10 @@ async fn rebuild_through_rpc(boundary: ReadBoundary) {
     let before_approval = harness.recorded_calls().len();
     let response = client
       .approve_goal_registration(ApproveGoalRegistrationRequest {
-        server_id: "mac-mini".to_owned(),
-        project:   "takt-dash".to_owned(),
-        revision:  4,
+        idempotency_key: None,
+        server_id:       "mac-mini".to_owned(),
+        project:         "takt-dash".to_owned(),
+        revision:        4,
       })
       .await
       .expect("実 RPC が B を登録して成功します")

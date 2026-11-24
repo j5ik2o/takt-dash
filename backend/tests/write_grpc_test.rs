@@ -91,12 +91,13 @@ async fn pending_decision_inquiry_id_is_the_identifier_used_for_answering() {
 
   client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
-      inquiry_id: inquiry.inquiry_id.clone(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
+      inquiry_id:      inquiry.inquiry_id.clone(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect("一覧の識別子で回答できます");
@@ -174,12 +175,13 @@ async fn answer_inquiry_sends_free_text_in_the_answer_object() {
 
   let response = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect("回答を受け付けられます")
@@ -218,12 +220,13 @@ async fn answer_inquiry_sends_unable_for_an_operation_request() {
 
   client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       None,
-      report:     Some(OperationAnswerReport::Unable as i32),
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            None,
+      report:          Some(OperationAnswerReport::Unable as i32),
     })
     .await
     .expect("対応できないの回答を受け付けられます");
@@ -247,12 +250,13 @@ async fn answer_inquiry_rejects_empty_inquiry_id_without_calling_takt() {
 
   let status = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
-      inquiry_id: String::new(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
+      inquiry_id:      String::new(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect_err("空の識別子は拒否されます")
@@ -272,12 +276,13 @@ async fn answer_inquiry_rejects_an_answer_without_text_or_report() {
 
   let status = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       None,
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            None,
+      report:          None,
     })
     .await
     .expect_err("text も report も無い回答は拒否されます")
@@ -297,11 +302,12 @@ async fn approve_goal_merge_sends_goal_and_pr_with_until() {
 
   let response = client
     .approve_goal_merge(ApproveGoalMergeRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "takt-dash".to_owned(),
-      goal_id:   "g-merge".to_owned(),
-      pr_number: 42,
-      until:     "merge".to_owned(),
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         "g-merge".to_owned(),
+      pr_number:       42,
+      until:           "merge".to_owned(),
     })
     .await
     .expect("マージ承認を受け付けられます")
@@ -327,11 +333,12 @@ async fn approve_goal_merge_rejects_a_non_positive_pr_number() {
 
   let status = client
     .approve_goal_merge(ApproveGoalMergeRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "takt-dash".to_owned(),
-      goal_id:   "g-merge".to_owned(),
-      pr_number: 0,
-      until:     "merge".to_owned(),
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         "g-merge".to_owned(),
+      pr_number:       0,
+      until:           "merge".to_owned(),
     })
     .await
     .expect_err("0 の PR 番号は拒否されます")
@@ -351,9 +358,10 @@ async fn approve_goal_registration_sends_the_revision() {
 
   let response = client
     .approve_goal_registration(ApproveGoalRegistrationRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "takt-dash".to_owned(),
-      revision:  3,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        3,
     })
     .await
     .expect("承認を受け付けられます")
@@ -377,9 +385,10 @@ async fn approve_goal_registration_rejects_control_characters_in_the_target_with
 
     let status = client
       .approve_goal_registration(ApproveGoalRegistrationRequest {
-        server_id: server_id.to_owned(),
-        project:   project.to_owned(),
-        revision:  3,
+        idempotency_key: None,
+        server_id:       server_id.to_owned(),
+        project:         project.to_owned(),
+        revision:        3,
       })
       .await
       .expect_err("制御文字を含む server_id / project は拒否されます")
@@ -404,9 +413,10 @@ async fn reject_goal_registration_calls_reject_and_not_approve() {
 
   let response = client
     .reject_goal_registration(RejectGoalRegistrationRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "takt-dash".to_owned(),
-      revision:  3,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        3,
     })
     .await
     .expect("却下を受け付けられます")
@@ -430,9 +440,10 @@ async fn reject_goal_registration_rejects_a_non_positive_revision() {
 
   let status = client
     .reject_goal_registration(RejectGoalRegistrationRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "takt-dash".to_owned(),
-      revision:  0,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        0,
     })
     .await
     .expect_err("0 の revision は拒否されます")
@@ -778,12 +789,13 @@ async fn answer_inquiry_sends_the_goal_id_that_owns_the_inquiry() {
 
   let response = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    None,
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         None,
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect("ゴールを持つ問い合わせに回答できます")
@@ -810,12 +822,13 @@ async fn answer_inquiry_rejects_an_inquiry_without_a_goal_without_calling_takt()
 
   let status = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    None,
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         None,
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect_err("ゴールを特定できない問い合わせには回答できません")
@@ -836,12 +849,13 @@ async fn answering_with_the_wrong_answer_kind_is_rejected_without_calling_takt()
 
   let status = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    None,
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       None,
-      report:     Some(OperationAnswerReport::Completed as i32),
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         None,
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            None,
+      report:          Some(OperationAnswerReport::Completed as i32),
     })
     .await
     .expect_err("質問に report は使えません")
@@ -862,12 +876,13 @@ async fn answering_an_operation_request_with_text_is_rejected_without_calling_ta
 
   let status = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    None,
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         None,
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect_err("作業の依頼に text は使えません")
@@ -888,12 +903,13 @@ async fn answer_inquiry_sends_completed_for_a_finished_operation_request() {
 
   client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    None,
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       None,
-      report:     Some(OperationAnswerReport::Completed as i32),
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         None,
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            None,
+      report:          Some(OperationAnswerReport::Completed as i32),
     })
     .await
     .expect("実施したの回答を受け付けられます");
@@ -915,11 +931,12 @@ async fn approve_goal_merge_rejects_an_unknown_until_without_calling_takt() {
   for until in ["", "unknown"] {
     let status = client
       .approve_goal_merge(ApproveGoalMergeRequest {
-        server_id: "mac-mini".to_owned(),
-        project:   "takt-dash".to_owned(),
-        goal_id:   "g-merge".to_owned(),
-        pr_number: 42,
-        until:     until.to_owned(),
+        idempotency_key: None,
+        server_id:       "mac-mini".to_owned(),
+        project:         "takt-dash".to_owned(),
+        goal_id:         "g-merge".to_owned(),
+        pr_number:       42,
+        until:           until.to_owned(),
       })
       .await
       .expect_err("2値以外の until は拒否されます")
@@ -1007,9 +1024,10 @@ async fn a_tool_error_is_mapped_to_unavailable() {
 
   let status = client
     .approve_goal_registration(ApproveGoalRegistrationRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "takt-dash".to_owned(),
-      revision:  3,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        3,
     })
     .await
     .expect_err("道具エラーはエラーとして返ります")
@@ -1028,9 +1046,10 @@ async fn a_project_missing_from_the_config_is_unavailable_without_calling_takt()
 
   let status = client
     .approve_goal_registration(ApproveGoalRegistrationRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "unknown-project".to_owned(),
-      revision:  3,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "unknown-project".to_owned(),
+      revision:        3,
     })
     .await
     .expect_err("設定に無いプロジェクトは解決できません")
@@ -1095,12 +1114,13 @@ async fn answer_inquiry_uses_only_the_matching_project_inquiry() {
 
   let response = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "A".to_owned(),
-      goal_id:    None,
-      inquiry_id: "q-1".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "A".to_owned(),
+      goal_id:         None,
+      inquiry_id:      "q-1".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect("対象プロジェクトの問い合わせには回答できます")
@@ -1139,12 +1159,13 @@ async fn answer_inquiry_rejects_inquiry_id_of_another_project_without_calling_ta
 
   let status = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "A".to_owned(),
-      goal_id:    None,
-      inquiry_id: "q-1".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "A".to_owned(),
+      goal_id:         None,
+      inquiry_id:      "q-1".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect_err("別プロジェクトにしかない識別子は引き当てられません")
@@ -1172,12 +1193,13 @@ async fn answer_inquiry_rejects_a_missing_inquiry_with_an_explicit_goal_without_
 
   let status = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "A".to_owned(),
-      goal_id:    Some("22222222-2222-4222-8222-222222222222".to_owned()),
-      inquiry_id: "q-404".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "A".to_owned(),
+      goal_id:         Some("22222222-2222-4222-8222-222222222222".to_owned()),
+      inquiry_id:      "q-404".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect_err("対象プロジェクトに無い問い合わせは回答できません")
@@ -1209,12 +1231,13 @@ async fn answer_inquiry_rejects_ambiguous_inquiry_id_without_calling_takt() {
 
   let status = client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "A".to_owned(),
-      goal_id:    None,
-      inquiry_id: "q-1".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "A".to_owned(),
+      goal_id:         None,
+      inquiry_id:      "q-1".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect_err("同じプロジェクト内で重複する識別子は選べません")
@@ -1270,12 +1293,13 @@ async fn write_rpcs_use_a_dedicated_write_lane_process() {
   let mut client = client(server.address).await;
   client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    None,
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         None,
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect("書き込みレーンの子プロセスで回答できます");
@@ -1331,9 +1355,10 @@ async fn write_rpc_rebuilds_the_client_when_the_project_cwd_changes() {
 
   client
     .approve_goal_registration(ApproveGoalRegistrationRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "takt-dash".to_owned(),
-      revision:  3,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        3,
     })
     .await
     .expect("最初の承認は成功します");
@@ -1350,9 +1375,10 @@ async fn write_rpc_rebuilds_the_client_when_the_project_cwd_changes() {
 
   client
     .approve_goal_registration(ApproveGoalRegistrationRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "takt-dash".to_owned(),
-      revision:  4,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        4,
     })
     .await
     .expect("設定変更後の承認は成功します");
@@ -1419,9 +1445,10 @@ async fn write_rpc_rebuild_resets_the_baseline_before_the_next_poll_cycle() {
   let mut client = client(server.address).await;
   client
     .approve_goal_registration(ApproveGoalRegistrationRequest {
-      server_id: "mac-mini".to_owned(),
-      project:   "takt-dash".to_owned(),
-      revision:  3,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        3,
     })
     .await
     .expect("設定変更後の書き込みは成功します");
@@ -1509,12 +1536,13 @@ async fn answered_question_of_a_terminal_goal_leaves_pending_decisions_on_the_ne
 
   client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    None,
-      inquiry_id: inquiry_id.to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         None,
+      inquiry_id:      inquiry_id.to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect("完了したゴールの問い合わせに回答できます");
@@ -1555,12 +1583,13 @@ async fn failed_answer_to_a_terminal_goal_question_does_not_force_a_reread() {
 
   client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    None,
-      inquiry_id: inquiry_id.to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         None,
+      inquiry_id:      inquiry_id.to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect_err("takt が失敗した回答はエラーです");
@@ -1600,12 +1629,13 @@ async fn write_over_http_read_project_routes_to_the_stdio_write_server() {
 
   client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    Some("11111111-1111-4111-8111-111111111111".to_owned()),
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         Some("11111111-1111-4111-8111-111111111111".to_owned()),
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect("HTTP 読み取りのプロジェクトでも writeServer の stdio で回答できます");
@@ -1644,12 +1674,13 @@ async fn write_over_http_routes_to_the_http_write_server() {
 
   client
     .answer_inquiry(AnswerInquiryRequest {
-      server_id:  "mac-mini".to_owned(),
-      project:    "takt-dash".to_owned(),
-      goal_id:    Some("11111111-1111-4111-8111-111111111111".to_owned()),
-      inquiry_id: "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
-      text:       Some("はい".to_owned()),
-      report:     None,
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         Some("11111111-1111-4111-8111-111111111111".to_owned()),
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
     })
     .await
     .expect("書き込み先の HTTP サーバーで回答できます");
