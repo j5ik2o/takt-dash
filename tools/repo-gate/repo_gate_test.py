@@ -2800,6 +2800,10 @@ def test_step_that_does_more_than_notify_is_not_a_terminal() -> None:
             "python3 .takt/scripts/notify_orca.py --result aborted", "true"
         ),
         "終端へ進まない": notify_step("notify_aborted", "aborted", "machine_gate"),
+        "結果と終端が逆": notify_step("notify_aborted", "completed", "ABORT"),
+        "通知のあとに別のコマンド": notify_step("notify_aborted", "aborted", "ABORT").replace(
+            "--result aborted", "--result aborted; true"
+        ),
     }
     for label, aborted_step in variants.items():
         with Sandbox() as sandbox:

@@ -276,6 +276,24 @@ def test_repository_default_bot_is_the_project_officer() -> None:
     assert config["default_bot"] not in ("副元帥", "元帥"), config
 
 
+def test_aborted_reports_last_completed_step_from_run_log() -> None:
+    # stepExecutions は初出順（fmt, clippy）だが、実際に最後に終わったのは 2 回目の fmt 修正。
+    steps = ("machine_gate", "fix_machine_gate_fmt", "fix_machine_gate_clippy", "notify_aborted")
+    with Workspace("orca: bot=副元帥 item=149\n", steps=steps) as ws:
+        logs = ws.run / "logs"
+        logs.mkdir()
+        order = ["machine_gate", "fix_machine_gate_fmt", "machine_gate", "fix_machine_gate_clippy",
+                 "machine_gate", "fix_machine_gate_fmt", "notify_aborted"]
+        records = [{"type": "step_start", "step": "x", "workflow": "taktdash-change"}]
+        records += [{"type": "step_complete", "step": step, "workflow": "taktdash-change"} for step in order]
+        (logs / "20261124-100000-abcdef.jsonl").write_text(
+            "\n".join(json.dumps(record) for record in records) + "\nnot json\n", encoding="utf-8"
+        )
+        completed, _ = ws.run_script("--result", "aborted")
+        assert completed.returncode == 0
+        assert "理由: 工程 taktdash-change/fix_machine_gate_fmt のあと中断で終わった" in ws.body(), ws.body()
+
+
 def test_orca_failure_still_exits_zero() -> None:
     with Workspace("orca: bot=副元帥 item=149\n", orca_tail="echo boom >&2; exit 3") as ws:
         completed, _ = ws.run_script("--result", "completed")
@@ -299,13 +317,13 @@ def test_orca_timeout_is_cut_and_child_stopped() -> None:
         assert pidfile.exists(), "偽の orca が子プロセスを起こす前に打ち切られました"
         child = int(pidfile.read_text().strip())
         time.sleep(0.2)
-        try:
-            os.kill(child, 0)
-        except ProcessLookupError:
-            pass
-        else:
+        # 孤児を回収しない環境では止まった子がゾンビ（状態 Z）として残るため、状態で判定する。
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(child)], capture_output=True, text=True
+        ).stdout.strip()
+        if state and not state.startswith("Z"):
             os.kill(child, signal.SIGKILL)
-            raise AssertionError("orca の子プロセスが残っています")
+            raise AssertionError(f"orca の子プロセスが動いたまま残っています（状態 {state}）")
 
 
 def test_missing_orca_still_exits_zero() -> None:
@@ -351,6 +369,7 @@ def main() -> int:
         test_project_config_is_read_when_clone_has_none,
         test_without_destination_nothing_is_sent,
         test_repository_default_bot_is_the_project_officer,
+        test_aborted_reports_last_completed_step_from_run_log,
         test_orca_failure_still_exits_zero,
         test_orca_timeout_is_cut_and_child_stopped,
         test_missing_orca_still_exits_zero,

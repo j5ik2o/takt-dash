@@ -132,18 +132,44 @@ def read_meta(run_dir: Path | None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def last_work_step(meta: dict) -> str | None:
-    """直前に実行した工程（通知の工程を除く）を「ワークフロー名/工程名」で返す。"""
+def _step_label(entry: dict) -> str | None:
+    step = entry.get("step")
+    if not isinstance(step, str) or step.startswith(NOTIFY_STEP_PREFIX):
+        return None
+    workflow = entry.get("workflow")
+    return f"{workflow}/{step}" if isinstance(workflow, str) else step
+
+
+def last_work_step(run_dir: Path | None, meta: dict) -> str | None:
+    """直前に終わった工程（通知の工程を除く）を「ワークフロー名/工程名」で返す。
+
+    実行順は run の logs/*.jsonl の step_complete から読む。meta.json の stepExecutions は
+    工程ごとの回数を初出順に並べたもので、同じ工程を繰り返すと順序が実行順と食い違うため、
+    ログが読めないときだけ使う。
+    """
+    if run_dir is not None:
+        last = None
+        for log in sorted((run_dir / "logs").glob("*.jsonl")):
+            try:
+                lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(record, dict) and record.get("type") == "step_complete":
+                    last = _step_label(record) or last
+        if last is not None:
+            return last
     executions = meta.get("stepExecutions")
     if not isinstance(executions, list):
         return None
     for entry in reversed(executions):
-        if not isinstance(entry, dict):
-            continue
-        step = entry.get("step")
-        if isinstance(step, str) and not step.startswith(NOTIFY_STEP_PREFIX):
-            workflow = entry.get("workflow")
-            return f"{workflow}/{step}" if isinstance(workflow, str) else step
+        label = _step_label(entry) if isinstance(entry, dict) else None
+        if label is not None:
+            return label
     return None
 
 
@@ -251,7 +277,7 @@ def build_message(args, cwd: Path, environ) -> dict:
         f"- 結果: {label}",
     ]
     if args.result != "completed":
-        step = last_work_step(meta)
+        step = last_work_step(run_dir, meta)
         response = (environ.get("TAKT_PREVIOUS_RESPONSE_FILE") or "").strip()
         reason = f"工程 {step or '不明'} のあと{label}で終わった"
         if response:

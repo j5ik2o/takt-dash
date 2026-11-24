@@ -4,15 +4,18 @@ import re
 from gate_common import GateError
 
 
-TERMINALS = ("COMPLETE", "ABORT")
-NOTIFY_SCRIPT = ".takt/scripts/notify_orca.py"
+NOTIFY_COMMANDS = {
+    "python3 .takt/scripts/notify_orca.py --result completed": "COMPLETE",
+    "python3 .takt/scripts/notify_orca.py --result aborted": "ABORT",
+}
 
 
 def notify_terminal(step):
     """終わりを Orca へ知らせるだけの工程なら、その後に進む終端（COMPLETE / ABORT）を返す。
 
-    mode: system で、system_inputs が notify_orca.py を呼ぶ command 1 つだけ、rules が
-    when(true) から COMPLETE か ABORT への 1 つだけの工程を通知の工程とみなす。
+    mode: system で、system_inputs が `python3 .takt/scripts/notify_orca.py --result <結果>` の
+    command 1 つだけ、rules が when(true) から終端への 1 つだけで、結果と終端が対応する
+    （completed → COMPLETE、aborted → ABORT）工程を通知の工程とみなす。
     """
     if not isinstance(step, dict) or step.get("mode", step.get("kind")) != "system":
         return None
@@ -22,11 +25,12 @@ def notify_terminal(step):
         return None
     command = inputs[0].get("command") if isinstance(inputs[0], dict) else None
     rule = rules[0] if isinstance(rules[0], dict) else {}
-    if not (isinstance(command, str) and NOTIFY_SCRIPT in command):
+    terminal = NOTIFY_COMMANDS.get(command.strip()) if isinstance(command, str) else None
+    if terminal is None or rule.get("next") != terminal:
         return None
     if not re.fullmatch(r"when\(\s*true\s*\)", str(rule.get("condition") or "").strip()):
         return None
-    return rule.get("next") if rule.get("next") in TERMINALS else None
+    return terminal
 
 
 def _through_notify(steps):
