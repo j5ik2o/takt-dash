@@ -124,17 +124,6 @@ impl TaktDashServiceImpl {
       | McpConnection::Stdio(_) => ReadSource::Stdio(self.screen_handle(resolved)),
     }
   }
-
-  /// 書き込み RPC 用の書き込み元を作る。HTTP 接続先は常駐サーバーのハンドル、stdio 接続先は
-  /// 書き込みレーンのクライアントを使います。
-  pub(super) fn write_source(&self, resolved: &ResolvedProject) -> WriteSource {
-    match &resolved.write_connection {
-      | McpConnection::Http(_) => {
-        WriteSource::Http(Box::new(HttpReadHandle::new_for_write(resolved.write_connection.clone(), READ_TIMEOUT)))
-      },
-      | McpConnection::Stdio(_) => WriteSource::Stdio(self.write_handle(resolved)),
-    }
-  }
 }
 
 /// 画面の要求時の読み取り用の読み取り元。
@@ -262,6 +251,16 @@ pub(super) enum WriteSource {
 }
 
 impl WriteSource {
+  /// 書き込み道具を送る前に、接続先との接続（HTTP のセッション、stdio の子プロセスの初期化）を
+  /// 済ませる。ここでの失敗は、書き込みが takt へ送られていないことを意味します。
+  pub(super) async fn connect(&mut self) -> Result<(), ToolError> {
+    match self {
+      | WriteSource::Http(handle) => handle.connect().await?,
+      | WriteSource::Stdio(handle) => handle.lock().await.warm_up().await?,
+    }
+    Ok(())
+  }
+
   /// takt_answer_goal_question で managerからの質問へ回答する。
   pub(super) async fn answer_goal_question(
     &mut self,

@@ -570,6 +570,13 @@ enum OperationAnswerReport {
   OPERATION_ANSWER_REPORT_UNABLE = 2;     // 対応できない
 }
 
+// 書き込み要求の idempotency_key は、利用者の1回の操作を表す任意の鍵（1〜128文字の ASCII 表示文字）。
+// 同じ鍵と同じ内容の要求は、応答が期限切れになったあとの再試行や同時の重複であっても、
+// takt への書き込みを1回だけ行い、同じ結果を返す。鍵を省いた要求は重複を検出しない。
+// backend は鍵の記録をメモリに持ち、書き込みの決着から1時間だけ保つ。backend の再起動か1時間の経過の
+// あとは、同じ鍵の要求を新しい操作として扱う。結果が不明のまま決着した鍵の要求は、takt へ送り直さず
+// DEADLINE_EXCEEDED を返す。状態を確かめたあとのやり直しには新しい鍵を使う。
+
 // 問い合わせへの回答を要求する。
 message AnswerInquiryRequest {
   string server_id = 1;                              // サーバー
@@ -578,6 +585,7 @@ message AnswerInquiryRequest {
   string inquiry_id = 4;                             // 問い合わせの識別子（判断待ちの inquiry_id）
   optional string text = 5;                          // 自由記述または選択肢の回答（質問への回答で使う）
   optional OperationAnswerReport report = 6;         // 作業の依頼への回答（operation_request で使う）
+  optional string idempotency_key = 7;               // 重複を防ぐ鍵（省略可）
 }
 
 // 問い合わせへの回答への応答を表す。
@@ -592,6 +600,7 @@ message ApproveGoalMergeRequest {
   string goal_id = 3;    // ゴール ID
   int64 pr_number = 4;   // プルリクエストの番号
   string until = 5;      // "prepare" なら準備まで、"merge" ならマージまで行う
+  optional string idempotency_key = 6;  // 重複を防ぐ鍵（省略可）
 }
 
 // プルリクエストのマージの承認への応答を表す。
@@ -605,6 +614,7 @@ message ApproveGoalRegistrationRequest {
   string server_id = 1;  // サーバー
   string project = 2;    // プロジェクト
   int32 revision = 3;    // 承認待ちの revision
+  optional string idempotency_key = 4;  // 重複を防ぐ鍵（省略可）
 }
 
 // ゴール登録の承認への応答を表す。
@@ -618,6 +628,7 @@ message RejectGoalRegistrationRequest {
   string server_id = 1;  // サーバー
   string project = 2;    // プロジェクト
   int32 revision = 3;    // 却下する承認待ちの revision
+  optional string idempotency_key = 4;  // 重複を防ぐ鍵（省略可）
 }
 
 // ゴール登録の却下への応答を表す。

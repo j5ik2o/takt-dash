@@ -1301,7 +1301,11 @@ export interface AnswerInquiryRequest {
     | string
     | undefined;
   /** 作業の依頼への回答（operation_request で使う） */
-  report?: OperationAnswerReport | undefined;
+  report?:
+    | OperationAnswerReport
+    | undefined;
+  /** 重複を防ぐ鍵（省略可） */
+  idempotencyKey?: string | undefined;
 }
 
 /** 問い合わせへの回答への応答を表す。 */
@@ -1322,6 +1326,8 @@ export interface ApproveGoalMergeRequest {
   prNumber: number;
   /** "prepare" なら準備まで、"merge" ならマージまで行う */
   until: string;
+  /** 重複を防ぐ鍵（省略可） */
+  idempotencyKey?: string | undefined;
 }
 
 /** プルリクエストのマージの承認への応答を表す。 */
@@ -1340,6 +1346,8 @@ export interface ApproveGoalRegistrationRequest {
   project: string;
   /** 承認待ちの revision */
   revision: number;
+  /** 重複を防ぐ鍵（省略可） */
+  idempotencyKey?: string | undefined;
 }
 
 /** ゴール登録の承認への応答を表す。 */
@@ -1358,6 +1366,8 @@ export interface RejectGoalRegistrationRequest {
   project: string;
   /** 却下する承認待ちの revision */
   revision: number;
+  /** 重複を防ぐ鍵（省略可） */
+  idempotencyKey?: string | undefined;
 }
 
 /** ゴール登録の却下への応答を表す。 */
@@ -8280,7 +8290,15 @@ export const WatchStateRequest: MessageFns<WatchStateRequest> = {
 };
 
 function createBaseAnswerInquiryRequest(): AnswerInquiryRequest {
-  return { serverId: "", project: "", goalId: undefined, inquiryId: "", text: undefined, report: undefined };
+  return {
+    serverId: "",
+    project: "",
+    goalId: undefined,
+    inquiryId: "",
+    text: undefined,
+    report: undefined,
+    idempotencyKey: undefined,
+  };
 }
 
 export const AnswerInquiryRequest: MessageFns<AnswerInquiryRequest> = {
@@ -8302,6 +8320,9 @@ export const AnswerInquiryRequest: MessageFns<AnswerInquiryRequest> = {
     }
     if (message.report !== undefined) {
       writer.uint32(48).int32(message.report);
+    }
+    if (message.idempotencyKey !== undefined) {
+      writer.uint32(58).string(message.idempotencyKey);
     }
     return writer;
   },
@@ -8367,6 +8388,14 @@ export const AnswerInquiryRequest: MessageFns<AnswerInquiryRequest> = {
             message.report = reader.int32() as any;
             continue;
           }
+          case 7: {
+            if (tag !== 58) {
+              break;
+            }
+
+            message.idempotencyKey = reader.string();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -8399,6 +8428,11 @@ export const AnswerInquiryRequest: MessageFns<AnswerInquiryRequest> = {
         : "",
       text: isSet(object.text) ? globalThis.String(object.text) : undefined,
       report: isSet(object.report) ? operationAnswerReportFromJSON(object.report) : undefined,
+      idempotencyKey: isSet(object.idempotencyKey)
+        ? globalThis.String(object.idempotencyKey)
+        : isSet(object.idempotency_key)
+        ? globalThis.String(object.idempotency_key)
+        : undefined,
     };
   },
 
@@ -8422,6 +8456,9 @@ export const AnswerInquiryRequest: MessageFns<AnswerInquiryRequest> = {
     if (message.report !== undefined) {
       obj.report = operationAnswerReportToJSON(message.report);
     }
+    if (message.idempotencyKey !== undefined) {
+      obj.idempotencyKey = message.idempotencyKey;
+    }
     return obj;
   },
 
@@ -8436,6 +8473,7 @@ export const AnswerInquiryRequest: MessageFns<AnswerInquiryRequest> = {
     message.inquiryId = object.inquiryId ?? "";
     message.text = object.text ?? undefined;
     message.report = object.report ?? undefined;
+    message.idempotencyKey = object.idempotencyKey ?? undefined;
     return message;
   },
 };
@@ -8514,7 +8552,7 @@ export const AnswerInquiryResponse: MessageFns<AnswerInquiryResponse> = {
 };
 
 function createBaseApproveGoalMergeRequest(): ApproveGoalMergeRequest {
-  return { serverId: "", project: "", goalId: "", prNumber: 0, until: "" };
+  return { serverId: "", project: "", goalId: "", prNumber: 0, until: "", idempotencyKey: undefined };
 }
 
 export const ApproveGoalMergeRequest: MessageFns<ApproveGoalMergeRequest> = {
@@ -8533,6 +8571,9 @@ export const ApproveGoalMergeRequest: MessageFns<ApproveGoalMergeRequest> = {
     }
     if (message.until !== "") {
       writer.uint32(42).string(message.until);
+    }
+    if (message.idempotencyKey !== undefined) {
+      writer.uint32(50).string(message.idempotencyKey);
     }
     return writer;
   },
@@ -8590,6 +8631,14 @@ export const ApproveGoalMergeRequest: MessageFns<ApproveGoalMergeRequest> = {
             message.until = reader.string();
             continue;
           }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.idempotencyKey = reader.string();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -8621,6 +8670,11 @@ export const ApproveGoalMergeRequest: MessageFns<ApproveGoalMergeRequest> = {
         ? globalThis.Number(object.pr_number)
         : 0,
       until: isSet(object.until) ? globalThis.String(object.until) : "",
+      idempotencyKey: isSet(object.idempotencyKey)
+        ? globalThis.String(object.idempotencyKey)
+        : isSet(object.idempotency_key)
+        ? globalThis.String(object.idempotency_key)
+        : undefined,
     };
   },
 
@@ -8641,6 +8695,9 @@ export const ApproveGoalMergeRequest: MessageFns<ApproveGoalMergeRequest> = {
     if (message.until !== "") {
       obj.until = message.until;
     }
+    if (message.idempotencyKey !== undefined) {
+      obj.idempotencyKey = message.idempotencyKey;
+    }
     return obj;
   },
 
@@ -8654,6 +8711,7 @@ export const ApproveGoalMergeRequest: MessageFns<ApproveGoalMergeRequest> = {
     message.goalId = object.goalId ?? "";
     message.prNumber = object.prNumber ?? 0;
     message.until = object.until ?? "";
+    message.idempotencyKey = object.idempotencyKey ?? undefined;
     return message;
   },
 };
@@ -8748,7 +8806,7 @@ export const ApproveGoalMergeResponse: MessageFns<ApproveGoalMergeResponse> = {
 };
 
 function createBaseApproveGoalRegistrationRequest(): ApproveGoalRegistrationRequest {
-  return { serverId: "", project: "", revision: 0 };
+  return { serverId: "", project: "", revision: 0, idempotencyKey: undefined };
 }
 
 export const ApproveGoalRegistrationRequest: MessageFns<ApproveGoalRegistrationRequest> = {
@@ -8761,6 +8819,9 @@ export const ApproveGoalRegistrationRequest: MessageFns<ApproveGoalRegistrationR
     }
     if (message.revision !== 0) {
       writer.uint32(24).int32(message.revision);
+    }
+    if (message.idempotencyKey !== undefined) {
+      writer.uint32(34).string(message.idempotencyKey);
     }
     return writer;
   },
@@ -8802,6 +8863,14 @@ export const ApproveGoalRegistrationRequest: MessageFns<ApproveGoalRegistrationR
             message.revision = reader.int32();
             continue;
           }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.idempotencyKey = reader.string();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -8823,6 +8892,11 @@ export const ApproveGoalRegistrationRequest: MessageFns<ApproveGoalRegistrationR
         : "",
       project: isSet(object.project) ? globalThis.String(object.project) : "",
       revision: isSet(object.revision) ? globalThis.Number(object.revision) : 0,
+      idempotencyKey: isSet(object.idempotencyKey)
+        ? globalThis.String(object.idempotencyKey)
+        : isSet(object.idempotency_key)
+        ? globalThis.String(object.idempotency_key)
+        : undefined,
     };
   },
 
@@ -8837,6 +8911,9 @@ export const ApproveGoalRegistrationRequest: MessageFns<ApproveGoalRegistrationR
     if (message.revision !== 0) {
       obj.revision = Math.round(message.revision);
     }
+    if (message.idempotencyKey !== undefined) {
+      obj.idempotencyKey = message.idempotencyKey;
+    }
     return obj;
   },
 
@@ -8850,6 +8927,7 @@ export const ApproveGoalRegistrationRequest: MessageFns<ApproveGoalRegistrationR
     message.serverId = object.serverId ?? "";
     message.project = object.project ?? "";
     message.revision = object.revision ?? 0;
+    message.idempotencyKey = object.idempotencyKey ?? undefined;
     return message;
   },
 };
@@ -8946,7 +9024,7 @@ export const ApproveGoalRegistrationResponse: MessageFns<ApproveGoalRegistration
 };
 
 function createBaseRejectGoalRegistrationRequest(): RejectGoalRegistrationRequest {
-  return { serverId: "", project: "", revision: 0 };
+  return { serverId: "", project: "", revision: 0, idempotencyKey: undefined };
 }
 
 export const RejectGoalRegistrationRequest: MessageFns<RejectGoalRegistrationRequest> = {
@@ -8959,6 +9037,9 @@ export const RejectGoalRegistrationRequest: MessageFns<RejectGoalRegistrationReq
     }
     if (message.revision !== 0) {
       writer.uint32(24).int32(message.revision);
+    }
+    if (message.idempotencyKey !== undefined) {
+      writer.uint32(34).string(message.idempotencyKey);
     }
     return writer;
   },
@@ -9000,6 +9081,14 @@ export const RejectGoalRegistrationRequest: MessageFns<RejectGoalRegistrationReq
             message.revision = reader.int32();
             continue;
           }
+          case 4: {
+            if (tag !== 34) {
+              break;
+            }
+
+            message.idempotencyKey = reader.string();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -9021,6 +9110,11 @@ export const RejectGoalRegistrationRequest: MessageFns<RejectGoalRegistrationReq
         : "",
       project: isSet(object.project) ? globalThis.String(object.project) : "",
       revision: isSet(object.revision) ? globalThis.Number(object.revision) : 0,
+      idempotencyKey: isSet(object.idempotencyKey)
+        ? globalThis.String(object.idempotencyKey)
+        : isSet(object.idempotency_key)
+        ? globalThis.String(object.idempotency_key)
+        : undefined,
     };
   },
 
@@ -9035,6 +9129,9 @@ export const RejectGoalRegistrationRequest: MessageFns<RejectGoalRegistrationReq
     if (message.revision !== 0) {
       obj.revision = Math.round(message.revision);
     }
+    if (message.idempotencyKey !== undefined) {
+      obj.idempotencyKey = message.idempotencyKey;
+    }
     return obj;
   },
 
@@ -9048,6 +9145,7 @@ export const RejectGoalRegistrationRequest: MessageFns<RejectGoalRegistrationReq
     message.serverId = object.serverId ?? "";
     message.project = object.project ?? "";
     message.revision = object.revision ?? 0;
+    message.idempotencyKey = object.idempotencyKey ?? undefined;
     return message;
   },
 };

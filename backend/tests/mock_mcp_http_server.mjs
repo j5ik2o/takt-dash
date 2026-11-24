@@ -29,6 +29,7 @@ const option = (name) => {
 };
 
 const behavior = option("--behavior") ?? "ok";
+let initializeHung = false;
 // drop-connection-once で、最初の tools/call だけ応答を返さずに接続を切ったかどうか。
 let connectionDropped = false;
 const statePath = option("--state");
@@ -344,6 +345,12 @@ const server = createServer((request, response) => {
       return;
     }
     if (message.method === "initialize") {
+      if (behavior === "hang-initialize-once" && !initializeHung) {
+        // 最初の initialize だけ応答しない。セッションの確立が時間切れになり、
+        // 道具の呼び出しが一度も届いていない状態を再現する。
+        initializeHung = true;
+        return;
+      }
       const sessionId = `sess-${sessions.size + 1}-${Date.now()}`;
       sessions.add(sessionId);
       if (sessionLogPath !== undefined) {

@@ -6,6 +6,15 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
+# One run per PR. A new head, a reopen, or a base change cancels the older run.
+# A title or body edit does not cancel: it waits behind the running run, and a
+# burst of edits collapses into one pending run. It still runs the full CI
+# because a skipped required job would count as passing. Pushes to main and
+# manual re-runs get their own group and are never cancelled.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !(github.event.action == 'edited' && !github.event.changes.base) }}
+
 jobs:
   ci-revision:
     runs-on: ubuntu-latest
