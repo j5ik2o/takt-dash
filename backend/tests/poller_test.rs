@@ -2199,12 +2199,26 @@ async fn unrecorded_connection_lost_survives_a_failed_retry_and_is_recorded_once
   poller.read_cycle_once().await.expect_err("再試行を繰り返しても失敗で終わります");
   assert!(connection_events(&harness).is_empty(), "記録先が失敗している間は何も記録されません");
 
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
   allow_event_recording(&harness.activity_db_path);
   let recovered = poller.read_cycle_once().await.expect("記録先が復旧したサイクルを実行できます");
   assert_eq!(recovered.events_recorded, 2, "未記録の接続断と、対応する復帰を記録します");
   let following = poller.read_cycle_once().await.expect("後続のサイクルを実行できます");
   assert_eq!(following.events_recorded, 0, "再試行した回数だけ重ねて記録しません");
   poller.shutdown().await;
+
+  let restored: Vec<_> = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .collect();
+  assert!(
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰の本文に、保持していた接続断から数えた切断していた時間を入れます: {}",
+    restored[0].body
+  );
 
   let kinds: Vec<EventKind> = connection_events(&harness).into_iter().map(|(kind, _)| kind).collect();
   assert_eq!(kinds, vec![EventKind::ConnectionLost, EventKind::ConnectionRestored]);
@@ -2258,6 +2272,7 @@ async fn failed_connection_lost_record_keeps_the_baseline_and_records_it_once_wh
   assert!(down.snapshot.is_some(), "最後に読めた状態は保持します");
 
   // サイクル3: 記録だけを回復する。読み取り失敗は続くので、未記録だった接続断を記録する。
+  let detected_before = chrono::Utc::now();
   allow_event_recording(&harness.activity_db_path);
   let recovered = poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
   assert_eq!(recovered.events_recorded, 1, "未記録だった接続断だけを回復後に記録します");
@@ -2275,6 +2290,8 @@ async fn failed_connection_lost_record_keeps_the_baseline_and_records_it_once_wh
     .filter(|event| event.kind == EventKind::ConnectionLost)
     .count();
   assert_eq!(lost, 1, "接続断は欠落も重複もなくちょうど1回記録します");
+  let lost_at = connection_events(&harness)[0].1;
+  assert!(lost_at <= detected_before, "接続断は、記録が回復した時刻ではなく検出した時刻で記録します: {lost_at:?}");
 }
 
 #[tokio::test]
