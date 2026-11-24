@@ -793,7 +793,7 @@ impl<'a> ToolSetCore<'a> {
   /// takt_get_goal（path なし）の goal summary から、タスク詳細に載せる
   /// ブランチとプルリクエスト URL を読む。
   async fn read_task_link_fields(&mut self, goal_id: &str) -> Result<TaskLinkFields, ToolError> {
-    let goal_id = domain_value("goalId", GoalId::try_from(goal_id))?;
+    let goal_id = domain_value("ゴール ID", GoalId::try_from(goal_id))?;
     let value = self.read_goal_summary(&goal_id).await?;
     let goal =
       value.get("goal").ok_or_else(|| ToolError::Parse("takt_get_goal の応答に goal がありません".to_owned()))?;

@@ -387,8 +387,9 @@ async fn read_body(body: Incoming) -> Result<Vec<u8>, ExchangeError> {
 }
 
 impl ToolCaller for HttpReadHandle {
+  /// 接続先は 127.0.0.1 の URL だけで決まるため、トークン（authorization）は鍵に入れません。
   fn connection_key(&self) -> String {
-    format!("http:{:?}", self.server)
+    format!("http:{}", self.server.endpoint.url())
   }
 
   fn call_tool<'a>(

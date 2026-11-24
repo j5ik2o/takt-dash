@@ -85,8 +85,12 @@ pub trait ToolCaller: Send {
 }
 
 impl ToolCaller for McpClient {
+  /// 環境変数はトークンを含みうるため、値を鍵に入れず、ハッシュだけを入れます。
   fn connection_key(&self) -> String {
-    format!("stdio:{:?}:{:?}:{:?}", self.config.command, self.config.args, self.config.env)
+    use std::hash::{Hash, Hasher};
+    let mut env = std::collections::hash_map::DefaultHasher::new();
+    self.config.env.hash(&mut env);
+    format!("stdio:{:?}:{:?}:env-{:016x}", self.config.command, self.config.args, env.finish())
   }
 
   fn call_tool<'a>(
