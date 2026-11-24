@@ -31,6 +31,8 @@ export type ToolCall = {
 
 export type Stack = {
   webUrl: string;
+  // ループバック以外のアドレス（LAN など）で同じ Web を開く URL。該当するインタフェースが無ければ undefined。
+  lanWebUrl: string | undefined;
   projectDir: string;
   readCalls: () => Promise<ToolCall[]>;
   updateState: (mutate: (state: Record<string, unknown>) => Record<string, unknown>) => Promise<void>;
@@ -48,6 +50,16 @@ type ProcessEnv = { [key: string]: string | undefined };
 let tempCounter = 0;
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ループバック以外の IPv4 アドレスを1つ選ぶ。私設アドレス（LAN）を優先する。
+const PRIVATE_IPV4 = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+const nonLoopbackAddress = (): string | undefined => {
+  const addresses = Object.values(os.networkInterfaces())
+    .flatMap((entries) => entries ?? [])
+    .filter((entry) => entry.family === "IPv4" && !entry.internal)
+    .map((entry) => entry.address);
+  return addresses.find((address) => PRIVATE_IPV4.test(address)) ?? addresses[0];
+};
 
 // 実行時に空きポートを確保する。固定ポート（本番や並行タスクが使う）を避ける。
 const freePort = (): Promise<number> =>
@@ -439,6 +451,7 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
 
   let backendAddress = "";
   let webUrl = "";
+  let lanWebUrl: string | undefined;
 
   // 明示が無ければ既定の1プロジェクトで起動し、既存 spec の起動経路と設定を変えない。
   const projects: readonly StackProject[] =
@@ -467,6 +480,11 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     const webPort = await freePort();
     // 本番と同じく Web は 0.0.0.0 で待ち受け、利用側は listen 名と違う 127.0.0.1 から開く。
     webUrl = `http://127.0.0.1:${webPort}`;
+    const lanAddress = nonLoopbackAddress();
+    lanWebUrl = lanAddress === undefined ? undefined : `http://${lanAddress}:${webPort}`;
+    // 本番と同じく、許可ホストの環境変数は設定しない。実行する環境の値も引き継がない。
+    const webEnv: ProcessEnv = { ...process.env, TAKTDASH_BACKEND_ADDR: backendAddress };
+    delete webEnv.TAKTDASH_ALLOWED_HOSTS;
 
     backend = spawnWithLog(
       BACKEND_BIN,
@@ -488,8 +506,7 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
       ["start", "-H", "0.0.0.0", "-p", String(webPort)],
       WEB_DIR,
       webLog,
-      // 空きポートは既定の許可ホストに含まれないため、利用する URL のホストだけを許可する。
-      { ...process.env, TAKTDASH_BACKEND_ADDR: backendAddress, TAKTDASH_ALLOWED_HOSTS: `127.0.0.1:${webPort}` },
+      webEnv,
     );
     if (web.pid === undefined) {
       throw new Error("web を起動できませんでした。");
@@ -521,6 +538,7 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
 
   return {
     webUrl,
+    lanWebUrl,
     projectDir,
     readCalls,
     updateState,

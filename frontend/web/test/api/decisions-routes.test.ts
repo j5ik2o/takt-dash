@@ -46,8 +46,12 @@ const postWithHeaders = (
     }),
   );
 
+// 画面（ブラウザ）からの正規の書き込みと同じ形。許可ホストの Host と、それに一致する Origin を付ける。
+// Origin の無い要求は境界で拒否されるため、入力や backend の応答を確かめるテストはこの形で送る。
+const SAME_ORIGIN_HEADERS = { host: "localhost:3000", origin: "http://localhost:3000" } as const;
+
 const postJson = (handler: RouteHandler, path: string, body: unknown): Promise<Response> =>
-  postWithHeaders(handler, path, body, { "content-type": "application/json" });
+  postWithHeaders(handler, path, body, { "content-type": "application/json", ...SAME_ORIGIN_HEADERS });
 
 const withServer = async (
   behavior: Parameters<typeof startTaktDashServer>[0],
@@ -388,6 +392,7 @@ test("charset 付きの application/json は既存どおり許可する", async 
   await withServer({ approveGoalMerge: { taskName: "マージ", workflow: "simple" } }, async (server) => {
     const response = await postWithHeaders(postMerge, MERGE_PATH, MERGE_BODY, {
       "content-type": "application/json; charset=utf-8",
+      ...SAME_ORIGIN_HEADERS,
     });
 
     assert.equal(response.status, 200);
@@ -399,7 +404,6 @@ test("charset 付きの application/json は既存どおり許可する", async 
 // http://0.0.0.0:3000 になる。ブラウザが送る Origin・Host とは一致しないことを前提に検証する。
 const LISTEN_BASE = "http://0.0.0.0:3000";
 const ALLOWED_HOSTS_ENV = "TAKTDASH_ALLOWED_HOSTS";
-const DEFAULT_ALLOWED_HOSTS = ["10.0.1.143:3000", "100.106.166.1:3000", "127.0.0.1:3000", "localhost:3000"];
 
 // 許可ホストの環境変数を設定（undefined なら削除）して実行し、終わったら元へ戻す。
 const withAllowedHostsEnv = async <T>(value: string | undefined, run: () => Promise<T>): Promise<T> => {
@@ -456,8 +460,8 @@ test("request.url と異なっても、許可ホストの Host と一致する O
     for (const [label, handler, path, body, behavior] of writeRoutes) {
       await withServer(behavior, async (server) => {
         const response = await postFromBrowser(handler, path, body, {
-          host: "10.0.1.143:3000",
-          origin: "http://10.0.1.143:3000",
+          host: "100.106.166.1:3000",
+          origin: "http://100.106.166.1:3000",
           "sec-fetch-site": "same-origin",
         });
 
@@ -468,27 +472,11 @@ test("request.url と異なっても、許可ホストの Host と一致する O
   });
 });
 
-test("環境変数が未設定のときは既定の4ホストそれぞれからの書き込みを許可する", async () => {
-  await withAllowedHostsEnv(undefined, async () => {
-    for (const host of DEFAULT_ALLOWED_HOSTS) {
-      await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
-        const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
-          host,
-          origin: `http://${host}`,
-        });
-
-        assert.equal(response.status, 200, host);
-        assert.equal(server.requests.length, 1, `${host} は gRPC を呼ぶ`);
-      });
-    }
-  });
-});
-
 test("request.url のオリジンと一致するだけで Host と一致しない Origin は 403 にする", async () => {
   await withAllowedHostsEnv(undefined, async () => {
     await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
       const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
-        host: "10.0.1.143:3000",
+        host: "100.106.166.1:3000",
         origin: LISTEN_BASE,
       });
 
@@ -503,7 +491,7 @@ test("Host と Origin の host が違う書き込みは、どちらも許可ホ�
     for (const [label, handler, path, body, behavior] of writeRoutes) {
       await withServer(behavior, async (server) => {
         const response = await postFromBrowser(handler, path, body, {
-          host: "10.0.1.143:3000",
+          host: "127.0.0.1:3000",
           origin: "http://100.106.166.1:3000",
         });
 
@@ -533,8 +521,8 @@ test("x-forwarded-host だけが Origin と一致しても書き込みは 403 �
     await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
       const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
         host: "0.0.0.0:3000",
-        "x-forwarded-host": "10.0.1.143:3000",
-        origin: "http://10.0.1.143:3000",
+        "x-forwarded-host": "100.106.166.1:3000",
+        origin: "http://100.106.166.1:3000",
       });
 
       assert.equal(response.status, 403);
@@ -588,8 +576,8 @@ test("Origin があって Host ヘッダが無い書き込みは 403 にする",
 });
 
 test("環境変数で設定した許可ホストは、前後の空白を除いて照合する", async () => {
-  await withAllowedHostsEnv(" taktdash.lan:3000 ,127.0.0.1:3000", async () => {
-    for (const host of ["taktdash.lan:3000", "127.0.0.1:3000"]) {
+  await withAllowedHostsEnv(" taktdash.example:3000 ,127.0.0.1:3000", async () => {
+    for (const host of ["taktdash.example:3000", "127.0.0.1:3000"]) {
       await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
         const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
           host,
@@ -603,16 +591,16 @@ test("環境変数で設定した許可ホストは、前後の空白を除い�
   });
 });
 
-test("環境変数で許可ホストを設定すると、既定のホストは許可しない", async () => {
-  await withAllowedHostsEnv("taktdash.lan:3000", async () => {
+test("環境変数で許可ホストを設定しても、IP アドレスで開いた画面からの書き込みは許可する", async () => {
+  await withAllowedHostsEnv("taktdash.example:3000", async () => {
     await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
       const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
-        host: "10.0.1.143:3000",
-        origin: "http://10.0.1.143:3000",
+        host: "100.106.166.1:3000",
+        origin: "http://100.106.166.1:3000",
       });
 
-      assert.equal(response.status, 403);
-      assert.equal(server.requests.length, 0);
+      assert.equal(response.status, 200);
+      assert.equal(server.requests.length, 1);
     });
   });
 });
@@ -621,12 +609,12 @@ test("許可ホストの環境変数はリクエストのたびに読む", async
   await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
     const send = () =>
       postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
-        host: "taktdash.lan:3000",
-        origin: "http://taktdash.lan:3000",
+        host: "taktdash.example:3000",
+        origin: "http://taktdash.example:3000",
       });
 
     const before = await withAllowedHostsEnv(undefined, send);
-    const after = await withAllowedHostsEnv("taktdash.lan:3000", send);
+    const after = await withAllowedHostsEnv("taktdash.example:3000", send);
 
     assert.equal(before.status, 403);
     assert.equal(after.status, 200);
@@ -635,11 +623,11 @@ test("許可ホストの環境変数はリクエストのたびに読む", async
 });
 
 test("既定ポートを明示した許可ホストは、Host と Origin がポートを省略しても許可する", async () => {
-  await withAllowedHostsEnv("localhost:80", async () => {
+  await withAllowedHostsEnv("dash.example:80", async () => {
     await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
       const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
-        host: "localhost",
-        origin: "http://localhost",
+        host: "dash.example",
+        origin: "http://dash.example",
       });
 
       assert.equal(response.status, 200);
@@ -649,11 +637,11 @@ test("既定ポートを明示した許可ホストは、Host と Origin がポ�
 });
 
 test("既定ポートを明示した Host と Origin は、許可ホストがポートを省略していても許可する", async () => {
-  await withAllowedHostsEnv("localhost", async () => {
+  await withAllowedHostsEnv("dash.example", async () => {
     await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
       const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
-        host: "localhost:80",
-        origin: "http://localhost:80",
+        host: "dash.example:80",
+        origin: "http://dash.example:80",
       });
 
       assert.equal(response.status, 200);
@@ -691,13 +679,13 @@ test("https の既定ポート 443 を明示した Host と Origin は、許可�
 });
 
 test("パスや userinfo 等を含む許可ホストの設定値は、既定ポートの明示があっても無効とする", async () => {
-  const invalidValues = ["localhost:80/path", "user@localhost:80", "localhost:80?query=1", "localhost:80#fragment"];
+  const invalidValues = ["dash.example:80/path", "user@dash.example:80", "dash.example:80?query=1", "dash.example:80#fragment"];
   for (const value of invalidValues) {
     await withAllowedHostsEnv(value, async () => {
       await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
         const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
-          host: "localhost",
-          origin: "http://localhost",
+          host: "dash.example",
+          origin: "http://dash.example",
         });
 
         assert.equal(response.status, 403, value);
@@ -707,15 +695,179 @@ test("パスや userinfo 等を含む許可ホストの設定値は、既定ポ�
   }
 });
 
-test("Origin の無い CLI の要求は許可する", async () => {
-  for (const [label, handler, path, body, behavior] of writeRoutes) {
-    await withServer(behavior, async (server) => {
-      const response = await postJson(handler, path, body);
+// オーナーが実際に開くホスト。機械の IP やポートが変わっても、許可ホストの設定なしで書き込める。
+const LOCALLY_RESOLVED_HOSTS: ReadonlyArray<readonly [label: string, host: string]> = [
+  ["LAN の IP（いまの en0）", "10.0.1.42:3000"],
+  ["LAN の IP（以前の値）", "10.0.1.143:3000"],
+  ["VPN 経由で見える私設アドレス", "192.168.30.1:3000"],
+  ["Tailscale の IP", "100.106.166.1:3000"],
+  ["mDNS の名前（.local）", "j5ik2o-mac-mini.local:3000"],
+  ["ルータが配る名前（.lan）", "j5ik2o-mac-mini.lan:3000"],
+  ["ドットの無い名前", "j5ik2o-mac-mini:3000"],
+  ["ループバックの IP", "127.0.0.1:3000"],
+  ["localhost", "localhost:3000"],
+  ["IPv6 のループバック", "[::1]:3000"],
+  ["3000 以外のポート", "10.0.1.42:53580"],
+  ["大文字を含む名前", "J5ik2o-Mac-Mini.local:3000"],
+  ["末尾にドットを付けた私設の名前", "j5ik2o-mac-mini.local.:3000"],
+  ["末尾にドットを付けた localhost", "localhost.:3000"],
+];
 
-      assert.equal(response.status, 200, label);
-      assert.equal(server.requests.length, 1, `${label} は gRPC を呼ぶ`);
+test("環境変数が未設定でも、IP アドレスや私設の名前で開いた画面からの書き込みを4本とも許可する", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const [hostLabel, host] of LOCALLY_RESOLVED_HOSTS) {
+      for (const [label, handler, path, body, behavior] of writeRoutes) {
+        await withServer(behavior, async (server) => {
+          const response = await postFromBrowser(handler, path, body, {
+            host,
+            origin: `http://${host}`,
+            "sec-fetch-site": "same-origin",
+          });
+
+          assert.equal(response.status, 200, `${hostLabel}: ${label}`);
+          assert.equal(server.requests.length, 1, `${hostLabel}: ${label} は gRPC を呼ぶ`);
+        });
+      }
+    }
+  });
+});
+
+test("私設の名前で開いていても、Origin が Host と違う書き込みは 403 にする", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const [hostLabel, host] of LOCALLY_RESOLVED_HOSTS) {
+      await withServer({ approveGoalMerge: { taskName: "マージ", workflow: "simple" } }, async (server) => {
+        const response = await postFromBrowser(postMerge, MERGE_PATH, MERGE_BODY, {
+          host,
+          origin: "http://evil.example:3000",
+        });
+
+        assert.equal(response.status, 403, hostLabel);
+        assert.equal(server.requests.length, 0, `${hostLabel} は gRPC を呼ばない`);
+      });
+    }
+  });
+});
+
+// DNS リバインディング: 攻撃者の公開の名前を利用者の機械へ向け直すと、Host と Origin が
+// その名前でそろう。公開の DNS で引ける名前は、設定で許可しない限り拒否する。
+test("公開の DNS で引ける名前は、Host と Origin が一致していても、設定で許可しない限り 403 にする", async () => {
+  const publicNames = [
+    "evil.example:3000",
+    "10.0.1.42.evil.example:3000",
+    "j5ik2o-mac-mini.local.evil.example:3000",
+    "localhost.evil.example:3000",
+    "evil.example.:3000",
+    "j5ik2o-mac-mini.local.evil.example.:3000",
+    "evil.example..:3000",
+    "rebind.ts.net:3000",
+  ];
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const host of publicNames) {
+      for (const [label, handler, path, body, behavior] of writeRoutes) {
+        await withServer(behavior, async (server) => {
+          const response = await postFromBrowser(handler, path, body, {
+            host,
+            origin: `http://${host}`,
+            "sec-fetch-site": "same-origin",
+          });
+
+          assert.equal(response.status, 403, `${host}: ${label}`);
+          assert.equal(server.requests.length, 0, `${host}: ${label} は gRPC を呼ばない`);
+        });
+      }
+    }
+  });
+});
+
+// Origin の無い要求（curl など、ブラウザ以外からの直接の要求）は、宛先に関係なく拒否する（#303）。
+// 宛先は Host ヘッダで表す。本番と同じく、許可ホストの環境変数は設定しない。
+const DESTINATIONS: ReadonlyArray<readonly [label: string, host: string]> = [
+  ["LAN の IP 宛て", "10.0.1.42:3000"],
+  ["ループバック宛て", "127.0.0.1:3000"],
+];
+
+for (const [destination, host] of DESTINATIONS) {
+  test(`${destination}: Origin の無い書き込みは 403 で gRPC を呼ばない`, async () => {
+    await withAllowedHostsEnv(undefined, async () => {
+      for (const [label, handler, path, body, behavior] of writeRoutes) {
+        await withServer(behavior, async (server) => {
+          const response = await postFromBrowser(handler, path, body, { host });
+
+          assert.equal(response.status, 403, label);
+          assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
+        });
+      }
     });
-  }
+  });
+
+  test(`${destination}: 別の Origin からの書き込みは 403 で gRPC を呼ばない`, async () => {
+    await withAllowedHostsEnv(undefined, async () => {
+      for (const [label, handler, path, body, behavior] of writeRoutes) {
+        await withServer(behavior, async (server) => {
+          const response = await postFromBrowser(handler, path, body, {
+            host,
+            origin: "https://evil.example",
+          });
+
+          assert.equal(response.status, 403, label);
+          assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
+        });
+      }
+    });
+  });
+
+  test(`${destination}: 正しい Origin からの書き込みは許可する`, async () => {
+    await withAllowedHostsEnv(undefined, async () => {
+      for (const [label, handler, path, body, behavior] of writeRoutes) {
+        await withServer(behavior, async (server) => {
+          const response = await postFromBrowser(handler, path, body, {
+            host,
+            origin: `http://${host}`,
+          });
+
+          assert.equal(response.status, 200, label);
+          assert.equal(server.requests.length, 1, `${label} は gRPC を呼ぶ`);
+        });
+      }
+    });
+  });
+}
+
+test("Origin が無ければ、ほかのヘッダが正規の要求に見えても 403 で gRPC を呼ばない", async () => {
+  const cases: ReadonlyArray<readonly [label: string, headers: Record<string, string>]> = [
+    ["Host も無い", {}],
+    ["許可ホストに無い Host", { host: "whatever.example" }],
+    ["Sec-Fetch-Site: same-origin", { host: "127.0.0.1:3000", "sec-fetch-site": "same-origin" }],
+    ["Sec-Fetch-Site: none", { host: "127.0.0.1:3000", "sec-fetch-site": "none" }],
+    ["Referer が許可ホスト", { host: "127.0.0.1:3000", referer: "http://127.0.0.1:3000/decisions" }],
+    ["x-forwarded-host が許可ホスト", { host: "127.0.0.1:3000", "x-forwarded-host": "127.0.0.1:3000" }],
+  ];
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const [label, headers] of cases) {
+      await withServer({ approveGoalMerge: { taskName: "マージ", workflow: "simple" } }, async (server) => {
+        const response = await postFromBrowser(postMerge, MERGE_PATH, MERGE_BODY, headers);
+
+        assert.equal(response.status, 403, label);
+        assert.equal(server.requests.length, 0, `${label} は gRPC を呼ばない`);
+      });
+    }
+  });
+});
+
+test("Origin が null や空の書き込みは 403 で gRPC を呼ばない", async () => {
+  await withAllowedHostsEnv(undefined, async () => {
+    for (const origin of ["null", ""]) {
+      await withServer({ approveGoalMerge: { taskName: "マージ", workflow: "simple" } }, async (server) => {
+        const response = await postFromBrowser(postMerge, MERGE_PATH, MERGE_BODY, {
+          host: "127.0.0.1:3000",
+          origin,
+        });
+
+        assert.equal(response.status, 403, JSON.stringify(origin));
+        assert.equal(server.requests.length, 0, JSON.stringify(origin));
+      });
+    }
+  });
 });
 
 test("Sec-Fetch-Site が cross-site の書き込みは 403 で gRPC を呼ばない", async () => {
@@ -736,8 +888,8 @@ test("Sec-Fetch-Site が cross-site なら、許可ホストの Host と Origin 
   await withAllowedHostsEnv(undefined, async () => {
     await withServer({ answerInquiry: { inquiryId: "inquiry-text" } }, async (server) => {
       const response = await postFromBrowser(postAnswer, ANSWER_PATH, ANSWER_BODY, {
-        host: "10.0.1.143:3000",
-        origin: "http://10.0.1.143:3000",
+        host: "100.106.166.1:3000",
+        origin: "http://100.106.166.1:3000",
         "sec-fetch-site": "cross-site",
       });
 
