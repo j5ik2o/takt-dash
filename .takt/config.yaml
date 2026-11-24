@@ -29,3 +29,11 @@ manager:
     - default
     - simple
     - taktdash-change: taktDash の変更作業（計画・実装・レビュー・修正）の標準ワークフロー
+
+# キューのタスクの最終状態（完了・失敗・中断・PR 失敗・工程の上限）を保存した後、
+# 再開位置を変えずに Orca の担当ボットへ知らせる。作業ディレクトリはプロジェクトルート。
+# 終わり方と run・タスク・ゴールの情報は TAKT_FINISH_* の環境変数で渡る。
+# 通知のスクリプトは orca を 10 秒で打ち切り、どんな失敗でも終了コード 0 で終わる。
+task_finish_hook:
+  command: [python3, .takt/scripts/notify_orca.py]
+  timeout_ms: 15000

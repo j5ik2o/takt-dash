@@ -1,35 +1,39 @@
 #!/usr/bin/env python3
-"""notify_orca.py を、偽の orca と偽の run ディレクトリで実行して確かめる。
+"""notify_orca.py を、TAKT の task_finish_hook と同じ環境変数・偽の orca・偽の run で確かめる。
 
 使い方:
     python3 .takt/scripts/notify_orca_test.py
 
 確かめる観点:
   1. 指示文の `orca: bot=<名前> item=<番号>` の行から宛先と項目番号を決め、orca へ
-     --from takt-workflow --to bot:<名前> --type status --subject --body-file --item を渡す。本文には
-     プロジェクト・ゴール ID・タスク・workKey・issue・PR・結果・実行 ID・run のディレクトリ・
-     項目番号が入る。
+     --from takt-workflow --to bot:<名前> --type status --subject --body-file --json --item を渡す。
+     本文にはプロジェクト・ゴール ID・タスク・workKey・issue・PR・結果・実行 ID・run の
+     ディレクトリ・ブランチ・項目番号が入る。送れたら orca が返したメッセージ ID を記録する。
   2. 指示文に行が無いときは、設定の map が指す対応表の `<ゴール ID>:<タスク名>` から
      宛先・項目・issue・PR を決める。
-  3. どちらにも無いときは設定（.takt/notify-orca.json）の default_bot 宛てにし、--item を付けず、
-     項目番号を「不明」と書く。形の崩れた `orca:` 行は使わない。設定は作業用クローンに無ければ
-     プロジェクトの .takt から読む。設定も無ければ送らない。
+  3. どちらにも無いときは設定（<プロジェクト>/.takt/notify-orca.json）の default_bot 宛てにし、
+     --item を付けず、項目番号を「不明」と書く。形の崩れた `orca:` 行は使わない。設定も無ければ送らない。
   3a. issue の欄と Orca の項目番号を取り違えない（指示文に両方がある・issue の URL だけ・
       `orca:` 行だけの 3 通り）。
-  4. 中断の通知は、通知の工程を除いた直前の工程を理由に書き、直前の応答はパスだけを書いて
-     中身を貼らない。
-  5. orca が失敗・時間切れ・存在しない・引数が足りないときも終了コード 0 で終わり、
-     run のディレクトリの notify-orca.log に 1 行残す。orca の標準エラーは本文にも記録にも貼らず、
-     notify-orca.stderr に分けて残す。時間切れでは orca の子プロセスも止める。
-  6. TAKT と同じく HOME などを渡さない最小の環境で動く。
-  7. このリポジトリの設定の default_bot は takt-dash中将（副元帥・元帥を既定にしない）。
-  8. taktdash-change では、COMPLETE へ直接進むのは通知の工程（notify_completed）だけで、
-     ABORT の前には通知の工程を置かない。
+  4. TAKT_FINISH_STATUS と中断の記録から終わり方を決める（完了・失敗・中断・PR 失敗・工程の上限）。
+     ワークフローの ABORT（Workflow aborted by step transition）と停止（INTERRUPTED=true）は中断。
+     完了以外では、終わった工程（meta.json の failure.step、無ければログの最後の step_complete）と
+     TAKT の失敗の理由（1 行、長さを制限）を書く。知らない状態は送らない。
+  5. run のディレクトリが無いときは、tasks.yaml の task_dir の order.md から宛先を読み、
+     <プロジェクト>/.takt/notify-orca.log に記録する。
+  6. orca が失敗・時間切れ・存在しない・引数が不正なときも終了コード 0 で終わり、1 行残す。
+     orca の標準エラーは本文にも記録にも貼らず、notify-orca.stderr に分けて残す。
+     時間切れでは orca の子プロセスも止める。
+  7. TAKT と同じく HOME などを渡さない最小の環境で、プロジェクトルートを作業ディレクトリにして動く。
+  8. このリポジトリの設定: default_bot は takt-dash中将。.takt/config.yaml の task_finish_hook が
+     このスクリプトを呼び、その timeout_ms は orca の打ち切りより長い。taktdash-change には
+     通知の工程が無い（成功の通知が二重にならない）。
 
 実の orca は呼ばない。すべて一時ディレクトリで完結する。
 """
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -40,6 +44,7 @@ import traceback
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent / "notify_orca.py"
+TAKT_DIR = SCRIPT.parent.parent
 SLUG = "20261124-100000-sample-task-abcdef"
 GOAL = "9a930940-7d84-47a2-b7cc-0377f0640094"
 TEST_TIMEOUT_SECONDS = 30
@@ -55,6 +60,7 @@ for arg in "$@"; do
 done
 {tail}
 """
+SENT = "echo '{\"ok\":true,\"result\":{\"message\":{\"id\":\"msg_abc123\"}}}'; exit 0"
 
 
 class TestTimeout(Exception):
@@ -68,55 +74,48 @@ def _on_timeout(signum, frame):
 class Workspace:
     """偽のプロジェクト、作業用クローン、run ディレクトリ、偽の orca を持つ一時ディレクトリ。"""
 
-    def __init__(self, order, orca_tail="exit 0", steps=("mark_in_progress", "develop")):
+    def __init__(self, order, orca_tail=SENT, meta=None):
         self.base = Path(tempfile.mkdtemp(prefix="notify-orca-test-")).resolve()
         self.project = self.base / "takt-dash"
         self.clone = self.base / "takt-worktrees" / "20261124T1000-sample-task"
-        self.clone.mkdir(parents=True)
         self.run = self.clone / ".takt" / "runs" / SLUG
-        context = self.run / "context"
-        (context / "task").mkdir(parents=True)
-        (context / "task" / "order.md").write_text(order, encoding="utf-8")
-        commands = context / "system-commands" / "uuid"
-        commands.mkdir(parents=True)
-        self.response = commands / "response.txt"
-        self.response.write_text("SECRET-RESPONSE-CONTENT\n", encoding="utf-8")
-        executions = [{"workflow": "taktdash-change", "step": step, "count": 1} for step in steps]
+        (self.run / "context" / "task").mkdir(parents=True)
+        (self.run / "context" / "task" / "order.md").write_text(order, encoding="utf-8")
         (self.run / "meta.json").write_text(
-            json.dumps({
-                "runSlug": SLUG,
-                "workflow": "taktdash-change",
-                "status": "running",
-                "stepExecutions": executions,
-            }),
+            json.dumps(meta or {"runSlug": SLUG, "workflow": "taktdash-change", "status": "completed"}),
             encoding="utf-8",
         )
-        tasks = self.project / ".takt" / "tasks.yaml"
-        tasks.parent.mkdir(parents=True)
-        tasks.write_text(
+        self.task_dir = self.project / ".takt" / "tasks" / SLUG
+        self.task_dir.mkdir(parents=True)
+        (self.task_dir / "order.md").write_text(order, encoding="utf-8")
+        (self.project / ".takt" / "tasks.yaml").write_text(
             "tasks:\n"
+            "  - name: other-task\n"
+            "    status: completed\n"
             f"  - goal_id: {GOAL}\n"
             "    goal_work_key: sample-work-key\n"
             "    name: sample-task\n"
-            "    status: running\n"
+            "    status: completed\n"
             f"    run_slug: {SLUG}\n"
             "    execution_id: 11111111-2222-3333-4444-555555555555\n"
+            f"    task_dir: .takt/tasks/{SLUG}\n"
             f"    worktree_path: {self.clone}\n"
             "    workflow: taktdash-change\n",
             encoding="utf-8",
         )
         self.map = self.base / "takt-orca-map.json"
-        self.config = self.clone / ".takt" / "notify-orca.json"
-        self.write_config({"default_bot": "takt-dash中将", "map": str(self.map)})
+        self.config = self.project / ".takt" / "notify-orca.json"
+        self.config.write_text(
+            json.dumps({"default_bot": "takt-dash中将", "map": str(self.map)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
         self.out = self.base / "orca-call"
         self.orca = self.base / "fake-orca"
-        self.orca.write_text(FAKE_ORCA.format(out=self.out, tail=orca_tail), encoding="utf-8")
-        self.orca.chmod(0o755)
+        self.write_orca(orca_tail)
 
-    def write_config(self, data, path=None):
-        path = path or self.config
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    def write_orca(self, tail):
+        self.orca.write_text(FAKE_ORCA.format(out=self.out, tail=tail), encoding="utf-8")
+        self.orca.chmod(0o755)
 
     def __enter__(self):
         return self
@@ -125,17 +124,32 @@ class Workspace:
         shutil.rmtree(self.base, ignore_errors=True)
         return False
 
-    def run_script(self, *args, orca=None, timeout="5"):
+    def finish_env(self, status="completed", **extra):
+        """TAKT の task_finish_hook が渡すのと同じ形の環境変数。"""
         env = {
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "TMPDIR": str(self.base),
-            "TAKT_PREVIOUS_RESPONSE_FILE": str(self.response),
+            "TAKT_FINISH_TASK_NAME": "sample-task",
+            "TAKT_FINISH_STATUS": status,
+            "TAKT_FINISH_PROJECT_DIR": str(self.project),
+            "TAKT_FINISH_INTERRUPTED": "false",
+            "TAKT_FINISH_COMPLETED_AT": "2026-11-24T10:10:00.000Z",
+            "TAKT_FINISH_RUN_SLUG": SLUG,
+            "TAKT_FINISH_RUN_DIR": str(self.run),
+            "TAKT_FINISH_BRANCH": "takt/sample-task",
+            "TAKT_FINISH_WORKTREE_PATH": str(self.clone),
+            "TAKT_FINISH_GOAL_ID": GOAL,
         }
+        env.update(extra)
+        return {key: value for key, value in env.items() if value is not None}
+
+    def run_script(self, *args, env=None, orca=None, timeout="5"):
         command = [sys.executable, str(SCRIPT), *args,
                    "--orca", str(orca or self.orca), "--timeout", timeout]
         started = time.monotonic()
         completed = subprocess.run(
-            command, cwd=self.clone, env=env, capture_output=True, text=True, timeout=25
+            command, cwd=self.project, env=env or self.finish_env(),
+            capture_output=True, text=True, timeout=25,
         )
         return completed, time.monotonic() - started
 
@@ -145,8 +159,8 @@ class Workspace:
     def body(self):
         return self.out.with_suffix(".body").read_text(encoding="utf-8")
 
-    def log(self):
-        return (self.run / "notify-orca.log").read_text(encoding="utf-8")
+    def log(self, directory=None):
+        return ((directory or self.run) / "notify-orca.log").read_text(encoding="utf-8")
 
 
 def option(args, name):
@@ -157,7 +171,8 @@ def option(args, name):
 def test_order_line_routes_to_bot_and_item() -> None:
     order = "issue #93 の修正。\nPR https://github.com/j5ik2o/takt-dash/pull/341\norca: bot=副元帥 item=149\n"
     with Workspace(order) as ws:
-        completed, _ = ws.run_script("--result", "completed")
+        env = ws.finish_env(TAKT_FINISH_PR_URL="https://github.com/j5ik2o/takt-dash/pull/350")
+        completed, _ = ws.run_script(env=env)
         assert completed.returncode == 0, completed
         args = ws.args()
         assert args[:2] == ["orchestration", "send"], args
@@ -166,22 +181,25 @@ def test_order_line_routes_to_bot_and_item() -> None:
         assert option(args, "--type") == "status"
         assert option(args, "--subject") == "TAKT 完了: sample-task"
         assert option(args, "--item") == "149"
-        assert "--body-file" in args
+        assert "--json" in args, args
         body = ws.body()
         for expected in (
             f"プロジェクト: {ws.project}",
             f"ゴール ID: {GOAL}",
             "タスク: sample-task（workKey: sample-work-key）",
             "issue: 93",
-            "PR: https://github.com/j5ik2o/takt-dash/pull/341",
-            "結果: 完了",
-            "実行 ID: 11111111-2222-3333-4444-555555555555",
+            "PR: https://github.com/j5ik2o/takt-dash/pull/341, https://github.com/j5ik2o/takt-dash/pull/350",
+            "結果: 完了（TAKT の状態: completed、中断の記録: なし）",
+            "ワークフロー: taktdash-change",
+            f"実行 ID: 11111111-2222-3333-4444-555555555555（run: {SLUG}）",
             f"run のディレクトリ: {ws.run}",
+            "ブランチ: takt/sample-task",
+            f"指示文: {ws.run / 'context' / 'task' / 'order.md'}",
             "Orca の項目番号: 149（宛先の決め方: 指示文）",
         ):
             assert expected in body, f"本文に {expected!r} がありません:\n{body}"
         assert "理由:" not in body
-        assert "送信した: bot:副元帥 item=149" in ws.log()
+        assert "送信した（msg_abc123）: bot:副元帥 item=149" in ws.log()
         assert len(completed.stdout.splitlines()) == 1, completed.stdout
 
 
@@ -193,7 +211,7 @@ def test_map_routes_when_order_has_no_line() -> None:
                 "pr": "https://github.com/j5ik2o/takt-dash/pull/341",
             },
         }), encoding="utf-8")
-        completed, _ = ws.run_script("--result", "completed")
+        completed, _ = ws.run_script()
         assert completed.returncode == 0
         args = ws.args()
         assert option(args, "--to") == "bot:takt-dash中将"
@@ -206,7 +224,7 @@ def test_map_routes_when_order_has_no_line() -> None:
 
 def test_default_route_without_line_or_map() -> None:
     with Workspace("orca: bot=副元帥 item=abc\norca: bot=\"x y\" item=3\n") as ws:
-        completed, _ = ws.run_script("--result", "completed")
+        completed, _ = ws.run_script()
         assert completed.returncode == 0
         args = ws.args()
         assert option(args, "--to") == "bot:takt-dash中将"
@@ -214,17 +232,76 @@ def test_default_route_without_line_or_map() -> None:
         assert "Orca の項目番号: 不明（宛先の決め方: 既定）" in ws.body()
 
 
-def test_aborted_reports_previous_step_without_response_body() -> None:
-    steps = ("mark_in_progress", "develop", "machine_gate", "notify_aborted")
-    with Workspace("orca: bot=副元帥 item=149\n", steps=steps) as ws:
-        completed, _ = ws.run_script("--result", "aborted")
+FAILED_META = {
+    "runSlug": SLUG, "workflow": "taktdash-change", "status": "failed",
+    "failure": {"step": "machine_gate", "error": "x"},
+}
+
+
+def test_finish_kinds_set_subject_and_reason() -> None:
+    cases = {
+        "失敗": ({"TAKT_FINISH_STATUS": "failed", "TAKT_FINISH_FAILURE_REASON": "rule_no_match"},
+                 "TAKT 失敗: sample-task", "（TAKT の状態: failed、中断の記録: なし）",
+                 "理由: 工程 taktdash-change/machine_gate のあと失敗で終わった（TAKT の記録: rule_no_match）"),
+        "ワークフローの ABORT": (
+            {"TAKT_FINISH_STATUS": "failed", "TAKT_FINISH_FAILURE_REASON": "Workflow aborted by step transition"},
+            "TAKT 中断: sample-task", "（TAKT の状態: failed、中断の記録: なし）",
+            "理由: 工程 taktdash-change/machine_gate のあと中断で終わった"
+            "（TAKT の記録: Workflow aborted by step transition）"),
+        "停止": ({"TAKT_FINISH_STATUS": "failed", "TAKT_FINISH_INTERRUPTED": "true",
+                  "TAKT_FINISH_FAILURE_REASON": "Task stopped"},
+                 "TAKT 中断: sample-task", "（TAKT の状態: failed、中断の記録: あり）",
+                 "のあと中断で終わった（TAKT の記録: Task stopped）"),
+        "PR 失敗": ({"TAKT_FINISH_STATUS": "pr_failed", "TAKT_FINISH_FAILURE_REASON": "gh pr create failed"},
+                    "TAKT PR 失敗: sample-task", "（TAKT の状態: pr_failed、",
+                    "のあとPR 失敗で終わった（TAKT の記録: gh pr create failed）"),
+        "工程の上限": ({"TAKT_FINISH_STATUS": "exceeded"},
+                       "TAKT 工程の上限: sample-task", "（TAKT の状態: exceeded、",
+                       "理由: 工程 taktdash-change/machine_gate のあと工程の上限で終わった\n"),
+    }
+    for label, (extra, subject, state, reason) in cases.items():
+        with Workspace("orca: bot=takt-dash中将 item=238\n", meta=FAILED_META) as ws:
+            completed, _ = ws.run_script(env=ws.finish_env(**extra))
+            assert completed.returncode == 0, label
+            assert option(ws.args(), "--subject") == subject, (label, ws.args())
+            body = ws.body()
+            assert state in body, (label, body)
+            assert reason in body, (label, body)
+
+
+def test_failure_reason_is_one_short_line() -> None:
+    reason = "Step \"develop\" failed:\n" + "x" * 1000
+    with Workspace("orca: bot=takt-dash中将 item=238\n", meta=FAILED_META) as ws:
+        completed, _ = ws.run_script(env=ws.finish_env("failed", TAKT_FINISH_FAILURE_REASON=reason))
         assert completed.returncode == 0
-        assert option(ws.args(), "--subject") == "TAKT 中断: sample-task"
-        body = ws.body()
-        assert "結果: 中断" in body
-        assert f"理由: 工程 taktdash-change/machine_gate のあと中断で終わった（直前の応答: {ws.response}）" in body, body
-        assert "SECRET-RESPONSE-CONTENT" not in body
-        assert "SECRET-RESPONSE-CONTENT" not in ws.log()
+        line = next(line for line in ws.body().splitlines() if line.startswith("- 理由:"))
+        assert "Step \"develop\" failed: xxx" in line, line
+        assert line.endswith("…）") and len(line) < 400, line
+
+
+def test_reason_step_comes_from_run_log_without_failure_step() -> None:
+    with Workspace("orca: bot=副元帥 item=149\n") as ws:
+        logs = ws.run / "logs"
+        logs.mkdir()
+        order = ["machine_gate", "fix_machine_gate_fmt", "machine_gate", "fix_machine_gate_clippy",
+                 "machine_gate", "fix_machine_gate_fmt"]
+        records = [{"type": "step_start", "step": "x", "workflow": "taktdash-change"}]
+        records += [{"type": "step_complete", "step": step, "workflow": "taktdash-change"} for step in order]
+        (logs / "20261124-100000-abcdef.jsonl").write_text(
+            "\n".join(json.dumps(record) for record in records) + "\nnot json\n", encoding="utf-8"
+        )
+        completed, _ = ws.run_script(env=ws.finish_env("failed"))
+        assert completed.returncode == 0
+        assert "理由: 工程 taktdash-change/fix_machine_gate_fmt のあと失敗で終わった\n" in ws.body(), ws.body()
+
+
+def test_unknown_status_is_not_sent() -> None:
+    for status in ("running", None):
+        with Workspace("orca: bot=副元帥 item=149\n") as ws:
+            completed, _ = ws.run_script(env=ws.finish_env(status))
+            assert completed.returncode == 0, status
+            assert not ws.out.with_suffix(".args").exists(), f"{status} なのに orca を呼びました"
+            assert "終わり方が分からないので送らなかった" in ws.log(ws.project / ".takt"), status
 
 
 ISSUE_URL = "https://github.com/j5ik2o/takt-dash/issues/93"
@@ -238,7 +315,7 @@ def test_issue_and_item_are_not_confused() -> None:
     }
     for label, (order, issue, item, to) in cases.items():
         with Workspace(order) as ws:
-            completed, _ = ws.run_script("--result", "completed")
+            completed, _ = ws.run_script()
             assert completed.returncode == 0, label
             args, body = ws.args(), ws.body()
             assert option(args, "--to") == to, (label, args)
@@ -252,51 +329,31 @@ def test_issue_and_item_are_not_confused() -> None:
             assert "issue: 149" not in body, (label, body)
 
 
-def test_project_config_is_read_when_clone_has_none() -> None:
-    with Workspace("宛先の行は無い。\n") as ws:
-        ws.config.unlink()
-        ws.write_config({"default_bot": "fraktor-ng-rs中将"}, ws.project / ".takt" / "notify-orca.json")
-        completed, _ = ws.run_script("--result", "completed")
+def test_order_from_task_dir_when_run_dir_is_gone() -> None:
+    with Workspace("orca: bot=副元帥 item=149\n") as ws:
+        shutil.rmtree(ws.clone)
+        completed, _ = ws.run_script(env=ws.finish_env("failed", TAKT_FINISH_RUN_DIR=None))
         assert completed.returncode == 0
-        assert option(ws.args(), "--to") == "bot:fraktor-ng-rs中将"
+        assert option(ws.args(), "--item") == "149"
+        body = ws.body()
+        assert f"指示文: {ws.task_dir / 'order.md'}" in body, body
+        assert "run のディレクトリ: 不明" in body, body
+        assert "理由: 工程 不明 のあと失敗で終わった" in body, body
+        assert "送信した" in ws.log(ws.project / ".takt")
 
 
 def test_without_destination_nothing_is_sent() -> None:
     with Workspace("宛先の行は無い。\n") as ws:
         ws.config.unlink()
-        completed, _ = ws.run_script("--result", "completed")
+        completed, _ = ws.run_script()
         assert completed.returncode == 0
         assert not ws.out.with_suffix(".args").exists(), "宛先が無いのに orca を呼びました"
         assert "どれにも無いので送らなかった" in ws.log()
 
 
-def test_repository_default_bot_is_the_project_officer() -> None:
-    config = json.loads((SCRIPT.parent.parent / "notify-orca.json").read_text(encoding="utf-8"))
-    assert config["default_bot"] == "takt-dash中将", config
-    assert config["default_bot"] not in ("副元帥", "元帥"), config
-
-
-def test_aborted_reports_last_completed_step_from_run_log() -> None:
-    # stepExecutions は初出順（fmt, clippy）だが、実際に最後に終わったのは 2 回目の fmt 修正。
-    steps = ("machine_gate", "fix_machine_gate_fmt", "fix_machine_gate_clippy", "notify_aborted")
-    with Workspace("orca: bot=副元帥 item=149\n", steps=steps) as ws:
-        logs = ws.run / "logs"
-        logs.mkdir()
-        order = ["machine_gate", "fix_machine_gate_fmt", "machine_gate", "fix_machine_gate_clippy",
-                 "machine_gate", "fix_machine_gate_fmt", "notify_aborted"]
-        records = [{"type": "step_start", "step": "x", "workflow": "taktdash-change"}]
-        records += [{"type": "step_complete", "step": step, "workflow": "taktdash-change"} for step in order]
-        (logs / "20261124-100000-abcdef.jsonl").write_text(
-            "\n".join(json.dumps(record) for record in records) + "\nnot json\n", encoding="utf-8"
-        )
-        completed, _ = ws.run_script("--result", "aborted")
-        assert completed.returncode == 0
-        assert "理由: 工程 taktdash-change/fix_machine_gate_fmt のあと中断で終わった" in ws.body(), ws.body()
-
-
 def test_orca_failure_still_exits_zero() -> None:
     with Workspace("orca: bot=副元帥 item=149\n", orca_tail="echo boom >&2; exit 3") as ws:
-        completed, _ = ws.run_script("--result", "completed")
+        completed, _ = ws.run_script()
         assert completed.returncode == 0
         assert f"orca が終了コード 3 で失敗した（標準エラー: {ws.run / 'notify-orca.stderr'}）" in ws.log()
         assert "boom" not in ws.log() and "boom" not in completed.stdout
@@ -304,13 +361,10 @@ def test_orca_failure_still_exits_zero() -> None:
 
 
 def test_orca_timeout_is_cut_and_child_stopped() -> None:
-    tail = f'sleep 30 & echo $! > "{{pidfile}}"; wait'
     with Workspace("orca: bot=副元帥 item=149\n") as ws:
         pidfile = ws.base / "child.pid"
-        ws.orca.write_text(
-            FAKE_ORCA.format(out=ws.out, tail=tail.format(pidfile=pidfile)), encoding="utf-8"
-        )
-        completed, elapsed = ws.run_script("--result", "completed", timeout="3")
+        ws.write_orca(f'sleep 30 & echo $! > "{pidfile}"; wait')
+        completed, elapsed = ws.run_script(timeout="3")
         assert completed.returncode == 0
         assert elapsed < 15, f"時間切れで打ち切られていません: {elapsed:.1f}s"
         assert "orca が 3 秒で終わらず打ち切った" in ws.log()
@@ -328,38 +382,40 @@ def test_orca_timeout_is_cut_and_child_stopped() -> None:
 
 def test_missing_orca_still_exits_zero() -> None:
     with Workspace("orca: bot=副元帥 item=149\n") as ws:
-        completed, _ = ws.run_script("--result", "completed", orca=ws.base / "no-such-orca")
+        completed, _ = ws.run_script(orca=ws.base / "no-such-orca")
         assert completed.returncode == 0
         assert "orca を起動できない" in ws.log()
 
 
-def test_missing_result_argument_still_exits_zero() -> None:
+def test_invalid_argument_still_exits_zero() -> None:
     with Workspace("orca: bot=副元帥 item=149\n") as ws:
-        completed, _ = ws.run_script()
+        completed, _ = ws.run_script("--no-such-option")
         assert completed.returncode == 0
-        assert not ws.out.with_suffix(".args").exists(), "引数不足なのに orca を呼びました"
-        assert "引数が不正" in (ws.clone / ".takt" / "notify-orca.log").read_text(encoding="utf-8")
+        assert not ws.out.with_suffix(".args").exists(), "引数が不正なのに orca を呼びました"
+        assert "引数が不正" in ws.log(ws.project / ".takt")
 
 
-WORKFLOW = SCRIPT.parent.parent / "workflows" / "taktdash-change.yaml"
+def test_repository_default_bot_is_the_project_officer() -> None:
+    config = json.loads((TAKT_DIR / "notify-orca.json").read_text(encoding="utf-8"))
+    assert config["default_bot"] == "takt-dash中将", config
+    assert config["default_bot"] not in ("副元帥", "元帥"), config
 
 
-def test_taktdash_change_completes_only_through_notify_step() -> None:
-    lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
-    step = None
-    direct = []
-    for line in lines:
-        stripped = line.strip()
-        if line.startswith("  - name: "):
-            step = stripped.removeprefix("- name: ")
-        if stripped in ("next: COMPLETE", "next: ABORT"):
-            direct.append((step, stripped.removeprefix("next: ")))
-    completes = [name for name, terminal in direct if terminal == "COMPLETE"]
-    assert completes == ["notify_completed"], direct
-    # 失敗・中断の前には通知の工程を置かない（failure.step と再開位置が通知の工程になるため）。
-    assert all(name != "notify_aborted" for name, _ in direct), direct
-    assert "notify_aborted" not in "\n".join(lines)
-    assert "command: python3 .takt/scripts/notify_orca.py --result completed" in "\n".join(lines)
+def test_project_finish_hook_calls_this_script() -> None:
+    text = (TAKT_DIR / "config.yaml").read_text(encoding="utf-8")
+    block = re.search(r"^task_finish_hook:\n((?:  .*\n)+)", text, re.MULTILINE)
+    assert block, "config.yaml に task_finish_hook がありません"
+    assert "  command: [python3, .takt/scripts/notify_orca.py]\n" in block.group(1), block.group(1)
+    timeout = re.search(r"^  timeout_ms: (\d+)$", block.group(1), re.MULTILINE)
+    # orca の打ち切り（既定 10 秒）とスクリプトの起動に余裕を残し、TAKT 側の打ち切りより先に終わる。
+    assert timeout and int(timeout.group(1)) >= 12000, block.group(1)
+
+
+def test_taktdash_change_has_no_notify_step() -> None:
+    # 成功の通知は task_finish_hook だけが送る。ワークフローの工程からも送ると二重になる。
+    text = (TAKT_DIR / "workflows" / "taktdash-change.yaml").read_text(encoding="utf-8")
+    assert "notify_orca" not in text
+    assert "notify_completed" not in text
 
 
 def main() -> int:
@@ -367,17 +423,20 @@ def main() -> int:
         test_order_line_routes_to_bot_and_item,
         test_map_routes_when_order_has_no_line,
         test_default_route_without_line_or_map,
-        test_aborted_reports_previous_step_without_response_body,
+        test_finish_kinds_set_subject_and_reason,
+        test_failure_reason_is_one_short_line,
+        test_reason_step_comes_from_run_log_without_failure_step,
+        test_unknown_status_is_not_sent,
         test_issue_and_item_are_not_confused,
-        test_project_config_is_read_when_clone_has_none,
+        test_order_from_task_dir_when_run_dir_is_gone,
         test_without_destination_nothing_is_sent,
-        test_repository_default_bot_is_the_project_officer,
-        test_aborted_reports_last_completed_step_from_run_log,
         test_orca_failure_still_exits_zero,
         test_orca_timeout_is_cut_and_child_stopped,
         test_missing_orca_still_exits_zero,
-        test_missing_result_argument_still_exits_zero,
-        test_taktdash_change_completes_only_through_notify_step,
+        test_invalid_argument_still_exits_zero,
+        test_repository_default_bot_is_the_project_officer,
+        test_project_finish_hook_calls_this_script,
+        test_taktdash_change_has_no_notify_step,
     ]
     failures = 0
     for test in tests:
