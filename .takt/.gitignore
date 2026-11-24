@@ -13,6 +13,10 @@
 !workflows/**
 !steps/
 !steps/**
+
+# Workflow helper scripts (version-controlled)
+!scripts/
+!scripts/**
 !facets/
 !facets/personas/
 !facets/personas/**
