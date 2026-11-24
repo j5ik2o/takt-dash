@@ -13,7 +13,7 @@ all_steps:
     - ref: taktdash-coding-rules
       position: before_instruction
 # 判定も1工程として数える。従来の70工程で、最短6工程ごとに判定しても最大11回。
-# 終わりの通知（notify_completed / notify_aborted）が1工程使うため、その分の1を足す。
+# 成功の終わりの通知（notify_completed）が1工程使うため、その分の1を足す。
 max_steps: 82
 initial_step: mark_in_progress
 loop_monitors:
@@ -43,7 +43,7 @@ loop_monitors:
         - condition: 進展あり、または比較の証拠が不足
           next: machine_gate
         - condition: 同じ指摘と原因が続き差分・検証結果・知見に進展がないと確認した
-          next: notify_aborted
+          next: ABORT
 steps:
   - name: mark_in_progress
     description: 開始時に対象 issue を解決し、ボードの Status を In Progress にする（失敗は非致命）
@@ -112,7 +112,7 @@ steps:
       - condition: COMPLETE
         next: machine_gate
       - condition: ABORT
-        next: notify_aborted
+        next: ABORT
   - name: machine_gate
     description: proto-check・fmt・clippy・test・typecheck・lint を検査ごとに実行し、すべて通るときだけ完了とする
     mode: system
@@ -157,7 +157,7 @@ steps:
       - condition: when(context.machine_gate.proto_check.exit_code == 0 && context.machine_gate.fmt.exit_code == 0 && context.machine_gate.clippy.exit_code == 0 && context.machine_gate.test.exit_code == 0 && context.machine_gate.typecheck.exit_code == 0 && context.machine_gate.lint.exit_code == 0)
         next: aislop_gate
       - condition: when(true)
-        next: notify_aborted
+        next: ABORT
   - name: aislop_gate
     description: aislop の警告以上の指摘を受け入れ一覧と照合し、一覧に無ければ失敗する機械ゲート
     mode: system
@@ -194,7 +194,7 @@ steps:
       - condition: make fmt の失敗を修正して検証した
         next: machine_gate
       - condition: 裏付けられた原因を安全に修正または検証できない
-        next: notify_aborted
+        next: ABORT
   - name: fix_machine_gate_clippy
     description: make clippy の失敗出力を確認して修正し、機械ゲートへ戻る
     capabilities: edit
@@ -218,7 +218,7 @@ steps:
       - condition: make clippy の失敗を修正して検証した
         next: machine_gate
       - condition: 裏付けられた原因を安全に修正または検証できない
-        next: notify_aborted
+        next: ABORT
   - name: fix_machine_gate_test
     description: make test の失敗出力を確認して修正し、機械ゲートへ戻る
     capabilities: edit
@@ -242,7 +242,7 @@ steps:
       - condition: make test の失敗を修正して検証した
         next: machine_gate
       - condition: 裏付けられた原因を安全に修正または検証できない
-        next: notify_aborted
+        next: ABORT
   - name: fix_machine_gate_typecheck
     description: make typecheck の失敗出力を確認して修正し、機械ゲートへ戻る
     capabilities: edit
@@ -266,7 +266,7 @@ steps:
       - condition: make typecheck の失敗を修正して検証した
         next: machine_gate
       - condition: 裏付けられた原因を安全に修正または検証できない
-        next: notify_aborted
+        next: ABORT
   - name: fix_machine_gate_lint
     description: make lint の失敗出力を確認して修正し、機械ゲートへ戻る
     capabilities: edit
@@ -290,7 +290,7 @@ steps:
       - condition: make lint の失敗を修正して検証した
         next: machine_gate
       - condition: 裏付けられた原因を安全に修正または検証できない
-        next: notify_aborted
+        next: ABORT
   - name: fix_machine_gate_proto_check
     description: make proto-check の失敗出力を確認して修正し、機械ゲートへ戻る
     capabilities: edit
@@ -314,7 +314,7 @@ steps:
       - condition: make proto-check の失敗を修正して検証した
         next: machine_gate
       - condition: 裏付けられた原因を安全に修正または検証できない
-        next: notify_aborted
+        next: ABORT
   - name: fix_aislop_gate
     description: aislop の警告以上の指摘をコードの修正で解消し、検証してから機械ゲートへ戻る
     capabilities: edit
@@ -337,9 +337,11 @@ steps:
       - condition: aislop の指摘をコードの修正で解消し、検証した
         next: machine_gate
       - condition: 修正できない
-        next: notify_aborted
-  # 終わりを Orca の担当ボットへ知らせる。通知は失敗しても終了コード 0 で、
-  # 判定はどの結果でも元の行き先（COMPLETE / ABORT）へ進む。
+        next: ABORT
+  # 成功の終わりを Orca の担当ボットへ知らせる。通知は失敗しても終了コード 0 で、
+  # 判定はどの結果でも COMPLETE へ進む。
+  # 失敗・中断の前には通知の工程を置かない。置くと TAKT がタスクの failure.step と
+  # 再開位置をその工程として保存し、再試行が修正をせずに ABORT へ戻るため。
   - name: notify_completed
     description: 成功で終わることを Orca の担当ボットへ知らせる（失敗は非致命）
     mode: system
@@ -351,14 +353,3 @@ steps:
     rules:
       - condition: when(true)
         next: COMPLETE
-  - name: notify_aborted
-    description: 失敗・中断で終わることを Orca の担当ボットへ知らせる（失敗は非致命）
-    mode: system
-    system_inputs:
-      - type: command
-        as: notify
-        command: python3 .takt/scripts/notify_orca.py --result aborted
-        timeout_ms: 30000
-    rules:
-      - condition: when(true)
-        next: ABORT

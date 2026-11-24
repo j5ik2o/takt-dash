@@ -6,9 +6,11 @@
     python3 .takt/scripts/notify_orca.py --result aborted
 
 結果の値:
-  completed  ワークフローが COMPLETE へ進む直前
-  aborted    ワークフローが ABORT へ進む直前（理由は直前の工程名で示す）
-  failed / question も受け付ける（ワークフロー以外から呼ぶとき用）
+  completed  ワークフローが COMPLETE へ進む直前（taktdash-change の notify_completed）
+  aborted / failed / question  いまはワークフローから呼ばない。ABORT の前に通知の工程を置くと
+             TAKT がタスクの failure.step と再開位置をその工程として保存し、再試行が修正を
+             せずに ABORT へ戻るため。TAKT 本体に、再開位置を変えずに終了時に外部コマンドを
+             呼ぶ出口ができたときに使う（理由は直前に終わった工程名で示す）。
 
 宛先の決め方（先に見つかったものを使う）。宛先はその TAKT の仕事を管理しているボットにする:
   1. タスクの指示文（order.md）の 1 行 `orca: bot=<ボット名> item=<番号>`。投入したボットが

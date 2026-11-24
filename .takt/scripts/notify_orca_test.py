@@ -23,8 +23,8 @@
      notify-orca.stderr に分けて残す。時間切れでは orca の子プロセスも止める。
   6. TAKT と同じく HOME などを渡さない最小の環境で動く。
   7. このリポジトリの設定の default_bot は takt-dash中将（副元帥・元帥を既定にしない）。
-  8. taktdash-change では、COMPLETE と ABORT へ直接進むのは通知の工程（notify_completed /
-     notify_aborted）だけで、ほかの工程の終わりはすべて通知を通る。
+  8. taktdash-change では、COMPLETE へ直接進むのは通知の工程（notify_completed）だけで、
+     ABORT の前には通知の工程を置かない。
 
 実の orca は呼ばない。すべて一時ディレクトリで完結する。
 """
@@ -344,7 +344,7 @@ def test_missing_result_argument_still_exits_zero() -> None:
 WORKFLOW = SCRIPT.parent.parent / "workflows" / "taktdash-change.yaml"
 
 
-def test_taktdash_change_ends_only_through_notify_steps() -> None:
+def test_taktdash_change_completes_only_through_notify_step() -> None:
     lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
     step = None
     direct = []
@@ -354,9 +354,12 @@ def test_taktdash_change_ends_only_through_notify_steps() -> None:
             step = stripped.removeprefix("- name: ")
         if stripped in ("next: COMPLETE", "next: ABORT"):
             direct.append((step, stripped.removeprefix("next: ")))
-    assert direct == [("notify_completed", "COMPLETE"), ("notify_aborted", "ABORT")], direct
-    for name, result in (("notify_completed", "completed"), ("notify_aborted", "aborted")):
-        assert f"command: python3 .takt/scripts/notify_orca.py --result {result}" in "\n".join(lines), name
+    completes = [name for name, terminal in direct if terminal == "COMPLETE"]
+    assert completes == ["notify_completed"], direct
+    # 失敗・中断の前には通知の工程を置かない（failure.step と再開位置が通知の工程になるため）。
+    assert all(name != "notify_aborted" for name, _ in direct), direct
+    assert "notify_aborted" not in "\n".join(lines)
+    assert "command: python3 .takt/scripts/notify_orca.py --result completed" in "\n".join(lines)
 
 
 def main() -> int:
@@ -374,7 +377,7 @@ def main() -> int:
         test_orca_timeout_is_cut_and_child_stopped,
         test_missing_orca_still_exits_zero,
         test_missing_result_argument_still_exits_zero,
-        test_taktdash_change_ends_only_through_notify_steps,
+        test_taktdash_change_completes_only_through_notify_step,
     ]
     failures = 0
     for test in tests:
