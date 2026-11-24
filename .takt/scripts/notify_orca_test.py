@@ -16,9 +16,10 @@
   3a. issue の欄と Orca の項目番号を取り違えない（指示文に両方がある・issue の URL だけ・
       `orca:` 行だけの 3 通り）。
   4. TAKT_FINISH_STATUS と中断の記録から終わり方を決める（完了・失敗・中断・PR 失敗・工程の上限）。
-     ワークフローの ABORT（Workflow aborted by step transition）と停止（INTERRUPTED=true）は中断。
+     ワークフローの ABORT（Workflow aborted by step transition）、ゴールの中止・一時停止
+     （Goal <ID> was aborted / paused）、停止（INTERRUPTED=true）は中断。
      完了以外では、終わった工程（meta.json の failure.step、無ければログの最後の step_complete）と
-     TAKT の失敗の理由（1 行、長さを制限）を書く。知らない状態は送らない。
+     TAKT の失敗の理由（1 行、長さを制限、認証情報らしい値は伏せる）を書く。知らない状態は送らない。
   5. run のディレクトリが無いときは、tasks.yaml の task_dir の order.md から宛先を読み、
      <プロジェクト>/.takt/notify-orca.log に記録する。
   6. orca が失敗・時間切れ・存在しない・引数が不正なときも終了コード 0 で終わり、1 行残す。
@@ -252,6 +253,16 @@ def test_finish_kinds_set_subject_and_reason() -> None:
                   "TAKT_FINISH_FAILURE_REASON": "Task stopped"},
                  "TAKT 中断: sample-task", "（TAKT の状態: failed、中断の記録: あり）",
                  "のあと中断で終わった（TAKT の記録: Task stopped）"),
+        "ゴールの中止": ({"TAKT_FINISH_STATUS": "failed", "TAKT_FINISH_FAILURE_REASON": f"Goal {GOAL} was aborted"},
+                         "TAKT 中断: sample-task", "（TAKT の状態: failed、中断の記録: なし）",
+                         f"のあと中断で終わった（TAKT の記録: Goal {GOAL} was aborted）"),
+        "ゴールの一時停止": ({"TAKT_FINISH_STATUS": "failed", "TAKT_FINISH_INTERRUPTED": "true",
+                              "TAKT_FINISH_FAILURE_REASON": f"Goal {GOAL} was paused"},
+                             "TAKT 中断: sample-task", "（TAKT の状態: failed、中断の記録: あり）",
+                             f"のあと中断で終わった（TAKT の記録: Goal {GOAL} was paused）"),
+        "文言が完全には一致しない": (
+            {"TAKT_FINISH_STATUS": "failed", "TAKT_FINISH_FAILURE_REASON": "Step x failed: Goal y was aborted later"},
+            "TAKT 失敗: sample-task", "（TAKT の状態: failed、", "のあと失敗で終わった"),
         "PR 失敗": ({"TAKT_FINISH_STATUS": "pr_failed", "TAKT_FINISH_FAILURE_REASON": "gh pr create failed"},
                     "TAKT PR 失敗: sample-task", "（TAKT の状態: pr_failed、",
                     "のあとPR 失敗で終わった（TAKT の記録: gh pr create failed）"),
@@ -277,6 +288,20 @@ def test_failure_reason_is_one_short_line() -> None:
         line = next(line for line in ws.body().splitlines() if line.startswith("- 理由:"))
         assert "Step \"develop\" failed: xxx" in line, line
         assert line.endswith("…）") and len(line) < 400, line
+
+
+def test_failure_reason_hides_credentials() -> None:
+    token = "ghp_" + "a" * 36
+    reason = (f"gh failed: Authorization: Bearer abc.def.ghi; GH_TOKEN={token} "
+              "api_key=sk-" + "b" * 30 + " password=\"hunter2\" token limit exceeded")
+    with Workspace("orca: bot=takt-dash中将 item=238\n", meta=FAILED_META) as ws:
+        completed, _ = ws.run_script(env=ws.finish_env("failed", TAKT_FINISH_FAILURE_REASON=reason))
+        assert completed.returncode == 0
+        body = ws.body()
+        for secret in ("abc.def.ghi", token, "sk-bbbb", "hunter2"):
+            assert secret not in body, (secret, body)
+        assert "Authorization: Bearer ***" in body, body
+        assert "token limit exceeded" in body, body
 
 
 def test_reason_step_comes_from_run_log_without_failure_step() -> None:
@@ -425,6 +450,7 @@ def main() -> int:
         test_default_route_without_line_or_map,
         test_finish_kinds_set_subject_and_reason,
         test_failure_reason_is_one_short_line,
+        test_failure_reason_hides_credentials,
         test_reason_step_comes_from_run_log_without_failure_step,
         test_unknown_status_is_not_sent,
         test_issue_and_item_are_not_confused,

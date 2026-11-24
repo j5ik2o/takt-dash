@@ -11,8 +11,9 @@ TAKT はキューのタスクの最終状態を .takt/tasks.yaml に保存した
 
 終わり方（件名と本文の「結果」）:
   completed                        完了
-  failed（中断の記録あり、または    中断（停止・ゴールの一時停止、ワークフローの ABORT）
-    ワークフローが ABORT へ進んだ）
+  failed（中断の記録あり、            中断（停止、ゴールの中止・一時停止、ワークフローの ABORT）
+    ワークフローが ABORT へ進んだ、
+    ゴールの中止・一時停止）
   failed（それ以外）               失敗
   pr_failed                        PR 失敗
   exceeded                         工程の上限
@@ -63,8 +64,16 @@ LOG_NAME = "notify-orca.log"
 STDERR_NAME = "notify-orca.stderr"
 STDERR_LIMIT = 4096
 REASON_LIMIT = 300
-# ワークフローの工程が ABORT へ進んだときに TAKT が保存する失敗の理由。
-STEP_ABORT_REASON = "Workflow aborted by step transition"
+# 中断として扱う失敗の理由。TAKT は中断の種類（abortKind）を出口に渡さないため、保存する
+# 文言で見分ける: ワークフローの工程が ABORT へ進んだとき、ゴールの中止・一時停止で
+# 失敗にしたとき（待ちのタスクは中断の記録なしで保存される）。
+ABORT_REASON = re.compile(r"Workflow aborted by step transition|Goal \S+ was (?:aborted|paused)")
+# 失敗の理由を本文へ入れる前に伏せる、認証情報らしい値。
+SECRET = re.compile(
+    r"(?i)(\b(?:token|access[_-]?token|authorization|password|passwd|secret|api[_-]?key)[\"']?\s*[:=]\s*[\"']?"
+    r"(?:bearer\s+|basic\s+)?|\bbearer\s+)[^\s,;'\"]+"
+    r"|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[abpr]-[A-Za-z0-9-]{10,})"
+)
 ORCA_LINE = re.compile(r"^\s*orca:\s*bot=(\S+)\s+item=([1-9][0-9]*)\s*$", re.MULTILINE)
 BOT_NAME = re.compile(r"^[^\s\"'`$\\]{1,64}$")
 PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
@@ -83,7 +92,7 @@ def finish_label(environ) -> str | None:
     if status == "failed":
         aborted = (
             environ.get("TAKT_FINISH_INTERRUPTED") == "true"
-            or environ.get("TAKT_FINISH_FAILURE_REASON") == STEP_ABORT_REASON
+            or ABORT_REASON.fullmatch(environ.get("TAKT_FINISH_FAILURE_REASON") or "") is not None
         )
         return "中断" if aborted else "失敗"
     return None
@@ -201,8 +210,12 @@ def route_from_map(map_path: Path, goal_id: str, refs):
     return None
 
 
+def redact(text: str) -> str:
+    return SECRET.sub(lambda m: f"{m.group(1)}***" if m.group(1) else "***", text)
+
+
 def one_line(text: str, limit: int = REASON_LIMIT) -> str:
-    first = " ".join(text.split())
+    first = " ".join(redact(text).split())
     return first if len(first) <= limit else first[: limit - 1] + "…"
 
 
