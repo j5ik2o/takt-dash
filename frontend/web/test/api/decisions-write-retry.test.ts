@@ -38,9 +38,10 @@ const withServer = async (behavior: Behavior, run: (server: RunningServer) => Pr
 
 const postJson = (handler: RouteHandler, path: string, body: unknown): Promise<Response> =>
   handler(
-    new NextRequest(`http://localhost${path}`, {
+    new NextRequest(`http://localhost:3000${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      // 画面からの書き込みと同じく、Host と一致する Origin を付ける。Origin の無い要求は境界で拒否される。
+      headers: { "content-type": "application/json", host: "localhost:3000", origin: "http://localhost:3000" },
       body: JSON.stringify(body),
     }),
   );
