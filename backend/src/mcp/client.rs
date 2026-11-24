@@ -71,6 +71,10 @@ pub trait ToolCaller: Send {
     arguments: Value,
   ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, CallError>> + Send + 'a>>;
 
+  /// 接続先を区別する鍵。接続先が変わると値も変わり、
+  /// 旧接続先から読んだ記憶を使わないために使います。
+  fn connection_key(&self) -> String;
+
   /// 呼び出しの前に接続の開始を済ませる。stdio の子プロセスはここで起動と初期化を
   /// 済ませます。HTTP のハンドルはセッションを呼び出しの中で作るため、何もしません。
   fn ensure_started<'a>(
@@ -81,6 +85,14 @@ pub trait ToolCaller: Send {
 }
 
 impl ToolCaller for McpClient {
+  /// 環境変数はトークンを含みうるため、値を鍵に入れず、ハッシュだけを入れます。
+  fn connection_key(&self) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut env = std::collections::hash_map::DefaultHasher::new();
+    self.config.env.hash(&mut env);
+    format!("stdio:{:?}:{:?}:env-{:016x}", self.config.command, self.config.args, env.finish())
+  }
+
   fn call_tool<'a>(
     &'a mut self,
     name: &'a str,

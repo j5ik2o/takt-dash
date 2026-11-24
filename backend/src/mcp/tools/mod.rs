@@ -32,6 +32,7 @@ mod goal;
 mod parse;
 mod run;
 mod sets;
+mod summary_cache;
 
 use self::{
   goal::{
@@ -41,6 +42,7 @@ use self::{
   },
   parse::{domain_value, optional_string, required_i32, required_string, string_field, Page},
   run::{parse_remote_run, step_entries, step_log_entries, step_log_next_offset},
+  summary_cache::{goal_summaries, GoalSummaryKey},
 };
 pub use self::{
   run::RemoteRun,
@@ -627,7 +629,7 @@ impl<'a> ToolSetCore<'a> {
   /// 全文を集めます。作業記録と質問は専用の一覧道具を全ページ追従します。紐づくタスクは
   /// takt_list_tasks を全ページ取得して goal_id で絞ります。
   pub async fn read_goal_detail(&mut self, goal_id: &GoalId) -> Result<GoalDetail, ToolError> {
-    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id.as_str() })).await?;
+    let value = self.read_goal_summary(goal_id).await?;
     let goal =
       value.get("goal").ok_or_else(|| ToolError::Parse("takt_get_goal の応答に goal がありません".to_owned()))?;
     let returned_id = string_field(goal, "id")?;
@@ -673,6 +675,22 @@ impl<'a> ToolSetCore<'a> {
       questions,
       tasks,
     })
+  }
+
+  /// path なしの takt_get_goal を読む。PR を持つゴールは [`summary_cache::GOAL_SUMMARY_TTL`]
+  /// の間、同じ接続先から前に読んだ応答を使い回します。
+  async fn read_goal_summary(&mut self, goal_id: &GoalId) -> Result<Value, ToolError> {
+    let key = GoalSummaryKey {
+      connection: self.client.connection_key(),
+      cwd:        self.cwd.clone(),
+      goal_id:    goal_id.clone(),
+    };
+    if let Some(value) = goal_summaries().get(&key, Instant::now()) {
+      return Ok(value);
+    }
+    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id.as_str() })).await?;
+    goal_summaries().record(key, Instant::now(), &value);
+    Ok(value)
   }
 
   /// takt_get_goal の文字列フィールドを textOffset で全ページ連結する。
@@ -775,7 +793,8 @@ impl<'a> ToolSetCore<'a> {
   /// takt_get_goal（path なし）の goal summary から、タスク詳細に載せる
   /// ブランチとプルリクエスト URL を読む。
   async fn read_task_link_fields(&mut self, goal_id: &str) -> Result<TaskLinkFields, ToolError> {
-    let value = self.call_json("takt_get_goal", json!({ "goalId": goal_id })).await?;
+    let goal_id = domain_value("ゴール ID", GoalId::try_from(goal_id))?;
+    let value = self.read_goal_summary(&goal_id).await?;
     let goal =
       value.get("goal").ok_or_else(|| ToolError::Parse("takt_get_goal の応答に goal がありません".to_owned()))?;
     Ok(TaskLinkFields {

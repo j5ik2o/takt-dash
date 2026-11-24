@@ -713,3 +713,40 @@ async fn get_task_detail_rejects_an_invalid_source_run_slug_as_internal() {
 
   server.stop().await;
 }
+
+/// mock が受け取った path なしの takt_get_goal（takt が PR の状態を gh で読む呼び出し）の数。
+fn summary_reads(harness: &GrpcHarness) -> usize {
+  harness
+    .recorded_calls()
+    .iter()
+    .filter(|call| call.name == "takt_get_goal" && call.arguments.get("path").is_none())
+    .count()
+}
+
+#[tokio::test]
+async fn get_task_detail_reuses_the_goal_summary_of_a_goal_with_a_pull_request() {
+  let harness = task_harness_with_goal_summary(json!({
+    "id": "g1",
+    "branch": "takt/goal-g1",
+    "pullRequest": { "number": 42, "url": "https://github.com/j5ik2o/takt-dash/pull/42" },
+  }));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  for _ in 0..3 {
+    let detail = client
+      .get_task_detail(GetTaskDetailRequest {
+        project:   "takt-dash".to_owned(),
+        task_name: "task-109".to_owned(),
+        goal_id:   Some("g1".to_owned()),
+      })
+      .await
+      .expect("タスク詳細を取得できます")
+      .into_inner();
+    assert_eq!(detail.pull_request_url.as_deref(), Some("https://github.com/j5ik2o/takt-dash/pull/42"));
+  }
+
+  assert_eq!(summary_reads(&harness), 1, "PR を持つゴールの summary は覚えている間は読み直しません");
+
+  server.stop().await;
+}
