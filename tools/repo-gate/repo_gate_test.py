@@ -2759,6 +2759,59 @@ def test_aislop_fix_return_must_precede_unconditional_abort() -> None:
                 assert_gate_rejects(sandbox, step)
 
 
+def notify_step(name, result, terminal, extra_rule=""):
+    return (
+        f"  - name: {name}\n"
+        "    description: 終わりを Orca の担当ボットへ知らせる\n"
+        "    mode: system\n"
+        "    system_inputs:\n"
+        "      - type: command\n"
+        "        as: notify\n"
+        f"        command: python3 .takt/scripts/notify_orca.py --result {result}\n"
+        "        timeout_ms: 30000\n"
+        "    rules:\n"
+        f"{extra_rule}"
+        "      - condition: when(true)\n"
+        f"        next: {terminal}\n"
+    )
+
+
+def through_notify(workflow, aborted_step):
+    """終端への遷移をすべて通知の工程へ回し、通知の工程を末尾に足したワークフロー。"""
+    routed = workflow.replace("next: COMPLETE", "next: notify_completed").replace(
+        "next: ABORT", "next: notify_aborted"
+    )
+    return routed + notify_step("notify_completed", "completed", "COMPLETE") + aborted_step
+
+
+def test_notify_steps_are_read_as_terminals() -> None:
+    with Sandbox() as sandbox:
+        workflow = through_notify(WORKFLOW, notify_step("notify_aborted", "aborted", "ABORT"))
+        repository(sandbox, workflow=workflow)
+        stub_external_tools(sandbox)
+        assert_success(sandbox, "通知の工程を通る終端")
+
+
+def test_step_that_does_more_than_notify_is_not_a_terminal() -> None:
+    extra = "      - condition: when(context.notify_aborted.notify.exit_code != 0)\n        next: machine_gate\n"
+    variants = {
+        "規則が 2 つ": notify_step("notify_aborted", "aborted", "ABORT", extra_rule=extra),
+        "通知のスクリプトを呼ばない": notify_step("notify_aborted", "aborted", "ABORT").replace(
+            "python3 .takt/scripts/notify_orca.py --result aborted", "true"
+        ),
+        "終端へ進まない": notify_step("notify_aborted", "aborted", "machine_gate"),
+        "結果と終端が逆": notify_step("notify_aborted", "completed", "ABORT"),
+        "通知のあとに別のコマンド": notify_step("notify_aborted", "aborted", "ABORT").replace(
+            "--result aborted", "--result aborted; true"
+        ),
+    }
+    for label, aborted_step in variants.items():
+        with Sandbox() as sandbox:
+            repository(sandbox, workflow=through_notify(WORKFLOW, aborted_step))
+            stub_external_tools(sandbox)
+            assert_gate_rejects(sandbox, label)
+
+
 def test_publish_fix_must_reject_additional_complete_transition() -> None:
     extra = "      - condition: 公開を省略する\n        next: COMPLETE\n"
     with Sandbox() as sandbox:
@@ -3141,6 +3194,8 @@ def main() -> int:
         test_machine_gate_fix_return_must_precede_unconditional_abort,
         test_aislop_fix_return_must_precede_unconditional_abort,
         test_publish_fix_must_reject_additional_complete_transition,
+        test_notify_steps_are_read_as_terminals,
+        test_step_that_does_more_than_notify_is_not_a_terminal,
         test_shell_comments_preserve_newline,
         test_shell_comments_preserve_hash_inside_words,
         test_aislop_success_must_not_be_shadowed_by_zero_matching_rule,

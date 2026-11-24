@@ -13,7 +13,8 @@ all_steps:
     - ref: taktdash-coding-rules
       position: before_instruction
 # 判定も1工程として数える。従来の70工程で、最短6工程ごとに判定しても最大11回。
-max_steps: 81
+# 成功の終わりの通知（notify_completed）が1工程使うため、その分の1を足す。
+max_steps: 82
 initial_step: mark_in_progress
 loop_monitors:
   # 修正対象が変わっても、同じ機械ゲートへ戻った周回を数える。
@@ -167,7 +168,7 @@ steps:
         timeout_ms: 900000
     rules:
       - condition: when(context.aislop_gate.result.exit_code == 0)
-        next: COMPLETE
+        next: notify_completed
       - condition: when(true)
         next: fix_aislop_gate
   - name: fix_machine_gate_fmt
@@ -337,3 +338,18 @@ steps:
         next: machine_gate
       - condition: 修正できない
         next: ABORT
+  # 成功の終わりを Orca の担当ボットへ知らせる。通知は失敗しても終了コード 0 で、
+  # 判定はどの結果でも COMPLETE へ進む。
+  # 失敗・中断の前には通知の工程を置かない。置くと TAKT がタスクの failure.step と
+  # 再開位置をその工程として保存し、再試行が修正をせずに ABORT へ戻るため。
+  - name: notify_completed
+    description: 成功で終わることを Orca の担当ボットへ知らせる（失敗は非致命）
+    mode: system
+    system_inputs:
+      - type: command
+        as: notify
+        command: python3 .takt/scripts/notify_orca.py --result completed
+        timeout_ms: 30000
+    rules:
+      - condition: when(true)
+        next: COMPLETE
