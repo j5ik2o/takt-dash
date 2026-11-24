@@ -41,7 +41,9 @@ const PRIVATE_NAME_SUFFIXES: readonly string[] = [".local", ".lan", ".home.arpa"
 // Host と Origin をその名前でそろえる。IP アドレスそのもの、ドットの無い名前、私設の
 // 名前はこの手口に使えないので、機械の IP が変わっても一覧の設定なしで許可できる。
 const hostnameIsLocallyResolved = (hostname: string): boolean => {
-  const bare = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+  const unbracketed = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+  // 末尾のドットは、名前を省略せずに書く表記（mac.local.）。同じ名前として判定する。
+  const bare = unbracketed.endsWith(".") ? unbracketed.slice(0, -1) : unbracketed;
   if (isIP(bare) !== 0) {
     return true;
   }

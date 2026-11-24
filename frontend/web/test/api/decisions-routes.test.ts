@@ -709,6 +709,8 @@ const LOCALLY_RESOLVED_HOSTS: ReadonlyArray<readonly [label: string, host: strin
   ["IPv6 のループバック", "[::1]:3000"],
   ["3000 以外のポート", "10.0.1.42:53580"],
   ["大文字を含む名前", "J5ik2o-Mac-Mini.local:3000"],
+  ["末尾にドットを付けた私設の名前", "j5ik2o-mac-mini.local.:3000"],
+  ["末尾にドットを付けた localhost", "localhost.:3000"],
 ];
 
 test("環境変数が未設定でも、IP アドレスや私設の名前で開いた画面からの書き込みを4本とも許可する", async () => {
@@ -755,7 +757,8 @@ test("公開の DNS で引ける名前は、Host と Origin が一致してい�
     "j5ik2o-mac-mini.local.evil.example:3000",
     "localhost.evil.example:3000",
     "evil.example.:3000",
-    "j5ik2o-mac-mini.local.:3000",
+    "j5ik2o-mac-mini.local.evil.example.:3000",
+    "evil.example..:3000",
     "rebind.ts.net:3000",
   ];
   await withAllowedHostsEnv(undefined, async () => {
