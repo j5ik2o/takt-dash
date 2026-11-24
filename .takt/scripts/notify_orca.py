@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""TAKT の実行の終わりを、Orca の担当ボットへ `orca orchestration send` で知らせる。
+"""TAKT のタスクの終わりを、Orca の担当ボットへ `orca orchestration send` で知らせる。
 
-使い方（ワークフローの system step の command から呼ぶ）:
-    python3 .takt/scripts/notify_orca.py --result completed
-    python3 .takt/scripts/notify_orca.py --result aborted
+使い方（プロジェクトの .takt/config.yaml の task_finish_hook から呼ぶ）:
+    task_finish_hook:
+      command: [python3, .takt/scripts/notify_orca.py]
 
-結果の値:
-  completed  ワークフローが COMPLETE へ進む直前（taktdash-change の notify_completed）
-  aborted / failed / question  いまはワークフローから呼ばない。ABORT の前に通知の工程を置くと
-             TAKT がタスクの failure.step と再開位置をその工程として保存し、再試行が修正を
-             せずに ABORT へ戻るため。TAKT 本体に、再開位置を変えずに終了時に外部コマンドを
-             呼ぶ出口ができたときに使う（理由は直前に終わった工程名で示す）。
+TAKT はキューのタスクの最終状態を .takt/tasks.yaml に保存した後、プロジェクトルートを
+作業ディレクトリにしてこのコマンドを 1 回呼ぶ。終わり方と run・タスク・ゴールの情報は
+環境変数 TAKT_FINISH_* で受け取る（docs/configuration.ja.md の「タスク終了フック」）。
+
+終わり方（件名と本文の「結果」）:
+  completed                        完了
+  failed（中断の記録あり、            中断（停止、ゴールの中止・一時停止、ワークフローの ABORT）
+    ワークフローが ABORT へ進んだ、
+    ゴールの中止・一時停止）
+  failed（それ以外）               失敗
+  pr_failed                        PR 失敗
+  exceeded                         工程の上限
+質問待ちは最終状態ではないため、この出口では扱わない（台帳の見張りが扱う）。
 
 宛先の決め方（先に見つかったものを使う）。宛先はその TAKT の仕事を管理しているボットにする:
   1. タスクの指示文（order.md）の 1 行 `orca: bot=<ボット名> item=<番号>`。投入したボットが
@@ -21,22 +28,14 @@
 
 設定（プロジェクトごとに 1 か所）:
   .takt/notify-orca.json に {"default_bot": "<担当ボット>", "map": "<対応表のパス>"} を置く。
-  map は省略でき、~ はホームに展開する。作業用クローン（cwd）の .takt にあればそれを、
-  無ければ tasks.yaml のあるプロジェクトの .takt を読む。ほかのプロジェクトへ写すときは
-  この設定だけを変える。
-
-実行の情報の読み方:
-  TAKT は command の環境を PATH・SHELL・TMPDIR などと TAKT_PREVIOUS_RESPONSE_FILE だけに
-  絞る。応答ファイルは <run>/context/system-commands/<uuid>/response.txt にあるため、
-  その祖先を run のディレクトリとし、meta.json と context/task/order.md を読む。
-  ゴール ID・workKey・タスク名は .takt/tasks.yaml の該当エントリ（task_context で解決）から読む。
+  map は省略でき、~ はホームに展開する。ほかのプロジェクトへ写すときはこの設定だけを変える。
 
 壊さない:
-  どんな失敗でも終了コード 0 で終わる。orca の呼び出しは --timeout 秒（既定 10）で打ち切る。
-  結果は 1 行だけを run のディレクトリの notify-orca.log（run が分からなければ
-  cwd/.takt/notify-orca.log）に追記し、標準出力にも 1 行だけ出す。応答やログの中身は
-  本文にも記録にも貼らず、パスだけを書く。orca の標準エラーは同じ場所の notify-orca.stderr に
-  先頭 4 KiB だけ残す（原因を調べるため。本文と記録には貼らない）。
+  どんな失敗でも終了コード 0 で終わる（TAKT は終了コードで状態も再開位置も変えないが、
+  警告も出さないようにする）。orca の呼び出しは --timeout 秒（既定 10。task_finish_hook の
+  timeout_ms より短くする）で打ち切る。結果は 1 行だけを run のディレクトリの notify-orca.log
+  （run が無ければ <プロジェクト>/.takt/notify-orca.log）に追記し、標準出力にも 1 行だけ出す。
+  orca の標準エラーは同じ場所の notify-orca.stderr に先頭 4 KiB だけ残す（本文と記録には貼らない）。
 """
 from __future__ import annotations
 
@@ -57,45 +56,60 @@ PROJECT_STATUS = HERE.parent.parent / "tools" / "project-status"
 
 DEFAULT_ORCA = "/Applications/Orca.app/Contents/Resources/bin/orca"
 CONFIG_NAME = "notify-orca.json"
-# Orca の端末の外（TAKT の command）から送るため、送信元の名前を --from で明示する。
+# Orca の端末の外（TAKT の出口）から送るため、送信元の名前を --from で明示する。
 # 無いと orca は no_active_sender_terminal で送らない。
 DEFAULT_SENDER = "takt-workflow"
 UNKNOWN_ITEM = "不明"
 LOG_NAME = "notify-orca.log"
 STDERR_NAME = "notify-orca.stderr"
 STDERR_LIMIT = 4096
-RESULT_LABELS = {
-    "completed": "完了",
-    "failed": "失敗",
-    "aborted": "中断",
-    "question": "質問待ち",
-}
+REASON_LIMIT = 300
+# 中断として扱う失敗の理由。TAKT は中断の種類（abortKind）を出口に渡さないため、保存する
+# 文言で見分ける: ワークフローの工程が ABORT へ進んだとき、ゴールの中止・一時停止で
+# 失敗にしたとき（待ちのタスクは中断の記録なしで保存される）。
+ABORT_REASON = re.compile(r"Workflow aborted by step transition|Goal \S+ was (?:aborted|paused)")
+# 失敗の理由を本文へ入れる前に伏せる、認証情報らしい値。
+SECRET = re.compile(
+    r"(?i)(\b(?:token|access[_-]?token|authorization|password|passwd|secret|api[_-]?key)[\"']?\s*[:=]\s*[\"']?"
+    r"(?:bearer\s+|basic\s+)?|\bbearer\s+)[^\s,;'\"]+"
+    r"|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[abpr]-[A-Za-z0-9-]{10,})"
+)
 ORCA_LINE = re.compile(r"^\s*orca:\s*bot=(\S+)\s+item=([1-9][0-9]*)\s*$", re.MULTILINE)
 BOT_NAME = re.compile(r"^[^\s\"'`$\\]{1,64}$")
 PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
-NOTIFY_STEP_PREFIX = "notify_"
+MESSAGE_ID = re.compile(r"\bmsg_[0-9A-Za-z]+\b")
 
 
-def read_config(explicit, cwd: Path, tasks_path) -> dict:
+# TAKT_FINISH_STATUS ごとの終わり方。failed は中断かどうかで分ける。
+FINISH_LABELS = {"completed": "完了", "pr_failed": "PR 失敗", "exceeded": "工程の上限", "failed": "失敗"}
+
+
+def finish_label(environ) -> str | None:
+    """TAKT_FINISH_STATUS と中断の記録から、件名に使う終わり方を返す。知らない状態なら None。"""
+    label = FINISH_LABELS.get(environ.get("TAKT_FINISH_STATUS") or "")
+    aborted = (
+        environ.get("TAKT_FINISH_INTERRUPTED") == "true"
+        or ABORT_REASON.fullmatch(environ.get("TAKT_FINISH_FAILURE_REASON") or "") is not None
+    )
+    return "中断" if label == "失敗" and aborted else label
+
+
+def read_config(explicit, project: Path) -> dict:
     """notify-orca.json を読み、default_bot と map（Path か None）を返す。読めなければ空。"""
-    candidates = [Path(explicit)] if explicit else [cwd / ".takt" / CONFIG_NAME]
-    if not explicit and tasks_path is not None:
-        candidates.append(tasks_path.parent / CONFIG_NAME)
-    for path in candidates:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        bot = data.get("default_bot")
-        table = data.get("map")
-        return {
-            "default_bot": bot if isinstance(bot, str) and BOT_NAME.fullmatch(bot) else None,
-            # TAKT は HOME を渡さないが、expanduser はパスワードデータベースへ倒れる。
-            "map": Path(os.path.expanduser(table)) if isinstance(table, str) and table else None,
-        }
-    return {"default_bot": None, "map": None}
+    path = Path(explicit) if explicit else project / ".takt" / CONFIG_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        return {"default_bot": None, "map": None}
+    bot = data.get("default_bot")
+    table = data.get("map")
+    return {
+        "default_bot": bot if isinstance(bot, str) and BOT_NAME.fullmatch(bot) else None,
+        # TAKT は HOME を渡さないが、expanduser はパスワードデータベースへ倒れる。
+        "map": Path(os.path.expanduser(table)) if isinstance(table, str) and table else None,
+    }
 
 
 def _load_task_context():
@@ -106,99 +120,78 @@ def _load_task_context():
     return task_context
 
 
-def find_run_dir(cwd: Path, environ) -> Path | None:
-    response = (environ.get("TAKT_PREVIOUS_RESPONSE_FILE") or "").strip()
-    if response:
-        path = Path(response)
-        for directory in path.parents:
-            if directory.name == "context" and (directory.parent / "meta.json").is_file():
-                return directory.parent
-    runs = cwd / ".takt" / "runs"
-    running = []
-    for meta in sorted(runs.glob("*/meta.json")) if runs.is_dir() else []:
-        try:
-            if json.loads(meta.read_text(encoding="utf-8")).get("status") == "running":
-                running.append(meta.parent)
-        except (OSError, ValueError, AttributeError):
-            continue
-    return running[0] if len(running) == 1 else None
+def find_entry(project: Path, task_name: str, run_slug: str, task_context) -> dict:
+    """プロジェクトの tasks.yaml から、このタスクのエントリを返す。一つに絞れなければ空。
 
-
-def read_meta(run_dir: Path | None) -> dict:
-    if run_dir is None:
+    TAKT は出口へ渡すタスクを名前で引くので、名前で照合する。名前で一つに絞れないとき
+    （台帳を手で直したなど）は、run slug で絞る。
+    """
+    if task_context is None or not (task_name or run_slug):
         return {}
     try:
-        data = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+        entries = task_context.parse_tasks_yaml(project / ".takt" / "tasks.yaml")
+    except Exception:
+        return {}
+    by_name = [entry for entry in entries if task_name and entry.get("name") == task_name]
+    if len(by_name) == 1:
+        return by_name[0]
+    by_slug = [entry for entry in (by_name or entries) if run_slug and entry.get("run_slug") == run_slug]
+    if len(by_slug) == 1:
+        return by_slug[0]
+    return {}
+
+
+def read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
-def _step_label(entry: dict) -> str | None:
-    step = entry.get("step")
-    if not isinstance(step, str) or step.startswith(NOTIFY_STEP_PREFIX):
-        return None
-    workflow = entry.get("workflow")
-    return f"{workflow}/{step}" if isinstance(workflow, str) else step
+def last_step(run_dir: Path | None) -> str | None:
+    """終わった工程を「ワークフロー名/工程名」で返す。
 
-
-def last_work_step(run_dir: Path | None, meta: dict) -> str | None:
-    """直前に終わった工程（通知の工程を除く）を「ワークフロー名/工程名」で返す。
-
-    実行順は run の logs/*.jsonl の step_complete から読む。meta.json の stepExecutions は
-    工程ごとの回数を初出順に並べたもので、同じ工程を繰り返すと順序が実行順と食い違うため、
-    ログが読めないときだけ使う。
+    meta.json の failure.step（失敗した工程）を先に使い、無ければ run の logs/*.jsonl の
+    最後の step_complete を使う。
     """
-    if run_dir is not None:
-        last = None
-        for log in sorted((run_dir / "logs").glob("*.jsonl")):
-            try:
-                lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(record, dict) and record.get("type") == "step_complete":
-                    last = _step_label(record) or last
-        if last is not None:
-            return last
-    executions = meta.get("stepExecutions")
-    if not isinstance(executions, list):
+    if run_dir is None:
         return None
-    for entry in reversed(executions):
-        label = _step_label(entry) if isinstance(entry, dict) else None
-        if label is not None:
-            return label
-    return None
+    meta = read_json(run_dir / "meta.json")
+    failure = meta.get("failure")
+    if isinstance(failure, dict) and isinstance(failure.get("step"), str):
+        workflow = meta.get("workflow")
+        return f"{workflow}/{failure['step']}" if isinstance(workflow, str) else failure["step"]
+    last = None
+    for log in sorted((run_dir / "logs").glob("*.jsonl")):
+        try:
+            lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and record.get("type") == "step_complete":
+                step, workflow = record.get("step"), record.get("workflow")
+                if isinstance(step, str):
+                    last = f"{workflow}/{step}" if isinstance(workflow, str) else step
+    return last
 
 
-def read_order(run_dir: Path | None, cwd: Path, environ, task_context) -> tuple[str, Path | None]:
+def read_order(run_dir: Path | None, project: Path, entry: dict) -> tuple[str, Path | None]:
     candidates = []
     if run_dir is not None:
         candidates.append(run_dir / "context" / "task" / "order.md")
+    if entry.get("task_dir"):
+        candidates.append(project / entry["task_dir"] / "order.md")
     for path in candidates:
-        if path.is_file():
-            return path.read_text(encoding="utf-8", errors="replace"), path
-    if task_context is not None:
         try:
-            found = Path(task_context.resolve_order(cwd, environ))
-            return found.read_text(encoding="utf-8", errors="replace"), found
-        except (task_context.ContextError, OSError):
-            return "", None
+            return path.read_text(encoding="utf-8", errors="replace"), path
+        except OSError:
+            continue
     return "", None
-
-
-def find_entry(cwd: Path, run_slug, task_context) -> tuple[dict, Path | None]:
-    if task_context is None:
-        return {}, None
-    try:
-        entry, tasks_path = task_context.find_task_entry(cwd, run_slug)
-        return entry, tasks_path
-    except Exception:
-        return {}, None
 
 
 def route_from_order(order: str):
@@ -211,12 +204,7 @@ def route_from_order(order: str):
 def route_from_map(map_path: Path, goal_id: str, refs):
     if not goal_id:
         return None
-    try:
-        table = json.loads(map_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(table, dict):
-        return None
+    table = read_json(map_path)
     for ref in refs:
         route = table.get(f"{goal_id}:{ref}") if ref else None
         if not isinstance(route, dict):
@@ -227,21 +215,31 @@ def route_from_map(map_path: Path, goal_id: str, refs):
     return None
 
 
-def build_message(args, cwd: Path, environ) -> dict:
+def redact(text: str) -> str:
+    return SECRET.sub(lambda m: f"{m.group(1)}***" if m.group(1) else "***", text)
+
+
+def one_line(text: str, limit: int = REASON_LIMIT) -> str:
+    first = " ".join(redact(text).split())
+    return first if len(first) <= limit else first[: limit - 1] + "…"
+
+
+def build_message(args, environ, label: str) -> dict:
     try:
         task_context = _load_task_context()
     except Exception:
         task_context = None
-    run_dir = find_run_dir(cwd, environ)
-    meta = read_meta(run_dir)
-    run_slug = meta.get("runSlug") if isinstance(meta.get("runSlug"), str) else None
-    entry, tasks_path = find_entry(cwd, run_slug, task_context)
-    order, order_path = read_order(run_dir, cwd, environ, task_context)
+    project = Path(environ.get("TAKT_FINISH_PROJECT_DIR") or Path.cwd())
+    task_name = environ.get("TAKT_FINISH_TASK_NAME") or ""
+    run_slug = environ.get("TAKT_FINISH_RUN_SLUG") or ""
+    run_dir_value = environ.get("TAKT_FINISH_RUN_DIR")
+    run_dir = Path(run_dir_value) if run_dir_value and Path(run_dir_value).is_dir() else None
+    entry = find_entry(project, task_name, run_slug, task_context)
+    order, order_path = read_order(run_dir, project, entry)
 
-    goal_id = entry.get("goal_id", "")
+    goal_id = environ.get("TAKT_FINISH_GOAL_ID") or entry.get("goal_id", "")
     work_key = entry.get("goal_work_key", "")
-    task_name = entry.get("name", "")
-    config = read_config(args.config, cwd, tasks_path)
+    config = read_config(args.config, project)
     issue = None
     if task_context is not None and order:
         try:
@@ -249,7 +247,9 @@ def build_message(args, cwd: Path, environ) -> dict:
             issue = task_context.extract_issue_reference(ORCA_LINE.sub("", order))
         except Exception:
             issue = None
-    prs = sorted(set(PR_URL.findall(order)))
+    prs = set(PR_URL.findall(order))
+    if PR_URL.fullmatch(environ.get("TAKT_FINISH_PR_URL") or ""):
+        prs.add(environ["TAKT_FINISH_PR_URL"])
 
     route = route_from_order(order)
     map_route = None
@@ -263,41 +263,41 @@ def build_message(args, cwd: Path, environ) -> dict:
     if map_route is not None:
         if not issue and map_route.get("issues"):
             issue = ", ".join(f"#{number}" for number in map_route["issues"])
-        if map_route.get("pr"):
-            prs = sorted(set(prs) | {map_route["pr"]})
+        if isinstance(map_route.get("pr"), str) and PR_URL.fullmatch(map_route["pr"]):
+            prs.add(map_route["pr"])
 
-    label = RESULT_LABELS[args.result]
-    project = tasks_path.parent.parent if tasks_path is not None else cwd
-    task_label = task_name or (run_slug or "不明")
+    status = environ.get("TAKT_FINISH_STATUS")
+    interrupted = "あり" if environ.get("TAKT_FINISH_INTERRUPTED") == "true" else "なし"
     lines = [
         f"TAKT の実行が終わりました: {label}",
         f"- プロジェクト: {project}",
         f"- ゴール ID: {goal_id or 'なし'}",
         f"- タスク: {task_name or '不明'}（workKey: {work_key or 'なし'}）",
         f"- issue: {issue or 'なし'}",
-        f"- PR: {', '.join(prs) if prs else 'なし'}",
-        f"- 結果: {label}",
+        f"- PR: {', '.join(sorted(prs)) if prs else 'なし'}",
+        f"- 結果: {label}（TAKT の状態: {status}、中断の記録: {interrupted}）",
     ]
-    if args.result != "completed":
-        step = last_work_step(run_dir, meta)
-        response = (environ.get("TAKT_PREVIOUS_RESPONSE_FILE") or "").strip()
-        reason = f"工程 {step or '不明'} のあと{label}で終わった"
-        if response:
-            reason += f"（直前の応答: {response}）"
+    if status != "completed":
+        reason = f"工程 {last_step(run_dir) or '不明'} のあと{label}で終わった"
+        failure = environ.get("TAKT_FINISH_FAILURE_REASON")
+        if failure:
+            reason += f"（TAKT の記録: {one_line(failure)}）"
         lines.append(f"- 理由: {reason}")
+    workflow = read_json(run_dir / "meta.json").get("workflow") if run_dir else None
     lines += [
-        f"- ワークフロー: {meta.get('workflow') or entry.get('workflow') or '不明'}",
+        f"- ワークフロー: {workflow or entry.get('workflow') or '不明'}",
         f"- 実行 ID: {entry.get('execution_id') or '不明'}（run: {run_slug or '不明'}）",
         f"- run のディレクトリ: {run_dir or '不明'}",
+        f"- ブランチ: {environ.get('TAKT_FINISH_BRANCH') or 'なし'}",
         f"- 指示文: {order_path or '不明'}",
         f"- Orca の項目番号: {item}（宛先の決め方: {route_source}）",
     ]
     return {
         "bot": bot,
         "item": item,
-        "subject": f"TAKT {label}: {task_label}",
+        "subject": f"TAKT {label}: {task_name or run_slug or '不明'}",
         "body": "\n".join(lines) + "\n",
-        "log_dir": run_dir if run_dir is not None else cwd / ".takt",
+        "log_dir": run_dir if run_dir is not None else project / ".takt",
     }
 
 
@@ -305,6 +305,7 @@ def send(orca: str, message: dict, timeout: float, sender: str = DEFAULT_SENDER)
     """orca を呼び、結果の 1 行の要約を返す。例外は投げない。
 
     orca の標準エラーは log_dir の notify-orca.stderr に残し（先頭 4 KiB まで）、要約にはパスだけを書く。
+    送れたときは orca が返したメッセージ ID を要約に入れる。
     """
     body_path = None
     stderr_path = message["log_dir"] / STDERR_NAME
@@ -321,16 +322,17 @@ def send(orca: str, message: dict, timeout: float, sender: str = DEFAULT_SENDER)
             "--type", "status",
             "--subject", message["subject"],
             "--body-file", body_path,
+            "--json",
         ]
         if message["item"] != UNKNOWN_ITEM:
             command += ["--item", message["item"]]
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryFile() as stderr:
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             try:
                 process = subprocess.Popen(
                     command,
                     stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
+                    stdout=stdout,
                     stderr=stderr,
                     start_new_session=True,
                 )
@@ -345,11 +347,13 @@ def send(orca: str, message: dict, timeout: float, sender: str = DEFAULT_SENDER)
                 code = None
             stderr.seek(0)
             stderr_path.write_bytes(stderr.read(STDERR_LIMIT))
+            stdout.seek(0)
+            sent_id = MESSAGE_ID.search(stdout.read(STDERR_LIMIT).decode("utf-8", "replace"))
         if code is None:
             return f"orca が {timeout:g} 秒で終わらず打ち切った（標準エラー: {stderr_path}）"
         if code != 0:
             return f"orca が終了コード {code} で失敗した（標準エラー: {stderr_path}）"
-        return "送信した"
+        return f"送信した（{sent_id.group(0)}）" if sent_id else "送信した"
     except Exception as error:
         return f"送信の準備に失敗した（{type(error).__name__}）"
     finally:
@@ -368,24 +372,27 @@ def record(log_dir: Path, line: str) -> str:
     return line
 
 
-def main(argv=None, environ=None, cwd=None) -> int:
+def main(argv=None, environ=None) -> int:
     environ = os.environ if environ is None else environ
-    cwd = Path.cwd() if cwd is None else Path(cwd)
-    log_dir = cwd / ".takt"
+    log_dir = Path(environ.get("TAKT_FINISH_PROJECT_DIR") or Path.cwd()) / ".takt"
     try:
         parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-        parser.add_argument("--result", required=True, choices=sorted(RESULT_LABELS))
         parser.add_argument("--orca", default=DEFAULT_ORCA)
-        parser.add_argument("--config", help=f"既定は .takt/{CONFIG_NAME}")
+        parser.add_argument("--config", help=f"既定は <プロジェクト>/.takt/{CONFIG_NAME}")
         parser.add_argument("--timeout", type=float, default=10.0)
         parser.add_argument("--sender", default=DEFAULT_SENDER)
         try:
             args = parser.parse_args(argv)
         except SystemExit:
-            line = f"{_now()} notify-orca: 引数が不正なので送らなかった"
+            print(record(log_dir, f"{_now()} notify-orca: 引数が不正なので送らなかった"))
+            return 0
+        label = finish_label(environ)
+        if label is None:
+            status = environ.get("TAKT_FINISH_STATUS") or "なし"
+            line = f"{_now()} notify-orca: TAKT_FINISH_STATUS が {status} で終わり方が分からないので送らなかった"
             print(record(log_dir, line))
             return 0
-        message = build_message(args, cwd, environ)
+        message = build_message(args, environ, label)
         log_dir = message["log_dir"]
         if message["bot"] is None:
             outcome = f"宛先が指示文・対応表・設定（{CONFIG_NAME} の default_bot）のどれにも無いので送らなかった"
@@ -395,7 +402,7 @@ def main(argv=None, environ=None, cwd=None) -> int:
             f"{_now()} notify-orca: {outcome}: bot:{message['bot']} item={message['item']} "
             f"件名「{message['subject']}」"
         )
-    except BaseException as error:  # 通知の失敗でワークフローの判定を変えない
+    except BaseException as error:  # 通知の失敗で TAKT の判定を変えない
         line = f"{_now()} notify-orca: 想定外の失敗（{type(error).__name__}）"
     print(record(log_dir, line))
     return 0

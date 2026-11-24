@@ -17,6 +17,9 @@
 # Workflow helper scripts and their settings (version-controlled)
 !scripts/
 !scripts/**
+# !scripts/** より後に置き、Python のキャッシュを再び無視する
+scripts/**/__pycache__/
+*.pyc
 !notify-orca.json
 !facets/
 !facets/personas/

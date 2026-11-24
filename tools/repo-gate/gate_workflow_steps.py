@@ -4,70 +4,10 @@ import re
 from gate_common import GateError
 
 
-NOTIFY_COMMANDS = {
-    "python3 .takt/scripts/notify_orca.py --result completed": "COMPLETE",
-    "python3 .takt/scripts/notify_orca.py --result aborted": "ABORT",
-}
-
-
-def notify_terminal(step):
-    """終わりを Orca へ知らせるだけの工程なら、その後に進む終端（COMPLETE / ABORT）を返す。
-
-    mode: system で、system_inputs が `python3 .takt/scripts/notify_orca.py --result <結果>` の
-    command 1 つだけ、rules が when(true) から終端への 1 つだけで、結果と終端が対応する
-    （completed → COMPLETE、aborted → ABORT）工程を通知の工程とみなす。
-    """
-    if not isinstance(step, dict) or step.get("mode", step.get("kind")) != "system":
-        return None
-    inputs = step.get("system_inputs")
-    rules = step.get("rules")
-    if not (isinstance(inputs, list) and len(inputs) == 1 and isinstance(rules, list) and len(rules) == 1):
-        return None
-    command = inputs[0].get("command") if isinstance(inputs[0], dict) else None
-    rule = rules[0] if isinstance(rules[0], dict) else {}
-    terminal = NOTIFY_COMMANDS.get(command.strip()) if isinstance(command, str) else None
-    if terminal is None or rule.get("next") != terminal:
-        return None
-    if not re.fullmatch(r"when\(\s*true\s*\)", str(rule.get("condition") or "").strip()):
-        return None
-    return terminal
-
-
-def _through_notify(steps):
-    """通知の工程を取り除き、そこへの遷移をその先の終端へ置き換えた steps を返す。
-
-    通知の工程は判定を変えずに終端へ進むため、配線の検査では終端と同じに扱う。
-    """
-    terminals = {}
-    for step in steps:
-        terminal = notify_terminal(step)
-        if terminal is not None and isinstance(step.get("name"), str):
-            terminals[step["name"]] = terminal
-    if not terminals:
-        return steps
-    resolved = []
-    for step in steps:
-        if not isinstance(step, dict) or step.get("name") in terminals:
-            if not isinstance(step, dict):
-                resolved.append(step)
-            continue
-        rules = step.get("rules")
-        if isinstance(rules, list):
-            step = dict(step)
-            step["rules"] = [
-                {**rule, "next": terminals[rule["next"]]}
-                if isinstance(rule, dict) and rule.get("next") in terminals else rule
-                for rule in rules
-            ]
-        resolved.append(step)
-    return resolved
-
-
 def workflow_steps(workflow):
     steps = workflow.get("steps")
     if not isinstance(steps, list):
         raise GateError("taktdash-change に steps がありません")
-    steps = _through_notify(steps)
     named = {}
     for step in steps:
         if isinstance(step, dict) and isinstance(step.get("name"), str):
