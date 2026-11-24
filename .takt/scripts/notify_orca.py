@@ -80,22 +80,18 @@ PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
 MESSAGE_ID = re.compile(r"\bmsg_[0-9A-Za-z]+\b")
 
 
+# TAKT_FINISH_STATUS ごとの終わり方。failed は中断かどうかで分ける。
+FINISH_LABELS = {"completed": "完了", "pr_failed": "PR 失敗", "exceeded": "工程の上限", "failed": "失敗"}
+
+
 def finish_label(environ) -> str | None:
     """TAKT_FINISH_STATUS と中断の記録から、件名に使う終わり方を返す。知らない状態なら None。"""
-    status = environ.get("TAKT_FINISH_STATUS")
-    if status == "completed":
-        return "完了"
-    if status == "pr_failed":
-        return "PR 失敗"
-    if status == "exceeded":
-        return "工程の上限"
-    if status == "failed":
-        aborted = (
-            environ.get("TAKT_FINISH_INTERRUPTED") == "true"
-            or ABORT_REASON.fullmatch(environ.get("TAKT_FINISH_FAILURE_REASON") or "") is not None
-        )
-        return "中断" if aborted else "失敗"
-    return None
+    label = FINISH_LABELS.get(environ.get("TAKT_FINISH_STATUS") or "")
+    aborted = (
+        environ.get("TAKT_FINISH_INTERRUPTED") == "true"
+        or ABORT_REASON.fullmatch(environ.get("TAKT_FINISH_FAILURE_REASON") or "") is not None
+    )
+    return "中断" if label == "失敗" and aborted else label
 
 
 def read_config(explicit, project: Path) -> dict:
