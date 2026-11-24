@@ -18,10 +18,10 @@ use tokio::{
 use super::Poller;
 use crate::{
   config::{load_config, McpServer},
-  domain::RegistrationRevision,
+  domain::{RegistrationRevision, RunSlug},
   mcp::{client_config, Lane},
   model::{EventKind, ExecutionStatus, ProjectSnapshot},
-  takt_dash::v1::{ApproveGoalRegistrationRequest, GetActivityRequest, GetProjectsRequest},
+  takt_dash::v1::{ApproveGoalRegistrationRequest, GetActivityRequest, GetPendingDecisionsRequest, GetProjectsRequest},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +29,7 @@ pub(super) enum ReadBoundary {
   BeforeAcquisition,
   AfterAcquisition,
   BeforeApply,
+  AfterProjectsPublished,
 }
 
 pub(super) struct ReadBarrier {
@@ -548,4 +549,95 @@ async fn cancelled_resume_is_not_a_successful_interruption() {
   let (_reached, resume) = arm(&mut poller, ReadBoundary::AfterAcquisition);
   drop(resume);
   poller.read_cycle_once().await.expect("周期を実行します");
+}
+
+#[tokio::test]
+async fn server_reassignment_publishes_the_new_server_without_the_old_projection() {
+  // 同じ Poller と状態ストアの上で、server 割り当てを mac-mini から mini-two へ変える。
+  // reset が set_projects より先に走っていれば、新 server_id の公開直後に旧 snapshot・
+  // 旧接続状態・旧 run は見えない。reset を set_projects の後ろへ戻す実装では、この
+  // 観測点で新 server_id と旧 projection が混在して検出できる。
+  let harness = harness();
+  let mut poller = poller(&harness);
+  let cwd_a = harness.project_cwd("takt-dash").to_path_buf();
+  write_run(&cwd_a, "plan");
+  harness.rewrite_state(json!({
+    "goals": [goal(GOAL, "active")],
+    "tasks": [{"name": "task-r1", "status": "running", "runSlug": "r1",
+               "startedAt": "2026-11-13T08:00:00Z"}],
+  }));
+  assert_eq!(poller.read_cycle_once().await.expect("mac-mini の初回を読めます").projects_read, 1);
+  let before = harness.store.project_views().remove(0);
+  assert_eq!(before.server_id, "mac-mini");
+  assert!(before.goals.iter().any(|goal| goal.goal_id.as_str() == GOAL), "変更前に旧ゴールを保持します");
+  let before_run = RunSlug::try_from("r1").expect("runSlug を作れます");
+  assert_eq!(
+    harness.store.find_run_project(&before_run).map(|view| view.server_id).as_deref(),
+    Some("mac-mini"),
+    "変更前は旧 run を旧 server のプロジェクトへ解決します"
+  );
+
+  let b_state = cwd_a.join("server-b.json");
+  let b = json!({"goals": [goal(ADDED_A, "active")]});
+  std::fs::write(&b_state, b.to_string()).expect("mini-two の状態を書けます");
+  let mut config: Value =
+    serde_json::from_str(&std::fs::read_to_string(harness.config_path()).expect("設定を読めます"))
+      .expect("設定を解析できます");
+  config["mcpServers"]["mini-two"] = config["mcpServers"]["mac-mini"].clone();
+  let args = config["mcpServers"]["mini-two"]["args"].as_array_mut().expect("起動引数があります");
+  let index = args.iter().position(|arg| arg == "--state").expect("--state があります");
+  args[index + 1] = json!(b_state);
+  config["servers"]["mini-two"] = config["servers"]["mac-mini"].clone();
+  config["projects"][0]["server"] = json!("mini-two");
+  config["projects"][0]["writeServer"] = json!("mini-two");
+  std::fs::write(harness.config_path(), config.to_string()).expect("mini-two の設定を書けます");
+
+  let grpc = start_server(&harness).await;
+  let mut client = client(grpc.address).await;
+  let (reached, resume) = arm(&mut poller, ReadBoundary::AfterProjectsPublished);
+  let (cycle, ()) = timeout(Duration::from_secs(15), async {
+    tokio::join!(poller.read_cycle_once(), async {
+      reached.await.expect("設定の公開後に到達します");
+      let view = harness.store.project_views().remove(0);
+      assert_eq!(view.server_id, "mini-two", "公開直後から新しい server_id を見ます");
+      assert!(view.snapshot.is_none(), "公開直後に旧 snapshot が見えません");
+      assert!(view.goals.is_empty(), "公開直後に旧ゴールが見えません");
+      assert!(view.tasks.is_empty(), "公開直後に旧タスクが見えません");
+      assert!(view.runs.is_empty(), "公開直後に旧 run が見えません");
+      assert!(view.last_read_at.is_none(), "公開直後に旧成功時刻が見えません");
+      assert!(view.connection_state.is_none(), "公開直後に旧接続状態が見えません");
+      assert!(!view.connected, "公開直後に旧接続状態を接続中として見せません");
+      assert!(
+        harness.store.find_run_project(&before_run).is_none(),
+        "公開直後に旧 run を新しい server_id のプロジェクトへ解決しません"
+      );
+      let projects = client
+        .get_pending_decisions(GetPendingDecisionsRequest {})
+        .await
+        .expect("公開直後の状態取得が成功します")
+        .into_inner();
+      let state = projects.state.as_ref().expect("状態があります");
+      let project = state.projects.first().expect("プロジェクトがあります");
+      assert_eq!(project.server_id, "mini-two", "gRPC 状態取得でも新しい server_id を見ます");
+      assert!(project.last_read_at.is_none(), "gRPC 状態取得でも旧成功時刻を見せません");
+      assert!(!project.connected, "gRPC 状態取得でも旧接続状態を接続中として見せません");
+      assert!(state.goals.iter().all(|goal| goal.goal_id != GOAL), "gRPC 状態取得のゴールに旧ゴールが混在しません");
+      assert!(state.runs.iter().all(|run| run.run_slug != "r1"), "gRPC 状態取得の run に旧 run が混在しません");
+      resume.send(()).expect("公開直後の観測後に周期を再開できます");
+    })
+  })
+  .await
+  .expect("公開直後の観測と周期の完了が 15 秒以内に終わります");
+  let cycle = cycle.expect("切り替え周期が成功します");
+  assert_eq!(cycle.projects_failed, 0);
+  assert_eq!(cycle.projects_read, 1, "切り替え周期は新しい設定で読みます");
+
+  let after = harness.store.project_views().remove(0);
+  assert_eq!(after.server_id, "mini-two", "切り替え周期の読み取りは新しい設定を使います");
+  assert_eq!(after.goals.len(), 1, "切り替え周期の読み取りは新しい server の状態です");
+  assert_eq!(after.goals[0].goal_id.as_str(), ADDED_A);
+  assert!(after.last_read_at.is_some());
+  drop(client);
+  grpc.stop().await;
+  poller.shutdown().await;
 }
