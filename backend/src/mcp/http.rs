@@ -387,6 +387,10 @@ async fn read_body(body: Incoming) -> Result<Vec<u8>, ExchangeError> {
 }
 
 impl ToolCaller for HttpReadHandle {
+  fn connection_key(&self) -> String {
+    format!("http:{:?}", self.server)
+  }
+
   fn call_tool<'a>(
     &'a mut self,
     name: &'a str,
