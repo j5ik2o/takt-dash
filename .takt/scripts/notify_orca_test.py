@@ -20,6 +20,7 @@
      （Goal <ID> was aborted / paused）、停止（INTERRUPTED=true）は中断。
      完了以外では、終わった工程（meta.json の failure.step、無ければログの最後の step_complete）と
      TAKT の失敗の理由（1 行、長さを制限、認証情報らしい値は伏せる）を書く。知らない状態は送らない。
+  4a. tasks.yaml のエントリは名前で引き、名前で一つに絞れないときは run slug で絞る。
   5. run のディレクトリが無いときは、tasks.yaml の task_dir の order.md から宛先を読み、
      <プロジェクト>/.takt/notify-orca.log に記録する。
   6. orca が失敗・時間切れ・存在しない・引数が不正なときも終了コード 0 で終わり、1 行残す。
@@ -367,6 +368,25 @@ def test_order_from_task_dir_when_run_dir_is_gone() -> None:
         assert "送信した" in ws.log(ws.project / ".takt")
 
 
+def test_entry_is_narrowed_by_run_slug_when_name_is_not_unique() -> None:
+    stale = (
+        "  - name: sample-task\n"
+        "    goal_work_key: stale-work-key\n"
+        "    status: failed\n"
+        "    run_slug: 20261101-000000-sample-task-old\n"
+    )
+    for label, edit in {
+        "同じ名前が 2 件": lambda text: text + stale,
+        "名前が違う": lambda text: text.replace("    name: sample-task\n", "    name: renamed-task\n"),
+    }.items():
+        with Workspace("orca: bot=takt-dash中将 item=238\n") as ws:
+            tasks = ws.project / ".takt" / "tasks.yaml"
+            tasks.write_text(edit(tasks.read_text(encoding="utf-8")), encoding="utf-8")
+            completed, _ = ws.run_script()
+            assert completed.returncode == 0, label
+            assert "（workKey: sample-work-key）" in ws.body(), (label, ws.body())
+
+
 def test_without_destination_nothing_is_sent() -> None:
     with Workspace("宛先の行は無い。\n") as ws:
         ws.config.unlink()
@@ -455,6 +475,7 @@ def main() -> int:
         test_unknown_status_is_not_sent,
         test_issue_and_item_are_not_confused,
         test_order_from_task_dir_when_run_dir_is_gone,
+        test_entry_is_narrowed_by_run_slug_when_name_is_not_unique,
         test_without_destination_nothing_is_sent,
         test_orca_failure_still_exits_zero,
         test_orca_timeout_is_cut_and_child_stopped,

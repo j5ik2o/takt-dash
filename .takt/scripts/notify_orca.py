@@ -124,16 +124,25 @@ def _load_task_context():
     return task_context
 
 
-def find_entry(project: Path, task_name: str, task_context) -> dict:
-    """プロジェクトの tasks.yaml から、名前が task_name のエントリを返す。無ければ空。"""
-    if task_context is None or not task_name:
+def find_entry(project: Path, task_name: str, run_slug: str, task_context) -> dict:
+    """プロジェクトの tasks.yaml から、このタスクのエントリを返す。一つに絞れなければ空。
+
+    TAKT は出口へ渡すタスクを名前で引くので、名前で照合する。名前で一つに絞れないとき
+    （台帳を手で直したなど）は、run slug で絞る。
+    """
+    if task_context is None or not (task_name or run_slug):
         return {}
     try:
         entries = task_context.parse_tasks_yaml(project / ".takt" / "tasks.yaml")
     except Exception:
         return {}
-    matched = [entry for entry in entries if entry.get("name") == task_name]
-    return matched[0] if len(matched) == 1 else {}
+    by_name = [entry for entry in entries if task_name and entry.get("name") == task_name]
+    if len(by_name) == 1:
+        return by_name[0]
+    by_slug = [entry for entry in (by_name or entries) if run_slug and entry.get("run_slug") == run_slug]
+    if len(by_slug) == 1:
+        return by_slug[0]
+    return {}
 
 
 def read_json(path: Path) -> dict:
@@ -229,7 +238,7 @@ def build_message(args, environ, label: str) -> dict:
     run_slug = environ.get("TAKT_FINISH_RUN_SLUG") or ""
     run_dir_value = environ.get("TAKT_FINISH_RUN_DIR")
     run_dir = Path(run_dir_value) if run_dir_value and Path(run_dir_value).is_dir() else None
-    entry = find_entry(project, task_name, task_context)
+    entry = find_entry(project, task_name, run_slug, task_context)
     order, order_path = read_order(run_dir, project, entry)
 
     goal_id = environ.get("TAKT_FINISH_GOAL_ID") or entry.get("goal_id", "")
