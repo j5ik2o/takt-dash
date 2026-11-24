@@ -6,17 +6,17 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
-# A newer run for the same PR cancels the older one. Pushes to main and edits
-# that change only the title or body get their own group, so they never cancel
-# a PR run that is testing code.
+# One run per PR. A new head, a reopen, or a base change cancels the older run.
+# A title or body edit does not cancel: it waits behind the running run, and a
+# burst of edits collapses into one pending run. It still runs the full CI
+# because a skipped required job would count as passing. Pushes to main and
+# manual re-runs get their own group and are never cancelled.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && !(github.event.action == 'edited' && !github.event.changes.base) && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !(github.event.action == 'edited' && !github.event.changes.base) }}
 
 jobs:
   ci-revision:
-    # An edit that does not change the base leaves the code under test unchanged.
-    if: ${{ !(github.event.action == 'edited' && !github.event.changes.base) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -111,29 +111,12 @@ jobs:
     needs: [ci-revision, done, e2e]
     if: ${{ always() }}
     runs-on: ubuntu-latest
-    permissions:
-      checks: read
+    permissions: {}
     steps:
       - name: Reject workflow cancellation
         if: ${{ cancelled() }}
         run: exit 1
-      # A skipped required job counts as passing, so a title or body edit
-      # reports the latest finished result for the same head instead.
-      - name: Carry over the latest result for an unchanged head
-        if: ${{ github.event.action == 'edited' && !github.event.changes.base }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          conclusion=$(gh api --paginate "repos/$REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=takt-dash%20required%20CI&filter=all&per_page=100" \
-            --jq ".check_runs[] | select(.status == \"completed\" and ((.details_url // \"\") | contains(\"/actions/runs/$RUN_ID/\") | not)) | [.id, .conclusion] | @tsv" \
-            | sort -n | tail -n 1 | cut -f2)
-          printf 'Latest finished takt-dash required CI on %s: %s\n' "$HEAD_SHA" "${conclusion:-none}"
-          [[ "$conclusion" == success ]]
       - name: Require all blocking jobs to succeed
-        if: ${{ !(github.event.action == 'edited' && !github.event.changes.base) }}
         env:
           REVISION_RESULT: ${{ needs.ci-revision.result }}
           DONE_RESULT: ${{ needs.done.result }}
@@ -145,7 +128,6 @@ jobs:
           fi
 
   coverage:
-    if: ${{ !(github.event.action == 'edited' && !github.event.changes.base) }}
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
