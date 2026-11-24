@@ -2123,14 +2123,23 @@ async fn failed_event_record_does_not_stop_the_remaining_projects() {
   );
 }
 
-#[tokio::test]
-async fn failed_event_record_keeps_the_connection_lost_event_once_after_recovery() {
-  // 接続断を検出したがその出来事を記録できなかったサイクルでは、connected 偽を確定させます。
-  // 回復したサイクルでは接続断を二重に記録せず、その後の変化を通常どおり記録します。
-  let harness = Harness::new(state_with_goal("g1"));
-  let mut poller = harness.poller();
-  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+/// 記録済みの接続断と復帰を、古い順に（種類, 発生時刻）で返す。
+fn connection_events(harness: &Harness) -> Vec<(EventKind, chrono::DateTime<chrono::Utc>)> {
+  let mut events: Vec<_> = harness
+    .activity
+    .recent_events(50)
+    .unwrap()
+    .into_iter()
+    .filter(|event| matches!(event.kind, EventKind::ConnectionLost | EventKind::ConnectionRestored))
+    .map(|event| (event.kind, event.occurred_at))
+    .collect();
+  events.reverse();
+  events
+}
 
+/// 初回の読み取りの後、読み取りの失敗と接続断の記録の失敗を同じサイクルで起こす。
+async fn lose_connection_without_recording_it(harness: &Harness, poller: &mut Poller) {
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
   harness.rewrite_connection_thresholds(1, 1);
   tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
   std::fs::write(&harness.state_path, "{ this is not json").expect("壊れた状態ファイルを書けます");
@@ -2142,22 +2151,103 @@ async fn failed_event_record_keeps_the_connection_lost_event_once_after_recovery
     Some(takt_dash_backend::model::ConnectionState::Unresponsive),
     "記録に失敗しても応答なしの状態は確定します"
   );
+}
+
+#[tokio::test]
+async fn failed_event_record_keeps_the_connection_lost_event_once_after_recovery() {
+  // 接続断を検出したがその出来事を記録できなかった後、記録先と takt-mcp が同じサイクルで
+  // 復旧した場合、未記録の接続断を1件だけ記録し、対応する復帰を続けて記録します。
+  // 復旧後の差分検出だけに頼る実装では、接続断を再検出できず0件のまま失われます。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  lose_connection_without_recording_it(&harness, &mut poller).await;
+  let lost_before = chrono::Utc::now();
+  // 記録の時刻はミリ秒へ丸めるため、次のサイクルが同じミリ秒に入らないようにします。
+  tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
   allow_event_recording(&harness.activity_db_path);
   harness.rewrite_state(state_with_goal("g1"));
-  poller.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
-  let recovered = harness.store.slot("takt-dash").expect("スロットがあります");
-  assert!(recovered.is_connected(), "復旧すれば connected 真です");
+  let recovered = poller.read_cycle_once().await.expect("復旧後のサイクルを実行できます");
+  assert_eq!(recovered.events_recorded, 2, "未記録の接続断と、対応する復帰を記録します");
+  assert!(harness.store.slot("takt-dash").expect("スロットがあります").is_connected(), "復旧すれば connected 真です");
+
+  // 後続のサイクルは、成功が続いても失敗へ戻っても、記録済みの接続断を再記録しません。
+  let following = poller.read_cycle_once().await.expect("後続のサイクルを実行できます");
+  assert_eq!(following.events_recorded, 0, "記録済みの接続断と復帰を再記録しません");
   poller.shutdown().await;
 
-  let lost: usize = harness
+  let events = connection_events(&harness);
+  let kinds: Vec<EventKind> = events.iter().map(|(kind, _)| *kind).collect();
+  assert_eq!(
+    kinds,
+    vec![EventKind::ConnectionLost, EventKind::ConnectionRestored],
+    "接続断を欠落も重複もなく1件、復帰をその後に1件記録します"
+  );
+  assert!(events[0].1 <= lost_before, "接続断は、復旧時刻ではなく検出した時刻で記録します: {:?}", events[0].1);
+  assert!(events[0].1 < events[1].1, "接続断は復帰より前の時刻です");
+}
+
+#[tokio::test]
+async fn unrecorded_connection_lost_survives_a_failed_retry_and_is_recorded_once() {
+  // takt-mcp だけが先に復旧し、記録先がまだ失敗するサイクルでは、未記録の接続断を保持した
+  // まま再試行します。記録先が復旧したサイクルで、接続断と復帰を1件ずつ記録します。
+  // 再試行のたびに積み増す実装では重複し、1回の失敗で手放す実装では欠落します。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  lose_connection_without_recording_it(&harness, &mut poller).await;
+
+  harness.rewrite_state(state_with_goal("g1"));
+  poller.read_cycle_once().await.expect_err("記録先が失敗している間の再試行は失敗で終わります");
+  poller.read_cycle_once().await.expect_err("再試行を繰り返しても失敗で終わります");
+  assert!(connection_events(&harness).is_empty(), "記録先が失敗している間は何も記録されません");
+
+  tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+  allow_event_recording(&harness.activity_db_path);
+  let recovered = poller.read_cycle_once().await.expect("記録先が復旧したサイクルを実行できます");
+  assert_eq!(recovered.events_recorded, 2, "未記録の接続断と、対応する復帰を記録します");
+  let following = poller.read_cycle_once().await.expect("後続のサイクルを実行できます");
+  assert_eq!(following.events_recorded, 0, "再試行した回数だけ重ねて記録しません");
+  poller.shutdown().await;
+
+  let restored: Vec<_> = harness
     .activity
     .recent_events(50)
     .unwrap()
     .into_iter()
-    .filter(|event| event.kind == EventKind::ConnectionLost)
-    .count();
-  assert_eq!(lost, 0, "記録できなかった接続断を、復旧時に遡って二重に記録しません");
+    .filter(|event| event.kind == EventKind::ConnectionRestored)
+    .collect();
+  assert!(
+    outage_seconds_of(&restored[0]) >= 1,
+    "復帰の本文に、保持していた接続断から数えた切断していた時間を入れます: {}",
+    restored[0].body
+  );
+
+  let kinds: Vec<EventKind> = connection_events(&harness).into_iter().map(|(kind, _)| kind).collect();
+  assert_eq!(kinds, vec![EventKind::ConnectionLost, EventKind::ConnectionRestored]);
+}
+
+#[tokio::test]
+async fn unrecorded_connection_lost_is_dropped_when_the_client_is_rebuilt() {
+  // 未記録の接続断を保持している間に読取先を作り直した場合、保持していた接続断は前の
+  // 読取先のものです。作り直し後の記録へ混ぜず、復帰も記録しません。
+  let harness = Harness::new(state_with_goal("g1"));
+  let mut poller = harness.poller();
+  lose_connection_without_recording_it(&harness, &mut poller).await;
+
+  let alternate_dir = harness._directory.path().join("project-alternate");
+  std::fs::create_dir_all(&alternate_dir).expect("作り直し先の cwd を作れます");
+  harness.rewrite_config(|value| {
+    value["projects"][0]["cwd"] = json!(alternate_dir.display().to_string());
+  });
+  allow_event_recording(&harness.activity_db_path);
+  harness.rewrite_state(state_with_goal("g1"));
+  let rebuilt = poller.read_cycle_once().await.expect("作り直し後のサイクルを実行できます");
+  assert_eq!(rebuilt.events_recorded, 0, "前の読取先の接続断を、作り直し後に記録しません");
+  let following = poller.read_cycle_once().await.expect("後続のサイクルを実行できます");
+  assert_eq!(following.events_recorded, 0);
+  poller.shutdown().await;
+
+  assert!(connection_events(&harness).is_empty(), "接続の出来事は1件も記録されません");
 }
 
 #[tokio::test]
@@ -2184,6 +2274,9 @@ async fn failed_connection_lost_record_keeps_the_baseline_and_records_it_once_wh
   assert!(down.snapshot.is_some(), "最後に読めた状態は保持します");
 
   // サイクル3: 記録だけを回復する。読み取り失敗は続くので、未記録だった接続断を記録する。
+  let detected_before = chrono::Utc::now();
+  // 記録の時刻はミリ秒へ丸めるため、次のサイクルが同じミリ秒に入らないようにします。
+  tokio::time::sleep(std::time::Duration::from_millis(20)).await;
   allow_event_recording(&harness.activity_db_path);
   let recovered = poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
   assert_eq!(recovered.events_recorded, 1, "未記録だった接続断だけを回復後に記録します");
@@ -2201,6 +2294,8 @@ async fn failed_connection_lost_record_keeps_the_baseline_and_records_it_once_wh
     .filter(|event| event.kind == EventKind::ConnectionLost)
     .count();
   assert_eq!(lost, 1, "接続断は欠落も重複もなくちょうど1回記録します");
+  let lost_at = connection_events(&harness)[0].1;
+  assert!(lost_at <= detected_before, "接続断は、記録が回復した時刻ではなく検出した時刻で記録します: {lost_at:?}");
 }
 
 #[tokio::test]
