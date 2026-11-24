@@ -134,34 +134,48 @@ TAKTDASH_BACKEND_ADDR=127.0.0.1:50051 npm --prefix frontend/web run dev
 
 - `TAKTDASH_BACKEND_ADDR`: フロントエンドが接続するバックエンドのアドレス。未設定時は
   `127.0.0.1:50051`。
-- `TAKTDASH_ALLOWED_HOSTS`: ブラウザからの書き込みを受け付けるホストの一覧。詳しくは下の「書き込みを許可するホスト」で説明します。
-- 待ち受けポートを変えるときは `-- --port <番号>` を付けます。ブラウザから書き込むときは、
-  同じポートを `TAKTDASH_ALLOWED_HOSTS` にも設定します
-  （例: `TAKTDASH_ALLOWED_HOSTS=localhost:53580,127.0.0.1:53580 npm --prefix frontend/web run dev -- --port 53580`）。
+- `TAKTDASH_ALLOWED_HOSTS`: 公開の DNS で引ける名前で開くときに、書き込みを追加で許可するホストの一覧。詳しくは下の「書き込みを許可するホスト」で説明します。
+- 待ち受けポートを変えるときは `-- --port <番号>` を付けます。
 - 開発サーバーの既定は http://localhost:3000。
 
 固定ポート（3000・50051）が使用中のときは、バックエンドの `--listen` とフロントエンドの
-`--port`、`TAKTDASH_BACKEND_ADDR` を空きポートに揃えて起動してください。ブラウザから書き込むときは、
-`TAKTDASH_ALLOWED_HOSTS` にもフロントエンドと同じポートを設定してください。
+`--port`、`TAKTDASH_BACKEND_ADDR` を空きポートに揃えて起動してください。
 
 ### 書き込みを許可するホスト
 
 判断待ちの書き込み API は、ブラウザが送る Origin ヘッダのホストと Host ヘッダを比べます。
-両者が一致し、そのホストが許可の一覧にあるときだけ、API は書き込みを受け付けます。
-許可の一覧は環境変数 `TAKTDASH_ALLOWED_HOSTS` で指定します。
+次の3つをすべて満たすときだけ、API は書き込みを受け付けます。
 
-- 形式: `host:port` をカンマで区切って並べます（例: `localhost:53580,127.0.0.1:53580`）。
+1. Origin ヘッダがある。
+2. Origin のホストとポートが、Host ヘッダと一致する（画面を開いた URL と同じオリジンからの要求）。
+3. そのホスト名が、次のどれかに当たる。
+   - IP アドレス（LAN の IP、VPN 経由で見えるアドレス、Tailscale の IP、`127.0.0.1` など）
+   - ドットの無い名前（`localhost`、`my-mac` など）
+   - 私設の名前（`.local`、`.lan`、`.home.arpa`、`.internal`、`.localhost` で終わる名前）
+   - 環境変数 `TAKTDASH_ALLOWED_HOSTS` で許可した名前
+
+機械の IP やポートが変わっても、3 の最初の3つに当たる URL で開いていれば、設定は要りません。
+
+`TAKTDASH_ALLOWED_HOSTS` は、公開の DNS で引ける名前（Tailscale の `*.ts.net` の名前など）で開くときにだけ設定します。
+
+- 形式: `host:port` をカンマで区切って並べます（例: `my-mac.example.ts.net:3000`）。
   前後の空白は取り除かれ、大文字と小文字は区別されません。`http://` やパスを付けた値は無効となり、一覧から除かれます。
-- 未設定のとき、または空白だけのとき、API は次の4つのホストを許可します:
-  `10.0.1.143:3000`、`100.106.166.1:3000`、`127.0.0.1:3000`、`localhost:3000`。
-- 値を設定すると、その値が既定の一覧を置き換えます。既定の一覧に追加されるわけではないので、
-  既定のホストも使うときは、それらも値に含めてください。
-- API は、次の要求を 403 で拒否します。
-  - 一覧に無いホストからの要求
-  - Host ヘッダと Origin ヘッダのホストが一致しない要求
-  - `sec-fetch-site: cross-site` が付いた要求
-- Origin ヘッダの無い要求（CLI など）は照合の対象外で、API は一覧に関係なく受け付けます。
 - フロントエンドはこの値をリクエストのたびに読みます。
+
+```bash
+TAKTDASH_ALLOWED_HOSTS=my-mac.example.ts.net:3000 npm --prefix frontend/web run start
+```
+
+API は、次の要求を 403 で拒否します。
+
+- Origin ヘッダの無い要求（curl など、ブラウザ以外からの直接の要求）
+- Host ヘッダと Origin ヘッダのホストが一致しない要求（別のサイトのページからの要求）
+- `sec-fetch-site: cross-site` が付いた要求
+- 公開の DNS で引ける名前で、設定で許可していないもの。攻撃者が自分の名前の向き先をこの機械へ
+  向け直す手口（DNS リバインディング）では、Host と Origin がその名前でそろうためです。
+
+この検査は、ブラウザ経由の別サイトからの書き込みと、ヘッダを付けない直接の要求を止めます。
+認証ではありません。Web に届く機械の上で Origin と Host を自分で付けられるクライアントは通ります。
 
 フロントエンドはビルド時に git から短縮コミット SHA とブランチ名を取得し、
 `TAKTDASH_FRONTEND_COMMIT` / `TAKTDASH_FRONTEND_BRANCH` として埋め込みます（手動設定は不要）。
