@@ -2,6 +2,7 @@
 //
 // 入力の形だけを検証し、値はそのまま gRPC の書き込み API へ渡す。業務的な検証
 // （ゴールの所属、pull_request の有無など）は backend に任せ、ここでは重複しない。
+import { isIP } from "node:net";
 import * as grpc from "@grpc/grpc-js";
 import { BackendUnavailableError, getBackendClient, type BackendClient } from "../../../src/grpc/client";
 
@@ -12,8 +13,8 @@ const jsonResponse = (status: number, body: unknown): Response =>
 
 export const badRequest = (message: string): Response => jsonResponse(400, { ok: false, error: message });
 
-// 本文を読む前の境界検証。ブラウザの別オリジンや cross-site からの書き込み、および
-// JSON でない本文を受け付けない。ヘッダの無い CLI 等の既存利用は許可する。
+// 本文を読む前の境界検証。ブラウザの別オリジンや cross-site からの書き込み、
+// Origin ヘッダの無い書き込み、および JSON でない本文を受け付けない。
 const unsupportedMediaType = (): Response =>
   jsonResponse(415, { ok: false, error: "Content-Type は application/json で指定してください。" });
 
@@ -31,13 +32,24 @@ const contentTypeIsJson = (request: Request): boolean => {
 
 const ALLOWED_HOSTS_ENV = "TAKTDASH_ALLOWED_HOSTS";
 
-// 環境変数が未設定のときに許可するホスト（LAN、Tailscale、ローカル）。
-const DEFAULT_ALLOWED_HOSTS: readonly string[] = [
-  "10.0.1.143:3000",
-  "100.106.166.1:3000",
-  "127.0.0.1:3000",
-  "localhost:3000",
-];
+// 公開の DNS では引けない名前の末尾。mDNS（.local）、家庭内のルータが配る名前（.lan、
+// .home.arpa）、私設用に予約された名前（.internal）、ループバック（.localhost）。
+const PRIVATE_NAME_SUFFIXES: readonly string[] = [".local", ".lan", ".home.arpa", ".internal", ".localhost"];
+
+// 外部の者が DNS で向き先を決められないホスト名かどうか。
+// DNS リバインディングは、攻撃者が管理する公開の名前を利用者の機械へ向け直して、
+// Host と Origin をその名前でそろえる。IP アドレスそのもの、ドットの無い名前、私設の
+// 名前はこの手口に使えないので、機械の IP が変わっても一覧の設定なしで許可できる。
+const hostnameIsLocallyResolved = (hostname: string): boolean => {
+  const bare = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+  if (isIP(bare) !== 0) {
+    return true;
+  }
+  if (!bare.includes(".")) {
+    return bare !== "";
+  }
+  return PRIVATE_NAME_SUFFIXES.some((suffix) => bare.endsWith(suffix));
+};
 
 // スキームの既定ポート。http と https 以外のスキームでは、ポートの省略と明示を
 // 同一視しない。
@@ -86,24 +98,27 @@ const normalizeHost = (value: string, defaultPort: string | undefined): string |
   if (parsed === undefined) {
     return undefined;
   }
-  const hostPart = parsed.hostname.includes(":") ? `[${parsed.hostname}]` : parsed.hostname;
-  const spelled = parsed.port === "" ? hostPart : `${hostPart}:${parsed.port}`;
+  // URL の hostname は、IPv6 のアドレスを角括弧つきで返す。
+  const spelled = parsed.port === "" ? parsed.hostname : `${parsed.hostname}:${parsed.port}`;
   if (value.toLowerCase() !== spelled) {
     return undefined;
   }
   return canonicalHost(parsed.hostname, parsed.port, defaultPort);
 };
 
-// 起動設定で一覧を差し替えられるよう、リクエストのたびに環境変数から読む。
+// 上の判定に当たらない名前（公開の DNS で引ける名前）で開くときに、追加で許可する
+// ホストの一覧。起動設定で差し替えられるよう、リクエストのたびに環境変数から読む。
 // 設定値は、Origin のスキームを基準に正規化してから比べる。
 const resolveAllowedHosts = (
   env: Record<string, string | undefined>,
   defaultPort: string | undefined,
 ): readonly string[] => {
   const configured = env[ALLOWED_HOSTS_ENV];
-  const entries =
-    configured === undefined || configured.trim() === "" ? DEFAULT_ALLOWED_HOSTS : configured.split(",");
-  return entries
+  if (configured === undefined) {
+    return [];
+  }
+  return configured
+    .split(",")
     .map((entry) => normalizeHost(entry.trim(), defaultPort))
     .filter((host): host is string => host !== undefined);
 };
@@ -112,20 +127,24 @@ const requestOriginIsAllowed = (request: Request): boolean => {
   if (request.headers.get("sec-fetch-site") === "cross-site") {
     return false;
   }
+  // ブラウザは POST に必ず Origin を付ける。Origin の無い書き込みは画面からの操作ではなく、
+  // Host や許可ホストと照合する材料も無いので、宛先に関係なく拒否する。
   const origin = request.headers.get("origin");
   if (origin === null) {
-    return true;
+    return false;
   }
+  let originHostname: string;
   let originHost: string;
   let defaultPort: string | undefined;
   try {
     const originUrl = new URL(origin);
     defaultPort = defaultPortForScheme(originUrl.protocol);
-    originHost = canonicalHost(originUrl.hostname, originUrl.port, defaultPort);
+    originHostname = originUrl.hostname;
+    originHost = canonicalHost(originHostname, originUrl.port, defaultPort);
   } catch {
     return false;
   }
-  // Web は 0.0.0.0 で待ち受けるため request.url は利用者の開いた URL と一致しない。
+  // Web の待ち受けアドレスは利用者の開いた URL と一致するとは限らず、request.url は使えない。
   // ブラウザが開いた URL を表す Host ヘッダと比べる。x-forwarded-host は利用者が
   // 自由に付けられ、間に信頼できるプロキシも無いので判定に使わない。
   const hostHeader = request.headers.get("host");
@@ -133,8 +152,9 @@ const requestOriginIsAllowed = (request: Request): boolean => {
   if (host === undefined || originHost !== host) {
     return false;
   }
-  // Host と Origin を同時に偽れる DNS リバインディングを防ぐため、既知のホストに限る。
-  return resolveAllowedHosts(process.env, defaultPort).includes(host);
+  // Host と Origin が同じ名前でそろう DNS リバインディングを防ぐため、外部の者が向き先を
+  // 決められない名前か、設定で許可した名前に限る。
+  return hostnameIsLocallyResolved(originHostname) || resolveAllowedHosts(process.env, defaultPort).includes(host);
 };
 
 export type ReadJsonObjectResult =
