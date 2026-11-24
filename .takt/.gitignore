@@ -14,9 +14,10 @@
 !steps/
 !steps/**
 
-# Workflow helper scripts (version-controlled)
+# Workflow helper scripts and their settings (version-controlled)
 !scripts/
 !scripts/**
+!notify-orca.json
 !facets/
 !facets/personas/
 !facets/personas/**

@@ -10,11 +10,18 @@
   aborted    ワークフローが ABORT へ進む直前（理由は直前の工程名で示す）
   failed / question も受け付ける（ワークフロー以外から呼ぶとき用）
 
-宛先の決め方（先に見つかったものを使う）:
-  1. タスクの指示文（order.md）の 1 行 `orca: bot=<ボット名> item=<番号>`
-  2. takt-dash中将の対応表（--map、既定は ~/.orca/bots/takt-dash/state/takt-orca-map.json）の
-     `<ゴール ID>:<タスク名>` または `<ゴール ID>:<workKey>` のエントリ
-  3. 宛先 takt-dash中将、項目番号「不明」
+宛先の決め方（先に見つかったものを使う）。宛先はその TAKT の仕事を管理しているボットにする:
+  1. タスクの指示文（order.md）の 1 行 `orca: bot=<ボット名> item=<番号>`。投入したボットが
+     自分の名前と項目番号を書く。
+  2. 設定の map が指す対応表の `<ゴール ID>:<タスク名>` または `<ゴール ID>:<workKey>` のエントリ
+  3. 設定の default_bot（そのプロジェクトを担当するボット）、項目番号「不明」
+  どれも無ければ送らずに記録だけ残す。
+
+設定（プロジェクトごとに 1 か所）:
+  .takt/notify-orca.json に {"default_bot": "<担当ボット>", "map": "<対応表のパス>"} を置く。
+  map は省略でき、~ はホームに展開する。作業用クローン（cwd）の .takt にあればそれを、
+  無ければ tasks.yaml のあるプロジェクトの .takt を読む。ほかのプロジェクトへ写すときは
+  この設定だけを変える。
 
 実行の情報の読み方:
   TAKT は command の環境を PATH・SHELL・TMPDIR などと TAKT_PREVIOUS_RESPONSE_FILE だけに
@@ -47,7 +54,7 @@ HERE = Path(__file__).resolve().parent
 PROJECT_STATUS = HERE.parent.parent / "tools" / "project-status"
 
 DEFAULT_ORCA = "/Applications/Orca.app/Contents/Resources/bin/orca"
-DEFAULT_BOT = "takt-dash中将"
+CONFIG_NAME = "notify-orca.json"
 # Orca の端末の外（TAKT の command）から送るため、送信元の名前を --from で明示する。
 # 無いと orca は no_active_sender_terminal で送らない。
 DEFAULT_SENDER = "takt-workflow"
@@ -67,9 +74,26 @@ PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
 NOTIFY_STEP_PREFIX = "notify_"
 
 
-def default_map_path() -> Path:
-    # TAKT は HOME を渡さないが、expanduser はパスワードデータベースへ倒れる。
-    return Path(os.path.expanduser("~")) / ".orca/bots/takt-dash/state/takt-orca-map.json"
+def read_config(explicit, cwd: Path, tasks_path) -> dict:
+    """notify-orca.json を読み、default_bot と map（Path か None）を返す。読めなければ空。"""
+    candidates = [Path(explicit)] if explicit else [cwd / ".takt" / CONFIG_NAME]
+    if not explicit and tasks_path is not None:
+        candidates.append(tasks_path.parent / CONFIG_NAME)
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        bot = data.get("default_bot")
+        table = data.get("map")
+        return {
+            "default_bot": bot if isinstance(bot, str) and BOT_NAME.fullmatch(bot) else None,
+            # TAKT は HOME を渡さないが、expanduser はパスワードデータベースへ倒れる。
+            "map": Path(os.path.expanduser(table)) if isinstance(table, str) and table else None,
+        }
+    return {"default_bot": None, "map": None}
 
 
 def _load_task_context():
@@ -189,23 +213,25 @@ def build_message(args, cwd: Path, environ) -> dict:
     goal_id = entry.get("goal_id", "")
     work_key = entry.get("goal_work_key", "")
     task_name = entry.get("name", "")
+    config = read_config(args.config, cwd, tasks_path)
     issue = None
     if task_context is not None and order:
         try:
-            issue = task_context.extract_issue_reference(order)
+            # 宛先の行（item=<番号>）を issue と取り違えないよう、その行を除いて読む。
+            issue = task_context.extract_issue_reference(ORCA_LINE.sub("", order))
         except Exception:
             issue = None
     prs = sorted(set(PR_URL.findall(order)))
 
     route = route_from_order(order)
     map_route = None
-    if route is None:
-        found = route_from_map(Path(args.map), goal_id, (task_name, work_key))
+    if route is None and config["map"] is not None:
+        found = route_from_map(config["map"], goal_id, (task_name, work_key))
         if found is not None:
             route, map_route = found[:3], found[3]
-    if route is None:
-        route = (DEFAULT_BOT, UNKNOWN_ITEM, "既定")
-    bot, item, route_source = route
+    if route is None and config["default_bot"] is not None:
+        route = (config["default_bot"], UNKNOWN_ITEM, "既定")
+    bot, item, route_source = route if route is not None else (None, UNKNOWN_ITEM, "なし")
     if map_route is not None:
         if not issue and map_route.get("issues"):
             issue = ", ".join(f"#{number}" for number in map_route["issues"])
@@ -322,7 +348,7 @@ def main(argv=None, environ=None, cwd=None) -> int:
         parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
         parser.add_argument("--result", required=True, choices=sorted(RESULT_LABELS))
         parser.add_argument("--orca", default=DEFAULT_ORCA)
-        parser.add_argument("--map", default=str(default_map_path()))
+        parser.add_argument("--config", help=f"既定は .takt/{CONFIG_NAME}")
         parser.add_argument("--timeout", type=float, default=10.0)
         parser.add_argument("--sender", default=DEFAULT_SENDER)
         try:
@@ -333,7 +359,10 @@ def main(argv=None, environ=None, cwd=None) -> int:
             return 0
         message = build_message(args, cwd, environ)
         log_dir = message["log_dir"]
-        outcome = send(args.orca, message, args.timeout, args.sender)
+        if message["bot"] is None:
+            outcome = f"宛先が指示文・対応表・設定（{CONFIG_NAME} の default_bot）のどれにも無いので送らなかった"
+        else:
+            outcome = send(args.orca, message, args.timeout, args.sender)
         line = (
             f"{_now()} notify-orca: {outcome}: bot:{message['bot']} item={message['item']} "
             f"件名「{message['subject']}」"

@@ -9,16 +9,21 @@
      --from takt-workflow --to bot:<名前> --type status --subject --body-file --item を渡す。本文には
      プロジェクト・ゴール ID・タスク・workKey・issue・PR・結果・実行 ID・run のディレクトリ・
      項目番号が入る。
-  2. 指示文に行が無いときは、対応表の `<ゴール ID>:<タスク名>` から宛先・項目・issue・PR を決める。
-  3. どちらにも無いときは takt-dash中将宛てにし、--item を付けず、項目番号を「不明」と書く。
-     形の崩れた `orca:` 行は使わない。
+  2. 指示文に行が無いときは、設定の map が指す対応表の `<ゴール ID>:<タスク名>` から
+     宛先・項目・issue・PR を決める。
+  3. どちらにも無いときは設定（.takt/notify-orca.json）の default_bot 宛てにし、--item を付けず、
+     項目番号を「不明」と書く。形の崩れた `orca:` 行は使わない。設定は作業用クローンに無ければ
+     プロジェクトの .takt から読む。設定も無ければ送らない。
+  3a. issue の欄と Orca の項目番号を取り違えない（指示文に両方がある・issue の URL だけ・
+      `orca:` 行だけの 3 通り）。
   4. 中断の通知は、通知の工程を除いた直前の工程を理由に書き、直前の応答はパスだけを書いて
      中身を貼らない。
   5. orca が失敗・時間切れ・存在しない・引数が足りないときも終了コード 0 で終わり、
      run のディレクトリの notify-orca.log に 1 行残す。orca の標準エラーは本文にも記録にも貼らず、
      notify-orca.stderr に分けて残す。時間切れでは orca の子プロセスも止める。
   6. TAKT と同じく HOME などを渡さない最小の環境で動く。
-  7. taktdash-change では、COMPLETE と ABORT へ直接進むのは通知の工程（notify_completed /
+  7. このリポジトリの設定の default_bot は takt-dash中将（副元帥・元帥を既定にしない）。
+  8. taktdash-change では、COMPLETE と ABORT へ直接進むのは通知の工程（notify_completed /
      notify_aborted）だけで、ほかの工程の終わりはすべて通知を通る。
 
 実の orca は呼ばない。すべて一時ディレクトリで完結する。
@@ -101,10 +106,17 @@ class Workspace:
             encoding="utf-8",
         )
         self.map = self.base / "takt-orca-map.json"
+        self.config = self.clone / ".takt" / "notify-orca.json"
+        self.write_config({"default_bot": "takt-dash中将", "map": str(self.map)})
         self.out = self.base / "orca-call"
         self.orca = self.base / "fake-orca"
         self.orca.write_text(FAKE_ORCA.format(out=self.out, tail=orca_tail), encoding="utf-8")
         self.orca.chmod(0o755)
+
+    def write_config(self, data, path=None):
+        path = path or self.config
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def __enter__(self):
         return self
@@ -120,7 +132,7 @@ class Workspace:
             "TAKT_PREVIOUS_RESPONSE_FILE": str(self.response),
         }
         command = [sys.executable, str(SCRIPT), *args,
-                   "--orca", str(orca or self.orca), "--map", str(self.map), "--timeout", timeout]
+                   "--orca", str(orca or self.orca), "--timeout", timeout]
         started = time.monotonic()
         completed = subprocess.run(
             command, cwd=self.clone, env=env, capture_output=True, text=True, timeout=25
@@ -215,6 +227,55 @@ def test_aborted_reports_previous_step_without_response_body() -> None:
         assert "SECRET-RESPONSE-CONTENT" not in ws.log()
 
 
+ISSUE_URL = "https://github.com/j5ik2o/takt-dash/issues/93"
+
+
+def test_issue_and_item_are_not_confused() -> None:
+    cases = {
+        "両方": (f"対象 {ISSUE_URL}\norca: bot=副元帥 item=149\n", ISSUE_URL, "149", "bot:副元帥"),
+        "issue の URL だけ": (f"対象 {ISSUE_URL}\n", ISSUE_URL, None, "bot:takt-dash中将"),
+        "orca: 行だけ": ("宛先だけ書く。\norca: bot=副元帥 item=149\n", "なし", "149", "bot:副元帥"),
+    }
+    for label, (order, issue, item, to) in cases.items():
+        with Workspace(order) as ws:
+            completed, _ = ws.run_script("--result", "completed")
+            assert completed.returncode == 0, label
+            args, body = ws.args(), ws.body()
+            assert option(args, "--to") == to, (label, args)
+            assert f"- issue: {issue}\n" in body, (label, body)
+            if item is None:
+                assert "--item" not in args, (label, args)
+                assert "Orca の項目番号: 不明" in body, (label, body)
+            else:
+                assert option(args, "--item") == item, (label, args)
+                assert f"Orca の項目番号: {item}（" in body, (label, body)
+            assert "issue: 149" not in body, (label, body)
+
+
+def test_project_config_is_read_when_clone_has_none() -> None:
+    with Workspace("宛先の行は無い。\n") as ws:
+        ws.config.unlink()
+        ws.write_config({"default_bot": "fraktor-ng-rs中将"}, ws.project / ".takt" / "notify-orca.json")
+        completed, _ = ws.run_script("--result", "completed")
+        assert completed.returncode == 0
+        assert option(ws.args(), "--to") == "bot:fraktor-ng-rs中将"
+
+
+def test_without_destination_nothing_is_sent() -> None:
+    with Workspace("宛先の行は無い。\n") as ws:
+        ws.config.unlink()
+        completed, _ = ws.run_script("--result", "completed")
+        assert completed.returncode == 0
+        assert not ws.out.with_suffix(".args").exists(), "宛先が無いのに orca を呼びました"
+        assert "どれにも無いので送らなかった" in ws.log()
+
+
+def test_repository_default_bot_is_the_project_officer() -> None:
+    config = json.loads((SCRIPT.parent.parent / "notify-orca.json").read_text(encoding="utf-8"))
+    assert config["default_bot"] == "takt-dash中将", config
+    assert config["default_bot"] not in ("副元帥", "元帥"), config
+
+
 def test_orca_failure_still_exits_zero() -> None:
     with Workspace("orca: bot=副元帥 item=149\n", orca_tail="echo boom >&2; exit 3") as ws:
         completed, _ = ws.run_script("--result", "completed")
@@ -231,10 +292,11 @@ def test_orca_timeout_is_cut_and_child_stopped() -> None:
         ws.orca.write_text(
             FAKE_ORCA.format(out=ws.out, tail=tail.format(pidfile=pidfile)), encoding="utf-8"
         )
-        completed, elapsed = ws.run_script("--result", "completed", timeout="1")
+        completed, elapsed = ws.run_script("--result", "completed", timeout="3")
         assert completed.returncode == 0
-        assert elapsed < 10, f"時間切れで打ち切られていません: {elapsed:.1f}s"
-        assert "orca が 1 秒で終わらず打ち切った" in ws.log()
+        assert elapsed < 15, f"時間切れで打ち切られていません: {elapsed:.1f}s"
+        assert "orca が 3 秒で終わらず打ち切った" in ws.log()
+        assert pidfile.exists(), "偽の orca が子プロセスを起こす前に打ち切られました"
         child = int(pidfile.read_text().strip())
         time.sleep(0.2)
         try:
@@ -285,6 +347,10 @@ def main() -> int:
         test_map_routes_when_order_has_no_line,
         test_default_route_without_line_or_map,
         test_aborted_reports_previous_step_without_response_body,
+        test_issue_and_item_are_not_confused,
+        test_project_config_is_read_when_clone_has_none,
+        test_without_destination_nothing_is_sent,
+        test_repository_default_bot_is_the_project_officer,
         test_orca_failure_still_exits_zero,
         test_orca_timeout_is_cut_and_child_stopped,
         test_missing_orca_still_exits_zero,
