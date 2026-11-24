@@ -75,7 +75,9 @@ const writeRoutes: Array<[string, RouteHandler, string, Record<string, unknown>,
 ];
 
 test("書き込みの応答が期限内に届かないときは 504 を返し、結果が不明であることを伝える", async () => {
-  await withServer({ hangUnary: true }, async (server) => {
+  // backend は要求を受け取るが、応答は Web の期限より遅れる。
+  const behavior = { approveGoalMerge: { taskName: "マージ", workflow: "simple" }, writeDelayMs: 2_000 };
+  await withServer(behavior, async (server) => {
     const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: server.address }, writeDeadlineMs: 50 });
     try {
       const response = await runWrite(() => client.approveGoalMerge({ ...MERGE_BODY, until: "merge" }));

@@ -20,6 +20,8 @@ mod resolve;
 mod run_content;
 mod run_detail;
 mod run_updates;
+mod write_ledger;
+mod writes;
 
 use std::{
   path::PathBuf,
@@ -38,16 +40,14 @@ use run_updates::{parse_log_cursor, read_updates_response};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+use write_ledger::{WriteFailure, WriteLedger};
 
 use crate::{
   activity::ActivityStore,
   config::load_config,
   conversation::{ConversationQuery, ConversationReader},
-  domain::{
-    GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ReportFilename,
-    RunSlug, ServerId, TaskName,
-  },
-  mcp::{McpClientRegistry, ToolError},
+  domain::{GoalId, InstructionId, ProjectName, ReportFilename, RunSlug, ServerId, TaskName},
+  mcp::{McpClientRegistry, ToolError, TransportError},
   model::{self},
   run_log::{ContentRead, InitialRead, Instruction},
   run_progress::{read_run, read_run_instructions, RunLogHandle, RunLogHandles, RunReadFailure},
@@ -131,6 +131,8 @@ pub struct TaktDashServiceImpl {
   /// 末尾の [`DETAIL_INITIAL_TAIL_BYTES`] だけを読みます。lock は取っ手の受け渡しの間だけ持ち、
   /// 読み取りの間は持ちません。
   run_logs:     Mutex<RunLogHandles<ProjectName>>,
+  /// 書き込み要求の鍵ごとの記録。同じ操作の再試行と同時の重複を、takt へ送り直さずに扱います。
+  write_ledger: WriteLedger,
 }
 
 /// サービスの現在時刻を返す関数。テストは固定時計を注入します。
@@ -182,6 +184,7 @@ impl TaktDashServiceImpl {
       registry,
       clock,
       run_logs: Mutex::new(RunLogHandles::with_initial_read(InitialRead::Tail(DETAIL_INITIAL_TAIL_BYTES))),
+      write_ledger: WriteLedger::default(),
     }
   }
 
@@ -257,6 +260,19 @@ fn tool_error_status(error: ToolError) -> Status {
     | ToolError::Parse(message) => Status::internal(format!("takt-mcp の応答を解析できませんでした: {message}")),
     | ToolError::Tool(error) => Status::unavailable(format!("takt-mcp の道具が失敗しました: {error}")),
     | ToolError::Transport(error) => Status::unavailable(format!("takt-mcp へ接続できませんでした: {error}")),
+  }
+}
+
+/// 書き込み道具のエラーを、書き込みの失敗へ変換する境界。
+///
+/// takt が期限内に応答しなかった書き込みは、適用されたかどうか分かりません。接続の失敗と
+/// 区別して DEADLINE_EXCEEDED で返し、結果が不明であることを利用者へ伝えます。
+fn write_failure(error: ToolError) -> WriteFailure {
+  match error {
+    | ToolError::Transport(TransportError::Timeout(seconds)) => WriteFailure::Unknown(Status::deadline_exceeded(format!(
+      "takt-mcp から {seconds} 秒以内に応答がなく、操作の結果は不明です。状態を確かめてから、必要ならやり直してください。"
+    ))),
+    | error => WriteFailure::Failed(tool_error_status(error)),
   }
 }
 
@@ -737,76 +753,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     request: Request<AnswerInquiryRequest>,
   ) -> Result<Response<AnswerInquiryResponse>, Status> {
     let request = request.into_inner();
-    if request.inquiry_id.trim().is_empty() {
-      return Err(Status::invalid_argument("inquiry_id が空です。"));
-    }
-    if request.server_id.trim().is_empty() {
-      return Err(Status::invalid_argument("server_id が空です。"));
-    }
-    if request.project.trim().is_empty() {
-      return Err(Status::invalid_argument("project が空です。"));
-    }
-    // 保留項目は (server_id, project, inquiry_id) の3条件一致で引き当てる。同じ id が別の
-    // プロジェクトや別のサーバーにあっても、対象の判断だけを選ぶ。
-    let matches: Vec<model::PendingDecision> = self
-      .store
-      .pending_decisions(self.now(), model::PendingDecisionFilter::Inquiry)
-      .into_iter()
-      .filter(|decision| {
-        decision.server_id == request.server_id
-          && decision.project == request.project
-          && decision.inquiry_id.as_ref().map(InquiryId::as_str) == Some(request.inquiry_id.as_str())
-      })
-      .collect();
-    let pending = match matches.len() {
-      | 0 => None,
-      | 1 => matches.into_iter().next(),
-      | _ => {
-        return Err(Status::invalid_argument(format!(
-          "問い合わせ {} はサーバー {} のプロジェクト {} 内で一意に特定できません。",
-          request.inquiry_id, request.server_id, request.project
-        )));
-      },
-    };
-    let inquiry_kind = pending.as_ref().and_then(|decision| decision.inquiry_kind);
-    let answer = answer_payload(inquiry_kind, request.text, request.report)?;
-    // 保留項目を引き当てられない問い合わせは、要求がゴールを明示していても回答しません。
-    // 回答本文の検証を先に済ませることで、空の回答は入力の誤りとして扱います。
-    let Some(pending) = pending else {
-      return Err(Status::not_found(format!(
-        "問い合わせ {} はサーバー {} のプロジェクト {} にありません。",
-        request.inquiry_id, request.server_id, request.project
-      )));
-    };
-    // takt_answer_goal_question の入力契約では goalId は必須（UUID）です。要求が明示した
-    // ゴールを優先し、無ければ引き当てた判断待ちのゴールを使います。要求の値の誤りは入力の
-    // 誤り、状態ストア由来の値の誤りは内部の不整合として扱います。
-    let requested_goal_id = request.goal_id.clone().filter(|goal_id| !goal_id.trim().is_empty());
-    let goal_id = match requested_goal_id {
-      | Some(goal_id) => GoalId::try_from(goal_id.as_str())
-        .map_err(|error| Status::invalid_argument(format!("goal_id が不正です: {error}")))?,
-      | None => {
-        let goal_id = pending.goal_id.clone().filter(|goal_id| !goal_id.trim().is_empty()).ok_or_else(|| {
-          Status::invalid_argument("goal_id を特定できません。ゴールに属さない問い合わせには回答できません。")
-        })?;
-        GoalId::try_from(goal_id.as_str())
-          .map_err(|error| Status::internal(format!("状態ストアの goal_id が不正です: {error}")))?
-      },
-    };
-    let question_id = InquiryId::try_from(request.inquiry_id.as_str())
-      .map_err(|error| Status::invalid_argument(format!("inquiry_id が不正です: {error}")))?;
-    let server_id = ServerId::try_from(request.server_id.as_str())
-      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
-    let project = ProjectName::try_from(request.project.as_str())
-      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
-    let resolved = self.resolve_write_target(&server_id, &project)?;
-    let _write_gate = self.write_gate(&resolved).await;
-    let mut source = self.write_source(&resolved);
-    source.answer_goal_question(&resolved.cwd, &goal_id, &question_id, answer).await.map_err(tool_error_status)?;
-    self.record_write(&resolved);
-    // 回答したゴールは、終端でも次の周期で質問を読み直させて判断待ちから外します。
-    self.store.invalidate_goal_questions(resolved.project.as_str(), goal_id);
-    Ok(Response::new(AnswerInquiryResponse { inquiry_id: question_id.as_str().to_owned() }))
+    let key = request.idempotency_key.clone();
+    self.write_ledger.run("AnswerInquiry", key.as_deref(), &request, || self.prepare_answer(request.clone())).await
   }
 
   async fn approve_goal_merge(
@@ -814,40 +762,8 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     request: Request<ApproveGoalMergeRequest>,
   ) -> Result<Response<ApproveGoalMergeResponse>, Status> {
     let request = request.into_inner();
-    if request.goal_id.trim().is_empty() {
-      return Err(Status::invalid_argument("goal_id が空です。"));
-    }
-    if request.pr_number <= 0 {
-      return Err(Status::invalid_argument("pr_number は正の整数で指定してください。"));
-    }
-    if !matches!(request.until.as_str(), "prepare" | "merge") {
-      return Err(Status::invalid_argument("until は \"prepare\" か \"merge\" を指定してください。"));
-    }
-    if request.server_id.trim().is_empty() {
-      return Err(Status::invalid_argument("server_id が空です。"));
-    }
-    if request.project.trim().is_empty() {
-      return Err(Status::invalid_argument("project が空です。"));
-    }
-    let goal_id = GoalId::try_from(request.goal_id.as_str())
-      .map_err(|error| Status::invalid_argument(format!("goal_id が不正です: {error}")))?;
-    let pr_number = PullRequestNumber::try_from(request.pr_number)
-      .map_err(|error| Status::invalid_argument(format!("pr_number が不正です: {error}")))?;
-    let until = MergeUntil::try_from(request.until.as_str())
-      .map_err(|error| Status::invalid_argument(format!("until が不正です: {error}")))?;
-    let server_id = ServerId::try_from(request.server_id.as_str())
-      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
-    let project = ProjectName::try_from(request.project.as_str())
-      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
-    let resolved = self.resolve_write_target(&server_id, &project)?;
-    let _write_gate = self.write_gate(&resolved).await;
-    let mut source = self.write_source(&resolved);
-    let result = source.merge_goal_pr(&resolved.cwd, &goal_id, pr_number, until).await.map_err(tool_error_status)?;
-    self.record_write(&resolved);
-    Ok(Response::new(ApproveGoalMergeResponse {
-      task_name: result.task_name.as_str().to_owned(),
-      workflow:  result.workflow,
-    }))
+    let key = request.idempotency_key.clone();
+    self.write_ledger.run("ApproveGoalMerge", key.as_deref(), &request, || self.prepare_merge(request.clone())).await
   }
 
   async fn approve_goal_registration(
@@ -855,30 +771,11 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     request: Request<ApproveGoalRegistrationRequest>,
   ) -> Result<Response<ApproveGoalRegistrationResponse>, Status> {
     let request = request.into_inner();
-    if request.revision <= 0 {
-      return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
-    }
-    let revision = RegistrationRevision::try_from(request.revision)
-      .map_err(|error| Status::invalid_argument(format!("revision が不正です: {error}")))?;
-    if request.server_id.trim().is_empty() {
-      return Err(Status::invalid_argument("server_id が空です。"));
-    }
-    if request.project.trim().is_empty() {
-      return Err(Status::invalid_argument("project が空です。"));
-    }
-    let server_id = ServerId::try_from(request.server_id.as_str())
-      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
-    let project = ProjectName::try_from(request.project.as_str())
-      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
-    let resolved = self.resolve_write_target(&server_id, &project)?;
-    let _write_gate = self.write_gate(&resolved).await;
-    let mut source = self.write_source(&resolved);
-    let result = source.approve_goal_registration(&resolved.cwd, revision).await.map_err(tool_error_status)?;
-    self.record_write(&resolved);
-    Ok(Response::new(ApproveGoalRegistrationResponse {
-      revision: result.revision.get(),
-      goal_id:  result.goal_id.as_str().to_owned(),
-    }))
+    let key = request.idempotency_key.clone();
+    self
+      .write_ledger
+      .run("ApproveGoalRegistration", key.as_deref(), &request, || self.prepare_registration_approval(request.clone()))
+      .await
   }
 
   async fn reject_goal_registration(
@@ -886,27 +783,11 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     request: Request<RejectGoalRegistrationRequest>,
   ) -> Result<Response<RejectGoalRegistrationResponse>, Status> {
     let request = request.into_inner();
-    if request.revision <= 0 {
-      return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
-    }
-    let revision = RegistrationRevision::try_from(request.revision)
-      .map_err(|error| Status::invalid_argument(format!("revision が不正です: {error}")))?;
-    if request.server_id.trim().is_empty() {
-      return Err(Status::invalid_argument("server_id が空です。"));
-    }
-    if request.project.trim().is_empty() {
-      return Err(Status::invalid_argument("project が空です。"));
-    }
-    let server_id = ServerId::try_from(request.server_id.as_str())
-      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
-    let project = ProjectName::try_from(request.project.as_str())
-      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
-    let resolved = self.resolve_write_target(&server_id, &project)?;
-    let _write_gate = self.write_gate(&resolved).await;
-    let mut source = self.write_source(&resolved);
-    let rejected = source.reject_goal_registration(&resolved.cwd, revision).await.map_err(tool_error_status)?;
-    self.record_write(&resolved);
-    Ok(Response::new(RejectGoalRegistrationResponse { revision: rejected.get() }))
+    let key = request.idempotency_key.clone();
+    self
+      .write_ledger
+      .run("RejectGoalRegistration", key.as_deref(), &request, || self.prepare_registration_rejection(request.clone()))
+      .await
   }
 
   async fn list_goal_registration_proposals(

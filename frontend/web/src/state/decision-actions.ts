@@ -191,16 +191,45 @@ const COMMUNICATION_FAILURE_MESSAGE = "操作を送信できませんでした�
 
 type WriteResponseBody = { ok?: boolean; error?: string };
 
+// 1 回の操作の送信。決着するまでのやり直しは同じ鍵を使い、backend が同じ操作として扱う。
+export type DecisionAttempt = {
+  fingerprint: string;
+  idempotencyKey: string;
+};
+
+// backend が受け付ける鍵（32 桁の 16 進数）を作る。crypto.randomUUID は http の LAN 上の
+// アドレスでは使えないため、どの文脈でも使える getRandomValues から作る。
+export function newIdempotencyKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// 今回の送信に使う鍵を決める。previous は成功していない直前の送信で、同じ操作のやり直しなら
+// その鍵を使い続ける。応答を受け取れなかった操作は backend で済んでいることがあり、同じ鍵で
+// 送れば backend は書き込みを重ねない。内容や種類が違う操作は別の操作として新しい鍵を使う。
+export function decisionAttempt(
+  action: DecisionAction,
+  previous: DecisionAttempt | undefined,
+  newKey: () => string = newIdempotencyKey,
+): DecisionAttempt {
+  const fingerprint = JSON.stringify([action.kind, action.payload]);
+  if (previous !== undefined && previous.fingerprint === fingerprint) {
+    return previous;
+  }
+  return { fingerprint, idempotencyKey: newKey() };
+}
+
 export async function submitDecisionAction(
   action: DecisionAction,
   fetchImpl: typeof fetch = fetch,
+  idempotencyKey?: string,
 ): Promise<DecisionOutcome> {
   let response: Response;
   try {
     response = await fetchImpl(ENDPOINTS[action.kind], {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(action.payload),
+      body: JSON.stringify(idempotencyKey === undefined ? action.payload : { ...action.payload, idempotencyKey }),
     });
   } catch {
     return { ok: false, message: COMMUNICATION_FAILURE_MESSAGE };

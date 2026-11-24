@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { badRequest, isNonEmptyString, isPositiveInteger, readJsonObject, runWrite } from "../_shared";
+import { badRequest, isNonEmptyString, isPositiveInteger, readIdempotencyKey, readJsonObject, runWrite } from "../_shared";
 
 // マージの承認。until は Web の操作契約として "merge" に固定する。
 export async function POST(request: NextRequest): Promise<Response> {
@@ -23,7 +23,13 @@ export async function POST(request: NextRequest): Promise<Response> {
     return badRequest("prNumber は正の整数で指定してください。");
   }
 
+  const key = readIdempotencyKey(body);
+  if (key.kind === "error") {
+    return key.response;
+  }
+  const { idempotencyKey } = key;
+
   return runWrite((client) =>
-    client.approveGoalMerge({ serverId, project, goalId, prNumber, until: "merge" }),
+    client.approveGoalMerge({ serverId, project, goalId, prNumber, until: "merge", idempotencyKey }),
   );
 }

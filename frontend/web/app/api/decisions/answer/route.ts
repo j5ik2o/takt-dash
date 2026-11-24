@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { OperationAnswerReport } from "../../../../src/proto/taktdash";
-import { badRequest, isNonEmptyString, readJsonObject, runWrite } from "../_shared";
+import { badRequest, isNonEmptyString, readIdempotencyKey, readJsonObject, runWrite } from "../_shared";
 
 // 問い合わせへの回答。text（自由記述・選択肢）と report（作業の依頼）のどちらか一方だけを
 // 受け取り、そのまま AnswerInquiry へ渡す。
@@ -56,7 +56,13 @@ export async function POST(request: NextRequest): Promise<Response> {
     report = reportValue;
   }
 
+  const key = readIdempotencyKey(body);
+  if (key.kind === "error") {
+    return key.response;
+  }
+  const { idempotencyKey } = key;
+
   return runWrite((client) =>
-    client.answerInquiry({ serverId, project, goalId, inquiryId, text, report }),
+    client.answerInquiry({ serverId, project, goalId, inquiryId, text, report, idempotencyKey }),
   );
 }
