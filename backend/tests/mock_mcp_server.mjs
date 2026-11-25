@@ -387,7 +387,7 @@ const listedProposal = ({ summary, ...identity }) => ({
       : [{ path: "summary" }],
 });
 
-// takt_get_goal_registration_proposal（path なし）の応答。持ち主でない会話と、保留中の登録案が
+// takt_get_goal_registration_proposal の応答（path なしは登録案の全体、path ありは項目のページ）。持ち主でない会話と、保留中の登録案が
 // 無い cwd は、実 takt-mcp と同じ文言の道具エラーにする。
 const readProposal = (args, pending) => {
   const fail = (text) => ({ content: [{ type: "text", text: `Goal registration proposal read failed: ${text}` }], isError: true });
@@ -398,7 +398,78 @@ const readProposal = (args, pending) => {
   if (pending.length === 0) {
     return fail(`No goal registration proposal is pending for ${args.cwd}`);
   }
-  return asText({ proposal: pending[0] });
+  const { summary, ...identity } = pending[0];
+  if (args.path === undefined) {
+    return asText(boundedResponse({ proposal: pending[0] }));
+  }
+  // path は summary.<項目> と summary.<一覧>.<番号>。実 takt-mcp の selectGoalValue と同じく、
+  // 無い項目は道具エラーにする。
+  let value = { summary };
+  for (const part of args.path.split(".")) {
+    if (value === null || typeof value !== "object" || !Object.hasOwn(value, part)) {
+      return fail("Selected field does not exist");
+    }
+    value = value[part];
+  }
+  const extra = { ...identity, path: args.path };
+  if (Array.isArray(value)) {
+    const offset = Number(args.offset ?? 0);
+    const limit = Number(args.limit ?? PAGE_SIZE);
+    const page = value.slice(offset, offset + limit);
+    const nextOffset = offset + page.length < value.length ? offset + page.length : null;
+    return asText(
+      boundedResponse({
+        ...extra,
+        items: page,
+        collection: "items",
+        totalCount: value.length,
+        returnedCount: page.length,
+        omittedCount: value.length - page.length,
+        offset,
+        nextOffset,
+        truncated: nextOffset !== null,
+      }),
+    );
+  }
+  if (typeof value === "string") {
+    return asText({ ...extra, ...textPage(value, args.textOffset, args.maxBytes) });
+  }
+  return asText({ ...extra, value });
+};
+
+// 実 takt-mcp の jsonResult と同じく、応答が 64 KiB に収まらなければ、長い文字列を先頭 4096
+// バイトの文字境界までにし、truncated と omissions（番号は [] にまとめる）を足す。
+const RESPONSE_MAX_BYTES = 64 * 1024;
+const boundedResponse = (payload) => {
+  if (Buffer.byteLength(JSON.stringify(payload)) <= RESPONSE_MAX_BYTES) {
+    return payload;
+  }
+  const omissions = new Map();
+  const shorten = (entry, path) => {
+    if (typeof entry === "string") {
+      const page = textPage(entry, 0, 4096);
+      if (page.returnedBytes < page.totalBytes) {
+        const key = path.replace(/\.\d+(?=\.|$)/g, "[]");
+        const previous = omissions.get(key);
+        omissions.set(key, {
+          path: key,
+          totalBytes: (previous?.totalBytes ?? 0) + page.totalBytes,
+          returnedBytes: (previous?.returnedBytes ?? 0) + page.returnedBytes,
+        });
+      }
+      return page.content;
+    }
+    if (Array.isArray(entry)) {
+      return entry.map((item, index) => shorten(item, `${path}.${index}`));
+    }
+    if (entry !== null && typeof entry === "object") {
+      return Object.fromEntries(
+        Object.entries(entry).map(([key, item]) => [key, shorten(item, path ? `${path}.${key}` : key)]),
+      );
+    }
+    return entry;
+  };
+  return { ...shorten(payload, ""), truncated: true, omissions: [...omissions.values()] };
 };
 
 const withOwner = (proposals) =>

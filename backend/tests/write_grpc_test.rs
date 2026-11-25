@@ -2388,30 +2388,72 @@ async fn proposal_body_read_failure_keeps_the_previous_proposals() {
   poller.shutdown().await;
 }
 
+/// 実 takt-mcp が 64 KiB に収まらない登録案を先頭だけにするのと同じ大きさの状態。
+fn state_with_long_proposal(objective: &str, criteria: &[&str]) -> serde_json::Value {
+  json!({
+    "proposals": [{
+      "revision": 3,
+      "repositoryDirectory": "/abs/takt-dash",
+      "summary": { "objective": objective, "acceptanceCriteria": criteria, "startBranch": "main" }
+    }]
+  })
+}
+
 #[tokio::test]
-async fn truncated_proposal_body_says_so() {
-  // 応答が 64 KiB に収まらないと、takt-mcp は長い文字列を先頭だけにして truncated を立てる。
-  // 画面の本文に、省略があることを書く。
-  let (harness, mut poller) = polled_harness(json!({
-    "proposals": [{ "revision": 3, "repositoryDirectory": "/abs/takt-dash", "summary": { "objective": "長い目的" } }],
-    "responses": {
-      "takt_get_goal_registration_proposal": {
-        "proposal": {
-          "revision": 3,
-          "conversationId": DEFAULT_CONVERSATION,
-          "repositoryDirectory": "/abs/takt-dash",
-          "summary": { "objective": "長い目的の先頭", "acceptanceCriteria": ["表示される"] }
-        },
-        "truncated": true,
-        "omissions": [{ "path": "proposal.summary.objective", "totalBytes": 120000, "returnedBytes": 4095 }]
-      }
-    }
-  }))
-  .await;
+async fn long_proposal_fields_are_read_in_full() {
+  // 応答が 64 KiB に収まらないと、takt-mcp は長い文字列を先頭 4096 バイトまでにして truncated を
+  // 立てる（issue #369）。省略された項目は path と textOffset で続きを読み、全文を本文に入れる。
+  let objective = format!("{}目的の終わり", "あ".repeat(40_000));
+  // 受入条件の一覧のページも 64 KiB を超えるため、要素は 1 つずつ textOffset で読み直す。
+  let criterion = format!("{}条件の終わり", "い".repeat(23_000));
+  let (harness, mut poller) = polled_harness(state_with_long_proposal(&objective, &["短い条件", &criterion])).await;
+  let reads = || calls_named(&harness, "takt_get_goal_registration_proposal");
 
   let bodies = stored_proposal_bodies(&harness);
-  assert!(bodies[0].contains("長い目的の先頭"), "読めた分は本文に入ります: {bodies:?}");
-  assert!(bodies[0].contains("先頭だけを表示"), "省略があることを書きます: {bodies:?}");
+  assert!(bodies[0].contains(&objective), "目的を全文で出します（{} バイト）", bodies[0].len());
+  assert!(bodies[0].contains(&criterion), "受入条件の長い項目も全文で出します");
+  assert!(bodies[0].contains("短い条件"), "省略されていない項目も残ります");
+  assert!(bodies[0].contains("開始ブランチ: main"), "省略されていない項目も残ります");
+  assert!(
+    !bodies[0].contains("先頭だけを表示"),
+    "全文を読めたら省略の注記を付けません: {}",
+    &bodies[0][bodies[0].len() - 200..]
+  );
+  let read_count = reads().len();
+  assert!(read_count > 1, "続きを path で読みます");
+  assert!(
+    reads().iter().skip(1).all(|call| call["path"].as_str().is_some_and(|path| path.starts_with("summary."))),
+    "続きは項目の path で読みます: {:?}",
+    reads()
+  );
+  assert!(
+    reads().iter().any(|call| call["path"] == json!("summary.acceptanceCriteria.1")),
+    "先頭だけになった一覧の要素は、番号の path で読み直します"
+  );
+
+  poller.read_cycle_once().await.expect("次の周期を実行できます");
+  assert_eq!(reads().len(), read_count, "同じ revision の登録案は続きも読み直しません");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn long_proposal_field_reads_stop_at_the_limit() {
+  // 続きの読み取りには回数の上限がある。上限までに読み切れない登録案は、読めた分を出し、
+  // 省略があることを書く。
+  let objective = format!("{}目的の終わり", "う".repeat(200_000));
+  // 目的で上限に達するため、受入条件は最初の応答の先頭のまま残る。
+  let criterion = format!("{}条件の終わり", "え".repeat(3_000));
+  let (harness, mut poller) = polled_harness(state_with_long_proposal(&objective, &["短い条件", &criterion])).await;
+
+  let reads = calls_named(&harness, "takt_get_goal_registration_proposal");
+  assert!(reads.len() <= 1 + 64, "続きの読み取りは 64 回までです: {} 回", reads.len());
+  let bodies = stored_proposal_bodies(&harness);
+  assert!(bodies[0].starts_with("目的: ううう"), "読めた分は本文に入ります");
+  assert!(!bodies[0].contains("目的の終わり"), "上限を超える分は読みません");
+  assert!(bodies[0].contains("先頭だけを表示"), "省略があることを書きます");
+  assert!(bodies[0].contains("短い条件"), "上限のあとの項目も、最初の応答の分は残ります");
+  assert!(bodies[0].contains(&"え".repeat(1_000)), "上限のあとの長い項目も、最初の応答の先頭は残ります");
 
   poller.shutdown().await;
 }
