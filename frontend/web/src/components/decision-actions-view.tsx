@@ -180,12 +180,18 @@ function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, di
   }, []);
 
   // 送信中はボタンが無効になり、押したボタンからフォーカスが外れる。見出しへ戻して
-  // ダイアログ内にフォーカスを保つ。
+  // ダイアログ内にフォーカスを保つ。切断で確定ボタンが無効になったときも、そこに
+  // フォーカスがあれば見出しへ移す。押せる「やめる」やリンクにあるフォーカスは動かさない。
   useEffect(() => {
-    if (busy) {
+    const active = document.activeElement;
+    const lostFocus =
+      active === null ||
+      !(dialogRef.current?.contains(active) ?? false) ||
+      (active instanceof HTMLButtonElement && active.disabled);
+    if (busy || (disconnected && lostFocus)) {
       headingRef.current?.focus();
     }
-  }, [busy]);
+  }, [busy, disconnected]);
 
   // キー処理と逸脱検知はダイアログの子孫ではなく document に置く。本文や背景のクリックで
   // フォーカスが body へ移っても Tab/Escape を捕まえ、背景操作へ抜けさせない。
