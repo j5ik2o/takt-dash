@@ -16,8 +16,8 @@ use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::{json, Value};
 use takt_dash_backend::{
-  domain::{GoalId, InquiryId},
-  model::{EventKind, ExecutionStatus, InquiryEntry, InquiryKind, ProjectSnapshot},
+  domain::{GoalId, InquiryId, RegistrationRevision},
+  model::{EventKind, ExecutionStatus, InquiryEntry, InquiryKind, ProjectSnapshot, RegistrationProposalEntry},
   poller::Poller,
   takt_dash::v1::{
     AnswerInquiryRequest, ApproveGoalMergeRequest, ApproveGoalRegistrationRequest, GetPendingDecisionsRequest,
@@ -165,7 +165,7 @@ async fn answer_inquiry_sends_free_text_in_the_answer_object() {
     "takt-dash",
     snapshot_with(vec![inquiry_entry(
       "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e",
-      "11111111-1111-4111-8111-111111111111",
+      "3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11",
       InquiryKind::Question,
     )]),
     time("2026-11-13T12:00:00Z"),
@@ -192,11 +192,7 @@ async fn answer_inquiry_sends_free_text_in_the_answer_object() {
   let calls = calls_named(&harness, "takt_answer_goal_question");
   assert_eq!(calls.len(), 1, "回答の道具を1回だけ呼びます: {calls:?}");
   let arguments = &calls[0];
-  assert_eq!(
-    arguments["goalId"],
-    json!("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11"),
-    "一致1件では要求が明示したゴールを優先します"
-  );
+  assert_eq!(arguments["goalId"], json!("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11"), "判断待ちのゴールへ回答します");
   assert_eq!(arguments["questionId"], json!("8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e"));
   assert_eq!(arguments["answer"], json!({ "text": "はい" }), "answer はオブジェクトで text を持つ必要があります");
 
@@ -352,7 +348,7 @@ async fn approve_goal_merge_rejects_a_non_positive_pr_number() {
 
 #[tokio::test]
 async fn approve_goal_registration_sends_the_revision() {
-  let harness = harness_with(json!({}));
+  let harness = harness_with_pending_proposals(json!({}), &[3]);
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -407,7 +403,7 @@ async fn approve_goal_registration_rejects_control_characters_in_the_target_with
 
 #[tokio::test]
 async fn reject_goal_registration_calls_reject_and_not_approve() {
-  let harness = harness_with(json!({}));
+  let harness = harness_with_pending_proposals(json!({}), &[3]);
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -1018,7 +1014,7 @@ async fn list_goal_registration_proposals_returns_empty_without_proposals() {
 
 #[tokio::test]
 async fn a_tool_error_is_mapped_to_unavailable() {
-  let harness = harness_with(json!({ "isError": ["takt_approve_goal_registration"] }));
+  let harness = harness_with_pending_proposals(json!({ "isError": ["takt_approve_goal_registration"] }), &[3]);
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -1349,7 +1345,7 @@ async fn write_rpc_rebuilds_the_client_when_the_project_cwd_changes() {
   // 同じ gRPC サーバとレジストリのまま、プロジェクトの cwd を変える。
   // 既存クライアントを設定と比較せずに再利用する実装では、次の書き込みが旧 cwd のまま
   // 旧子プロセスを使い続けるため、記録された cwd と子プロセスの数で検出する。
-  let harness = harness_with(json!({}));
+  let harness = harness_with_pending_proposals(json!({}), &[3, 4]);
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -1410,7 +1406,11 @@ async fn write_rpc_rebuild_resets_the_baseline_before_the_next_poll_cycle() {
     "objective": "確認の対象",
     "integrationBranch": "takt/confirm"
   });
-  let harness = harness_with(json!({ "goals": [goal] }));
+  // 書き込みに使う承認は、状態ストアの承認待ちと照合されるため、初回の読み取りで取り込みます。
+  let harness = harness_with(json!({
+    "goals": [goal],
+    "proposals": [{ "revision": 3, "repositoryDirectory": "/abs/takt-dash", "summary": "新しいゴール" }]
+  }));
   let mut poller = Poller::new(
     harness.config_path().to_path_buf(),
     harness.activity.clone(),
@@ -1731,6 +1731,208 @@ async fn write_over_http_routes_to_the_http_write_server() {
   );
   let calls = calls_named(&harness, "takt_answer_goal_question");
   assert!(calls.is_empty(), "書き込み道具を stdio の子プロセスへ渡しません");
+
+  server.stop().await;
+}
+
+// --- 判断待ちの一覧との照合（issue #319） ---
+
+/// 承認待ち（revision）だけを持つプロジェクトの snapshot。
+fn snapshot_with_proposals(revisions: &[i32]) -> ProjectSnapshot {
+  ProjectSnapshot {
+    proposals: revisions
+      .iter()
+      .map(|revision| RegistrationProposalEntry {
+        revision:             RegistrationRevision::try_from(*revision).expect("テストの revision は有効です"),
+        repository_directory: "/abs/takt-dash".to_owned(),
+        summary:              "新しいゴール".to_owned(),
+      })
+      .collect(),
+    ..ProjectSnapshot::empty()
+  }
+}
+
+/// 1プロジェクト分の土台に、承認待ち（revision）を状態ストアへ置いたものを作る。画面が
+/// 一覧から承認・却下する状況を表します。
+fn harness_with_pending_proposals(state: serde_json::Value, revisions: &[i32]) -> GrpcHarness {
+  let harness = harness_with(state);
+  harness.store.record_success("takt-dash", snapshot_with_proposals(revisions), time("2026-11-13T12:00:00Z"));
+  harness
+}
+
+#[tokio::test]
+async fn answer_inquiry_rejects_a_goal_id_that_differs_from_the_pending_decision_without_calling_takt() {
+  // 古い画面は、問い合わせが属さないゴール（同じプロジェクトの別のゴール、もう無いゴール）を
+  // goal_id に入れて回答しうる。一覧の判断待ちが持つゴールと違えば、takt へ送らずに断る。
+  let pending_goal = "11111111-1111-4111-8111-111111111111";
+  for (case, requested_goal) in [
+    ("同じプロジェクトの別のゴール", "22222222-2222-4222-8222-222222222222"),
+    ("どこにも無いゴール", "99999999-9999-4999-8999-999999999999"),
+  ] {
+    let harness = harness_with(json!({}));
+    harness.store.record_success(
+      "takt-dash",
+      snapshot_with(vec![
+        inquiry_entry("q-1", pending_goal, InquiryKind::Question),
+        inquiry_entry("q-2", "22222222-2222-4222-8222-222222222222", InquiryKind::Question),
+      ]),
+      time("2026-11-13T12:00:00Z"),
+    );
+    let server = start_server(&harness).await;
+    let mut client = client(server.address).await;
+
+    let status = client
+      .answer_inquiry(AnswerInquiryRequest {
+        idempotency_key: None,
+        server_id:       "mac-mini".to_owned(),
+        project:         "takt-dash".to_owned(),
+        goal_id:         Some(requested_goal.to_owned()),
+        inquiry_id:      "q-1".to_owned(),
+        text:            Some("はい".to_owned()),
+        report:          None,
+      })
+      .await
+      .expect_err("一覧と食い違う goal_id の回答は断ります");
+
+    assert_eq!(status.code(), Code::FailedPrecondition, "{case}: 一覧との食い違いは failed_precondition です");
+    assert!(status.message().contains("読み込み直"), "{case}: 画面の読み直しを案内します: {}", status.message());
+    assert!(calls_named(&harness, "takt_answer_goal_question").is_empty(), "{case}: takt へ書き込みません");
+    assert_eq!(harness.recorded_processes().len(), 0, "{case}: takt-mcp の子プロセスを起動しません");
+
+    server.stop().await;
+  }
+}
+
+#[tokio::test]
+async fn answer_inquiry_rejects_a_goal_id_for_an_inquiry_without_a_goal_without_calling_takt() {
+  // ゴールに属さない問い合わせへ、要求が goal_id を付けても、そのゴールへは書き込まない。
+  let (harness, mut poller) = polled_harness(state_with_standalone_inquiry()).await;
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .answer_inquiry(AnswerInquiryRequest {
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         Some("3f9c1a54-2b41-4d1e-9d2e-2c1a5b8f7e11".to_owned()),
+      inquiry_id:      "8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
+    })
+    .await
+    .expect_err("ゴールに属さない問い合わせへ goal_id を付けた回答は断ります")
+    .code();
+
+  assert_eq!(status, Code::FailedPrecondition);
+  assert!(calls_named(&harness, "takt_answer_goal_question").is_empty(), "takt へ書き込みません");
+
+  poller.shutdown().await;
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn answer_inquiry_accepts_the_goal_id_of_the_pending_decision() {
+  // 画面は判断待ちの goal_id をそのまま送る。一覧と一致する回答は、いままでどおり通る。
+  let goal = "11111111-1111-4111-8111-111111111111";
+  let harness = harness_with(json!({}));
+  harness.store.record_success(
+    "takt-dash",
+    snapshot_with(vec![inquiry_entry("q-1", goal, InquiryKind::Question)]),
+    time("2026-11-13T12:00:00Z"),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  client
+    .answer_inquiry(AnswerInquiryRequest {
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      goal_id:         Some(goal.to_owned()),
+      inquiry_id:      "q-1".to_owned(),
+      text:            Some("はい".to_owned()),
+      report:          None,
+    })
+    .await
+    .expect("一覧と一致する goal_id の回答は通ります");
+
+  let calls = calls_named(&harness, "takt_answer_goal_question");
+  assert_eq!(calls.len(), 1);
+  assert_eq!(calls[0]["goalId"], json!(goal));
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn goal_registration_writes_reject_a_revision_absent_from_the_pending_list_without_calling_takt() {
+  // 古い画面は、作り直される前の登録案の revision で承認・却下しうる。一覧の承認待ちに無い
+  // revision は、takt へ送らずに断る。承認待ちが1件も無いとき（空の一覧、まだ読めていない
+  // プロジェクト）も同じ。
+  for (case, pending_revision) in [("古い revision", Some(3)), ("承認待ちが空", None)] {
+    let harness = harness_with(json!({}));
+    if let Some(revision) = pending_revision {
+      harness.store.record_success("takt-dash", snapshot_with_proposals(&[revision]), time("2026-11-13T12:00:00Z"));
+    } else {
+      harness.store.record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T12:00:00Z"));
+    }
+    let server = start_server(&harness).await;
+    let mut client = client(server.address).await;
+
+    let approval = client
+      .approve_goal_registration(ApproveGoalRegistrationRequest {
+        idempotency_key: None,
+        server_id:       "mac-mini".to_owned(),
+        project:         "takt-dash".to_owned(),
+        revision:        2,
+      })
+      .await
+      .expect_err("一覧に無い revision の承認は断ります");
+    let rejection = client
+      .reject_goal_registration(RejectGoalRegistrationRequest {
+        idempotency_key: None,
+        server_id:       "mac-mini".to_owned(),
+        project:         "takt-dash".to_owned(),
+        revision:        2,
+      })
+      .await
+      .expect_err("一覧に無い revision の却下は断ります");
+
+    for status in [&approval, &rejection] {
+      assert_eq!(status.code(), Code::FailedPrecondition, "{case}: 一覧との食い違いは failed_precondition です");
+      assert!(status.message().contains("読み込み直"), "{case}: 画面の読み直しを案内します: {}", status.message());
+    }
+    assert!(calls_named(&harness, "takt_approve_goal_registration").is_empty(), "{case}: 承認を takt へ送りません");
+    assert!(calls_named(&harness, "takt_reject_goal_registration").is_empty(), "{case}: 却下を takt へ送りません");
+    assert_eq!(harness.recorded_processes().len(), 0, "{case}: takt-mcp の子プロセスを起動しません");
+
+    server.stop().await;
+  }
+}
+
+#[tokio::test]
+async fn goal_registration_approval_rejects_a_revision_pending_only_in_another_project() {
+  // revision はプロジェクトごとの値。別のプロジェクトの承認待ちと同じ番号でも、対象の
+  // プロジェクトの一覧に無ければ断る。
+  let harness = scope_harness();
+  harness.store.record_success("A", ProjectSnapshot::empty(), time("2026-11-13T12:00:00Z"));
+  harness.store.record_success("B", snapshot_with_proposals(&[3]), time("2026-11-13T12:00:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .approve_goal_registration(ApproveGoalRegistrationRequest {
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "A".to_owned(),
+      revision:        3,
+    })
+    .await
+    .expect_err("別のプロジェクトにしか無い revision は断ります")
+    .code();
+
+  assert_eq!(status, Code::FailedPrecondition);
+  assert!(calls_named(&harness, "takt_approve_goal_registration").is_empty(), "takt へ書き込みません");
 
   server.stop().await;
 }

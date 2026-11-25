@@ -11,8 +11,8 @@ use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::{json, Value};
 use takt_dash_backend::{
-  domain::{GoalId, InquiryId},
-  model::{InquiryEntry, InquiryKind, ProjectSnapshot},
+  domain::{GoalId, InquiryId, RegistrationRevision},
+  model::{InquiryEntry, InquiryKind, ProjectSnapshot, RegistrationProposalEntry},
   takt_dash::v1::{AnswerInquiryRequest, ApproveGoalMergeRequest, ApproveGoalRegistrationRequest},
 };
 use tokio::time::Duration;
@@ -40,6 +40,11 @@ fn harness_with(state: Value) -> GrpcHarness {
         options:    vec![],
         answered:   false,
         created_at: time("2026-11-13T07:00:00Z"),
+      }],
+      proposals: vec![RegistrationProposalEntry {
+        revision:             RegistrationRevision::try_from(3).expect("テストの revision は有効です"),
+        repository_directory: "/abs/takt-dash".to_owned(),
+        summary:              "新しいゴール".to_owned(),
       }],
       ..ProjectSnapshot::empty()
     },
@@ -296,6 +301,71 @@ async fn a_write_whose_connection_drops_after_it_was_received_is_not_resent() {
   let retried = client.approve_goal_merge(merge(Some("merge-1"))).await.expect_err("結果不明の操作は送り直しません");
   assert!(retried.message().contains("再送していません"), "{}", retried.message());
   assert_eq!(merges(), 1, "同じ鍵の再試行で書き込みを重ねません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn a_retry_replays_the_recorded_approval_after_the_proposal_left_the_pending_list() {
+  // 承認が済むと、登録案は判断待ちの一覧から消える。応答を失った利用者の同じ鍵のやり直しは、
+  // 一覧との照合（issue #319）で断らず、先の書き込みの結果を返す。
+  let harness = harness_with(json!({}));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let first =
+    client.approve_goal_registration(approval(Some("approve-1"))).await.expect("最初の承認は成功します").into_inner();
+  harness.store.record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T12:01:00Z"));
+  let retried = client
+    .approve_goal_registration(approval(Some("approve-1")))
+    .await
+    .expect("同じ鍵のやり直しは、記録した結果を受け取ります")
+    .into_inner();
+
+  assert_eq!(retried, first);
+  assert_eq!(call_count(&harness, "takt_approve_goal_registration"), 1, "やり直しは takt へ送り直しません");
+
+  let fresh = client
+    .approve_goal_registration(approval(Some("approve-2")))
+    .await
+    .expect_err("新しい操作は、一覧に無い revision として断ります");
+  assert_eq!(fresh.code(), Code::FailedPrecondition);
+  assert_eq!(call_count(&harness, "takt_approve_goal_registration"), 1, "断った操作は takt へ送りません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn a_write_rejected_by_the_pending_list_is_not_recorded_under_its_key() {
+  // 一覧との照合で断った操作は、書き込みを適用していないと分かっている。台帳に残さず、一覧が
+  // 追いついたあとの同じ鍵のやり直しを通す。
+  let harness = harness_with(json!({}));
+  harness.store.record_success("takt-dash", ProjectSnapshot::empty(), time("2026-11-13T12:00:00Z"));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let rejected =
+    client.approve_goal_registration(approval(Some("approve-1"))).await.expect_err("一覧に無い revision は断ります");
+  assert_eq!(rejected.code(), Code::FailedPrecondition);
+  assert_eq!(call_count(&harness, "takt_approve_goal_registration"), 0);
+
+  harness.store.record_success(
+    "takt-dash",
+    ProjectSnapshot {
+      proposals: vec![RegistrationProposalEntry {
+        revision:             RegistrationRevision::try_from(3).expect("テストの revision は有効です"),
+        repository_directory: "/abs/takt-dash".to_owned(),
+        summary:              "新しいゴール".to_owned(),
+      }],
+      ..ProjectSnapshot::empty()
+    },
+    time("2026-11-13T12:01:00Z"),
+  );
+  client
+    .approve_goal_registration(approval(Some("approve-1")))
+    .await
+    .expect("一覧に現れたあとの同じ鍵のやり直しは通ります");
+  assert_eq!(call_count(&harness, "takt_approve_goal_registration"), 1);
 
   server.stop().await;
 }

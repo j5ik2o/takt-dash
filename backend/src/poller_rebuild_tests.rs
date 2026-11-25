@@ -21,7 +21,7 @@ use crate::{
   domain::{RegistrationRevision, RunSlug},
   mcp::{client_config, Lane},
   model::{EventKind, ExecutionStatus, ProjectSnapshot},
-  takt_dash::v1::{ApproveGoalRegistrationRequest, GetActivityRequest, GetPendingDecisionsRequest, GetProjectsRequest},
+  takt_dash::v1::{ApproveGoalMergeRequest, GetActivityRequest, GetPendingDecisionsRequest, GetProjectsRequest},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,13 +87,18 @@ async fn same_server_stdio_to_http_retires_children_and_keeps_write_order() {
 
   let grpc = start_server(&harness).await;
   let mut client = client(grpc.address).await;
-  let approval = |revision| ApproveGoalRegistrationRequest {
+  // 書き込みには、状態ストアの判断待ちと照合しないマージの承認を使います。接続の切替は状態
+  // ストアを初期化するため、一覧と照合する書き込み（回答、ゴール登録の承認）は切替の直後に
+  // 断られます。
+  let merge = |pr_number| ApproveGoalMergeRequest {
     idempotency_key: None,
     server_id: "mac-mini".to_owned(),
     project: "takt-dash".to_owned(),
-    revision,
+    goal_id: GOAL.to_owned(),
+    pr_number,
+    until: "merge".to_owned(),
   };
-  client.approve_goal_registration(approval(1)).await.expect("stdio で書き込めます");
+  client.approve_goal_merge(merge(1)).await.expect("stdio で書き込めます");
   assert_eq!(registry.write_sequence("mac-mini", "takt-dash"), 1);
 
   // 画面読み取りレーンも起動してから、ハンドルをレジストリだけが所有する状態にします。
@@ -120,13 +125,13 @@ async fn same_server_stdio_to_http_retires_children_and_keeps_write_order() {
   });
   std::fs::write(harness.config_path(), config.to_string()).unwrap();
   // HTTP への切替周期と次周期のそれぞれで、読み取りが完了した直後に書き込みを挟みます。
-  for (revision, write_sequence) in [(2, 2), (3, 3)] {
+  for (pr_number, write_sequence) in [(2, 2), (3, 3)] {
     let (reached, resume) = arm(&mut poller, ReadBoundary::BeforeApply);
     let control = async {
       reached.await.expect("HTTP の読み取りが完了します");
       assert!(Arc::ptr_eq(&write_gate, &registry.write_gate("mac-mini", "takt-dash")));
       assert_eq!(registry.write_sequence("mac-mini", "takt-dash"), write_sequence - 1);
-      client.approve_goal_registration(approval(revision)).await.expect("HTTP で書き込めます");
+      client.approve_goal_merge(merge(pr_number)).await.expect("HTTP で書き込めます");
       assert_eq!(registry.write_sequence("mac-mini", "takt-dash"), write_sequence);
       resume.send(()).expect("読み取り結果の反映を再開できます");
     };
@@ -140,7 +145,7 @@ async fn same_server_stdio_to_http_retires_children_and_keeps_write_order() {
     let slot = harness.store.slot("takt-dash").expect("切替後も同じプロジェクトが残ります");
     assert!(slot.snapshot.is_none(), "切替時に初期化した状態に古い HTTP 結果を反映しません");
 
-    if revision == 2 {
+    if pr_number == 2 {
       assert_stdio_children_exit(&old_pids).await;
     }
   }
@@ -151,8 +156,8 @@ async fn same_server_stdio_to_http_retires_children_and_keeps_write_order() {
   let writes: Vec<_> = http
     .recorded_calls()
     .into_iter()
-    .filter(|call| call["name"] == "takt_approve_goal_registration")
-    .map(|call| call["arguments"]["revision"].clone())
+    .filter(|call| call["name"] == "takt_merge_goal_pr")
+    .map(|call| call["arguments"]["prNumber"].clone())
     .collect();
   assert_eq!(writes, [json!(2), json!(3)], "切替後の書き込みは HTTP に届きます");
 
@@ -280,30 +285,29 @@ async fn rebuild_through_rpc(boundary: ReadBoundary) {
     let index = args.iter().position(|arg| arg == "--state").expect("--state があります");
     args[index + 1] = json!(b_state);
     std::fs::write(harness.config_path(), config.to_string()).expect("B の設定を書けます");
-    let proposal = &b["proposalsByCwd"][cwd_b.to_str().expect("B の cwd は文字列です")][0];
-    assert_eq!(proposal["repositoryDirectory"], json!(cwd_b));
-    assert_eq!(proposal["revision"], json!(4));
-    let before_approval = harness.recorded_calls().len();
-    let response = client
-      .approve_goal_registration(ApproveGoalRegistrationRequest {
+    // 書き込みには、状態ストアの判断待ちと照合しないマージの承認を使います。この時点の状態
+    // ストアは A の一覧を持つため、B にだけある登録案の承認は一覧との照合で断られます。
+    let before_write = harness.recorded_calls().len();
+    client
+      .approve_goal_merge(ApproveGoalMergeRequest {
         idempotency_key: None,
         server_id:       "mac-mini".to_owned(),
         project:         "takt-dash".to_owned(),
-        revision:        4,
+        goal_id:         GOAL.to_owned(),
+        pr_number:       4,
+        until:           "merge".to_owned(),
       })
       .await
-      .expect("実 RPC が B を登録して成功します")
-      .into_inner();
-    assert_eq!(json!(response.revision), proposal["revision"]);
-    let approvals: Vec<_> = harness
+      .expect("実 RPC が B へ書き込んで成功します");
+    let writes: Vec<_> = harness
       .recorded_calls()
       .into_iter()
-      .skip(before_approval)
-      .filter(|call| call.name == "takt_approve_goal_registration")
+      .skip(before_write)
+      .filter(|call| call.name == "takt_merge_goal_pr")
       .collect();
-    assert_eq!(approvals.len(), 1);
-    assert_eq!(approvals[0].arguments["cwd"], proposal["repositoryDirectory"]);
-    assert_eq!(approvals[0].arguments["revision"], proposal["revision"]);
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].arguments["cwd"], json!(cwd_b));
+    assert_eq!(writes[0].arguments["prNumber"], json!(4));
     resume.send(()).expect("対象周期へ再開許可を渡せます");
   };
   let (interrupted, ()) = timeout(Duration::from_secs(15), async { tokio::join!(poller.read_cycle_once(), control) })

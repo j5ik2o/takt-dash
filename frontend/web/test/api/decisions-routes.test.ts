@@ -282,6 +282,56 @@ test("backend が INVALID_ARGUMENT を返すと 400 と失敗の文言を返す"
   );
 });
 
+test("backend が一覧との食い違いで断ると 409 と backend の理由を返す", async () => {
+  await withServer(
+    {
+      approveGoalRegistration: {
+        code: grpc.status.FAILED_PRECONDITION,
+        details: "ゴール登録案 revision 2 は、いまの承認待ちにありません。画面を読み込み直してから、もう一度操作してください。",
+      },
+    },
+    async () => {
+      const response = await postJson(postApproveRegistration, APPROVE_PATH, {
+        serverId: "mini",
+        project: "esa",
+        revision: 2,
+      });
+
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), {
+        ok: false,
+        error: "ゴール登録案 revision 2 は、いまの承認待ちにありません。画面を読み込み直してから、もう一度操作してください。",
+      });
+    },
+  );
+});
+
+test("backend が判断待ちに無い問い合わせを断ると 404 と backend の理由を返す", async () => {
+  await withServer(
+    {
+      answerInquiry: {
+        code: grpc.status.NOT_FOUND,
+        details: "問い合わせ inquiry-text はサーバー mini のプロジェクト esa にありません。",
+      },
+    },
+    async () => {
+      const response = await postJson(postAnswer, ANSWER_PATH, {
+        serverId: "mini",
+        project: "esa",
+        goalId: "goal-2",
+        inquiryId: "inquiry-text",
+        text: "回答",
+      });
+
+      assert.equal(response.status, 404);
+      assert.deepEqual(await response.json(), {
+        ok: false,
+        error: "問い合わせ inquiry-text はサーバー mini のプロジェクト esa にありません。",
+      });
+    },
+  );
+});
+
 test("backend が UNAVAILABLE を返すと 502 と backend の理由を返し、接続不能として扱わない", async () => {
   await withServer(
     {

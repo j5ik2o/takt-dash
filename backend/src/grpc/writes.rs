@@ -9,7 +9,7 @@ use std::future::Future;
 
 use tonic::Status;
 
-use super::{answer_payload, write_failure, write_ledger::WriteFailure, TaktDashServiceImpl};
+use super::{answer_payload, lanes::WriteLane, write_failure, write_ledger::WriteFailure, TaktDashServiceImpl};
 use crate::{
   domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ServerId},
   model,
@@ -67,21 +67,33 @@ impl TaktDashServiceImpl {
         request.inquiry_id, request.server_id, request.project
       )));
     };
-    // takt_answer_goal_question の入力契約では goalId は必須（UUID）です。要求が明示した
-    // ゴールを優先し、無ければ引き当てた判断待ちのゴールを使います。要求の値の誤りは入力の
-    // 誤り、状態ストア由来の値の誤りは内部の不整合として扱います。
-    let requested_goal_id = request.goal_id.clone().filter(|goal_id| !goal_id.trim().is_empty());
-    let goal_id = match requested_goal_id {
-      | Some(goal_id) => GoalId::try_from(goal_id.as_str())
-        .map_err(|error| Status::invalid_argument(format!("goal_id が不正です: {error}")))?,
-      | None => {
-        let goal_id = pending.goal_id.clone().filter(|goal_id| !goal_id.trim().is_empty()).ok_or_else(|| {
-          Status::invalid_argument("goal_id を特定できません。ゴールに属さない問い合わせには回答できません。")
-        })?;
-        GoalId::try_from(goal_id.as_str())
-          .map_err(|error| Status::internal(format!("状態ストアの goal_id が不正です: {error}")))?
-      },
-    };
+    // takt_answer_goal_question の入力契約では goalId は必須（UUID）です。書き込み先は、引き当てた
+    // 判断待ちのゴールに限ります。要求が goal_id を明示したときは、判断待ちのゴールと照合し、
+    // 食い違えば takt へ送らずに断ります（issue #319）。要求の値の誤りは入力の誤り、状態ストア
+    // 由来の値の誤りは内部の不整合として扱います。
+    let requested_goal_id = request
+      .goal_id
+      .as_deref()
+      .filter(|goal_id| !goal_id.trim().is_empty())
+      .map(GoalId::try_from)
+      .transpose()
+      .map_err(|error| Status::invalid_argument(format!("goal_id が不正です: {error}")))?;
+    let pending_goal_id = pending
+      .goal_id
+      .as_deref()
+      .filter(|goal_id| !goal_id.trim().is_empty())
+      .map(GoalId::try_from)
+      .transpose()
+      .map_err(|error| Status::internal(format!("状態ストアの goal_id が不正です: {error}")))?;
+    if requested_goal_id.as_ref().is_some_and(|requested| Some(requested) != pending_goal_id.as_ref()) {
+      return Err(Status::failed_precondition(format!(
+        "問い合わせ {} は、指定されたゴールの判断待ちではありません。画面を読み込み直してから、もう一度操作してください。",
+        request.inquiry_id
+      )));
+    }
+    let goal_id = pending_goal_id.ok_or_else(|| {
+      Status::invalid_argument("goal_id を特定できません。ゴールに属さない問い合わせには回答できません。")
+    })?;
     let question_id = InquiryId::try_from(request.inquiry_id.as_str())
       .map_err(|error| Status::invalid_argument(format!("inquiry_id が不正です: {error}")))?;
     let server_id = ServerId::try_from(request.server_id.as_str())
@@ -152,22 +164,7 @@ impl TaktDashServiceImpl {
     &self,
     request: ApproveGoalRegistrationRequest,
   ) -> Result<impl Future<Output = Result<ApproveGoalRegistrationResponse, WriteFailure>> + Send + 'static, Status> {
-    if request.revision <= 0 {
-      return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
-    }
-    let revision = RegistrationRevision::try_from(request.revision)
-      .map_err(|error| Status::invalid_argument(format!("revision が不正です: {error}")))?;
-    if request.server_id.trim().is_empty() {
-      return Err(Status::invalid_argument("server_id が空です。"));
-    }
-    if request.project.trim().is_empty() {
-      return Err(Status::invalid_argument("project が空です。"));
-    }
-    let server_id = ServerId::try_from(request.server_id.as_str())
-      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
-    let project = ProjectName::try_from(request.project.as_str())
-      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
-    let lane = self.write_lane(self.resolve_write_target(&server_id, &project)?);
+    let (revision, lane) = self.pending_registration_target(request.revision, &request.server_id, &request.project)?;
     Ok(async move {
       let _write_gate = lane.gate().await;
       let mut source = lane.connected_source().await?;
@@ -186,22 +183,7 @@ impl TaktDashServiceImpl {
     &self,
     request: RejectGoalRegistrationRequest,
   ) -> Result<impl Future<Output = Result<RejectGoalRegistrationResponse, WriteFailure>> + Send + 'static, Status> {
-    if request.revision <= 0 {
-      return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
-    }
-    let revision = RegistrationRevision::try_from(request.revision)
-      .map_err(|error| Status::invalid_argument(format!("revision が不正です: {error}")))?;
-    if request.server_id.trim().is_empty() {
-      return Err(Status::invalid_argument("server_id が空です。"));
-    }
-    if request.project.trim().is_empty() {
-      return Err(Status::invalid_argument("project が空です。"));
-    }
-    let server_id = ServerId::try_from(request.server_id.as_str())
-      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
-    let project = ProjectName::try_from(request.project.as_str())
-      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
-    let lane = self.write_lane(self.resolve_write_target(&server_id, &project)?);
+    let (revision, lane) = self.pending_registration_target(request.revision, &request.server_id, &request.project)?;
     Ok(async move {
       let _write_gate = lane.gate().await;
       let mut source = lane.connected_source().await?;
@@ -209,5 +191,43 @@ impl TaktDashServiceImpl {
       lane.record_write();
       Ok(RejectGoalRegistrationResponse { revision: rejected.get() })
     })
+  }
+
+  /// ゴール登録の承認・却下の対象を検証し、承認待ちの一覧と照合して、書き込み先を解決する。
+  ///
+  /// revision は、状態ストアが持つ対象プロジェクトの承認待ちと照合します。一覧に無い revision
+  /// （作り直される前の登録案、決着済みの登録案、まだ読めていないプロジェクト）は、takt へ
+  /// 送らずに断ります（issue #319）。状態ストアが takt より古いときの最終の判定は takt-mcp が
+  /// 行います。
+  fn pending_registration_target(
+    &self,
+    revision: i32,
+    server_id: &str,
+    project: &str,
+  ) -> Result<(RegistrationRevision, WriteLane), Status> {
+    if revision <= 0 {
+      return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
+    }
+    let revision = RegistrationRevision::try_from(revision)
+      .map_err(|error| Status::invalid_argument(format!("revision が不正です: {error}")))?;
+    if server_id.trim().is_empty() {
+      return Err(Status::invalid_argument("server_id が空です。"));
+    }
+    if project.trim().is_empty() {
+      return Err(Status::invalid_argument("project が空です。"));
+    }
+    let server_id = ServerId::try_from(server_id)
+      .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
+    let project = ProjectName::try_from(project)
+      .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
+    let target = self.resolve_write_target(&server_id, &project)?;
+    let pending = self.store.registration_proposals(&server_id, &project);
+    if !pending.iter().any(|proposal| proposal.revision == revision) {
+      return Err(Status::failed_precondition(format!(
+        "ゴール登録案 revision {} は、いまの承認待ちにありません。画面を読み込み直してから、もう一度操作してください。",
+        revision.get()
+      )));
+    }
+    Ok((revision, self.write_lane(target)))
   }
 }
