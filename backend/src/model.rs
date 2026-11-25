@@ -104,6 +104,11 @@ impl EventKind {
   }
 
   /// 保存済みの種類の文字列から復元する。
+  ///
+  /// 未知の種類は `None` を返し、`ActivityStore::recent_events` は一覧全体を失敗にします。
+  /// `events` テーブルは古い行を消さないため、種類が増えた版からその種類を知らない版へ
+  /// backend を戻すと、新しい種類の行が残っているあいだアクティビティを読めません。
+  /// 戻す手順は `docs/rollback.md` にあります。
   pub fn from_stored(value: &str) -> Option<Self> {
     match value {
       | "goal_created" => Some(EventKind::GoalCreated),
