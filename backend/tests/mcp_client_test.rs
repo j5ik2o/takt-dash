@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::io::Write;
+use std::{io::Write, time::Duration};
 
 use common::*;
 use serde_json::{json, Value};
@@ -142,6 +142,63 @@ async fn spawn_failure_is_a_transport_error() {
   );
 
   assert!(matches!(error, TransportError::Spawn(_) | TransportError::Io(_)), "起動失敗は輸送エラーです: {error}");
+}
+
+#[tokio::test]
+async fn failed_warm_up_does_not_make_the_next_call_back_off() {
+  // 温めの起動失敗は再起動の抑制を始めない。温めをしない場合と同じく、
+  // 次の呼び出しは子プロセスの起動を試みます。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let mut config = mock_config(directory.path(), &state, None);
+  config.command = "this-command-does-not-exist".to_owned();
+  let mut client = mock_client(config);
+
+  client.warm_up().await.expect_err("起動できないコマンドの温めは失敗します");
+  let error = transport(
+    client.call_tool("takt_list_goals", with_cwd(directory.path(), json!({}))).await.expect_err("起動失敗はエラーです"),
+  );
+
+  assert!(matches!(error, TransportError::Spawn(_)), "温めの失敗の後も起動を試みます: {error}");
+}
+
+#[tokio::test]
+async fn failed_spawn_on_a_call_still_backs_off_the_next_call() {
+  // 呼び出しの経路での起動失敗は、これまでどおり次の起動を抑えます。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let mut config = mock_config(directory.path(), &state, None);
+  config.command = "this-command-does-not-exist".to_owned();
+  let mut client = mock_client(config);
+
+  client.call_tool("takt_list_goals", with_cwd(directory.path(), json!({}))).await.expect_err("起動失敗はエラーです");
+  let error = transport(
+    client.call_tool("takt_list_goals", with_cwd(directory.path(), json!({}))).await.expect_err("抑制中はエラーです"),
+  );
+
+  assert!(matches!(error, TransportError::Backoff(_)), "呼び出しの起動失敗の後は抑制します: {error}");
+}
+
+#[tokio::test]
+async fn cancelled_call_does_not_leave_its_reply_for_the_next_call() {
+  // 応答の行を読む途中で呼び出しを打ち切っても、その応答の残りが次の呼び出しの応答として
+  // 読まれない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "splitReplies": { "takt_list_goals": 1000 } }));
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  client.warm_up().await.expect("起動できます");
+
+  let cancelled =
+    timeout(Duration::from_millis(300), client.call_tool("takt_list_goals", with_cwd(directory.path(), json!({}))))
+      .await;
+  assert!(cancelled.is_err(), "応答の残りが届く前に打ち切ります");
+  let text = client
+    .call_tool("takt_list_goals", with_cwd(directory.path(), json!({})))
+    .await
+    .expect("打ち切った呼び出しの残りに邪魔されずに応答を読めます");
+
+  assert!(text.contains("\"goals\""), "次の呼び出しの応答を返します: {text}");
+  client.shutdown().await;
 }
 
 #[tokio::test]
