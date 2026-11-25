@@ -3,6 +3,9 @@
 TAKT のタスクが終わったことを Orca の担当ボット（`takt-dash中将`）へ知らせる仕組みと、
 TAKT の版を戻すときの手順を書く。
 
+> いまは `task_finish_hook` を外してある。理由と戻す条件は下の「いまの状態」に書く。
+> ここから下の「仕組み」は、このキーを戻したときの動きになる。
+
 ## 仕組み
 
 - `.takt/config.yaml` の `task_finish_hook` が、キューのタスクの最終状態（完了・失敗・中断・
@@ -23,6 +26,36 @@ TAKT の版を戻すときの手順を書く。
 - スクリプトはどんな失敗でも終了コード 0 で終わる。TAKT は終了コードで状態も再開位置も
   変えないので、通知の失敗でタスクの結果を変えない。
 - 質問待ち・ログの停止・プロセスの消失は、終了の出口では扱わない。台帳の見張りが受け持つ。
+
+## いまの状態
+
+`task_finish_hook` は**いまは外してある**（2026-11-25）。理由は次のとおりで、戻す条件もこの節に書く。
+
+理由は、動いている実体が PATH の **takt 0.77.0** で、このキーを知らないため（TAKT 本体の
+`.takt/config.yaml` スキーマ、`src/core/models/config-schemas.ts`）。キーが残っていると、次に
+誰かが TAKT を流した瞬間に
+`Error: Configuration error: invalid (root) ... Unrecognized key: "task_finish_hook"` で設定を
+読めず、全タスクが即失敗する。その地雷を先に消してある。
+
+### 戻す条件
+
+フォーク（`j5ik2o/takt`）の `integration/takt-mcp`（`task_finish_hook` を知る版）を実体として
+配備してから、キーを戻す。順序は下の「古い TAKT へ戻すとき」の逆で、先にキーを戻し、そのあと
+実際に送れたかを見る。
+
+1. `.takt/config.yaml` に `task_finish_hook` のブロック（`command: [python3,
+   .takt/scripts/notify_orca.py]` と `timeout_ms: 15000`）を書き戻す。
+2. 次に終わるタスクで、run のディレクトリの `notify-orca.log` の最後の行が
+   `送信した（msg_...）` になっていることを見る。失敗も同じファイルに 1 行残るので、行数だけでは
+   送れたかを判断できない。
+
+`.takt/scripts/notify_orca.py` と `.takt/notify-orca.json` は残してある。キーが無ければ呼ばれない
+だけで、古い TAKT もこの 2 つを読まない。
+
+台帳の見張り（`~/.orca/bots/takt-dash/state/takt-orca-notify.py`）は戻さない。`j5ik2o/takt#126`
+と #355 の条件が生きているため。
+
+下の「古い TAKT へ戻すとき」の手順は消さない。将来また版を戻すときに使う。
 
 ## 古い TAKT へ戻すとき
 

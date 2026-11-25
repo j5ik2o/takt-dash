@@ -27,15 +27,15 @@
      orca の標準エラーは本文にも記録にも貼らず、notify-orca.stderr に分けて残す。
      時間切れでは orca の子プロセスも止める。
   7. TAKT と同じく HOME などを渡さない最小の環境で、プロジェクトルートを作業ディレクトリにして動く。
-  8. このリポジトリの設定: default_bot は takt-dash中将。.takt/config.yaml の task_finish_hook が
-     このスクリプトを呼び、その timeout_ms は orca の打ち切りより長い。taktdash-change には
-     通知の工程が無い（成功の通知が二重にならない）。
+  8. このリポジトリの設定: default_bot は takt-dash中将。.takt/config.yaml の task_finish_hook は
+     いまは外してある（動く実体の takt 0.77.0 がこのキーを知らないため）。外した理由と
+     戻す条件は .takt/README.md に書いてある。taktdash-change には通知の工程が無い
+     （成功の通知が二重にならない）。
 
 実の orca は呼ばない。すべて一時ディレクトリで完結する。
 """
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -446,14 +446,26 @@ def test_repository_default_bot_is_the_project_officer() -> None:
     assert config["default_bot"] not in ("副元帥", "元帥"), config
 
 
-def test_project_finish_hook_calls_this_script() -> None:
+def test_project_finish_hook_is_absent_and_documented() -> None:
+    # キーを戻すとこの確認は落ちる。戻し忘れを見つける見張りとして置いてある。
     text = (TAKT_DIR / "config.yaml").read_text(encoding="utf-8")
-    block = re.search(r"^task_finish_hook:\n((?:  .*\n)+)", text, re.MULTILINE)
-    assert block, "config.yaml に task_finish_hook がありません"
-    assert "  command: [python3, .takt/scripts/notify_orca.py]\n" in block.group(1), block.group(1)
-    timeout = re.search(r"^  timeout_ms: (\d+)$", block.group(1), re.MULTILINE)
-    # orca の打ち切り（既定 10 秒）とスクリプトの起動に余裕を残し、TAKT 側の打ち切りより先に終わる。
-    assert timeout and int(timeout.group(1)) >= 12000, block.group(1)
+    assert not any(
+        line.startswith("task_finish_hook:") for line in text.splitlines()
+    ), "config.yaml に task_finish_hook があります（戻す条件は .takt/README.md）"
+
+    # 外した理由と戻す条件、残したものを README に書いてあること。
+    # 文の形には依存させず、含まれるべき語だけを見る（README を書き直しても落ちない）。
+    readme = (TAKT_DIR / "README.md").read_text(encoding="utf-8")
+    for word in (
+        "いまは外してある",
+        "戻す条件",
+        "integration/takt-mcp",
+        "task_finish_hook",
+        "notify_orca.py",
+        "notify-orca.json",
+        "台帳の見張り",
+    ):
+        assert word in readme, f".takt/README.md に {word!r} がありません"
 
 
 def test_taktdash_change_has_no_notify_step() -> None:
@@ -482,7 +494,7 @@ def main() -> int:
         test_missing_orca_still_exits_zero,
         test_invalid_argument_still_exits_zero,
         test_repository_default_bot_is_the_project_officer,
-        test_project_finish_hook_calls_this_script,
+        test_project_finish_hook_is_absent_and_documented,
         test_taktdash_change_has_no_notify_step,
     ]
     failures = 0
