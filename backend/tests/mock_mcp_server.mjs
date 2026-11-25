@@ -650,6 +650,18 @@ const onLine = async (line) => {
         return;
       }
     }
+    // splitReplies に指定した道具は、応答の行の前半だけをすぐ書き、残りを指定ミリ秒の後に書く。
+    // 応答の行を読んでいる途中で呼び出しが打ち切られる状況を作るために使う。
+    const splitDelayMs = Number((state.splitReplies ?? {})[name] ?? 0);
+    if (splitDelayMs > 0) {
+      const line = `${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) })}\n`;
+      // id より前で割る。割った前半どうしが同じになり、前半と別の応答の後半がつながっても
+      // 別の応答の id のままになるようにする。
+      const head = line.indexOf(`"id"`);
+      process.stdout.write(line.slice(0, head));
+      setTimeout(() => process.stdout.write(line.slice(head)), splitDelayMs);
+      return;
+    }
     // delays に指定した道具は、応答を指定ミリ秒だけ遅らせる。期限より遅い応答を模す。
     const replyDelayMs = Number((state.delays ?? {})[name] ?? 0);
     if (replyDelayMs > 0) {

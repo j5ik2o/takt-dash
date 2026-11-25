@@ -182,6 +182,15 @@ pub struct McpClient {
   lane: String,
 }
 
+/// 起動に失敗したときに、次の起動を抑えるか。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnSpawnFailure {
+  /// 次の起動を間隔を空けて行う。呼び出しの経路の起動です。
+  BackOff,
+  /// 次の起動を抑えない。温めの起動です。
+  Retry,
+}
+
 struct McpProcess {
   child:  Child,
   stdin:  BufWriter<ChildStdin>,
@@ -210,8 +219,11 @@ impl McpClient {
   ///
   /// 書き込みレーンのように、最初の利用が利用者の操作で遅延がそのまま見えるレーンを
   /// 起動時に温めるために使います。既に起動済みなら何もしません。
+  ///
+  /// 温めの起動失敗は再起動の抑制を始めません。温めをしない場合と同じく、次の利用が
+  /// 起動を試みられるようにするためです。
   pub async fn warm_up(&mut self) -> Result<(), TransportError> {
-    self.ensure_started().await
+    self.start(OnSpawnFailure::Retry).await
   }
 
   /// 渡された順序で、指定した道具を1つずつ呼び出して応答の本文テキストを返す。
@@ -248,7 +260,12 @@ impl McpClient {
   /// 子プロセスが未起動なら起動して initialize まで済ませる。
   ///
   /// 道具呼び出しの計時から起動・初期化を除くため、呼び出し側が計時前に準備だけを進められます。
+  /// 起動に失敗したら、次の起動を間隔を空けて行います。
   pub(crate) async fn ensure_started(&mut self) -> Result<(), TransportError> {
+    self.start(OnSpawnFailure::BackOff).await
+  }
+
+  async fn start(&mut self, on_failure: OnSpawnFailure) -> Result<(), TransportError> {
     if self.process.is_some() {
       return Ok(());
     }
@@ -267,8 +284,10 @@ impl McpClient {
         Ok(())
       },
       | Err(error) => {
-        self.consecutive_spawn_failures = self.consecutive_spawn_failures.saturating_add(1);
-        self.next_spawn_at = Some(Instant::now() + spawn_backoff(self.consecutive_spawn_failures));
+        if on_failure == OnSpawnFailure::BackOff {
+          self.consecutive_spawn_failures = self.consecutive_spawn_failures.saturating_add(1);
+          self.next_spawn_at = Some(Instant::now() + spawn_backoff(self.consecutive_spawn_failures));
+        }
         tracing::warn!(lane = %self.lane, error = %error, "takt-mcp の子プロセスを起動できませんでした。");
         Err(error)
       },
@@ -313,17 +332,23 @@ impl McpClient {
     Ok(process)
   }
 
+  /// 往復の間は子プロセスをクライアントから外して持ち、応答を読み終えてから戻す。
+  ///
+  /// 呼び出しが途中で打ち切られると、外した子プロセスはここで破棄されます（起動時の
+  /// `kill_on_drop` で終了します）。読みかけの応答を残した子プロセスを次の要求へ
+  /// 使い回さないためです。
   async fn request(&mut self, request: Request, timeout: Duration) -> Result<Value, TransportError> {
     let timeout_secs = timeout.as_secs();
-    let process = match self.process.as_mut() {
-      | Some(process) => process,
-      | None => return Err(TransportError::ProcessExited),
+    let Some(mut process) = self.process.take() else {
+      return Err(TransportError::ProcessExited);
     };
     match process.exchange(request, timeout_secs).await {
-      | Ok(result) => Ok(result),
+      | Ok(result) => {
+        self.process = Some(process);
+        Ok(result)
+      },
       | Err(error) => {
         tracing::warn!(lane = %self.lane, error = %error, "takt-mcp との通信に失敗したため、子プロセスを破棄します。");
-        self.process = None;
         Err(error)
       },
     }

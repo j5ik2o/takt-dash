@@ -258,7 +258,7 @@ impl WriteSource {
   pub(super) async fn connect(&mut self) -> Result<(), ToolError> {
     match self {
       | WriteSource::Http(handle) => handle.connect().await?,
-      | WriteSource::Stdio(handle) => handle.lock().await.warm_up().await?,
+      | WriteSource::Stdio(handle) => handle.lock().await.ensure_started().await?,
     }
     Ok(())
   }
