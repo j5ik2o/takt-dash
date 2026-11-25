@@ -26,6 +26,10 @@ pub enum TransportError {
   Spawn(String),
   #[error("takt-mcp との通信で入出力に失敗しました: {0}")]
   Io(String),
+  /// 要求を送る前に失敗した。takt-mcp は要求を受け取っていません。接続を張れなかった場合と、
+  /// 消えたセッションを作り直せなかった場合です。
+  #[error("takt-mcp へ要求を送れませんでした: {0}")]
+  NotSent(String),
   #[error("takt-mcp から {0} 秒以内に応答がありませんでした")]
   Timeout(u64),
   #[error("takt-mcp の再起動を抑制しています。あと {0} 秒ほど待ってから再試行します")]

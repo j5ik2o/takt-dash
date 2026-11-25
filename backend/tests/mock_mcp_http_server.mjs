@@ -14,7 +14,8 @@
 // --port を省略した場合は OS が空きポートを採番する。採番した実際のポートと URL は
 // --ready-file に JSON で書き出す（テストが接続先を組み立てるため）。
 // --behavior で `deny`（常に 401）・`drop-session`（常に 404）・`fail-initialized`
-// （notifications/initialized だけ 500）を起こせる。
+// （notifications/initialized だけ 500）・`drop-session-then-refuse-initialize`（tools/call は
+// 404、2 回目以降の initialize は 500）などを起こせる。
 //
 // 追加の検証用オプション:
 //   --calls <path>         受け取った tools/call を {"name","arguments"} の JSONL で追記する
@@ -366,6 +367,11 @@ const server = createServer((request, response) => {
       return;
     }
     if (message.method === "initialize") {
+      if (behavior === "drop-session-then-refuse-initialize" && sessionCounter > 0) {
+        // 2 回目以降の initialize を拒否する。消えたセッションを作り直せない状態を再現する。
+        jsonBody(response, 500, { jsonrpc: "2.0", error: { code: -32000, message: "unavailable" }, id: message.id ?? null });
+        return;
+      }
       if (behavior === "hang-initialize-once" && !initializeHung) {
         // 最初の initialize だけ応答しない。セッションの確立が時間切れになり、
         // 道具の呼び出しが一度も届いていない状態を再現する。
@@ -425,7 +431,7 @@ const server = createServer((request, response) => {
         request.socket.destroy();
         return;
       }
-      if (behavior === "drop-session-on-call") {
+      if (behavior === "drop-session-on-call" || behavior === "drop-session-then-refuse-initialize") {
         // initialize は成功してセッションが採番されるが、tools/call の時点では
         // セッションが消えている状態を再現する。呼び出しの記録は残す。
         if (callsPath !== undefined) {

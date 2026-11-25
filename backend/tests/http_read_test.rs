@@ -11,7 +11,7 @@ mod common;
 use common::*;
 use serde_json::json;
 use takt_dash_backend::{
-  mcp::{HttpReadHandle, HttpSession, ToolError},
+  mcp::{HttpReadHandle, HttpSession, ToolError, TransportError},
   model::TaskStatus,
 };
 
@@ -346,4 +346,65 @@ async fn a_session_whose_initialization_fails_midway_is_closed() {
   assert_eq!(handle.session_count(), 0, "確立に失敗したセッションは保持しません");
   server.wait_for_live_sessions(0).await;
   assert_eq!(server.created_session_count(), 1, "サーバーはセッションを 1 つ作っていました");
+}
+
+fn answer_ids() -> (takt_dash_backend::domain::GoalId, takt_dash_backend::domain::InquiryId) {
+  let goal_id =
+    takt_dash_backend::domain::GoalId::try_from("11111111-1111-4111-8111-111111111111").expect("ゴール ID を作れます");
+  let question_id =
+    takt_dash_backend::domain::InquiryId::try_from("8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e").expect("質問 ID を作れます");
+  (goal_id, question_id)
+}
+
+#[tokio::test]
+async fn a_write_that_cannot_connect_on_an_established_session_is_reported_as_not_sent() {
+  // 共有セッションが確立済みだと、書き込みの前の connect() は何もせずに通る。そのあとで
+  // takt-mcp が止まっていると、道具を送る段で接続を張れない。要求は届いていないので、
+  // 結果が不明な失敗（I/O エラー）ではなく、送る前の失敗として分けて返す。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let server = HttpMockServer::start(&state, None);
+  let cwd = project_dir(directory.path());
+  let session = HttpSession::new(server.connection());
+  let timeout = std::time::Duration::from_secs(10);
+  let mut reader = HttpReadHandle::with_session(session.clone(), timeout);
+  reader.connect().await.expect("共有セッションを確立できます");
+  drop(server);
+
+  let mut writer = HttpReadHandle::with_session_for_write(session, timeout);
+  writer.connect().await.expect("確立済みのセッションでは、接続の確認は何も送らずに通ります");
+  let (goal_id, question_id) = answer_ids();
+  let error = takt_dash_backend::mcp::WriteToolSet::new(&mut writer, cwd)
+    .answer_goal_question(&goal_id, &question_id, json!({ "text": "はい" }))
+    .await
+    .expect_err("止まっているサーバーへの書き込みは失敗です");
+
+  assert!(
+    matches!(error, ToolError::Transport(TransportError::NotSent(_))),
+    "接続を張れなかった書き込みは、送る前の失敗です: {error:?}"
+  );
+}
+
+#[tokio::test]
+async fn a_write_whose_lost_session_cannot_be_recreated_is_reported_as_not_sent() {
+  // 未知セッション（404）を受けた書き込みは処理されていない。セッションの作り直しに失敗すれば
+  // 再試行も送っていないので、送る前の失敗として返す。書き込み道具が処理された記録は無い。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({}));
+  let server = HttpMockServer::start(&state, Some("drop-session-then-refuse-initialize"));
+  let cwd = project_dir(directory.path());
+  let mut writer = HttpReadHandle::new_for_write(server.connection(), std::time::Duration::from_secs(10));
+  writer.connect().await.expect("最初のセッションは確立できます");
+  let (goal_id, question_id) = answer_ids();
+
+  let error = takt_dash_backend::mcp::WriteToolSet::new(&mut writer, cwd)
+    .answer_goal_question(&goal_id, &question_id, json!({ "text": "はい" }))
+    .await
+    .expect_err("セッションを作り直せない書き込みは失敗です");
+
+  assert!(
+    matches!(error, ToolError::Transport(TransportError::NotSent(_))),
+    "作り直しに失敗した書き込みは、送る前の失敗です: {error:?}"
+  );
+  assert_eq!(server.created_session_count(), 1, "作り直しは成功していません");
 }

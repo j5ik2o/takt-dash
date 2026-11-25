@@ -365,6 +365,11 @@ impl GrpcHarness {
     self.http.as_ref().map(common::HttpMockServer::recorded_calls).unwrap_or_default()
   }
 
+  /// HTTP の mock サーバーを止める。takt-mcp が止まっている状態を再現します。
+  pub fn stop_http_server(&mut self) {
+    self.http = None;
+  }
+
   /// HTTP の mock サーバー。HTTP モードでない場合は panic します。
   pub fn http_server(&self) -> &common::HttpMockServer {
     self.http.as_ref().expect("HTTP モードの土台です")

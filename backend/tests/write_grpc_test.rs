@@ -1784,3 +1784,46 @@ async fn repeated_writes_over_http_do_not_accumulate_sessions() {
 
   server.stop().await;
 }
+
+#[tokio::test]
+async fn a_write_to_a_stopped_http_server_fails_as_not_sent_instead_of_unknown() {
+  // 共有セッションが確立済みのまま takt-mcp が止まると、書き込みは道具を送る段で接続を
+  // 張れない。書き込みは takt へ届いていないので、結果不明（DEADLINE_EXCEEDED）ではなく、
+  // 失敗（UNAVAILABLE）として返す。同じ鍵でのやり直しを、結果不明として止めない。
+  let goal_id = "11111111-1111-4111-8111-111111111111";
+  let inquiries = ["8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e", "9a14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e"];
+  let mut harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", std::path::Path::new("/abs/takt-dash")), server_meta(), json!({}))
+    .http_read()
+    .http_write()
+    .build();
+  harness.store.record_success(
+    "takt-dash",
+    snapshot_with(inquiries.iter().map(|id| inquiry_entry(id, goal_id, InquiryKind::Question)).collect()),
+    time("2026-11-13T12:00:00Z"),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  let request = |inquiry_id: &str| AnswerInquiryRequest {
+    idempotency_key: Some(format!("key-{inquiry_id}")),
+    server_id:       "mac-mini".to_owned(),
+    project:         "takt-dash".to_owned(),
+    goal_id:         Some(goal_id.to_owned()),
+    inquiry_id:      inquiry_id.to_owned(),
+    text:            Some("はい".to_owned()),
+    report:          None,
+  };
+  client.answer_inquiry(request(inquiries[0])).await.expect("止める前の書き込みは通り、セッションを確立します");
+
+  harness.stop_http_server();
+  let status =
+    client.answer_inquiry(request(inquiries[1])).await.expect_err("止まっているサーバーへの書き込みは失敗です");
+
+  assert_eq!(
+    status.code(),
+    tonic::Code::Unavailable,
+    "届いていない書き込みは、結果不明ではなく失敗として返します: {status:?}"
+  );
+
+  server.stop().await;
+}

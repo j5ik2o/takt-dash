@@ -98,6 +98,12 @@ impl HttpSession {
     }
   }
 
+  /// 同じ置き場を指すかどうか。レジストリが共有を返したことをテストで確かめるために使います。
+  #[cfg(test)]
+  pub(crate) fn shares_with(&self, other: &HttpSession) -> bool {
+    Arc::ptr_eq(&self.inner, &other.inner)
+  }
+
   /// 保持しているセッションをサーバーへの DELETE で閉じ、応答（または打ち切り）まで待つ。
   ///
   /// backend の停止時に使います。閉じたあとに要求が届けば、セッションを作り直します。
@@ -250,7 +256,17 @@ impl SessionInner {
     let response = timeout(request_timeout, self.client.request(request))
       .await
       .map_err(|_| ExchangeError::Transport(TransportError::Timeout(request_timeout.as_secs())))?
-      .map_err(|error| ExchangeError::Transport(TransportError::Io(error.to_string())))?;
+      .map_err(|error| {
+        // 接続を張れなかった失敗は、要求がサーバーに届いていないと分かります。張れたあとの
+        // 失敗（応答の前の切断など）は、届いたかどうか分かりません。
+        ExchangeError::Transport(
+          if error.is_connect() {
+            TransportError::NotSent(error.to_string())
+          } else {
+            TransportError::Io(error.to_string())
+          },
+        )
+      })?;
     let status = response.status();
     let content_type = response.headers().get("content-type").and_then(|value| value.to_str().ok()).map(str::to_owned);
     let session_id = response.headers().get("mcp-session-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
@@ -363,8 +379,11 @@ impl HttpReadHandle {
 
   /// 1 回の tools/call を送る。
   ///
-  /// 接続の失敗（I/O エラー）は、読み取りだけ同じセッションで 1 回送り直します。書き込み用の
-  /// ハンドルでは送り直しません（`retry_on_io_error`）。未知セッション（404）は、要求が
+  /// 接続の失敗は、読み取りだけ同じセッションで 1 回送り直します。書き込み用の
+  /// ハンドルでは送り直しません（`retry_on_io_error`）。接続を張れなかった失敗と、消えた
+  /// セッションを作り直せなかった失敗は、要求が届いていないことが分かるため、
+  /// [`TransportError::NotSent`] として、結果が不明な失敗（I/O
+  /// エラー、時間切れ）と分けて返します。未知セッション（404）は、要求が
   /// 処理されていないことが分かるため、セッションを作り直して 1 回だけ再試行します。
   /// サーバーの再起動は、送り直した要求への 404 として分かります。それ以外の失敗は
   /// 輸送エラーとして表面化させます。
@@ -374,7 +393,7 @@ impl HttpReadHandle {
       | Ok(incoming) => return unwrap_result(incoming),
       | Err(error) => error,
     };
-    if failure.io_error() && self.retry_on_io_error {
+    if failure.connection_failed() && self.retry_on_io_error {
       failure = match self.call_once(name, &arguments, &session).await {
         | Ok(incoming) => return unwrap_result(incoming),
         | Err(error) => error,
@@ -384,8 +403,13 @@ impl HttpReadHandle {
       return Err(failure.into_transport());
     }
     // セッションが消えた（サーバー再起動など）。セッションを作り直して 1 回だけ再試行します。
+    // 404 を受けた要求は処理されておらず、作り直しに失敗すれば再試行も送っていません。
+    // 作り直しの失敗は、種類によらず「送る前の失敗」として返します。
     self.session.inner.forget(&session);
-    let session = self.ensure_session().await?;
+    let session = self.ensure_session().await.map_err(|error| match error {
+      | error @ TransportError::NotSent(_) => error,
+      | error => TransportError::NotSent(format!("消えたセッションを作り直せませんでした（{error}）")),
+    })?;
     match self.call_once(name, &arguments, &session).await {
       | Ok(incoming) => unwrap_result(incoming),
       | Err(error) => Err(error.into_transport()),
@@ -591,9 +615,10 @@ enum ExchangeError {
 }
 
 impl ExchangeError {
-  /// 接続の失敗（I/O エラー）かどうか。要求がサーバーに届いたかは分かりません。
-  fn io_error(&self) -> bool {
-    matches!(self, ExchangeError::Transport(TransportError::Io(_)))
+  /// 接続の失敗かどうか。接続を張れなかった場合（要求は届いていない）と、張れたあとの
+  /// I/O エラー（要求が届いたかは分からない）の両方です。
+  fn connection_failed(&self) -> bool {
+    matches!(self, ExchangeError::Transport(TransportError::Io(_) | TransportError::NotSent(_)))
   }
 
   /// 未知セッション（404）かどうか。この応答を受けた要求はサーバーに処理されていない

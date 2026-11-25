@@ -114,6 +114,9 @@ struct RegistryInner {
   /// 設定再読込で HTTP
   /// と分かったサーバー。旧設定で開始済みの要求にレーンを再登録させないために使います。
   http_servers:  BTreeSet<String>,
+  /// 設定を 1 回でも反映したか。反映の前は、`http_servers` が空でも「設定から消えた」とは
+  /// みなしません。
+  configured:    bool,
   /// 常駐 HTTP サーバーごとのセッション。画面の読み取りと書き込みの要求が共有します。
   http_sessions: BTreeMap<String, HttpEntry>,
   /// 画面読み取りレーンの次回割り当て位置。プロジェクトごとにラウンドロビンで進めます。
@@ -194,10 +197,17 @@ impl McpClientRegistry {
   /// takt-mcp はセッションに期限を持たないため、要求ごとにセッションを作らず、サーバーごとに
   /// 1 つを使い回します。登録済みの接続先（URL とトークン）が `server` と異なる場合は、
   /// 置き場を作り直します。外した置き場は、利用中の要求が終わって最後の持ち主が消えた
-  /// 時点で、古いセッションを DELETE で閉じます。
+  /// 時点で、古いセッションを DELETE で閉じます。設定から消えたサーバーは登録せず、
+  /// その要求だけが使うセッションを返します。
   pub fn http_session(&self, server_id: &str, server: &HttpMcpServer) -> HttpSession {
     let (session, replaced) = {
       let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+      if inner.configured && !inner.http_servers.contains(server_id) {
+        // 設定から消えた（または stdio へ変わった）サーバーを、旧設定で解決済みの要求が
+        // 登録し直さないようにします。その要求だけが使うセッションを渡し、要求が終われば
+        // 閉じます。
+        return HttpSession::for_server(server.clone());
+      }
       if let Some(entry) = inner.http_sessions.get(server_id) {
         if &entry.server == server {
           return entry.session.clone();
@@ -330,6 +340,7 @@ impl McpClientRegistry {
       stale.iter().filter_map(|server_id| inner.http_sessions.remove(server_id)).collect()
     };
     inner.http_servers = http_servers;
+    inner.configured = true;
     // 設定から消えた HTTP サーバーの置き場は、map のロックを解放してから破棄します。
     drop(inner);
     drop(removed);
@@ -554,5 +565,42 @@ mod tests {
     assert_eq!(screen_lane_indexes(&registry, "local", "proj"), vec![0, 1, 2], "3本の画面レーンがそろいます");
     registry.ensure_lanes("local", "proj", ScreenReadLanes::clamped(1), config);
     assert_eq!(screen_lane_indexes(&registry, "local", "proj"), vec![0], "本数を超えた画面レーンは外します");
+  }
+
+  fn http_server(port: u16) -> crate::config::HttpMcpServer {
+    crate::config::HttpMcpServer {
+      endpoint:      crate::config::HttpServerEndpoint::try_from(format!("http://127.0.0.1:{port}/").as_str())
+        .expect("ループバックの URL を解釈できます"),
+      authorization: "Bearer test-token".to_owned(),
+    }
+  }
+
+  #[test]
+  fn http_requests_to_the_same_server_share_one_session() {
+    let registry = McpClientRegistry::new();
+    let first = registry.http_session("resident", &http_server(4100));
+    let second = registry.http_session("resident", &http_server(4100));
+    assert!(first.shares_with(&second), "同じ接続先の要求は 1 つのセッションを共有します");
+
+    let moved = registry.http_session("resident", &http_server(4101));
+    assert!(!first.shares_with(&moved), "接続先が変わったら置き場を作り直します");
+  }
+
+  #[test]
+  fn a_request_resolved_with_an_old_config_does_not_reregister_a_removed_http_server() {
+    // 設定から消えた HTTP サーバーを、旧設定で解決済みの要求が登録し直さない。
+    let registry = McpClientRegistry::new();
+    let before = registry.http_session("resident", &http_server(4100));
+    registry.retain_configured(&BTreeSet::new(), BTreeSet::new());
+
+    let stale = registry.http_session("resident", &http_server(4100));
+    let again = registry.http_session("resident", &http_server(4100));
+    assert!(!before.shares_with(&stale), "設定から消えたサーバーの置き場は外れています");
+    assert!(!stale.shares_with(&again), "旧設定の要求は、その要求だけのセッションを使い、登録し直しません");
+
+    registry.retain_configured(&BTreeSet::new(), BTreeSet::from(["resident".to_owned()]));
+    let restored = registry.http_session("resident", &http_server(4100));
+    let shared = registry.http_session("resident", &http_server(4100));
+    assert!(restored.shares_with(&shared), "設定に戻ったサーバーは、また 1 つのセッションを共有します");
   }
 }
