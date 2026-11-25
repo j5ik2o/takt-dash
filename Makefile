@@ -1,6 +1,8 @@
-.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-build e2e-prod e2e-screenshots e2e-skip-only-check prod-check
+.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-build e2e-prod e2e-screenshots e2e-skip-only-check prod-check workflow-inspect
 
 BASE_URL ?= http://127.0.0.1:3000
+
+# workflow-inspect は任意の検査。CI と make done には入れない（CI に takt が無いため）。
 
 # coverage.py と PyYAML を、システム Python を汚さずに用意する。CI の done ジョブは
 # PyYAML しか導入しないため、通常の make done でも coverage 判定を実行できるよう、
@@ -29,6 +31,12 @@ typecheck:
 
 lint:
 	npm --prefix frontend/web run lint
+
+# 任意。解決できない workflow_call を takt workflow inspect に名指しさせる（doctor は同じ
+# 状態でも Workflow OK と言う）。takt が無ければ検査をスキップして 0 で終わる。名前を渡すと
+# 1 件だけ見る: make workflow-inspect WORKFLOW=taktdash-change
+workflow-inspect:
+	python3 tools/workflow-inspect/workflow_inspect.py $(WORKFLOW)
 
 proto-gen:
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
