@@ -3,7 +3,8 @@
 // backend（takt 側）では書き込みが済んでいることがあるため、「接続できません」ではなく
 // 結果が不明であることを伝える。やり直しで書き込みを重ねないための鍵は、受け取った値を
 // そのまま gRPC の書き込み API へ渡す。backend はダミー gRPC サーバーで代替する。
-import test from "node:test";
+import test, { mock } from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import assert from "node:assert/strict";
 import * as grpc from "@grpc/grpc-js";
 import { NextRequest } from "next/server";
@@ -75,13 +76,32 @@ const writeRoutes: Array<[string, RouteHandler, string, Record<string, unknown>,
   ],
 ];
 
+// 偽の時計の下で、要求が backend に届くまでイベントループを回す回数の上限。
+const MAX_TURNS_UNTIL_REQUEST = 1_000;
+
 test("書き込みの応答が期限内に届かないときは 504 を返し、結果が不明であることを伝える", async () => {
   // backend は要求を受け取るが、応答は Web の期限より遅れる。
   const behavior = { approveGoalMerge: { taskName: "マージ", workflow: "simple" }, writeDelayMs: 2_000 };
   await withServer(behavior, async (server) => {
+    // 期限は偽の時計で進める。要求が backend に届いたのを確かめてから期限を切らし、
+    // 実時間の速さ（負荷や計測の有無）で順序が入れ替わらないようにする。
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
     const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: server.address }, writeDeadlineMs: 50 });
     try {
-      const response = await runWrite(() => client.approveGoalMerge({ ...MERGE_BODY, until: "merge" }));
+      let settled = false;
+      const pending = runWrite(() => client.approveGoalMerge({ ...MERGE_BODY, until: "merge" })).finally(() => {
+        settled = true;
+      });
+      // 要求が届く前に結果が返ったとき（接続の失敗など）や、いつまでも届かないときに、待ち続けない。
+      let turns = 0;
+      while (server.requests.length === 0 && !settled && turns < MAX_TURNS_UNTIL_REQUEST) {
+        await nextTurn();
+        turns += 1;
+      }
+      assert.equal(settled, false, "要求が backend に届く前に結果が返った");
+      assert.equal(server.requests.length, 1, `${MAX_TURNS_UNTIL_REQUEST} 回待っても要求が backend に届かない`);
+      mock.timers.tick(50);
+      const response = await pending;
 
       assert.equal(response.status, 504);
       assert.deepEqual(await response.json(), {
@@ -90,6 +110,7 @@ test("書き込みの応答が期限内に届かないときは 504 を返し、
       });
       assert.equal(server.requests.length, 1, "要求は backend に届いている");
     } finally {
+      mock.timers.reset();
       await client.close();
     }
   });
