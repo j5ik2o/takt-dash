@@ -18,7 +18,11 @@
 #
 # builtin を更新するときは、新しい版の peer-review.yaml と steps/peer-review-final-gate.yaml、
 # facets/output-contracts/supervisor-validation.md・supervisor-summary.md との diff を取り、
-# 差分を取り込んでから `takt workflow doctor merge-review-fix-simple-thread-gate` を再実行する。
+# 差分を取り込んでから、次を再実行する。
+# `takt workflow doctor merge-review-fix-simple-thread-gate`、
+# `takt workflow doctor review-fix-simple-merge-gate`、`takt workflow doctor peer-review-merge-gate`
+# と、引数なしの `takt workflow doctor` を再実行する。親の doctor は、存在しない出力契約の名前を
+# 名前の文字列のまま契約の本文として扱い OK を返すため、子の doctor と引数なしの doctor も要る。
 name: peer-review-merge-gate
 description: 専門並列ピアレビュー（+ ai-antipattern-review-2nd）→ 指摘裁定 → 共通修正ループ後、supervisor が要件充足を最終裁定する。最終関門の報告は、統合の後にしか確かめられない条件を「統合後に確かめる」として扱う形式で書く。
 all_steps:

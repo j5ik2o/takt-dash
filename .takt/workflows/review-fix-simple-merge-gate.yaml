@@ -17,8 +17,11 @@
 #   (d) reviewers の呼び出し先を peer-review から peer-review-merge-gate にする
 #
 # builtin を更新するときは、新しい版の review-fix-simple.yaml との diff を取り、
-# (a)-(d) を除いた差分を取り込んでから
-# `takt workflow doctor merge-review-fix-simple-thread-gate` を再実行する。
+# (a)-(d) を除いた差分を取り込んでから、次を再実行する。
+# `takt workflow doctor merge-review-fix-simple-thread-gate`、
+# `takt workflow doctor review-fix-simple-merge-gate`、`takt workflow doctor peer-review-merge-gate`
+# と、引数なしの `takt workflow doctor` を再実行する。親の doctor は、存在しない出力契約の名前を
+# 名前の文字列のまま契約の本文として扱い OK を返すため、子の doctor と引数なしの doctor も要る。
 name: review-fix-simple-merge-gate
 subworkflow:
   callable: true
