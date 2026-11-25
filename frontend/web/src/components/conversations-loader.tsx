@@ -3,13 +3,16 @@ import { BackendUnavailableError, backendUnavailableSituation, getBackendClient 
 import { GetConversationResponse } from "../proto/taktdash";
 import { restoreConversationResponse } from "../state/conversation";
 import { recallConversation, rememberConversation, type LastConversation } from "../state/last-loaded";
-import { BackendUnavailableNotice, backendUnavailableMessage } from "./backend-unavailable-notice";
+import { BackendUnavailableNotice, BackendUnavailableOver, backendUnavailableMessage } from "./backend-unavailable-notice";
 import { LiveConversation } from "./live-conversation";
 
-type LoadResult =
-  | ({ kind: "ok" } & LastConversation)
-  | { kind: "unavailable"; error: BackendUnavailableError }
-  | { kind: "empty" };
+type LoadResult = LastConversation | { kind: "unavailable"; error: BackendUnavailableError };
+
+const EmptyConversations = (): ReactElement => (
+  <main className="page">
+    <p className="note">プロジェクトがありません。</p>
+  </main>
+);
 
 // プロジェクト一覧から先頭の会話を取得し、1秒更新の表示へ渡す。
 // backend に接続できないときはページを落とさず、接続できない旨を表示する。前に読めた
@@ -43,6 +46,13 @@ export async function ConversationsLoader(): Promise<ReactElement> {
       if (last === undefined) {
         return <BackendUnavailableNotice situation={situation} />;
       }
+      if (last.kind === "empty") {
+        return (
+          <BackendUnavailableOver situation={situation}>
+            <EmptyConversations />
+          </BackendUnavailableOver>
+        );
+      }
       return (
         <LiveConversation
           projects={last.projects}
@@ -53,13 +63,10 @@ export async function ConversationsLoader(): Promise<ReactElement> {
       );
     }
     case "empty":
-      return (
-        <main className="page">
-          <p className="note">プロジェクトがありません。</p>
-        </main>
-      );
+      rememberConversation(result);
+      return <EmptyConversations />;
     case "ok":
-      rememberConversation({ projects: result.projects, page: result.page });
+      rememberConversation(result);
       return (
         <LiveConversation projects={result.projects} initialProject={result.projects[0]!} initialPage={result.page} />
       );

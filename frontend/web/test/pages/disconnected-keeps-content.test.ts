@@ -271,3 +271,55 @@ test("run 詳細は接続中と切断中で、内容を同じ位置に同じ型�
   assert.equal(contentOf(connected), RunDetailContent);
   assert.equal(contentOf(disconnected), RunDetailContent);
 });
+
+test("会話は、先頭から読み直した初回取得でも、更新で覚えた発言を消さない", async () => {
+  const added = {
+    seq: 4,
+    occurredAt: new Date("2026-11-13T07:29:00Z"),
+    speaker: createConversationMessages()[0]!.speaker,
+    text: "初回取得の後に届いた発言です。",
+  };
+  const server = await startTaktDashServer({ overview: createDashboardState(), conversation: createConversationResponse() });
+  try {
+    await withBackendAddress(server.address, async () => renderToStaticMarkup(await ConversationsLoader()));
+  } finally {
+    await server.shutdown();
+  }
+  const updated = await startTaktDashServer({ conversation: createConversationResponse({ messages: [added], nextAfterSeq: 4 }) });
+  try {
+    await withBackendAddress(updated.address, async () => {
+      const response = await getConversationUpdate(
+        new NextRequest(
+          "http://localhost/api/conversations?project=corporate-site&session_id=session-conv-1&after_seq=3&limit=200",
+        ),
+      );
+      assert.equal(response.status, 200);
+    });
+  } finally {
+    await updated.shutdown();
+  }
+  // 別のタブが同じ会話を先頭から開き直す。応答は先頭の 3 件だけ。
+  const reopened = await startTaktDashServer({ overview: createDashboardState(), conversation: createConversationResponse() });
+  try {
+    await withBackendAddress(reopened.address, async () => renderToStaticMarkup(await ConversationsLoader()));
+  } finally {
+    await reopened.shutdown();
+  }
+  const html = await withBackendAddress(reopened.address, async () => renderToStaticMarkup(await ConversationsLoader()));
+  assert.match(html, /会話を取得できません/);
+  assert.match(html, /採用ページの見出しを直してください。/);
+  assert.match(html, /初回取得の後に届いた発言です。/);
+});
+
+test("会話は、最後にプロジェクトが無いと読めたなら、切断中も前の会話ではなく空の表示を出す", async () => {
+  const server = await startTaktDashServer({ overview: createDashboardState(), conversation: createConversationResponse() });
+  try {
+    await withBackendAddress(server.address, async () => renderToStaticMarkup(await ConversationsLoader()));
+  } finally {
+    await server.shutdown();
+  }
+  const empty = { ...createDashboardState(), projects: [] };
+  const result = await renderBeforeAndAfterDisconnect({ overview: empty }, () => ConversationsLoader());
+  assertKeptWithBanner(result, /プロジェクトがありません。/, /プロジェクトがありません。/);
+  assert.doesNotMatch(result.after, /採用ページの見出しを直してください。/);
+});

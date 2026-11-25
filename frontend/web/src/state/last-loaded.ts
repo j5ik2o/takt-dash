@@ -48,30 +48,49 @@ export const taskDetailKey = (project: string, taskName: string, goalId: string 
   JSON.stringify([project, taskName, goalId ?? null]);
 
 // 会話ページは先頭のプロジェクトの会話を開く。初回取得の内容に、1 秒更新で届いた
-// 差分を同じセッションの間だけ足していく。
-export type LastConversation = { projects: string[]; page: ConversationPage };
+// 差分を同じセッションの間だけ足していく。プロジェクトが無いと読めたときは、空で
+// あることを覚える。
+export type LastConversation = { kind: "ok"; projects: string[]; page: ConversationPage } | { kind: "empty" };
 
 const lastConversations = createLastLoaded<LastConversation>(1);
 const CONVERSATION_KEY = "conversations";
 
-export const rememberConversation = (loaded: LastConversation): void =>
-  lastConversations.remember(CONVERSATION_KEY, loaded);
-
 export const recallConversation = (): LastConversation | undefined => lastConversations.recall(CONVERSATION_KEY);
 
-/**
- * 1 秒更新で届いた差分を、覚えている会話と同じプロジェクト・セッションのときだけ足す。
- * 別のタブが古い位置から読み直した差分では、続きの位置を戻さない。
- */
-export const rememberConversationUpdate = (update: ConversationPage): void => {
+const isSameConversation = (a: ConversationPage, b: ConversationPage): boolean =>
+  a.project === b.project && a.sessionId === b.sessionId;
+
+// 同じ会話の 2 つのページを、発言は合わせ、続きの位置は先へ進んだ側に合わせて 1 つにする。
+// 別のタブが先頭から読み直しても、覚えている発言と続きの位置を戻さない。
+const mergeKeepingFurthest = (kept: ConversationPage, loaded: ConversationPage): ConversationPage => {
+  const merged = mergeConversationPages(kept, loaded);
+  const furthest = loaded.nextAfterSeq >= kept.nextAfterSeq ? loaded : kept;
+  return { ...merged, nextAfterSeq: furthest.nextAfterSeq, hasMore: furthest.hasMore };
+};
+
+/** ページの初回取得で読めた内容を覚える。同じ会話なら、覚えている発言に足す。 */
+export const rememberConversation = (loaded: LastConversation): void => {
   const last = recallConversation();
-  if (
-    last === undefined ||
-    last.page.project !== update.project ||
-    last.page.sessionId !== update.sessionId ||
-    update.nextAfterSeq < last.page.nextAfterSeq
-  ) {
+  if (loaded.kind === "ok" && last?.kind === "ok" && isSameConversation(last.page, loaded.page)) {
+    lastConversations.remember(CONVERSATION_KEY, {
+      kind: "ok",
+      projects: loaded.projects,
+      page: mergeKeepingFurthest(last.page, loaded.page),
+    });
     return;
   }
-  rememberConversation({ projects: last.projects, page: mergeConversationPages(last.page, update) });
+  lastConversations.remember(CONVERSATION_KEY, loaded);
+};
+
+/** 1 秒更新で届いた差分を、覚えている会話と同じプロジェクト・セッションのときだけ足す。 */
+export const rememberConversationUpdate = (update: ConversationPage): void => {
+  const last = recallConversation();
+  if (last?.kind !== "ok" || !isSameConversation(last.page, update)) {
+    return;
+  }
+  lastConversations.remember(CONVERSATION_KEY, {
+    kind: "ok",
+    projects: last.projects,
+    page: mergeKeepingFurthest(last.page, update),
+  });
 };
