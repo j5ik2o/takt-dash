@@ -14,6 +14,7 @@ export const EVENT_GOAL_ID = "67df7701-9a52-42c8-bfc4-113bbfbf48cd";
 export const WAIT_EVENT_TEXT = "イベント: wait_command_completed";
 export const QUESTION_TEXT = "PR #654 のマージ用タスクが停止しました。どう進めますか。";
 export const ANSWER_TEXT = "案A で進めてください。作業ツリーは残っています。";
+export const DIRECTOR_TEXT = "director からの確認です。PR 準備が3回失敗しています。原因と次の方針を作業記録に残してください。";
 
 const RESPONSE_FORMAT = [
   "次の JSON schema に一致する fenced JSON block をちょうど1つ返してください:",
@@ -61,6 +62,11 @@ const userRows = (repositoryDirectory: string): string[] => [
     questionId: "751b5b5f-f32f-4105-b0d3-683f7c32f29c",
     question: QUESTION_TEXT,
     answer: { text: ANSWER_TEXT, source: "takt-mcp", answeredAt: "2026-11-20T08:00:00.000Z" },
+  }),
+  turn("このターンは director 自身の依頼から始まりました。origin は director です。", {
+    text: DIRECTOR_TEXT,
+    origin: "director",
+    directorConversationId: "director-e2e",
   }),
 ];
 

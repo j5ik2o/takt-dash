@@ -500,6 +500,7 @@ export enum ConversationSpeaker {
   CONVERSATION_SPEAKER_USER = 1,
   CONVERSATION_SPEAKER_MANAGER = 2,
   CONVERSATION_SPEAKER_SYSTEM = 3,
+  CONVERSATION_SPEAKER_DIRECTOR = 4,
   UNRECOGNIZED = -1,
 }
 
@@ -517,6 +518,9 @@ export function conversationSpeakerFromJSON(object: any): ConversationSpeaker {
     case 3:
     case "CONVERSATION_SPEAKER_SYSTEM":
       return ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM;
+    case 4:
+    case "CONVERSATION_SPEAKER_DIRECTOR":
+      return ConversationSpeaker.CONVERSATION_SPEAKER_DIRECTOR;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -534,6 +538,8 @@ export function conversationSpeakerToJSON(object: ConversationSpeaker): string {
       return "CONVERSATION_SPEAKER_MANAGER";
     case ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM:
       return "CONVERSATION_SPEAKER_SYSTEM";
+    case ConversationSpeaker.CONVERSATION_SPEAKER_DIRECTOR:
+      return "CONVERSATION_SPEAKER_DIRECTOR";
     case ConversationSpeaker.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";

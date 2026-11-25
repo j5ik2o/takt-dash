@@ -135,6 +135,8 @@ export function conversationSpeakerLabel(speaker: number): string {
       return "manager";
     case CONVERSATION_SPEAKER.SYSTEM:
       return "システム";
+    case CONVERSATION_SPEAKER.DIRECTOR:
+      return "ディレクター";
     default:
       return "不明";
   }

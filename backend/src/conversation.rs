@@ -414,12 +414,20 @@ fn present_body(speaker: ConversationSpeaker, raw_text: String) -> PresentedBody
       | Some(TurnInput::InquiryAnswer { answer, question, source }) => {
         (ConversationSpeaker::User, answer, Some(ConversationDetail { question, source_json: pretty_json(&source) }))
       },
-      | None => (ConversationSpeaker::User, raw_text, None),
+      | Some(TurnInput::Director { text, source }) => (
+        ConversationSpeaker::Director,
+        text,
+        Some(ConversationDetail { question: None, source_json: pretty_json(&source) }),
+      ),
+      | None => {
+        let text = strip_turn_instructions(&raw_text).unwrap_or(raw_text);
+        (ConversationSpeaker::User, text, None)
+      },
     },
     | ConversationSpeaker::Manager => {
       (ConversationSpeaker::Manager, unwrap_assistant_message(&raw_text).unwrap_or(raw_text), None)
     },
-    | ConversationSpeaker::System => (ConversationSpeaker::System, raw_text, None),
+    | speaker @ (ConversationSpeaker::System | ConversationSpeaker::Director) => (speaker, raw_text, None),
   };
   let notice = garbled_notice(&text);
   PresentedBody { speaker, text, notice, detail }
@@ -432,29 +440,42 @@ enum TurnInput {
   Speech { text: String },
   /// 出来事から始まったターン。`{"event":{"kind":…},"instruction":…}` の行と、その前の説明文。
   Event { description: Option<String>, kind: String, event: Value },
-  /// 保存した質問への人の回答から始まったターン。`{"kind":"inquiry_answered",…}` の行。
-  /// `answer` は回答の本文（`answer.text`、無ければ `answer.report` を言葉にしたもの）。
+  /// 保存した質問への人の回答から始まったターン。`{"kind":"inquiry_answered",…}` の行と、
+  /// `kind` を持たない古い形の行。`answer` は `answer_body` で決めた回答の本文。
   InquiryAnswer { answer: String, question: Option<String>, source: Value },
+  /// director 自身の依頼から始まったターン。`{"text":…,"origin":"director",…}` の行。
+  Director { text: String, source: Value },
+}
+
+const TURN_MARKER: &str = "## このターンの入力";
+const BUSINESS_CONTEXT_PREFIX: &str = "Business context (not approval):";
+const RESPONSE_FORMAT_PREFIX: &str = "次の JSON schema に一致する";
+
+/// 現在の包みの見出しの直後の位置。前のターンの本文に同じ見出しが含まれていても、
+/// 現在の包みは行頭の見出しのうち最後のものです。
+fn current_turn_start(raw: &str) -> Option<usize> {
+  raw
+    .match_indices(TURN_MARKER)
+    .filter(|(index, _)| *index == 0 || raw.as_bytes()[index - 1] == b'\n')
+    .last()
+    .map(|(index, _)| index + TURN_MARKER.len())
 }
 
 /// `## このターンの入力` の包みから、ターンの始まり方を読み取る。
 ///
-/// 見出しより後だけを対象にし、行単位で JSON を解釈します。前のターンの本文に同じ見出しが
-/// 含まれていても、現在の包みは行頭の見出しのうち最後のものです。見出しと JSON の行の間に
-/// ある空でない行を説明文とします。応答形式の指示と Business context は JSON の行より後に
-/// あるため読みません。知らない形の JSON の行は読み飛ばし、どの形にも当たらなければ `None`
+/// 見出しより後だけを対象にし、行単位で JSON を解釈します。見出しと JSON の行の間に
+/// ある空でない行を説明文とします。Business context の行は説明文に入れず、応答形式の指示の
+/// 行から後は読みません。知らない形の JSON の行は読み飛ばし、どの形にも当たらなければ `None`
 /// を返します。
 fn parse_turn_input(raw: &str) -> Option<TurnInput> {
-  const MARKER: &str = "## このターンの入力";
-  let start = raw
-    .match_indices(MARKER)
-    .filter(|(index, _)| *index == 0 || raw.as_bytes()[index - 1] == b'\n')
-    .last()
-    .map(|(index, _)| index + MARKER.len())?;
+  let start = current_turn_start(raw)?;
   let mut description: Vec<&str> = Vec::new();
   for line in raw[start..].lines() {
     let trimmed = line.trim();
-    if trimmed.is_empty() {
+    if trimmed.starts_with(RESPONSE_FORMAT_PREFIX) {
+      break;
+    }
+    if trimmed.is_empty() || trimmed.starts_with(BUSINESS_CONTEXT_PREFIX) {
       continue;
     }
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
@@ -471,6 +492,8 @@ fn parse_turn_input(raw: &str) -> Option<TurnInput> {
   None
 }
 
+/// JSON の行をターンの始まり方へ読む。複数の形に当たる行は、人の発言、出来事、回答、
+/// 古い形の回答、director の依頼の順で最初の形にします。
 fn turn_input_from_json(value: Value, description: &[&str]) -> Option<TurnInput> {
   let non_empty = |value: &Value| value.as_str().filter(|text| !text.is_empty()).map(str::to_owned);
   if value.get("speaker").is_some() {
@@ -481,26 +504,59 @@ fn turn_input_from_json(value: Value, description: &[&str]) -> Option<TurnInput>
     let description = (!description.is_empty()).then(|| description.join("\n"));
     return Some(TurnInput::Event { description, kind, event: event.clone() });
   }
-  if value.get("kind").and_then(Value::as_str) == Some("inquiry_answered") {
-    let answer = value.get("answer").and_then(answer_text)?;
+  let inquiry_answered = value.get("kind").and_then(Value::as_str) == Some("inquiry_answered");
+  let legacy_answer = value.get("kind").is_none() && value.get("questionId").is_some() && value.get("answer").is_some();
+  if inquiry_answered || legacy_answer {
+    let answer = answer_body(value.get("answer"));
     let question = value.get("question").and_then(non_empty);
     return Some(TurnInput::InquiryAnswer { answer, question, source: value });
+  }
+  if value.get("origin").and_then(Value::as_str) == Some("director") {
+    let text = value.get("text").and_then(Value::as_str).filter(|text| !text.trim().is_empty())?.to_owned();
+    return Some(TurnInput::Director { text, source: value });
   }
   None
 }
 
-/// 回答の本文。人が書いた `text` を優先し、無ければ作業の依頼への報告（`report`）を、
-/// 判断待ちの画面のボタンと同じ言葉にする。
-fn answer_text(answer: &Value) -> Option<String> {
-  let non_empty = |key: &str| answer.get(key).and_then(Value::as_str).filter(|text| !text.is_empty());
-  if let Some(text) = non_empty("text") {
-    return Some(text.to_owned());
-  }
-  non_empty("report").map(|report| match report {
+/// 回答の本文。人が書いた `text` を本文にし、作業の依頼への報告（`report`）は判断待ちの
+/// 画面のボタンと同じ言葉で残します。空白だけの `text` は無いと同じです。
+fn answer_body(answer: Option<&Value>) -> String {
+  let field = |key: &str| answer.and_then(|answer| answer.get(key)).and_then(Value::as_str);
+  let text = field("text").filter(|text| !text.trim().is_empty());
+  let report = field("report").filter(|report| !report.is_empty());
+  let report_word = |report: &str| match report {
     | "completed" => "実施した".to_owned(),
     | "unable" => "対応できない".to_owned(),
-    | other => format!("回答: {other}"),
-  })
+    | other => other.to_owned(),
+  };
+  match (text, report) {
+    | (Some(text), None) => text.to_owned(),
+    | (Some(text), Some(report)) => format!("{text}\n（回答: {}）", report_word(report)),
+    | (None, Some(report @ ("completed" | "unable"))) => report_word(report),
+    | (None, Some(other)) => format!("回答: {other}"),
+    | (None, None) => "回答（本文なし）".to_owned(),
+  }
+}
+
+/// どの形にも当たらない包みから、応答形式の指示（その行から終わりまで）と Business context
+/// の行を除く。現在の包みの中に2つとも見つからなければ `None` を返します。
+fn strip_turn_instructions(raw: &str) -> Option<String> {
+  let start = current_turn_start(raw)?;
+  let mut kept = raw[..start].to_owned();
+  let mut stripped = false;
+  for line in raw[start..].split_inclusive('\n') {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with(RESPONSE_FORMAT_PREFIX) {
+      stripped = true;
+      break;
+    }
+    if trimmed.starts_with(BUSINESS_CONTEXT_PREFIX) {
+      stripped = true;
+      continue;
+    }
+    kept.push_str(line);
+  }
+  stripped.then(|| kept.trim_end().to_owned())
 }
 
 fn pretty_json(value: &Value) -> String {
@@ -618,6 +674,7 @@ pub enum ConversationSpeaker {
   User,
   Manager,
   System,
+  Director,
 }
 
 /// 解釈できずスキップした行の理由と件数。

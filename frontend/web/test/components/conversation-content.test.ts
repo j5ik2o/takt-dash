@@ -157,7 +157,7 @@ test("イベント起点の発言は説明文だけを出し、イベントの J
   const details = item.querySelector("details");
   assert.ok(details, "イベントの JSON の折りたたみがある");
   assert.equal(details.open, false, "ふだんは閉じている");
-  assert.equal(details.querySelector("summary")?.textContent, "イベントの JSON を表示します。");
+  assert.equal(details.querySelector("summary")?.textContent, "元の内容を表示します。");
   assert.equal(details.querySelector("pre")?.textContent, event.detail!.sourceJson, "折りたたみの中にイベントの JSON がある");
   assert.equal(details.querySelector(".conversation-detail-label"), null, "イベントに質問の欄はない");
 
@@ -179,7 +179,7 @@ test("質問への回答は回答だけを出し、質問の文と元の JSON �
   const details = item.querySelector("details");
   assert.ok(details, "質問と元の JSON の折りたたみがある");
   assert.equal(details.open, false, "ふだんは閉じている");
-  assert.equal(details.querySelector("summary")?.textContent, "質問と元の JSON を表示します。");
+  assert.equal(details.querySelector("summary")?.textContent, "元の内容を表示します。");
   assert.equal(question?.textContent, answer.detail!.question, "折りたたみの中に質問の文がある");
   assert.ok(question?.closest("details") === details, "質問の文は折りたたみの中にある");
   assert.equal(details.querySelector("pre")?.textContent, answer.detail!.sourceJson, "折りたたみの中に元の JSON がある");

@@ -118,6 +118,7 @@ pub fn conversation_speaker(speaker: ConversationSpeaker) -> v1::ConversationSpe
     | ConversationSpeaker::User => v1::ConversationSpeaker::User,
     | ConversationSpeaker::Manager => v1::ConversationSpeaker::Manager,
     | ConversationSpeaker::System => v1::ConversationSpeaker::System,
+    | ConversationSpeaker::Director => v1::ConversationSpeaker::Director,
   }
 }
 

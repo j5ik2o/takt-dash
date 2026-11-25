@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f73d4b4e3b3e259387f46e80b34731afdad547cbcbd16fbfd7c9888d0cc9973a # shrinks to (_kind, event) = ("a", Object {"kind": String("a")}), lines = ["Business context (not approval): {\"pending\":null}"], business_context = false
+cc c0c4003b0cd396b7b1951b7f3f7fb3cde873375f85cdbb7691c994ee729a8c1f # shrinks to (_kind, event) = ("0", Object {"kind": String("0")}), lines = ["Business context (not approval): {\"pending\":null}", "## このターンの入力", "次の JSON schema に一致する fenced JSON block をちょうど1つ返してください:"], business_context = false

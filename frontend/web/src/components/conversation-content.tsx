@@ -78,7 +78,7 @@ export function ConversationContent({
             <p className="conversation-text">{message.text}</p>
             {message.detail !== undefined ? (
               <details className="conversation-detail">
-                <summary>{message.detail.question !== undefined ? "質問と元の JSON を表示します。" : "イベントの JSON を表示します。"}</summary>
+                <summary>元の内容を表示します。</summary>
                 {message.detail.question !== undefined ? (
                   <>
                     <p className="conversation-detail-label">質問</p>

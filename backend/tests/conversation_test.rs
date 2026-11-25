@@ -9,9 +9,10 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use conversation_fixture::{
-  assistant_text, data_text, event_turn_data, fenced_assistant_data, fenced_assistant_without_message_data,
-  garbled_user_data, inquiry_answered_data, inquiry_answered_with_answer_data, invalid_fenced_assistant_data,
-  plain_user_data, wrapped_user_data, wrapped_user_without_speaker_data, ConversationFixture, CONVERSATION_SCHEMA,
+  assistant_text, data_text, director_turn_data, event_turn_data, fenced_assistant_data,
+  fenced_assistant_without_message_data, garbled_user_data, inquiry_answered_data, inquiry_answered_with_answer_data,
+  invalid_fenced_assistant_data, legacy_inquiry_answered_data, plain_user_data, turn_data, wrapped_user_data,
+  wrapped_user_without_speaker_data, ConversationFixture, BUSINESS_CONTEXT, CONVERSATION_SCHEMA, RESPONSE_FORMAT,
 };
 use takt_dash_backend::{
   conversation::{ConversationPage, ConversationQuery, ConversationReader, ConversationSpeaker},
@@ -970,8 +971,14 @@ fn wrapped_user_input_without_a_speaker_is_left_as_is() {
 
   let page = reader.read(&query("takt-dash", &project_cwd));
 
-  assert_eq!(texts(&page), vec![raw], "speaker を持たない JSON は人の発言として扱わず、元の本文を返す必要があります");
-  assert!(page.messages[0].text.contains("このターンの入力"), "包みの無い行は従来どおり本文を保つ必要があります");
+  let without_business_context = raw.replace("Business context (not approval): {}\n", "").trim_end().to_owned();
+  assert_eq!(
+    texts(&page),
+    vec![without_business_context],
+    "どの形にも当たらない包みは、Business context の行だけを除いた元の本文を返す必要があります"
+  );
+  assert_eq!(page.messages[0].speaker, ConversationSpeaker::User);
+  assert_eq!(page.messages[0].detail, None);
 }
 
 struct EventTurnCase {
@@ -984,6 +991,27 @@ struct EventTurnCase {
 
 fn event_turn_cases() -> Vec<EventTurnCase> {
   vec![
+    EventTurnCase {
+      kind:             "patrol",
+      description:      Some("このターンは daemon が届けた定期的な見回りです。対象ゴールの状態、run の判断と根拠を確かめ、完成へ向けた手配を判断します。"),
+      event:            serde_json::json!({ "kind": "patrol", "repositoryDirectory": "/tmp/takt-dash", "goalIds": ["1ae45d6e", "9e0a6490"] }),
+      business_context: true,
+      expected_text:    "このターンは daemon が届けた定期的な見回りです。対象ゴールの状態、run の判断と根拠を確かめ、完成へ向けた手配を判断します。",
+    },
+    EventTurnCase {
+      kind:             "goal_resumed",
+      description:      Some("このターンはイベントから始まりました。種類: goal_resumed（manager がゴールを再開した）。origin は manager です。manager の操作で実行が可能になった状態として受け取り、保存された合意、各タスクの停止理由、回答への依存を確かめて進めます。"),
+      event:            serde_json::json!({ "kind": "goal_resumed", "repositoryDirectory": "/tmp/takt-dash", "goalId": "3e11a84e", "origin": "manager" }),
+      business_context: false,
+      expected_text:    "このターンはイベントから始まりました。種類: goal_resumed（manager がゴールを再開した）。origin は manager です。manager の操作で実行が可能になった状態として受け取り、保存された合意、各タスクの停止理由、回答への依存を確かめて進めます。",
+    },
+    EventTurnCase {
+      kind:             "goal_pr_failed",
+      description:      Some("このターンはイベントから始まりました。種類: goal_pr_failed（ゴールの PR の準備に失敗した）。原因と現在の状態を確かめます。"),
+      event:            serde_json::json!({ "kind": "goal_pr_failed", "goalId": "6ddf5683", "expectedSha": "b652850e", "reason": "Goal PR creation failed: Command failed: gh pr create --title …\n## 目的\n" }),
+      business_context: false,
+      expected_text:    "このターンはイベントから始まりました。種類: goal_pr_failed（ゴールの PR の準備に失敗した）。原因と現在の状態を確かめます。",
+    },
     EventTurnCase {
       kind:             "goal_registered",
       description:      Some("このターンはイベントから始まりました。種類: goal_registered（ゴールが登録された）。保存された合意から作業を手配します。"),
@@ -1045,6 +1073,11 @@ fn event_turns_show_the_description_as_the_system_and_fold_the_event_json() {
     assert_eq!(detail.question, None, "{}: イベントに質問の文はありません", case.kind);
     let folded: serde_json::Value = serde_json::from_str(&detail.source_json).expect("折りたたみの中身は JSON です");
     assert_eq!(folded, case.event, "{}: 折りたたみにはイベントの JSON を置きます", case.kind);
+    assert!(
+      !detail.source_json.contains("To advance the assigned goals"),
+      "{}: instruction は折りたたみに入れません",
+      case.kind
+    );
     for shown in [message.text.as_str(), detail.source_json.as_str()] {
       assert!(!shown.contains("JSON schema"), "{}: 応答形式の指示は出しません", case.kind);
       assert!(!shown.contains("Business context"), "{}: Business context は出しません", case.kind);
@@ -1077,7 +1110,7 @@ fn inquiry_answer_turns_show_only_the_answer_and_fold_the_question_and_source_js
 }
 
 #[test]
-fn event_turns_without_a_usable_kind_are_left_as_is() {
+fn event_turns_without_a_usable_kind_are_unmatched_wrappers() {
   for event in
     [serde_json::json!({ "goalId": "67df7701" }), serde_json::json!({ "kind": "" }), serde_json::json!({ "kind": 3 })]
   {
@@ -1091,7 +1124,9 @@ fn event_turns_without_a_usable_kind_are_left_as_is() {
 
     let message = &page.messages[0];
     assert_eq!(message.speaker, ConversationSpeaker::User, "{event}: 種類が読めなければ話者は変えません");
-    assert_eq!(message.text, data_text(&data), "{event}: 種類が読めなければ元の本文を返します");
+    let raw = data_text(&data);
+    let expected = raw[..raw.find("次の JSON schema").expect("指示がある")].trim_end();
+    assert_eq!(message.text, expected, "{event}: 種類が読めなければ、指示を除いた元の本文を返します");
     assert_eq!(message.detail, None, "{event}: 種類が読めなければ折りたたみはありません");
   }
 }
@@ -1103,7 +1138,24 @@ fn operation_request_answers_without_text_show_the_chosen_report() {
     (serde_json::json!({ "report": "unable", "source": "takt-dash" }), "対応できない"),
     (serde_json::json!({ "report": "deferred" }), "回答: deferred"),
     (serde_json::json!({ "text": "", "report": "completed" }), "実施した"),
-    (serde_json::json!({ "text": "人が書いた回答です。", "report": "completed" }), "人が書いた回答です。"),
+    (serde_json::json!({ "text": " \n\t", "report": "unable" }), "対応できない"),
+    (
+      serde_json::json!({ "text": "人が書いた回答です。", "report": "completed" }),
+      "人が書いた回答です。\n（回答: 実施した）",
+    ),
+    (
+      serde_json::json!({ "text": "人が書いた回答です。", "report": "unable" }),
+      "人が書いた回答です。\n（回答: 対応できない）",
+    ),
+    (
+      serde_json::json!({ "text": "人が書いた回答です。", "report": "deferred" }),
+      "人が書いた回答です。\n（回答: deferred）",
+    ),
+    (serde_json::json!({}), "回答（本文なし）"),
+    (serde_json::json!({ "text": "   ", "report": "" }), "回答（本文なし）"),
+    (serde_json::json!({ "report": 1 }), "回答（本文なし）"),
+    (serde_json::Value::Null, "回答（本文なし）"),
+    (serde_json::json!("文字列の回答"), "回答（本文なし）"),
   ];
   for (answer, expected) in cases {
     let (_directory, fixture) = ConversationFixture::new();
@@ -1126,18 +1178,104 @@ fn operation_request_answers_without_text_show_the_chosen_report() {
 }
 
 #[test]
-fn inquiry_answers_without_text_or_report_are_left_as_is() {
-  for answer in [serde_json::json!({}), serde_json::json!({ "report": "" }), serde_json::json!({ "report": 1 })] {
+fn legacy_inquiry_answers_without_a_kind_are_read_as_answers() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  let answer = serde_json::json!({ "text": "完成まで進めてから repo-b を担当解除する（推奨）", "source": "tui" });
+  let data = legacy_inquiry_answered_data("担当から外すためにどちらを選びますか。", answer.clone(), FIRST_MESSAGE_AT);
+  fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &data);
+
+  let page = fixture.reader().read(&query("takt-dash", &project_cwd));
+
+  let message = &page.messages[0];
+  assert_eq!(message.speaker, ConversationSpeaker::User);
+  assert_eq!(
+    message.text, "完成まで進めてから repo-b を担当解除する（推奨）",
+    "kind の無い古い回答も回答だけを見せます"
+  );
+  let detail = message.detail.as_ref().expect("折りたたみがあります");
+  assert_eq!(detail.question.as_deref(), Some("担当から外すためにどちらを選びますか。"));
+  let folded: serde_json::Value = serde_json::from_str(&detail.source_json).expect("JSON です");
+  assert_eq!(folded["answer"], answer);
+}
+
+#[test]
+fn director_turns_show_the_request_as_the_director_and_fold_the_source_json() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  let request = "director からの確認です。PR 準備が3回失敗しています。原因と次の方針を作業記録に残してください。";
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &director_turn_data(request, true, FIRST_MESSAGE_AT),
+  );
+
+  let page = fixture.reader().read(&query("takt-dash", &project_cwd));
+
+  let message = &page.messages[0];
+  assert_eq!(message.speaker, ConversationSpeaker::Director, "director の依頼の話者はディレクターです");
+  assert_eq!(message.text, request, "本文は依頼の text だけです");
+  let detail = message.detail.as_ref().expect("折りたたみがあります");
+  assert_eq!(detail.question, None);
+  let folded: serde_json::Value = serde_json::from_str(&detail.source_json).expect("JSON です");
+  assert_eq!(folded["origin"], "director", "折りたたみに元の JSON を置きます");
+  assert_eq!(folded["text"], request);
+  assert!(!detail.source_json.contains("Business context") && !message.text.contains("Business context"));
+}
+
+#[test]
+fn director_shaped_lines_that_are_not_usable_are_unmatched_wrappers() {
+  for input in [
+    serde_json::json!({ "text": "依頼", "origin": "manager" }),
+    serde_json::json!({ "text": "  ", "origin": "director" }),
+    serde_json::json!({ "origin": "director" }),
+  ] {
     let (_directory, fixture) = ConversationFixture::new();
     let project_cwd = fixture.project_dir("takt-dash");
     seed_session(&fixture, &project_cwd);
-    let data = inquiry_answered_with_answer_data("質問", answer.clone(), false, FIRST_MESSAGE_AT);
+    let data = turn_data(Some("説明文"), &input, true, true, FIRST_MESSAGE_AT);
     fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &data);
 
     let page = fixture.reader().read(&query("takt-dash", &project_cwd));
 
-    assert_eq!(page.messages[0].text, data_text(&data), "{answer}: 回答が読めなければ元の本文を返します");
-    assert_eq!(page.messages[0].detail, None);
+    let message = &page.messages[0];
+    assert_eq!(message.speaker, ConversationSpeaker::User, "{input}");
+    assert_eq!(message.detail, None, "{input}");
+    assert!(message.text.contains(&serde_json::to_string(&input).expect("JSON")), "{input}: JSON の行は残します");
+    assert!(!message.text.contains("Business context") && !message.text.contains("JSON schema"), "{input}");
+  }
+}
+
+#[test]
+fn unmatched_wrappers_drop_only_the_found_instructions() {
+  let input = serde_json::json!({ "content": "# テスト作成レポート", "reference": "test-report.md", "scope": "full" });
+  let cases = [(true, true), (true, false), (false, true), (false, false)];
+  for (business_context, response_format) in cases {
+    let (_directory, fixture) = ConversationFixture::new();
+    let project_cwd = fixture.project_dir("takt-dash");
+    seed_session(&fixture, &project_cwd);
+    let data = turn_data(Some("説明文です。"), &input, business_context, response_format, FIRST_MESSAGE_AT);
+    let raw = data_text(&data);
+    fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &data);
+
+    let page = fixture.reader().read(&query("takt-dash", &project_cwd));
+
+    let text = &page.messages[0].text;
+    let label = format!("business_context={business_context} response_format={response_format}");
+    if !business_context && !response_format {
+      assert_eq!(text, &raw, "{label}: どちらも見つからなければ元の本文のままです");
+      continue;
+    }
+    let expected = format!(
+      "\n## このターンの入力\n\n\n\n\n\n\n\n説明文です。\n\n\n\n\n{}",
+      serde_json::to_string(&input).expect("JSON")
+    );
+    assert_eq!(text, &expected, "{label}: 見つけた指示と Business context だけを除きます");
+    assert!(!text.contains(BUSINESS_CONTEXT) && !text.contains(RESPONSE_FORMAT), "{label}");
   }
 }
 

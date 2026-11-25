@@ -11,8 +11,8 @@ use std::path::Path;
 
 use common::{project, server_meta};
 use conversation_fixture::{
-  event_turn_data, fenced_assistant_data, garbled_user_data, inquiry_answered_data, wrapped_user_data,
-  ConversationFixture,
+  director_turn_data, event_turn_data, fenced_assistant_data, garbled_user_data, inquiry_answered_data,
+  wrapped_user_data, ConversationFixture,
 };
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
@@ -318,6 +318,13 @@ async fn get_conversation_returns_the_folded_detail_of_non_speech_turns() {
     1_794_613_223_000,
     &wrapped_user_data("前のターンの本文", "見出しを直してください。", 1_794_613_223_000),
   );
+  fixture.insert_message(
+    "ses_alpha",
+    4,
+    "user",
+    1_794_613_224_000,
+    &director_turn_data("director の依頼です。", false, 1_794_613_224_000),
+  );
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -327,12 +334,14 @@ async fn get_conversation_returns_the_folded_detail_of_non_speech_turns() {
   assert_eq!(speakers, vec![
     ConversationSpeaker::System as i32,
     ConversationSpeaker::User as i32,
-    ConversationSpeaker::User as i32
+    ConversationSpeaker::User as i32,
+    ConversationSpeaker::Director as i32
   ]);
   assert_eq!(texts(&response), vec![
     "イベント: wait_command_completed",
     "案A で進めてください。",
-    "見出しを直してください。"
+    "見出しを直してください。",
+    "director の依頼です。"
   ]);
   let event_detail = response.messages[0].detail.as_ref().expect("イベントの折りたたみがあります");
   assert_eq!(event_detail.question, None);
