@@ -65,6 +65,7 @@ const renderActions = (
       text: "",
       dialog,
       busy,
+      disconnected: false,
       dialogTarget,
       onTextChange: noop,
       onAction: noop,
@@ -805,4 +806,78 @@ test("プルリクエストの URL の判定は、古いブラウザに無い UR
   } finally {
     Object.defineProperty(URL, "canParse", original);
   }
+});
+
+// 切断中は、最後に読めた判断待ちを残したまま、回答の操作だけを止める（issue #307）。
+const OFFLINE_NOTE = "再接続するまで操作できません。";
+
+const renderDecisionsConnection = (disconnected: boolean): string =>
+  renderToStaticMarkup(
+    createElement(DecisionsContent, {
+      snapshotLoaded: true,
+      state: createActionableDashboardState(),
+      now: NOW,
+      disconnected,
+    }),
+  );
+
+const controlsOf = (html: string): string[] => {
+  const document = new JSDOM(html).window.document;
+  return Array.from(document.querySelectorAll(".tray-list button, .tray-list input")).map(
+    (element) => element.outerHTML,
+  );
+};
+
+test("切断中は判断待ちの回答ボタンと入力欄をすべて無効にし、再接続するまで操作できないと添える", () => {
+  const html = renderDecisionsConnection(true);
+  const controls = controlsOf(html);
+
+  assert.ok(controls.length > 0, "フィクスチャに操作要素がある");
+  for (const control of controls) {
+    assert.match(control, /\sdisabled=""/, `切断中は押せない: ${control}`);
+  }
+  const document = new JSDOM(html).window.document;
+  const items = Array.from(document.querySelectorAll(".tray-list > li")).filter(
+    (item) => item.querySelector("button, input") !== null,
+  );
+  assert.ok(items.length > 0);
+  for (const item of items) {
+    assert.ok(item.textContent?.includes(OFFLINE_NOTE), "操作のある項目ごとに理由を添える");
+  }
+});
+
+test("接続中は判断待ちの回答ボタンを押せ、操作できない旨を出さない", () => {
+  const html = renderDecisionsConnection(false);
+  const buttons = controlsOf(html).filter(
+    (control) => control.startsWith("<button") && !control.includes('type="submit"'),
+  );
+
+  assert.ok(buttons.length > 0);
+  for (const button of buttons) {
+    assert.doesNotMatch(button, /\sdisabled=""/, `接続中は押せる: ${button}`);
+  }
+  assert.ok(!html.includes(OFFLINE_NOTE));
+});
+
+test("切断中は開いていたマージの確認でも確定できず、やめるだけは押せる", () => {
+  const html = renderToStaticMarkup(
+    createElement(DecisionActionsView, {
+      decision: merge(),
+      text: "",
+      dialog: "merge",
+      busy: false,
+      disconnected: true,
+      dialogTarget: null,
+      onTextChange: noop,
+      onAction: noop,
+    }),
+  );
+  const document = new JSDOM(html).window.document;
+  const dialogButtons = Array.from(document.querySelectorAll('[role="dialog"] button'));
+  const cancel = dialogButtons.find((button) => button.textContent === "やめる");
+  const confirm = dialogButtons.find((button) => button.textContent === "マージする");
+  assert.ok(cancel && confirm);
+  assert.equal(cancel.hasAttribute("disabled"), false);
+  assert.equal(confirm.hasAttribute("disabled"), true);
+  assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes(OFFLINE_NOTE));
 });

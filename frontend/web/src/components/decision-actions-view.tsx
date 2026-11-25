@@ -33,9 +33,16 @@ type DecisionActionsViewProps = {
   dialog: DialogKind | null;
   dialogTarget: DecisionDialogTarget | null;
   busy: boolean;
+  /** backend と切れている間は、回答を送れないので操作を止める（issue #307）。 */
+  disconnected: boolean;
   onTextChange: (text: string) => void;
   onAction: (intent: DecisionActionsIntent) => void;
 };
+
+// 切断中に操作要素へ添える理由。再接続すると disconnected が戻り、操作も戻る。
+function OfflineNote({ disconnected }: { disconnected: boolean }): ReactElement | null {
+  return disconnected ? <p className="note">再接続するまで操作できません。</p> : null;
+}
 
 // 確認ダイアログに出す対象の1行。href があれば、値を新しいタブで開くリンクにする。
 type ConfirmDialogDetail = {
@@ -51,6 +58,7 @@ type ConfirmDialogProps = {
   details: ConfirmDialogDetail[];
   confirmLabel: string;
   busy: boolean;
+  disconnected: boolean;
   onAction: (intent: DecisionActionsIntent) => void;
 };
 
@@ -154,7 +162,7 @@ export function decideDecisionTransition(input: {
   }
 }
 
-function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, onAction }: ConfirmDialogProps): ReactElement {
+function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, disconnected, onAction }: ConfirmDialogProps): ReactElement {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -284,11 +292,12 @@ function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, on
           </dl>
         )}
         <p className="dialog-message">{message}</p>
+        <OfflineNote disconnected={disconnected} />
         <div className="actions">
           <button type="button" disabled={busy} onClick={cancel}>
             やめる
           </button>
-          <button type="button" disabled={busy} onClick={() => onAction({ type: "confirm", dialog })}>
+          <button type="button" disabled={busy || disconnected} onClick={() => onAction({ type: "confirm", dialog })}>
             {confirmLabel}
           </button>
         </div>
@@ -388,6 +397,7 @@ type DialogActionSectionProps = {
   descriptionId: string;
   targetLabel: string;
   busy: boolean;
+  disconnected: boolean;
   triggerRefs: RefObject<Record<DialogKind, HTMLButtonElement | null>>;
   onAction: (intent: DecisionActionsIntent) => void;
 };
@@ -401,6 +411,7 @@ function DialogActionSection({
   descriptionId,
   targetLabel,
   busy,
+  disconnected,
   triggerRefs,
   onAction,
 }: DialogActionSectionProps): ReactElement {
@@ -412,7 +423,7 @@ function DialogActionSection({
         <button
           key={dialog}
           type="button"
-          disabled={busy}
+          disabled={busy || disconnected}
           ref={(element) => {
             triggerRefs.current[dialog] = element;
           }}
@@ -431,9 +442,11 @@ function DialogActionSection({
           details={current.details}
           confirmLabel={current.confirmLabel}
           busy={busy}
+          disconnected={disconnected}
           onAction={onAction}
         />
       )}
+      <OfflineNote disconnected={disconnected} />
     </div>
   );
 }
@@ -444,6 +457,7 @@ export function DecisionActionsView({
   dialog,
   dialogTarget,
   busy,
+  disconnected,
   onTextChange,
   onAction,
 }: DecisionActionsViewProps): ReactElement {
@@ -457,7 +471,7 @@ export function DecisionActionsView({
   const descriptionId = useId();
 
   // ダイアログを開いたトリガーを覚えておき、閉じたときにフォーカスを戻す。
-  // 送信中はトリガーが無効なので、復帰は busy の解除まで待つ。
+  // 送信中・切断中はトリガーが無効なので、復帰はその解除まで待つ。
   const triggerRefs = useRef<Record<DialogKind, HTMLButtonElement | null>>({
     merge: null,
     "approve-registration": null,
@@ -488,7 +502,7 @@ export function DecisionActionsView({
         pendingRestore.current = null;
         return;
     }
-  }, [dialog, busy]);
+  }, [dialog, busy, disconnected]);
 
   switch (state.kind) {
     case "unavailable":
@@ -502,7 +516,7 @@ export function DecisionActionsView({
             <button
               key={option}
               type="button"
-              disabled={busy}
+              disabled={busy || disconnected}
               aria-label={option}
               aria-describedby={descriptionId}
               onClick={() => onAction({ type: "answer-option", option })}
@@ -510,6 +524,7 @@ export function DecisionActionsView({
               {option}
             </button>
           ))}
+          <OfflineNote disconnected={disconnected} />
         </div>
       );
 
@@ -526,18 +541,19 @@ export function DecisionActionsView({
           <input
             type="text"
             value={text}
-            disabled={busy}
+            disabled={busy || disconnected}
             aria-label={`回答（${targetLabel}）`}
             onChange={(event) => onTextChange(event.target.value)}
           />
           <button
             type="submit"
-            disabled={busy || text.trim() === ""}
+            disabled={busy || disconnected || text.trim() === ""}
             aria-label="回答する"
             aria-describedby={descriptionId}
           >
             回答する
           </button>
+          <OfflineNote disconnected={disconnected} />
         </form>
       );
 
@@ -547,7 +563,7 @@ export function DecisionActionsView({
           <DecisionTargetDescription id={descriptionId} targetLabel={descriptionLabel} />
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || disconnected}
             aria-label="実施した"
             aria-describedby={descriptionId}
             onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.COMPLETED })}
@@ -556,42 +572,33 @@ export function DecisionActionsView({
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || disconnected}
             aria-label="対応できない"
             aria-describedby={descriptionId}
             onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.UNABLE })}
           >
             対応できない
           </button>
+          <OfflineNote disconnected={disconnected} />
         </div>
       );
 
     case "merge":
+    case "goal-registration": {
+      const group = state.kind;
       return (
         <DialogActionSection
-          triggers={DIALOG_TRIGGERS.merge}
-          configs={buildConfirmDialogs("merge", decision, dialogTarget)}
+          triggers={group === "merge" ? DIALOG_TRIGGERS.merge : DIALOG_TRIGGERS.goalRegistration}
+          configs={buildConfirmDialogs(group, decision, dialogTarget)}
           active={dialog}
           descriptionId={descriptionId}
           targetLabel={descriptionLabel}
           busy={busy}
+          disconnected={disconnected}
           triggerRefs={triggerRefs}
           onAction={onAction}
         />
       );
-
-    case "goal-registration":
-      return (
-        <DialogActionSection
-          triggers={DIALOG_TRIGGERS.goalRegistration}
-          configs={buildConfirmDialogs("goal-registration", decision, dialogTarget)}
-          active={dialog}
-          descriptionId={descriptionId}
-          targetLabel={descriptionLabel}
-          busy={busy}
-          triggerRefs={triggerRefs}
-          onAction={onAction}
-        />
-      );
+    }
   }
 }

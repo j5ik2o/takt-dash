@@ -22,10 +22,11 @@ import {
 
 type DecisionActionsProps = {
   decision: PendingDecision;
+  disconnected: boolean;
   onResult: (result: DecisionResult) => void;
 };
 
-export function DecisionActions({ decision, onResult }: DecisionActionsProps): ReactElement {
+export function DecisionActions({ decision, disconnected, onResult }: DecisionActionsProps): ReactElement {
   const [text, setText] = useState("");
   const [dialogState, setDialogState] = useState<DecisionDialogState>(INITIAL_DECISION_DIALOG_STATE);
   const [busy, setBusy] = useState(false);
@@ -74,6 +75,7 @@ export function DecisionActions({ decision, onResult }: DecisionActionsProps): R
       dialog={dialogState.kind === "open" ? dialogState.dialog : null}
       dialogTarget={dialogState.kind === "open" ? dialogState.target : null}
       busy={busy}
+      disconnected={disconnected}
       onTextChange={setText}
       onAction={handleAction}
     />
