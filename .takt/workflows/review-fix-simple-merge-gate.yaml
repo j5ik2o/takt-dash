@@ -7,13 +7,17 @@
 # 統合が止まる（issue #122、PR #109）。final_gate_instruction を差し替える引数は
 # review-fix-simple の外から渡せないため、builtin を写して差し替える。
 #
-# builtin との差分は次の (a)-(c) である。
+# 最終関門の報告の形式（出力契約）も替える必要があるため、呼び出し先の peer-review も
+# peer-review-merge-gate に写して替える（そちらの冒頭コメントを参照）。
+#
+# builtin との差分は次の (a)-(d) である。
 #   (a) name と description
 #   (b) この冒頭コメント
 #   (c) final_gate_instruction を taktdash-merge-final-gate にする
+#   (d) reviewers の呼び出し先を peer-review から peer-review-merge-gate にする
 #
 # builtin を更新するときは、新しい版の review-fix-simple.yaml との diff を取り、
-# (a)-(c) を除いた差分を取り込んでから
+# (a)-(d) を除いた差分を取り込んでから
 # `takt workflow doctor merge-review-fix-simple-thread-gate` を再実行する。
 name: review-fix-simple-merge-gate
 subworkflow:
@@ -45,7 +49,7 @@ steps:
   - name: reviewers
     description: 1体のレビュアーによるレビューから指摘の裁定・修正・再レビューを進め、要件充足を最終確認する
     kind: workflow_call
-    call: peer-review
+    call: peer-review-merge-gate
     args:
       reviewer_suite: single-review-suite
       review_policy_additions: []
