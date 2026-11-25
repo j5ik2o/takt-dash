@@ -1,7 +1,7 @@
 import type { ReactElement } from "react";
 import { BackendUnavailableError, backendUnavailableSituation, getBackendClient } from "../grpc/client";
 import { GetConversationResponse } from "../proto/taktdash";
-import { restoreConversationResponse, type ConversationPage } from "../state/conversation";
+import { restoreConversationResponse } from "../state/conversation";
 import { recallConversation, rememberConversation, type LastConversation } from "../state/last-loaded";
 import { BackendUnavailableNotice, backendUnavailableMessage } from "./backend-unavailable-notice";
 import { LiveConversation } from "./live-conversation";

@@ -27,6 +27,7 @@ import { ConversationsLoader } from "../../src/components/conversations-loader.t
 import { GoalDetailLoader } from "../../src/components/goal-detail-loader.tsx";
 import { ProjectsLoader } from "../../src/components/projects-loader.tsx";
 import { RunDetailLoader } from "../../src/components/run-detail-loader.tsx";
+import { RunDetailContent } from "../../src/components/run-detail-content.tsx";
 import { TaskDetailLoader } from "../../src/components/task-detail-loader.tsx";
 
 const withBackendAddress = async <T>(address: string, run: () => Promise<T>): Promise<T> => {
@@ -245,4 +246,28 @@ test("切断中のアクティビティは、最終更新に描画した時刻�
   } finally {
     mock.timers.reset();
   }
+});
+
+// React は同じ位置に同じ型の要素があれば状態を保つ。接続中と切断中で run 詳細の
+// 内容の位置と型をそろえ、切断から戻ったときにログの追従を作り直させない。
+test("run 詳細は接続中と切断中で、内容を同じ位置に同じ型で置く", async () => {
+  const contentOf = (element: ReactElement): unknown => {
+    const props = element.props as { children?: ReactElement };
+    return props.children?.type;
+  };
+  const server = await startTaktDashServer({ runDetail: createRunDetailResponse("run-eee") });
+  let connected: ReactElement;
+  try {
+    connected = await withBackendAddress(server.address, () =>
+      RunDetailLoader({ params: Promise.resolve({ slug: "run-eee" }) }),
+    );
+  } finally {
+    await server.shutdown();
+  }
+  const disconnected = await withBackendAddress(server.address, () =>
+    RunDetailLoader({ params: Promise.resolve({ slug: "run-eee" }) }),
+  );
+  assert.equal(connected.type, disconnected.type);
+  assert.equal(contentOf(connected), RunDetailContent);
+  assert.equal(contentOf(disconnected), RunDetailContent);
 });
