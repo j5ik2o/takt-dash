@@ -78,10 +78,12 @@ export function toRunView(
   const silentMinutes = run.lastLogAt
     ? Math.max(0, Math.floor((now.getTime() - run.lastLogAt.getTime()) / 60_000))
     : undefined;
+  // 無音は最後のログの時刻と閾値の比較ひとつで決める。backend の is_log_silent_at と同じく
+  // 閾値ちょうどは含めず、ミリ秒で比べる。分に丸めて比べたり、残った古い logSilent も
+  // 採ったりすると、新しいログが来た後も警告が残る（issue #239, #138）。
   const silent =
     run.lastLogAt !== undefined &&
-    (run.logSilent === true ||
-      (silentMinutes !== undefined && silentMinutes > thresholds.runLogSilentMinutes));
+    now.getTime() - run.lastLogAt.getTime() > thresholds.runLogSilentMinutes * 60_000;
   if (silent && silentMinutes !== undefined) {
     return {
       ...derived,

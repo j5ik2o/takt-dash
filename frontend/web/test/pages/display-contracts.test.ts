@@ -126,7 +126,9 @@ for (const condition of ["server", "project", "silent"] as const) {
         connectionState: condition === "project"
           ? ConnectionState.CONNECTION_STATE_UNRESPONSIVE : project.connectionState,
       })),
-      runs: base.runs.map((run) => ({ ...run, logSilent: condition === "silent" })),
+      runs: base.runs.map((run) => condition === "silent"
+        ? { ...run, logSilent: true, lastLogAt: new Date(NOW.getTime() - 11 * 60_000) }
+        : run),
     });
     const view = buildOverviewView(state, NOW, true);
     assert.equal(view.runningRuns, 1);

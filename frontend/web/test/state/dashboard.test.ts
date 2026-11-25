@@ -197,14 +197,21 @@ test("logSilent が偽でも経過時間が閾値を超えた run は警告に�
   assert.equal(overview.runs[0]?.note, "ログが 11分 出ていません。", "無音の分数を注記に出す");
 });
 
-test("run の無音判定は指定閾値と分単位の境界を保ち、警告件数と一致する", () => {
+test("run の無音判定は指定閾値をミリ秒で超えたときに警告となり、警告件数と一致する", () => {
   const base = createHealthyDashboardState();
   const run = base.runs[0];
   assert.ok(run);
   const cases = [
     { ageMs: 179_999, elapsedSeconds: 179, state: "live", label: "実行中", note: "", count: 0 },
     { ageMs: 180_000, elapsedSeconds: 180, state: "live", label: "実行中", note: "", count: 0 },
-    { ageMs: 239_999, elapsedSeconds: 239, state: "live", label: "実行中", note: "", count: 0 },
+    {
+      ageMs: 180_001,
+      elapsedSeconds: 180,
+      state: "warn",
+      label: "ログが止まっています",
+      note: "ログが 3分 出ていません。",
+      count: 1,
+    },
     {
       ageMs: 240_000,
       elapsedSeconds: 240,
@@ -1111,4 +1118,37 @@ test("概要のサーバー表示は応答していないプロジェクトを�
   const down = view.servers.find((item) => item.server.serverId === "down");
   assert.equal(down?.state, "down", "未接続のサーバーは応答なしのままにする");
   assert.deepEqual(down?.notRespondingProjects, [], "配下にプロジェクトが無いサーバーは空にする");
+});
+
+// issue #239 / #138: 無音の判定は最後のログの時刻と閾値の比較ひとつで決める。
+// 古い logSilent が残っても、最後のログが閾値以内なら警告にしない。
+test("logSilent が真のまま残っていても、最後のログが10分以内の run は警告にしない", () => {
+  const state = createDashboardState();
+  const { serverById, goalsById, thresholds } = overviewInputs(state);
+  const base = state.runs[0]!;
+  const run = { ...base, logSilent: true, lastLogAt: new Date(NOW.getTime() - 7 * 60_000) };
+
+  const view = toRunView(run, serverById, thresholds, NOW, goalsById);
+
+  assert.equal(view.state, "live", "7分前のログは無音ではない");
+  assert.equal(view.label, "実行中");
+  assert.equal(view.note, "");
+});
+
+test("無音の境目は backend と同じく10分ちょうどを含まず、1ミリ秒超えると警告になる", () => {
+  const state = createDashboardState();
+  const { serverById, goalsById, thresholds } = overviewInputs(state);
+  const base = state.runs[0]!;
+  const at = (ageMs: number) =>
+    toRunView(
+      { ...base, logSilent: false, lastLogAt: new Date(NOW.getTime() - ageMs) },
+      serverById,
+      thresholds,
+      NOW,
+      goalsById,
+    );
+
+  assert.equal(at(SILENT_MINUTES * 60_000).state, "live", "ちょうど10分は無音ではない");
+  assert.equal(at(SILENT_MINUTES * 60_000 + 1).state, "warn", "10分を超えたら無音");
+  assert.equal(at(SILENT_MINUTES * 60_000 + 30_000).label, "ログが止まっています");
 });
