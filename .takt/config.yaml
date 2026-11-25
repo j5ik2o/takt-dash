@@ -1,6 +1,9 @@
 language: ja
-# 全体で同時 2 本まで
-concurrency: 2
+# 全体で同時 1 本まで（issue #336）。TAKT はキューからタスクを取り出すとき、実行中の
+# タスクと同じブランチ・PR かを照合しない。2 以上だと、同じブランチのタスク2件が同時に
+# 動き、互いの push や Caccia の対応がぶつかる。TAKT 側で照合が入るまで 1 にする。
+# 1 にすると、別のブランチのタスクも1件ずつ順に動き、並列で進める利点はなくなる。
+concurrency: 1
 base_branch: main
 
 # マージ用ワークフローの関門ステップ（tools/merge-gate/review_threads_gate.py）を
@@ -21,6 +24,18 @@ rate_limit_fallback:
 # ワークフローを指定する（fraktor-ng-rs から複製したもの）
 merge:
   workflow: merge-review-fix-simple-thread-gate
+
+# Caccia（CodeRabbit の指摘への対応）の反復の上限（issue #336）。max_iterations の既定値は 3。
+# TAKT は前の周と同じ指摘かを判定しないため、CodeRabbit が同じ指摘を新しいスレッドで出し直すと
+# 上限まで回る。1 周で直らない指摘は caccia_limit で PR にコメントして止め、人が判断する。
+# enabled はここに書かず、いまの状態（無効）を変えない。2026-11-25 時点のグローバル設定
+# （TAKT_CONFIG_DIR、既定 ~/.takt の config.yaml）には caccia: がなく、既定の enabled: false の
+# ため、merge ワークフローの caccia は outcome: skipped で通過する。
+# 注意: TAKT はプロジェクトに caccia: があると、グローバルの caccia: を項目ごとに合わせず丸ごと
+# 置き換える（resolveConfigValue の caccia は local → global の先勝ち）。グローバルで
+# enabled: true にしても、このキーがある限り効かない。有効にするときは、ここに enabled: true を足す。
+caccia:
+  max_iterations: 1
 
 # manager（ゴール管理）がタスクに使ってよいワークフロー。未設定だと default と simple
 # だけになる

@@ -8,13 +8,15 @@
 #   system ステップ（wait_ci）には効かない。そのため builtin を写し、wait_ci と merge の
 #   間に関門のステップを足す。
 #
-# コピー時の builtin との差分は次の (a)-(f) である。
+# コピー時の builtin との差分は次の (a)-(g) である。
 #   (a) name と description
 #   (b) この冒頭コメント
 #   (c) max_steps に再同期・スレッド検査とループ判定の分を加える（後述）
 #   (d) wait_ci の最後の規則の next: merge を next: check_review_threads にする
 #   (e) merge ステップの直前に check_review_threads と unresolved_review_threads を足す
 #   (f) CI の再確認と待機から同じ失敗調査に戻る経路へ loop_monitors を足す
+#   (g) CI 修正の外側の流れ（push_ci_fix → caccia → … → push_ci_fix）へ loop_monitors と
+#       停止を知らせる ci_fix_loop_stopped を足す（issue #336）
 #
 # コピー元の TAKT 0.75.0 は builtin 名のワークフローにだけ mergeResyncBudget
 # （5 * max(2, concurrency-1)）を上乗せする（dist/features/tasks/execute/taskWorkflowExecution.js）。
@@ -25,7 +27,7 @@
 #
 # builtin を更新するときの追随手順:
 #   1. 新しい版の builtin（ja）の merge-review-fix-simple.yaml を取得する。
-#   2. このファイルとの diff を取り、(a)-(f) を除いた差分をこのファイルへ取り込む。
+#   2. このファイルとの diff を取り、(a)-(g) を除いた差分をこのファイルへ取り込む。
 #   3. taskWorkflowExecution.js の mergeResyncBudget の式を確認し、max_steps を見直す。
 #   4. `takt workflow doctor merge-review-fix-simple-thread-gate` と
 #      `python3 tools/merge-gate/review_threads_gate_test.py` を再実行する。
@@ -54,6 +56,31 @@ loop_monitors:
           next: investigate_ci
         - condition: 同じ指摘と原因が続き差分・検証結果・知見に進展がないと確認した
           next: ABORT
+  # CI 修正の外側の流れ push_ci_fix → caccia → wait_ci → collect_ci_failure → investigate_ci →
+  # refresh_ci → fix_ci → review_ci_fix → push_ci_fix を監視する（issue #336）。
+  # 途中の wait_ci・collect_ci_failure・investigate_ci・refresh_ci・rerun_ci は、CI の待ちや
+  # 再実行で回数が変わるので ignore_steps で外し、外側の流れの骨格だけを数える。
+  # push_ci_fix から始まる流れを2周し、3回目の CI 修正を push する手前で判定役を呼ぶ。
+  # 判定役が答えを返せば、規則は when(true) だけなので、内容によらず ci_fix_loop_stopped へ
+  # 進んで PR にコメントし、ABORT する。判定役がプロバイダの障害などで答えを返せないときは、
+  # TAKT は自然な遷移（push_ci_fix）へ進んで数を0に戻す（LoopMonitorJudgeRunner）ため、
+  # そのときは止まらない。
+  # いまの経路では、refresh_ci の fixRounds < 2（fixRounds は push_ci_fix の実行回数）が先に効き、
+  # 3回目の fix_ci へ進まないため、この監視は発火しない。fixRounds の関門が外れたときや
+  # TAKT の挙動が変わったときの安全網である。caccia から数えて2周で止めると、2回目の修正を
+  # push した直後に CI を待たずに止まり、その修正で通る CI もマージできなくなるため、そうしない。
+  # 判定役が監視の検出状態を消すため、上の CI 失敗の監視が判定すると、この監視の数は0に戻る。
+  - cycle: [push_ci_fix, caccia, fix_ci, review_ci_fix]
+    ignore_steps: [wait_ci, collect_ci_failure, investigate_ci, refresh_ci, rerun_ci]
+    threshold: 2
+    judge:
+      persona: taktdash-loop-judge
+      instruction: |
+        CI 修正の外側の流れ（push_ci_fix → caccia → … → review_ci_fix）を {cycle_count} 周しました。
+        この周回は回数だけで停止します。直前までの修正と CI の失敗を1行で要約してください。
+      rules:
+        - condition: when(true)
+          next: ci_fix_loop_stopped
 steps:
   - name: identify
     description: 対象PRの番号と現在の状態を取得する
@@ -297,6 +324,17 @@ steps:
         next: caccia
       - condition: when(true)
         next: ci_push_failed
+  - name: ci_fix_loop_stopped
+    description: CI修正の外側の流れが上限の周回に達して停止したことをPRにコメントする
+    mode: system
+    effects:
+      - type: comment_pr
+        pr: "{context:identify.pr.number}"
+        body_format: plain_text
+        body: "TAKTのCI回復を停止しました。CI修正の外側の流れ（push_ci_fix → caccia → … → push_ci_fix）が上限の2周に達しました。修正回数: {context:collect_ci_failure.failure.fixRounds}、再実行回数: {context:collect_ci_failure.failure.rerunCount}。調査要点: {structured:investigate_ci.summary}。最後の失敗チェック・run・job・証拠不足: {context:collect_ci_failure.failure.details}"
+    rules:
+      - condition: when(true)
+        next: ABORT
   - name: rerun_ci
     description: 外部要因と判定したCI失敗について、対象のチェックを再実行する
     mode: system
