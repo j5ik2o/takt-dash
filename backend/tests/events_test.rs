@@ -520,3 +520,59 @@ fn run_ending_in_failure_or_abort_is_detected_once_with_the_kind_of_that_end() {
     assert!(unchanged.is_empty(), "同じ状態のままの run を繰り返し出しません: {:?}", kind_names(&unchanged));
   }
 }
+
+#[test]
+fn failure_of_a_task_whose_name_another_goal_shares_is_detected_once() {
+  // タスク名の一意性はゴール内に限られます（docs/domain-primitives.md）。ゴール A の build が
+  // すでに失敗していて、ゴール B の build が running から失敗へ移ったとき、名前だけで前回の
+  // タスクを探す実装は A の build を見て、B の失敗を取りこぼします。
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(
+    vec![],
+    vec![
+      task_for_goal("build", "g1", TaskStatus::Failed, false),
+      task_for_goal("build", "g2", TaskStatus::Running, false),
+    ],
+    vec![],
+    vec![],
+    vec![],
+  );
+  let next = snapshot(
+    vec![],
+    vec![
+      task_for_goal("build", "g1", TaskStatus::Failed, false),
+      task_for_goal("build", "g2", TaskStatus::Failed, false),
+    ],
+    vec![],
+    vec![],
+    vec![],
+  );
+
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
+
+  assert_eq!(kind_names(&events), vec!["task_failed"], "別ゴールの同名タスクが失敗へ移った回を1件にします");
+  let unchanged = detect(SERVER, PROJECT, Some(&next), &next, Some(stable()), now);
+  assert!(unchanged.is_empty(), "失敗のままの同名タスクを繰り返し出しません: {:?}", kind_names(&unchanged));
+}
+
+#[test]
+fn unchanged_task_whose_name_another_goal_shares_does_not_repeat_a_failure() {
+  // ゴール A の build が pending のまま、ゴール B の build が失敗のままの周期では、何も
+  // 起きていません。名前だけで前回のタスクを探す実装は A の build を見て、B の失敗を毎周期
+  // 記録し直し、失敗の履歴を重複させます。
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(
+    vec![],
+    vec![
+      task_for_goal("build", "g1", TaskStatus::Pending, false),
+      task_for_goal("build", "g2", TaskStatus::Failed, false),
+    ],
+    vec![],
+    vec![],
+    vec![],
+  );
+
+  let events = detect(SERVER, PROJECT, Some(&prev), &prev, Some(stable()), now);
+
+  assert!(events.is_empty(), "別ゴールの同名タスクの状態を失敗の判定に使いません: {:?}", kind_names(&events));
+}

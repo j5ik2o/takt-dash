@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 
 use crate::{
   domain::{GoalId, RunSlug},
-  model::{ActivityEvent, ConnectionState, ConnectionTransition, EventKind, ProjectSnapshot, RunStatus, TaskStatus},
+  model::{
+    ActivityEvent, ConnectionState, ConnectionTransition, EventKind, ProjectSnapshot, RunStatus, TaskEntry, TaskStatus,
+  },
   store::{is_human_merge_wait, GoalTermination},
 };
 
@@ -155,7 +157,7 @@ fn detect_tasks(
   events: &mut Vec<ActivityEvent>,
 ) {
   for task in &next.tasks {
-    let previous = prev.tasks.iter().find(|entry| entry.name == task.name);
+    let previous = previous_task(prev, task);
     if task.status == TaskStatus::Running && previous.map(|entry| entry.status) != Some(TaskStatus::Running) {
       events.push(event(
         now,
@@ -189,6 +191,15 @@ fn detect_tasks(
       }
     }
   }
+}
+
+/// 前回の読み取りで同じタスクを探す。
+///
+/// タスク名の一意性はゴール内に限られるため（`docs/domain-primitives.md`）、名前だけで探すと
+/// 別のゴールにある同名タスクの状態を前回の状態として使ってしまいます。ゴール ID とタスク名の
+/// 組で照合します。
+fn previous_task<'a>(prev: &'a ProjectSnapshot, task: &TaskEntry) -> Option<&'a TaskEntry> {
+  prev.tasks.iter().find(|entry| entry.name == task.name && entry.goal_id == task.goal_id)
 }
 
 /// タスクの状態が失敗の一種なら、出来事の種類と本文の述部を返す。
