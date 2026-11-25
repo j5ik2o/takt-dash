@@ -277,7 +277,7 @@ export function OverviewContent({
                       : "最後のログはまだありません";
                   return (
                     <tr className={`run-row${flashing ? " flash" : ""}`} key={runView.run.runSlug}>
-                      <td className="run-project">
+                      <td className="run-project" data-label="プロジェクト">
                         <span className="p">{runView.run.project}</span>
                         {/* 同名のプロジェクトが複数のサーバーにあると、プロジェクト名だけでは
                             どのサーバーの run か分からない。サーバーの表示名を併記し、サーバーが
@@ -287,11 +287,11 @@ export function OverviewContent({
                           run の詳細を見る
                         </a>
                       </td>
-                      <td className="run-goal">
+                      <td className="run-goal" data-label="ゴール">
                         {runView.goalName ? <span className="g">{goalDisplayName(runView.goalName)}</span> : null}
                         <div className="task">タスク「{runView.run.summary || runView.run.taskName}」</div>
                       </td>
-                      <td className="run-step">
+                      <td className="run-step" data-label="ステップ">
                         {runView.currentStepName ? (
                           <div className="stp">
                             ステップ <b>{runView.currentStepName}</b>
@@ -309,10 +309,10 @@ export function OverviewContent({
                         ) : null}
                         {runView.model ? <div className="model">モデルは {formatModel(runView.model)} です。</div> : null}
                       </td>
-                      <td className="run-elapsed">
+                      <td className="run-elapsed" data-label="経過">
                         <span className={runView.state === "warn" ? "warn" : undefined}>{lastLogText}</span>
                       </td>
-                      <td className="run-status">
+                      <td className="run-status" data-label="状態">
                         <span className={`st ${runView.state}`}>
                           <span className={`dot ${runView.state}`} aria-hidden="true" />
                           {runView.label}

@@ -171,6 +171,15 @@ for (const width of NARROW_WIDTHS) {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow, "ページが横にはみ出さない").toBeLessThanOrEqual(0);
 
+    const tableOverflow = await page
+      .locator('section[aria-labelledby="h-runs"] .l-table')
+      .evaluate((element) => element.scrollWidth - element.clientWidth);
+    expect(tableOverflow, "run の表が枠の中で横スクロールしない").toBeLessThanOrEqual(0);
+
+    for (const label of ["プロジェクト", "ゴール", "ステップ", "経過", "状態"]) {
+      await expect(page.locator(`.run-row td[data-label="${label}"]`), `列「${label}」の名前が各セルに付く`).toHaveCount(1);
+    }
+
     const proj = await boxOf(page, ".callout .proj");
     expect(proj.width, "通知のプロジェクト名が1文字幅に潰れない").toBeGreaterThan(48);
     expect(await lineCount(page, ".callout .proj"), "プロジェクト名が1〜2行").toBeLessThanOrEqual(2);

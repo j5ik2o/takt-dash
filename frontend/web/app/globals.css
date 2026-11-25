@@ -676,6 +676,15 @@ a {
     border-bottom: 0;
   }
 
+  /* 見出し行を隠す代わりに、各セルの先頭へ列の名前を出す（縦積みでも各項目の意味が伝わるように）。 */
+  .runs-table td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: var(--font-size-13);
+    font-weight: 600;
+  }
+
   .runs-table tbody tr {
     border-bottom: 1px solid var(--line2);
   }
