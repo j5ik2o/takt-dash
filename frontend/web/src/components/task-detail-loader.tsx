@@ -7,6 +7,7 @@ import {
   TaskNotFoundError,
 } from "../grpc/client";
 import type { GetTaskDetailResponse } from "../proto/taktdash";
+import { lastTaskDetails, taskDetailKey } from "../state/last-loaded";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { LiveTaskDetail } from "./live-task-detail";
 
@@ -25,7 +26,10 @@ const firstValue = (value: string | string[] | undefined): string | undefined =>
 // タスクが見つからないときと、task が未指定・空文字・空白のみのときは 404 を返す。
 // gRPC の NOT_FOUND と応答の taskName・project・
 // goalId の不一致は、どれも TaskNotFoundError として扱う。backend 自体に接続できない
-// ときはページを落とさず、接続できない旨を表示する。
+// ときはページを落とさず、接続できない旨を表示する。前に読めたタスクなら、見出しと
+// 内容を残してその上に切断の通知を出す（issue #309）。通知は 1 秒更新の表示が持ち、
+// 次の取得が成功したら消す。
+
 export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoaderProps): Promise<ReactElement> {
   const { project } = await params;
   const query = await searchParams;
@@ -48,9 +52,17 @@ export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoade
       throw error;
     }
   }
+  const key = taskDetailKey(project, taskName, goalId);
   if (result.kind === "unavailable") {
-    return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;
+    const last = lastTaskDetails.recall(key);
+    if (last === undefined) {
+      return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;
+    }
+    return (
+      <LiveTaskDetail initialDetail={last} project={project} taskName={taskName} goalId={goalId} initialDisconnected />
+    );
   }
+  lastTaskDetails.remember(key, result.detail);
   return (
     <LiveTaskDetail
       initialDetail={result.detail}

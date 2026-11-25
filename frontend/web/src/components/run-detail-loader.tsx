@@ -7,7 +7,8 @@ import {
   RunNotFoundError,
 } from "../grpc/client";
 import type { GetRunDetailResponse } from "../proto/taktdash";
-import { BackendUnavailableNotice } from "./backend-unavailable-notice";
+import { createLastLoaded } from "../state/last-loaded";
+import { BackendUnavailableOver } from "./backend-unavailable-notice";
 import { RunDetailContent } from "./run-detail-content";
 
 type RunDetailLoaderProps = {
@@ -21,6 +22,9 @@ type LoadResult =
 // run が見つからないときは 404 を返す（order.md:27）。gRPC の NOT_FOUND と
 // 応答の runSlug 不一致は、どちらも RunNotFoundError として扱う。backend 自体に
 // 接続できないときはページを落とさず、接続できない旨を表示する（order.md:21）。
+// 前に読めた run なら、見出しと内容を残してその上に通知を出す（issue #309）。
+const lastRunDetails = createLastLoaded<GetRunDetailResponse>();
+
 export async function RunDetailLoader({ params }: RunDetailLoaderProps): Promise<ReactElement> {
   const { slug } = await params;
   let result: LoadResult;
@@ -37,7 +41,17 @@ export async function RunDetailLoader({ params }: RunDetailLoaderProps): Promise
     }
   }
   if (result.kind === "unavailable") {
-    return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;
+    const last = lastRunDetails.recall(slug);
+    return (
+      <BackendUnavailableOver situation={backendUnavailableSituation(result.error)}>
+        {last === undefined ? null : <RunDetailContent detail={last} now={new Date()} />}
+      </BackendUnavailableOver>
+    );
   }
-  return <RunDetailContent detail={result.detail} now={new Date()} />;
+  lastRunDetails.remember(slug, result.detail);
+  return (
+    <BackendUnavailableOver>
+      <RunDetailContent detail={result.detail} now={new Date()} />
+    </BackendUnavailableOver>
+  );
 }

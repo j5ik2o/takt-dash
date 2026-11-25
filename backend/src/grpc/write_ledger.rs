@@ -103,11 +103,16 @@ impl Ticket {
 impl Drop for Ticket {
   fn drop(&mut self) {
     if !self.done {
-      self.record(Settled::Unknown(Status::deadline_exceeded(
-        "書き込みの処理が中断したため、操作の結果は不明です。状態を確かめてから、必要ならやり直してください。",
-      )));
+      self.record(Settled::Unknown(interrupted()));
     }
   }
+}
+
+/// 書き込みの処理が結果を返さずに終わったときの状態。
+fn interrupted() -> Status {
+  Status::deadline_exceeded(
+    "書き込みの処理が中断したため、操作の結果は不明です。状態を確かめてから、必要ならやり直してください。",
+  )
 }
 
 /// 鍵ごとの書き込みの記録。
@@ -119,7 +124,7 @@ pub(super) struct WriteLedger {
 impl WriteLedger {
   /// 書き込みを実行する。
   ///
-  /// `key` が無い要求は、`prepare` の返す書き込みをそのまま実行します。`key` がある要求は
+  /// `key` が無い要求は、`prepare` の返す書き込みを台帳に残さずに実行します。`key` がある要求は
   /// 台帳を引き、最初の要求だけが `prepare` を呼びます。`prepare` は入力を検証して書き込みを
   /// 組み立て、検証の失敗は台帳に残しません。
   pub(super) async fn run<Request, Reply, Write>(
@@ -134,7 +139,10 @@ impl WriteLedger {
     Reply: prost::Message + Default + Send + 'static,
     Write: Future<Output = Result<Reply, WriteFailure>> + Send + 'static, {
     let Some(key) = key else {
-      return prepare()?.await.map(Response::new).map_err(WriteFailure::into_status);
+      return match tokio::spawn(prepare()?).await {
+        | Ok(written) => written.map(Response::new).map_err(WriteFailure::into_status),
+        | Err(_) => Err(interrupted()),
+      };
     };
     let mut fingerprint = rpc.as_bytes().to_vec();
     fingerprint.push(0);

@@ -17,6 +17,41 @@ use crate::{
 /// 本文の一部が省略されたときに、本文の末尾へ足す注記。
 const TRUNCATED_SUMMARY_NOTE: &str = "\n（長い項目は先頭だけを表示しています）";
 
+/// 省略された項目の続きを読む道具呼び出しの、登録案 1 件あたりの上限。1 回は最大 4096 バイト
+/// なので、本文はおよそ 256 KiB まで全文で出します。続きは revision が変わったときだけ読みます。
+const MAX_FIELD_READS: usize = 64;
+
+/// `summary` の項目のうち、文字列の一覧であるもの。
+const LIST_FIELDS: [&str; 3] = ["outOfScope", "acceptanceCriteria", "constraints"];
+
+/// 登録案 1 件の項目の続きを読む間の、持ち主と revision と残りの読み取り回数。
+struct FieldReader<'a> {
+  revision:        RegistrationRevision,
+  conversation_id: &'a ConversationId,
+  remaining:       usize,
+}
+
+/// 本文の応答の omissions が `summary.<key>` を含むか。takt-mcp は一覧の要素の省略を
+/// `proposal.summary.<key>[]` とまとめて書きます。omissions が無い・読めない応答は、
+/// どの項目が省略されたか分からないため、含むとみなします。
+fn is_omitted(value: &Value, key: &str) -> bool {
+  let Some(omissions) = value.get("omissions").and_then(Value::as_array) else {
+    return true;
+  };
+  let field = format!("proposal.summary.{key}");
+  omissions
+    .iter()
+    .filter_map(|omission| omission.get("path").and_then(Value::as_str))
+    .any(|path| path == field || path.strip_prefix(field.as_str()).is_some_and(|rest| rest.starts_with(['.', '['])))
+}
+
+/// 上限で読み切れなかった文字列は、先頭だけの候補のうち長いほうを残す。
+fn keep_longer(text: &mut String, candidate: String) {
+  if candidate.len() > text.len() {
+    *text = candidate;
+  }
+}
+
 impl ToolSetCore<'_> {
   /// ゴール登録の承認待ちを取得する。提案が無ければ空の並びを返します。
   ///
@@ -88,12 +123,148 @@ impl ToolSetCore<'_> {
         read.get()
       )));
     }
-    let mut summary = registration_summary_text(proposal.get("summary"))?;
     // 応答が 64 KiB に収まらないと、takt-mcp は長い文字列を先頭だけにして truncated を立てます。
-    if value.get("truncated").and_then(Value::as_bool) == Some(true) {
+    if value.get("truncated").and_then(Value::as_bool) != Some(true) {
+      return registration_summary_text(proposal.get("summary"));
+    }
+    let Some(Value::Object(object)) = proposal.get("summary") else {
+      // 文字列の本文（以前の takt-mcp）は、path で読む項目を持ちません。
+      let mut summary = registration_summary_text(proposal.get("summary"))?;
+      summary.push_str(TRUNCATED_SUMMARY_NOTE);
+      return Ok(summary);
+    };
+    let mut object = object.clone();
+    let mut reader = FieldReader { revision, conversation_id, remaining: MAX_FIELD_READS };
+    let mut complete = true;
+    for (key, _) in REGISTRATION_SUMMARY_FIELDS {
+      if !object.contains_key(key) || !is_omitted(&value, key) {
+        continue;
+      }
+      let path = format!("summary.{key}");
+      let first = object.get(key);
+      let (full, read_all) = if LIST_FIELDS.contains(&key) {
+        let first_items = first
+          .and_then(Value::as_array)
+          .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+          .unwrap_or_default();
+        let (items, read_all) = self.read_proposal_list(&mut reader, &path, first_items).await?;
+        (Value::Array(items.into_iter().map(Value::String).collect()), read_all)
+      } else {
+        let first_text = first.and_then(Value::as_str).unwrap_or_default().to_owned();
+        let (mut text, read_all) = self.read_proposal_text(&mut reader, &path).await?;
+        if !read_all {
+          keep_longer(&mut text, first_text);
+        }
+        (Value::String(text), read_all)
+      };
+      complete &= read_all;
+      object.insert(key.to_owned(), full);
+    }
+    let mut summary = compose_registration_summary(&object);
+    if !complete {
       summary.push_str(TRUNCATED_SUMMARY_NOTE);
     }
     Ok(summary)
+  }
+
+  /// 登録案の文字列の項目を textOffset で読み、全文を返す。読み取りの上限に達したら、読めた分と
+  /// false を返します。
+  async fn read_proposal_text(
+    &mut self,
+    reader: &mut FieldReader<'_>,
+    path: &str,
+  ) -> Result<(String, bool), ToolError> {
+    let mut content = String::new();
+    let mut offset = 0;
+    while let Some(page) = self.read_proposal_field(reader, json!({ "path": path, "textOffset": offset })).await? {
+      let chunk = page
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::Parse(format!("{path} の content が文字列ではありません")))?;
+      content.push_str(chunk);
+      match page.get("nextOffset").and_then(Value::as_u64) {
+        | Some(next) => offset = next,
+        | None => return Ok((content, true)),
+      }
+    }
+    Ok((content, false))
+  }
+
+  /// 登録案の一覧の項目を offset で読み、全要素を返す。takt-mcp が要素を先頭だけにしたページは、
+  /// そのページの要素を 1 つずつ textOffset で読み直します。`entries` は最初の応答の要素で、
+  /// 読めた要素だけを同じ番号で置き換えます。読み取りの上限に達したら、まだ読んでいない要素は
+  /// 最初の応答のまま残し、false を返します。
+  async fn read_proposal_list(
+    &mut self,
+    reader: &mut FieldReader<'_>,
+    path: &str,
+    mut entries: Vec<String>,
+  ) -> Result<(Vec<String>, bool), ToolError> {
+    let mut offset = 0;
+    while let Some(page) = self.read_proposal_field(reader, json!({ "path": path, "offset": offset })).await? {
+      let items = page
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolError::Parse(format!("{path} の items が配列ではありません")))?;
+      let shortened = page.get("omissions").and_then(Value::as_array).is_some_and(|omissions| !omissions.is_empty());
+      for (index, item) in items.iter().enumerate() {
+        let at = offset as usize + index;
+        let mut text =
+          item.as_str().ok_or_else(|| ToolError::Parse(format!("{path} の要素が文字列ではありません")))?.to_owned();
+        let mut read_all = true;
+        if shortened {
+          let (full, read) = self.read_proposal_text(reader, &format!("{path}.{at}")).await?;
+          read_all = read;
+          if read_all {
+            text = full;
+          } else {
+            keep_longer(&mut text, full);
+            if let Some(first) = entries.get(at) {
+              keep_longer(&mut text, first.clone());
+            }
+          }
+        }
+        match entries.get_mut(at) {
+          | Some(entry) => *entry = text,
+          | None => entries.push(text),
+        }
+        if !read_all {
+          return Ok((entries, false));
+        }
+      }
+      match page.get("nextOffset").and_then(Value::as_u64) {
+        | Some(next) => offset = next,
+        | None => {
+          entries.truncate(offset as usize + items.len());
+          return Ok((entries, true));
+        },
+      }
+    }
+    Ok((entries, false))
+  }
+
+  /// 登録案の項目を 1 回読む。読み取りの上限に達していたら None を返します。一覧のあとに
+  /// 登録案が作り直されて revision が違えば、本文を混ぜないよう解析エラーにします。
+  async fn read_proposal_field(
+    &mut self,
+    reader: &mut FieldReader<'_>,
+    mut extra: Value,
+  ) -> Result<Option<Value>, ToolError> {
+    if reader.remaining == 0 {
+      return Ok(None);
+    }
+    reader.remaining -= 1;
+    extra["conversationId"] = json!(reader.conversation_id.as_str());
+    let value = self.call_json("takt_get_goal_registration_proposal", extra).await?;
+    let read = domain_value("revision", RegistrationRevision::try_from(required_i32(&value, "revision")?))?;
+    if read != reader.revision {
+      return Err(ToolError::Parse(format!(
+        "登録案が読み取りの途中で作り直されました（一覧 revision {}、本文 revision {}）",
+        reader.revision.get(),
+        read.get()
+      )));
+    }
+    Ok(Some(value))
   }
 
   /// ゴール登録の承認待ちを承認する。承認した revision と、登録されたゴールの ID を返します。

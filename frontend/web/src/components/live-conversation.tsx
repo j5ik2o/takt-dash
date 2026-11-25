@@ -17,6 +17,8 @@ type LiveConversationProps = {
   projects: string[];
   initialProject: string;
   initialPage: ConversationPage;
+  /** 前に読めた会話で描画するとき、取得失敗の通知を出した状態で始める（issue #309）。 */
+  initialError?: string;
 };
 
 // 会話ページ専用の1秒更新。BFF の Route Handler を経由して差分を取り、
@@ -38,11 +40,17 @@ const requestPage = async (request: ConversationRequest): Promise<ConversationPa
   return restoreConversationResponse(await response.json());
 };
 
-export function LiveConversation({ projects, initialProject, initialPage }: LiveConversationProps): ReactElement {
+export function LiveConversation({
+  projects,
+  initialProject,
+  initialPage,
+  initialError,
+}: LiveConversationProps): ReactElement {
   const [view, setView] = useState<ConversationView>({
     project: initialProject,
     page: initialPage,
     loading: false,
+    error: initialError,
   });
   const [follow] = useState(() => createConversationFollow({ initialProject, initialPage, requestPage }));
 

@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { getBackendClient, TaskNotFoundError } from "../../../../src/grpc/client";
 import { GetTaskDetailResponse } from "../../../../src/proto/taktdash";
+import { lastTaskDetails, taskDetailKey } from "../../../../src/state/last-loaded";
 import { toBackendUnavailableResponse } from "../../error-response";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +23,8 @@ export async function GET(request: NextRequest, context: TaskDetailRouteContext)
   const client = getBackendClient();
   try {
     const response = await client.getTaskDetail(project, taskName, goalId);
+    // 切断中にページを開き直したとき、この更新で読めた内容を出す（issue #309）。
+    lastTaskDetails.remember(taskDetailKey(project, taskName, goalId), response);
     return Response.json(GetTaskDetailResponse.toJSON(response));
   } catch (error) {
     if (error instanceof TaskNotFoundError) {
