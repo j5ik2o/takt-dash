@@ -29,7 +29,7 @@ TAKT の版を戻すときの手順を書く。
 
 ## いまの状態
 
-`task_finish_hook` は**いま外してある**（2026-11-25）。
+`task_finish_hook` は**いまは外してある**（2026-11-25）。理由は次のとおりで、戻す条件もこの節に書く。
 
 理由は、動いている実体が PATH の **takt 0.77.0** で、このキーを知らないため（TAKT 本体の
 `.takt/config.yaml` スキーマ、`src/core/models/config-schemas.ts`）。キーが残っていると、次に
