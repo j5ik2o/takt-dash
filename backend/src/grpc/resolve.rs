@@ -115,11 +115,13 @@ impl TaktDashServiceImpl {
   }
 
   /// 読み取り RPC 用の読み取り元を作る。HTTP 接続先は常駐サーバーのハンドル、stdio 接続先は
-  /// 画面読み取りレーンのクライアントを使います。
+  /// 画面読み取りレーンのクライアントを使います。HTTP のハンドルは、レジストリが持つ
+  /// サーバーごとのセッションを共有し、要求ごとにセッションを作りません。
   pub(super) fn read_source(&self, resolved: &ResolvedProject) -> ReadSource {
     match &resolved.connection {
-      | McpConnection::Http(_) => {
-        ReadSource::Http(Box::new(HttpReadHandle::new(resolved.connection.clone(), READ_TIMEOUT)))
+      | McpConnection::Http(server) => {
+        let session = self.registry.http_session(resolved.server_id.as_str(), server);
+        ReadSource::Http(Box::new(HttpReadHandle::with_session(session, READ_TIMEOUT)))
       },
       | McpConnection::Stdio(_) => ReadSource::Stdio(self.screen_handle(resolved)),
     }

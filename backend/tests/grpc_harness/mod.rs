@@ -376,6 +376,16 @@ impl GrpcHarness {
   pub fn http_recorded_calls(&self) -> Vec<serde_json::Value> {
     self.http.as_ref().map(common::HttpMockServer::recorded_calls).unwrap_or_default()
   }
+
+  /// HTTP の mock サーバーを止める。takt-mcp が止まっている状態を再現します。
+  pub fn stop_http_server(&mut self) {
+    self.http = None;
+  }
+
+  /// HTTP の mock サーバー。HTTP モードでない場合は panic します。
+  pub fn http_server(&self) -> &common::HttpMockServer {
+    self.http.as_ref().expect("HTTP モードの土台です")
+  }
 }
 
 /// mock MCP サーバが受け取った1件の道具呼び出し。

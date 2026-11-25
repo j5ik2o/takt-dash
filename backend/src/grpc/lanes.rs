@@ -55,11 +55,13 @@ impl WriteLane {
   }
 
   /// 書き込み元を作る。HTTP 接続先は常駐サーバーのハンドル、stdio 接続先は書き込みレーンの
-  /// クライアントを使います。
+  /// クライアントを使います。HTTP のハンドルは、レジストリが持つサーバーごとのセッションを
+  /// 共有し、書き込みごとにセッションを作りません。
   fn source(&self) -> WriteSource {
     match &self.resolved.write_connection {
-      | McpConnection::Http(_) => {
-        WriteSource::Http(Box::new(HttpReadHandle::new_for_write(self.resolved.write_connection.clone(), READ_TIMEOUT)))
+      | McpConnection::Http(server) => {
+        let session = self.registry.http_session(self.resolved.write_server_id.as_str(), server);
+        WriteSource::Http(Box::new(HttpReadHandle::with_session_for_write(session, READ_TIMEOUT)))
       },
       | McpConnection::Stdio(server) => {
         let config = client_config(server, &self.resolved.cwd);

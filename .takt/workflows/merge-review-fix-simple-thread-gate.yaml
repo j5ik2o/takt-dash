@@ -8,7 +8,7 @@
 #   system ステップ（wait_ci）には効かない。そのため builtin を写し、wait_ci と merge の
 #   間に関門のステップを足す。
 #
-# コピー時の builtin との差分は次の (a)-(g) である。
+# コピー時の builtin との差分は次の (a)-(h) である。
 #   (a) name と description
 #   (b) この冒頭コメント
 #   (c) max_steps に再同期・スレッド検査とループ判定の分を加える（後述）
@@ -17,6 +17,9 @@
 #   (f) CI の再確認と待機から同じ失敗調査に戻る経路へ loop_monitors を足す
 #   (g) CI 修正の外側の流れ（push_ci_fix → caccia → … → push_ci_fix）へ loop_monitors と
 #       停止を知らせる ci_fix_loop_stopped を足す（issue #336）
+#   (h) review ステップの呼び出し先を review-fix-simple から review-fix-simple-merge-gate に
+#       する。統合の後にしか確かめられない受け入れ条件だけが残るときに、最終関門が
+#       BLOCKED で止めないようにするため（issue #122）
 #
 # コピー元の TAKT 0.75.0 は builtin 名のワークフローにだけ mergeResyncBudget
 # （5 * max(2, concurrency-1)）を上乗せする（dist/features/tasks/execute/taskWorkflowExecution.js）。
@@ -27,10 +30,13 @@
 #
 # builtin を更新するときの追随手順:
 #   1. 新しい版の builtin（ja）の merge-review-fix-simple.yaml を取得する。
-#   2. このファイルとの diff を取り、(a)-(g) を除いた差分をこのファイルへ取り込む。
+#   2. このファイルとの diff を取り、(a)-(h) を除いた差分をこのファイルへ取り込む。
 #   3. taskWorkflowExecution.js の mergeResyncBudget の式を確認し、max_steps を見直す。
-#   4. `takt workflow doctor merge-review-fix-simple-thread-gate` と
-#      `python3 tools/merge-gate/review_threads_gate_test.py` を再実行する。
+#   4. `takt workflow doctor merge-review-fix-simple-thread-gate`、
+#      `takt workflow doctor review-fix-simple-merge-gate`、`takt workflow doctor peer-review-merge-gate`、
+#      引数なしの `takt workflow doctor` と、`python3 tools/merge-gate/review_threads_gate_test.py`
+#      を再実行する。親の doctor は、存在しない出力契約の名前を名前の文字列のまま契約の本文として
+#      扱い OK を返すため、子の doctor と引数なしの doctor も要る。
 name: merge-review-fix-simple-thread-gate
 description: 1体の読み取り専用レビューと裁定・修正・検証を経て、CI通過後に未解決レビュースレッドが0件のときだけPRをマージする
 max_steps: 96
@@ -123,7 +129,7 @@ steps:
   - name: review
     description: 1体のレビュアーでPRをレビューし、指摘の裁定・修正・検証と要件確認を実施する
     kind: workflow_call
-    call: review-fix-simple
+    call: review-fix-simple-merge-gate
     rules:
       - condition: COMPLETE
         next: push

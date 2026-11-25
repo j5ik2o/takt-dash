@@ -318,7 +318,12 @@ impl HttpMockServer {
       .stdout(Stdio::null())
       .stderr(Stdio::null());
     if let Some(behavior) = behavior {
-      command.arg("--behavior").arg(behavior);
+      // `slow-initialize:<ミリ秒>` のように、挙動に遅延を添えられます。
+      let (name, delay) = behavior.split_once(':').unwrap_or((behavior, ""));
+      command.arg("--behavior").arg(name);
+      if !delay.is_empty() {
+        command.arg("--delay-ms").arg(delay);
+      }
     }
     let mut child = command.spawn().expect("mock HTTP MCP サーバを起動できます");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -367,6 +372,31 @@ impl HttpMockServer {
       return Vec::new();
     };
     text.lines().filter(|line| !line.trim().is_empty()).map(str::to_owned).collect()
+  }
+
+  /// サーバーが作ったセッションの数（"new" の数）。
+  pub fn created_session_count(&self) -> usize {
+    self.session_events().iter().filter(|event| event.starts_with("new ")).count()
+  }
+
+  /// サーバーに生きているセッションの数（作った数から、DELETE で閉じた数を引いたもの）。
+  pub fn live_session_count(&self) -> usize {
+    let events = self.session_events();
+    let closed = events.iter().filter(|event| event.starts_with("close ")).count();
+    events.iter().filter(|event| event.starts_with("new ")).count() - closed
+  }
+
+  /// 生きているセッションの数が `expected` になるまで待つ。破棄の DELETE は背後で送るため、
+  /// 固定の sleep ではなく、記録が現れるまで待ち合わせます。
+  pub async fn wait_for_live_sessions(&self, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+      if self.live_session_count() == expected {
+        return;
+      }
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("生きているセッションが {expected} になりませんでした: {:?}", self.session_events());
   }
 
   /// 接続を確認できるまで待つために、テストから URL のポート番号を返す。
