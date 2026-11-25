@@ -10,7 +10,9 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::domain::{GoalId, InquiryId, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName};
+use crate::domain::{
+  ConversationId, GoalId, InquiryId, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName,
+};
 
 /// ゴールの状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -432,6 +434,8 @@ pub struct RegistrationProposalEntry {
   pub revision:             RegistrationRevision,
   /// この登録案を読んだ接続先。
   pub source:               ProposalSource,
+  /// 登録案を持つ会話。takt-mcp は、承認・却下でこの値を必須にし、持ち主と照合します。
+  pub conversation_id:      ConversationId,
   pub repository_directory: String,
   /// 提案の要約。判断待ちの本文として表示します。
   pub summary:              String,

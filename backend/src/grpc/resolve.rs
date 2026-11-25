@@ -12,8 +12,8 @@ use super::{TaktDashServiceImpl, READ_TIMEOUT};
 use crate::{
   config::{load_config, Config, McpConnection},
   domain::{
-    GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, ScreenReadLanes,
-    ServerId, TaskName,
+    ConversationId, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug,
+    ScreenReadLanes, ServerId, TaskName,
   },
   mcp::{
     ApproveGoalRegistrationResult, ClientHandle, HttpReadHandle, MergeGoalPrResult, ReadToolSet, RemoteRun, ToolError,
@@ -287,14 +287,15 @@ impl WriteSource {
     &mut self,
     cwd: &std::path::Path,
     revision: RegistrationRevision,
+    conversation_id: &ConversationId,
   ) -> Result<ApproveGoalRegistrationResult, ToolError> {
     match self {
       | WriteSource::Http(handle) => {
-        WriteToolSet::new(&mut **handle, cwd.to_path_buf()).approve_goal_registration(revision).await
+        WriteToolSet::new(&mut **handle, cwd.to_path_buf()).approve_goal_registration(revision, conversation_id).await
       },
       | WriteSource::Stdio(handle) => {
         let mut client = handle.lock().await;
-        WriteToolSet::new(&mut *client, cwd.to_path_buf()).approve_goal_registration(revision).await
+        WriteToolSet::new(&mut *client, cwd.to_path_buf()).approve_goal_registration(revision, conversation_id).await
       },
     }
   }
@@ -304,14 +305,15 @@ impl WriteSource {
     &mut self,
     cwd: &std::path::Path,
     revision: RegistrationRevision,
+    conversation_id: &ConversationId,
   ) -> Result<RegistrationRevision, ToolError> {
     match self {
       | WriteSource::Http(handle) => {
-        WriteToolSet::new(&mut **handle, cwd.to_path_buf()).reject_goal_registration(revision).await
+        WriteToolSet::new(&mut **handle, cwd.to_path_buf()).reject_goal_registration(revision, conversation_id).await
       },
       | WriteSource::Stdio(handle) => {
         let mut client = handle.lock().await;
-        WriteToolSet::new(&mut *client, cwd.to_path_buf()).reject_goal_registration(revision).await
+        WriteToolSet::new(&mut *client, cwd.to_path_buf()).reject_goal_registration(revision, conversation_id).await
       },
     }
   }

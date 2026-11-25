@@ -169,7 +169,7 @@ async fn same_server_stdio_to_http_retires_children_and_keeps_write_order() {
     let mut late_client = late_write.lock().await;
     let revision = RegistrationRevision::try_from(4).unwrap();
     let result = common::write_tool_set(&mut late_client, harness.project_dir())
-      .approve_goal_registration(revision)
+      .approve_goal_registration(revision, &common::default_conversation_id())
       .await
       .expect("切替前に解決した接続先で書き込みを完了できます");
     assert_eq!(result.revision, revision);

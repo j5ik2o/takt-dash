@@ -11,8 +11,10 @@ use tonic::Status;
 
 use super::{answer_payload, lanes::WriteLane, write_failure, write_ledger::WriteFailure, TaktDashServiceImpl};
 use crate::{
-  domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ServerId},
-  mcp::connection_key,
+  domain::{
+    ConversationId, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ServerId,
+  },
+  mcp::{connection_key, tools::ToolError},
   model,
   model::ProposalSource,
   store::StateStore,
@@ -171,9 +173,12 @@ impl TaktDashServiceImpl {
     Ok(async move {
       let RegistrationTarget { revision, ref lane, .. } = target;
       let _write_gate = lane.gate().await;
-      target.check_pending()?;
+      let conversation_id = target.check_pending()?;
       let mut source = lane.connected_source().await?;
-      let result = source.approve_goal_registration(&lane.resolved.cwd, revision).await.map_err(write_failure)?;
+      let result = source
+        .approve_goal_registration(&lane.resolved.cwd, revision, &conversation_id)
+        .await
+        .map_err(registration_write_failure)?;
       lane.record_write();
       Ok(ApproveGoalRegistrationResponse {
         revision: result.revision.get(),
@@ -192,9 +197,12 @@ impl TaktDashServiceImpl {
     Ok(async move {
       let RegistrationTarget { revision, ref lane, .. } = target;
       let _write_gate = lane.gate().await;
-      target.check_pending()?;
+      let conversation_id = target.check_pending()?;
       let mut source = lane.connected_source().await?;
-      let rejected = source.reject_goal_registration(&lane.resolved.cwd, revision).await.map_err(write_failure)?;
+      let rejected = source
+        .reject_goal_registration(&lane.resolved.cwd, revision, &conversation_id)
+        .await
+        .map_err(registration_write_failure)?;
       lane.record_write();
       Ok(RejectGoalRegistrationResponse { revision: rejected.get() })
     })
@@ -248,7 +256,10 @@ impl RegistrationTarget {
   /// 一覧に無い revision（作り直される前の登録案、決着済みの登録案、まだ読めていない
   /// プロジェクト）は、takt へ送らずに断ります。状態ストアが takt より古いときの最終の判定は
   /// takt-mcp が行います。
-  fn check_pending(&self) -> Result<(), Status> {
+  ///
+  /// 照合で引き当てた登録案の持ち主（conversationId）を返します。takt-mcp は、承認・却下で
+  /// この値を必須にします（issue #363）。
+  fn check_pending(&self) -> Result<ConversationId, Status> {
     let resolved = &self.lane.resolved;
     let source = ProposalSource { connection: connection_key(&resolved.connection), cwd: resolved.cwd.clone() };
     let listed: Vec<_> = self
@@ -257,8 +268,8 @@ impl RegistrationTarget {
       .into_iter()
       .filter(|proposal| proposal.revision == self.revision)
       .collect();
-    if listed.iter().any(|proposal| proposal.source == source) {
-      return Ok(());
+    if let Some(proposal) = listed.iter().find(|proposal| proposal.source == source) {
+      return Ok(proposal.conversation_id.clone());
     }
     let reason = if listed.is_empty() {
       "いまの承認待ちにありません"
@@ -270,4 +281,29 @@ impl RegistrationTarget {
       self.revision.get()
     )))
   }
+}
+
+/// ゴール登録の承認・却下の失敗を、台帳の扱いと gRPC のステータスへ変換する。
+///
+/// takt-mcp が「登録案が変わった」「会話が登録案の持ち主でない」と断ったときは、状態ストアの
+/// 承認待ちが takt より古かったことを表します。書き込みは適用されていないので、一覧との
+/// 食い違い（issue #319）と同じ FAILED_PRECONDITION で返します。
+fn registration_write_failure(error: ToolError) -> WriteFailure {
+  match error {
+    | ToolError::Tool(error) if is_stale_registration(&error.message) => {
+      WriteFailure::Failed(Status::failed_precondition(format!(
+        "ゴール登録案は、作り直されたか、すでに承認・却下されています。画面を読み込み直してから、もう一度操作してください（{}）。",
+        error.message.trim()
+      )))
+    },
+    | error => write_failure(error),
+  }
+}
+
+/// takt-mcp の道具エラーの文言が、登録案の食い違いを表すかどうか。
+///
+/// `stale_summary` は manager の会話が返すエラーコード、後者は takt-mcp が持ち主を照合して返す
+/// 文言です（takt-custom features/mcp/goalRegistrationProposalOperations）。
+fn is_stale_registration(message: &str) -> bool {
+  message.contains("stale_summary") || message.contains("does not own the pending registration proposal")
 }

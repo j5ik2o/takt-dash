@@ -19,16 +19,16 @@ use super::{
 };
 use crate::{
   config::StdioMcpServer,
-  domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
+  domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RunSlug, TaskName},
   model::{
     ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
-    InquiryEntry, NotificationEntry, ProjectSnapshot, ProposalSource, RegistrationProposalEntry, RunEntry, TaskDetail,
-    TaskEntry, TaskStatus, TerminalReads,
+    InquiryEntry, NotificationEntry, ProjectSnapshot, RunEntry, TaskDetail, TaskEntry, TaskStatus, TerminalReads,
   },
   run_progress::{read_run, retain_runs, RunLogHandle, RunReadFailure},
 };
 
 mod goal;
+mod goal_registration;
 mod parse;
 mod run;
 mod sets;
@@ -38,13 +38,14 @@ use self::{
   goal::{
     is_missing_goal_field, parse_goal, parse_goal_execution_status, parse_goal_question, parse_goal_status,
     parse_goal_work_log, parse_inquiry, parse_notification, parse_task, parse_task_detail, prev_inquiries,
-    registration_summary_text, resolve_awaiting_merge_at, resolve_inquiry, ParsedInquiry, TaskLinkFields,
+    resolve_awaiting_merge_at, resolve_inquiry, ParsedInquiry, TaskLinkFields,
   },
-  parse::{domain_value, optional_string, required_i32, required_string, string_field, Page},
+  parse::{domain_value, optional_string, required_string, string_field, Page},
   run::{parse_remote_run, step_entries, step_log_entries, step_log_next_offset},
   summary_cache::{goal_summaries, GoalSummaryKey},
 };
 pub use self::{
+  goal_registration::ApproveGoalRegistrationResult,
   run::RemoteRun,
   sets::{ReadToolSet, WriteToolSet},
 };
@@ -179,7 +180,8 @@ impl<'a> ToolSetCore<'a> {
         resolve_awaiting_merge_at(goal, awaiting_merge_at.get(&goal.goal_id).copied(), prev, observed_at);
     }
     let runs = self.get_running_runs(&tasks, prev, runs).await?;
-    let proposals = match self.list_goal_registration_proposals().await {
+    let known = prev.map(|snapshot| snapshot.proposals.as_slice()).unwrap_or_default();
+    let proposals = match self.list_goal_registration_proposals(known).await {
       | Ok(entries) => entries,
       | Err(error) if matches!(error, ToolError::Parse(_)) || degrades_to_previous(&error) => {
         prev.map(|snapshot| snapshot.proposals.clone()).unwrap_or_default()
@@ -868,50 +870,6 @@ impl<'a> ToolSetCore<'a> {
     domain_value("inquiry ID", InquiryId::try_from(question_id.as_str()))
   }
 
-  /// ゴール登録の承認待ちを取得する。提案が無ければ空の並びを返します。
-  pub async fn list_goal_registration_proposals(&mut self) -> Result<Vec<RegistrationProposalEntry>, ToolError> {
-    let value = self.call_json("takt_list_goal_registration_proposals", json!({})).await?;
-    let proposals = value.get("proposals").and_then(Value::as_array).ok_or_else(|| {
-      ToolError::Parse("takt_list_goal_registration_proposals の応答に proposals の配列がありません".to_owned())
-    })?;
-    let source = ProposalSource { connection: self.client.connection_key(), cwd: self.cwd.clone() };
-    proposals
-      .iter()
-      .map(|proposal| {
-        Ok(RegistrationProposalEntry {
-          source:               source.clone(),
-          revision:             domain_value(
-            "revision",
-            RegistrationRevision::try_from(required_i32(proposal, "revision")?),
-          )?,
-          repository_directory: required_string(proposal, "repositoryDirectory")?,
-          summary:              registration_summary_text(proposal.get("summary"))?,
-        })
-      })
-      .collect()
-  }
-
-  /// ゴール登録の承認待ちを承認する。承認した revision と、登録されたゴールの ID を返します。
-  pub async fn approve_goal_registration(
-    &mut self,
-    revision: RegistrationRevision,
-  ) -> Result<ApproveGoalRegistrationResult, ToolError> {
-    let value = self.call_json("takt_approve_goal_registration", json!({ "revision": revision.get() })).await?;
-    let goal = value.get("goal").ok_or_else(|| ToolError::Parse("応答に goal がありません".to_owned()))?;
-    let goal_id = domain_value("ゴール ID", GoalId::try_from(required_string(goal, "id")?.as_str()))?;
-    let revision = domain_value("revision", RegistrationRevision::try_from(required_i32(&value, "revision")?))?;
-    Ok(ApproveGoalRegistrationResult { revision, goal_id })
-  }
-
-  /// ゴール登録の承認待ちを却下する。却下した revision を返します。
-  pub async fn reject_goal_registration(
-    &mut self,
-    revision: RegistrationRevision,
-  ) -> Result<RegistrationRevision, ToolError> {
-    let value = self.call_json("takt_reject_goal_registration", json!({ "revision": revision.get() })).await?;
-    domain_value("revision", RegistrationRevision::try_from(required_i32(&value, "revision")?))
-  }
-
   /// プルリクエストのマージを承認する。依頼したタスク名とワークフローを返します。
   pub async fn merge_goal_pr(
     &mut self,
@@ -930,13 +888,6 @@ impl<'a> ToolSetCore<'a> {
       workflow:  required_string(&value, "workflow")?,
     })
   }
-}
-
-/// takt_approve_goal_registration の結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApproveGoalRegistrationResult {
-  pub revision: RegistrationRevision,
-  pub goal_id:  GoalId,
 }
 
 /// takt_merge_goal_pr の結果。

@@ -11,8 +11,8 @@ use serde_json::Value;
 use super::{run::RemoteRun, ApproveGoalRegistrationResult, MergeGoalPrResult, ToolError, ToolSetCore};
 use crate::{
   domain::{
-    GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ReportFilename,
-    RunSlug, TaskName,
+    ConversationId, GoalId, InquiryId, InstructionId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision,
+    ReportFilename, RunSlug, TaskName,
   },
   mcp::{client::ToolCaller, metrics::ToolCallMetrics},
   model::{GoalDetail, ProjectSnapshot, RegistrationProposalEntry, TaskDetail},
@@ -67,9 +67,9 @@ impl<'a> ReadToolSet<'a> {
     self.core.read_task_detail(project, task_name, goal_id).await
   }
 
-  /// ゴール登録案の一覧を読む。
+  /// ゴール登録案の一覧を、本文つきで読む。前回の登録案を使い回さず、本文を読み直します。
   pub async fn list_goal_registration_proposals(&mut self) -> Result<Vec<RegistrationProposalEntry>, ToolError> {
-    self.core.list_goal_registration_proposals().await
+    self.core.list_goal_registration_proposals(&[]).await
   }
 
   /// takt_get_run の view report からレポートの本文を読む（画面用）。
@@ -130,16 +130,18 @@ impl<'a> WriteToolSet<'a> {
   pub async fn approve_goal_registration(
     &mut self,
     revision: RegistrationRevision,
+    conversation_id: &ConversationId,
   ) -> Result<ApproveGoalRegistrationResult, ToolError> {
-    self.core.approve_goal_registration(revision).await
+    self.core.approve_goal_registration(revision, conversation_id).await
   }
 
   /// ゴール登録案を却下する。
   pub async fn reject_goal_registration(
     &mut self,
     revision: RegistrationRevision,
+    conversation_id: &ConversationId,
   ) -> Result<RegistrationRevision, ToolError> {
-    self.core.reject_goal_registration(revision).await
+    self.core.reject_goal_registration(revision, conversation_id).await
   }
 
   /// ゴールのプルリクエストをマージする。
