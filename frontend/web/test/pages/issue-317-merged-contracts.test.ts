@@ -93,6 +93,7 @@ const renderActions = (decision: PendingDecision): string =>
       text: "",
       dialog: null,
       busy: false,
+      disconnected: false,
       dialogTarget: null,
       onTextChange: () => {},
       onAction: () => {},
