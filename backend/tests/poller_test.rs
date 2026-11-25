@@ -2037,6 +2037,54 @@ async fn failed_event_record_keeps_the_baseline_and_records_the_event_once_after
   assert!(created[0].contains("g2"), "回復後に記録された変化は失敗したサイクルの状態です: {created:?}");
 }
 
+fn state_with_task(status: &str) -> Value {
+  json!({ "tasks": [ { "name": "build", "status": status, "runSlug": "20261116-build", "startedAt": "2026-11-16T08:00:00Z" } ] })
+}
+
+fn recorded_kinds(harness: &Harness) -> Vec<&'static str> {
+  let mut events = harness.activity.recent_events(50).expect("記録した出来事を読めます");
+  events.reverse();
+  events.iter().map(|event| event.kind.as_str()).collect()
+}
+
+#[tokio::test]
+async fn task_failure_between_cycles_is_recorded_once_and_not_again_after_a_restart() {
+  // 11/16 の本番では、失敗が21件あったのに失敗の出来事は0件でした（issue #151）。
+  let harness = Harness::new(state_with_task("pending"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  harness.rewrite_state(state_with_task("failed"));
+  poller.read_cycle_once().await.expect("失敗を読むサイクルを実行できます");
+  poller.read_cycle_once().await.expect("失敗のままのサイクルを実行できます");
+  poller.shutdown().await;
+  assert_eq!(recorded_kinds(&harness), vec!["task_failed"], "失敗への遷移を1回だけ記録します");
+
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+  restarted.read_cycle_once().await.expect("再起動後の最初のサイクルを実行できます");
+  restarted.read_cycle_once().await.expect("再起動後の2回目のサイクルを実行できます");
+  restarted.shutdown().await;
+  assert_eq!(recorded_kinds(&harness), vec!["task_failed"], "再起動で過去の失敗を新しい失敗として足しません");
+}
+
+#[tokio::test]
+async fn task_failure_whose_record_failed_is_recorded_once_after_the_record_recovers() {
+  let harness = Harness::new(state_with_task("pending"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  harness.rewrite_state(state_with_task("pr_failed"));
+  fail_event_recording_for(&harness.activity_db_path, "mac-mini");
+  poller.read_cycle_once().await.expect_err("記録できないサイクルは記録の失敗で終わります");
+  assert!(recorded_kinds(&harness).is_empty(), "記録に失敗した失敗は残っていません");
+
+  allow_event_recording(&harness.activity_db_path);
+  poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
+  poller.read_cycle_once().await.expect("その次のサイクルを実行できます");
+  poller.shutdown().await;
+  assert_eq!(recorded_kinds(&harness), vec!["task_pr_failed"], "基準を進めずに持ち越した失敗を1回だけ記録します");
+}
+
 #[tokio::test]
 async fn failed_event_record_on_the_failure_path_still_marks_the_project_disconnected() {
   // 接続断の出来事の記録に失敗したサイクルでも、そのプロジェクトの connected は偽にします。
