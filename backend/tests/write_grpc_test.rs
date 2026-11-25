@@ -2269,3 +2269,100 @@ async fn goal_registration_writes_refused_by_takt_as_stale_are_failed_preconditi
     server.stop().await;
   }
 }
+
+// --- 登録案の本文の読み取り（issue #366） ---
+
+/// 状態ストアが持つ、プロジェクト takt-dash の登録案の本文。
+fn stored_proposal_bodies(harness: &GrpcHarness) -> Vec<String> {
+  harness
+    .store
+    .slot("takt-dash")
+    .and_then(|slot| slot.snapshot)
+    .map(|snapshot| snapshot.proposals.into_iter().map(|proposal| proposal.summary).collect())
+    .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn proposal_body_is_read_once_per_revision() {
+  // 一覧は本文を返さないので、本文は takt_get_goal_registration_proposal で読む。同じ revision の
+  // 登録案は前回の本文を使い回し、周期ごとに読み直さない。revision が進んだら読み直す。
+  let (harness, mut poller) = polled_harness(state_with_object_summary_proposal()).await;
+  let reads = || calls_named(&harness, "takt_get_goal_registration_proposal");
+
+  assert_eq!(reads().len(), 1, "初回は本文を1回読みます");
+  assert_eq!(reads()[0]["conversationId"], json!(DEFAULT_CONVERSATION), "一覧の持ち主で本文を読みます");
+  let first = stored_proposal_bodies(&harness);
+  assert!(first[0].contains("稼働状況を一覧できるようにする"), "本文に objective が入ります: {first:?}");
+
+  poller.read_cycle_once().await.expect("次の周期を実行できます");
+  assert_eq!(reads().len(), 1, "同じ revision の本文は読み直しません");
+  assert_eq!(stored_proposal_bodies(&harness), first, "本文は前回のまま残ります");
+
+  harness.rewrite_state(json!({
+    "proposals": [
+      { "revision": 7, "repositoryDirectory": "/abs/takt-dash", "summary": { "objective": "作り直した登録案" } }
+    ]
+  }));
+  poller.read_cycle_once().await.expect("作り直し後の周期を実行できます");
+  assert_eq!(reads().len(), 2, "revision が進んだら本文を読み直します");
+  assert!(stored_proposal_bodies(&harness)[0].contains("作り直した登録案"));
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn proposal_body_read_failure_keeps_the_previous_proposals() {
+  // 一覧のあとに登録案が作り直されると、本文は別の revision のものになる。その本文を一覧の
+  // revision に付けず、前回の登録案を保ち、次の周期で読み直す。
+  let (harness, mut poller) = polled_harness(state_with_object_summary_proposal()).await;
+  let before = stored_proposal_bodies(&harness);
+
+  harness.rewrite_state(json!({
+    "proposals": [
+      { "revision": 7, "repositoryDirectory": "/abs/takt-dash", "summary": { "objective": "作り直した登録案" } }
+    ],
+    "responses": {
+      "takt_get_goal_registration_proposal": {
+        "proposal": {
+          "revision": 8,
+          "conversationId": DEFAULT_CONVERSATION,
+          "repositoryDirectory": "/abs/takt-dash",
+          "summary": { "objective": "さらに作り直した登録案" }
+        }
+      }
+    }
+  }));
+  let report = poller.read_cycle_once().await.expect("本文の食い違いでも周期は成功します");
+  assert_eq!(report.projects_failed, 0, "登録案の本文の読み取りは補助の読み取りです");
+  assert_eq!(stored_proposal_bodies(&harness), before, "食い違った本文を付けず、前回の登録案を保ちます");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn truncated_proposal_body_says_so() {
+  // 応答が 64 KiB に収まらないと、takt-mcp は長い文字列を先頭だけにして truncated を立てる。
+  // 画面の本文に、省略があることを書く。
+  let (harness, mut poller) = polled_harness(json!({
+    "proposals": [{ "revision": 3, "repositoryDirectory": "/abs/takt-dash", "summary": { "objective": "長い目的" } }],
+    "responses": {
+      "takt_get_goal_registration_proposal": {
+        "proposal": {
+          "revision": 3,
+          "conversationId": DEFAULT_CONVERSATION,
+          "repositoryDirectory": "/abs/takt-dash",
+          "summary": { "objective": "長い目的の先頭", "acceptanceCriteria": ["表示される"] }
+        },
+        "truncated": true,
+        "omissions": [{ "path": "proposal.summary.objective", "totalBytes": 120000, "returnedBytes": 4095 }]
+      }
+    }
+  }))
+  .await;
+
+  let bodies = stored_proposal_bodies(&harness);
+  assert!(bodies[0].contains("長い目的の先頭"), "読めた分は本文に入ります: {bodies:?}");
+  assert!(bodies[0].contains("先頭だけを表示"), "省略があることを書きます: {bodies:?}");
+
+  poller.shutdown().await;
+}
