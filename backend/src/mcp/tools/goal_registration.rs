@@ -14,32 +14,86 @@ use crate::{
   model::{ProposalSource, RegistrationProposalEntry},
 };
 
+/// 本文の一部が省略されたときに、本文の末尾へ足す注記。
+const TRUNCATED_SUMMARY_NOTE: &str = "\n（長い項目は先頭だけを表示しています）";
+
 impl ToolSetCore<'_> {
   /// ゴール登録の承認待ちを取得する。提案が無ければ空の並びを返します。
-  pub async fn list_goal_registration_proposals(&mut self) -> Result<Vec<RegistrationProposalEntry>, ToolError> {
+  ///
+  /// 一覧（takt_list_goal_registration_proposals）は、登録案の本文（summary）を返さず、項目の
+  /// 一覧（fields）だけを返します。本文は takt_get_goal_registration_proposal で読みます。
+  /// `known` は前回読んだ登録案です。同じ接続先・同じ持ち主・同じ revision の登録案は、前回の
+  /// 本文を使い回し、本文を読み直しません。takt は登録案を作り直すたびに revision を進めるため、
+  /// revision が同じなら本文も同じです。
+  pub async fn list_goal_registration_proposals(
+    &mut self,
+    known: &[RegistrationProposalEntry],
+  ) -> Result<Vec<RegistrationProposalEntry>, ToolError> {
     let value = self.call_json("takt_list_goal_registration_proposals", json!({})).await?;
     let proposals = value.get("proposals").and_then(Value::as_array).ok_or_else(|| {
       ToolError::Parse("takt_list_goal_registration_proposals の応答に proposals の配列がありません".to_owned())
     })?;
     let source = ProposalSource { connection: self.client.connection_key(), cwd: self.cwd.clone() };
-    proposals
-      .iter()
-      .map(|proposal| {
-        Ok(RegistrationProposalEntry {
-          source:               source.clone(),
-          revision:             domain_value(
-            "revision",
-            RegistrationRevision::try_from(required_i32(proposal, "revision")?),
-          )?,
-          conversation_id:      domain_value(
-            "conversation ID",
-            ConversationId::try_from(required_string(proposal, "conversationId")?.as_str()),
-          )?,
-          repository_directory: required_string(proposal, "repositoryDirectory")?,
-          summary:              registration_summary_text(proposal.get("summary"))?,
-        })
-      })
-      .collect()
+    let mut entries = Vec::with_capacity(proposals.len());
+    for proposal in proposals {
+      let revision = domain_value("revision", RegistrationRevision::try_from(required_i32(proposal, "revision")?))?;
+      let conversation_id = domain_value(
+        "conversation ID",
+        ConversationId::try_from(required_string(proposal, "conversationId")?.as_str()),
+      )?;
+      let read_before = known.iter().find(|entry| {
+        entry.revision == revision
+          && entry.conversation_id == conversation_id
+          && entry.source == source
+          && !entry.summary.is_empty()
+      });
+      let summary = match (proposal.get("summary"), read_before) {
+        // 本文を一覧に載せる応答（以前の takt-mcp）は、そのまま使います。
+        | (Some(summary), _) if !summary.is_null() => registration_summary_text(Some(summary))?,
+        | (_, Some(entry)) => entry.summary.clone(),
+        | (_, None) => self.read_registration_summary(revision, &conversation_id).await?,
+      };
+      entries.push(RegistrationProposalEntry {
+        source: source.clone(),
+        revision,
+        conversation_id,
+        repository_directory: required_string(proposal, "repositoryDirectory")?,
+        summary,
+      });
+    }
+    Ok(entries)
+  }
+
+  /// 登録案の本文を takt_get_goal_registration_proposal で読み、表示用の本文にする。
+  ///
+  /// 一覧のあとに登録案が作り直されると、読んだ本文は別の revision のものになります。その
+  /// 本文を一覧の revision に付けないよう、revision が違えば解析エラーにします。定期読み取りは
+  /// 前回の登録案へ縮退し、次の周期で読み直します。
+  async fn read_registration_summary(
+    &mut self,
+    revision: RegistrationRevision,
+    conversation_id: &ConversationId,
+  ) -> Result<String, ToolError> {
+    let value = self
+      .call_json("takt_get_goal_registration_proposal", json!({ "conversationId": conversation_id.as_str() }))
+      .await?;
+    let proposal = value.get("proposal").ok_or_else(|| {
+      ToolError::Parse("takt_get_goal_registration_proposal の応答に proposal がありません".to_owned())
+    })?;
+    let read = domain_value("revision", RegistrationRevision::try_from(required_i32(proposal, "revision")?))?;
+    if read != revision {
+      return Err(ToolError::Parse(format!(
+        "登録案が一覧の取得後に作り直されました（一覧 revision {}、本文 revision {}）",
+        revision.get(),
+        read.get()
+      )));
+    }
+    let mut summary = registration_summary_text(proposal.get("summary"))?;
+    // 応答が 64 KiB に収まらないと、takt-mcp は長い文字列を先頭だけにして truncated を立てます。
+    if value.get("truncated").and_then(Value::as_bool) == Some(true) {
+      summary.push_str(TRUNCATED_SUMMARY_NOTE);
+    }
+    Ok(summary)
   }
 
   /// ゴール登録の承認待ちを承認する。承認した revision と、登録されたゴールの ID を返します。

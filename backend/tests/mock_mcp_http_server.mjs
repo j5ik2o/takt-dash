@@ -193,6 +193,30 @@ const runTaskResponse = (state, args) => {
 const DEFAULT_CONVERSATION_ID = `manager-${"a".repeat(64)}`;
 const CONVERSATION_ID_PATTERN = /^(manager|director)-[a-f0-9]{64}$/;
 
+// 実 takt-mcp の一覧は、登録案の本文（summary）を返さず、読める項目の一覧（fields）だけを返す。
+// 本文は takt_get_goal_registration_proposal で読む。
+const listedProposal = ({ summary, ...identity }) => ({
+  ...identity,
+  fields:
+    summary !== null && typeof summary === "object"
+      ? Object.keys(summary).map((key) => ({ path: `summary.${key}` }))
+      : [{ path: "summary" }],
+});
+
+// takt_get_goal_registration_proposal（path なし）の応答。持ち主でない会話と、保留中の登録案が
+// 無い cwd は、実 takt-mcp と同じ文言の道具エラーにする。
+const readProposal = (args, pending) => {
+  const fail = (text) => ({ content: [{ type: "text", text: `Goal registration proposal read failed: ${text}` }], isError: true });
+  const owner = pending[0]?.conversationId ?? DEFAULT_CONVERSATION_ID;
+  if (args.conversationId !== owner) {
+    return fail(`The conversationId ${args.conversationId} does not own the pending registration proposal of ${args.cwd}`);
+  }
+  if (pending.length === 0) {
+    return fail(`No goal registration proposal is pending for ${args.cwd}`);
+  }
+  return asText({ proposal: pending[0] });
+};
+
 const withOwner = (proposals) =>
   proposals.map((proposal) => ({ conversationId: DEFAULT_CONVERSATION_ID, ...proposal }));
 
@@ -321,7 +345,9 @@ const handleToolCall = (name, args) => {
       });
     }
     case "takt_list_goal_registration_proposals":
-      return asText({ proposals: withOwner(state.proposals ?? []) });
+      return asText({ proposals: withOwner(state.proposals ?? []).map(listedProposal) });
+    case "takt_get_goal_registration_proposal":
+      return readProposal(args, withOwner(state.proposals ?? []));
     // 書き込み系。応答の形は stdio 版モック（mock_mcp_server.mjs）と同じにします。
     case "takt_answer_goal_question":
       return asText({ goalId: args.goalId, questionId: args.questionId, answer: args.answer });

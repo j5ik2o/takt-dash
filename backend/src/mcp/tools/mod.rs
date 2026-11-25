@@ -180,7 +180,8 @@ impl<'a> ToolSetCore<'a> {
         resolve_awaiting_merge_at(goal, awaiting_merge_at.get(&goal.goal_id).copied(), prev, observed_at);
     }
     let runs = self.get_running_runs(&tasks, prev, runs).await?;
-    let proposals = match self.list_goal_registration_proposals().await {
+    let known = prev.map(|snapshot| snapshot.proposals.as_slice()).unwrap_or_default();
+    let proposals = match self.list_goal_registration_proposals(known).await {
       | Ok(entries) => entries,
       | Err(error) if matches!(error, ToolError::Parse(_)) || degrades_to_previous(&error) => {
         prev.map(|snapshot| snapshot.proposals.clone()).unwrap_or_default()
