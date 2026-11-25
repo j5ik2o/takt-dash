@@ -11,6 +11,8 @@ type LiveTaskDetailProps = {
   project: string;
   taskName: string;
   goalId?: string;
+  /** 前に読めた内容で描画し、切断の通知を出した状態で始めるか（issue #309）。 */
+  initialDisconnected?: boolean;
 };
 
 const taskDetailUrl = (project: string, taskName: string, goalId?: string): string => {
@@ -25,9 +27,10 @@ export function LiveTaskDetail({
   project,
   taskName,
   goalId,
+  initialDisconnected = false,
 }: LiveTaskDetailProps): ReactElement {
   const [detail, setDetail] = useState(initialDetail);
-  const [disconnected, setDisconnected] = useState(false);
+  const [disconnected, setDisconnected] = useState(initialDisconnected);
 
   useEffect(() => {
     const controller = new AbortController();

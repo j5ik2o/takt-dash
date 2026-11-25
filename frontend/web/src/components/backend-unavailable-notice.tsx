@@ -1,4 +1,4 @@
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import type { BackendUnavailableSituation } from "../grpc/client";
 
 // backend に接続できないときの表示。概要と判断待ちは画面側の内容が、それ以外の
@@ -56,5 +56,25 @@ export function BackendUnavailableNotice({
     <p className="banner warn" role="alert">
       {situation === undefined ? BACKEND_UNAVAILABLE_MESSAGE : backendUnavailableMessage(situation)}
     </p>
+  );
+}
+
+/**
+ * 切断の通知と、前に読めた内容を重ねて描画する（issue #309）。前に読めた内容が
+ * 無いページは children を渡さず、通知だけを出す。概要と判断待ちと同じく、
+ * 通知は見出しと内容の上に置く。
+ */
+export function BackendUnavailableOver({
+  situation,
+  children,
+}: {
+  situation: BackendUnavailableSituation;
+  children?: ReactNode;
+}): ReactElement {
+  return (
+    <>
+      <BackendUnavailableNotice situation={situation} />
+      {children}
+    </>
   );
 }
