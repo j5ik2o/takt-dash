@@ -3,7 +3,10 @@
 //! これらの型は lib の公開 API の一部であり、後続のタスクの gRPC サーバーが
 //! 読み取り系 API の応答を組み立てるために使います。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  path::PathBuf,
+};
 
 use chrono::{DateTime, Utc};
 
@@ -387,10 +390,25 @@ pub struct PendingDecision {
   pub merge_task_last:     Option<TaskStatus>,
 }
 
+/// 登録案の一覧を読んだ接続先。
+///
+/// revision はプロジェクトの cwd ごとに振られる小さな整数です。設定で接続先や cwd を切り替えた
+/// あと、切替前に読んだ一覧の revision を切替後の接続先へ送らないよう、書き込みの前に、設定から
+/// 解決した接続先と比べます。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalSource {
+  /// 接続先を区別する鍵（[`crate::mcp::connection_key`]）。
+  pub connection: String,
+  /// 一覧を読んだプロジェクトの cwd。
+  pub cwd:        PathBuf,
+}
+
 /// ゴール登録の承認待ち。提案そのものの保持と射影に使います。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationProposalEntry {
   pub revision:             RegistrationRevision,
+  /// この登録案を読んだ接続先。
+  pub source:               ProposalSource,
   pub repository_directory: String,
   /// 提案の要約。判断待ちの本文として表示します。
   pub summary:              String,

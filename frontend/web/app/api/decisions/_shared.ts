@@ -218,7 +218,10 @@ export function readIdempotencyKey(body: Record<string, unknown>): ReadIdempoten
 const UNKNOWN_OUTCOME_MESSAGE =
   "操作の結果は不明です。期限内に応答がありませんでした。状態を確かめてから、必要ならやり直してください。";
 
-// 書き込みを実行し、成功・入力不正・結果不明・接続不能を HTTP の応答へ一度だけ変換する。
+const STALE_DECISION_MESSAGE =
+  "操作の対象が、いまの判断待ちの一覧と一致しません。画面を読み込み直してから、もう一度操作してください。";
+
+// 書き込みを実行し、成功・入力不正・一覧との食い違い・結果不明・接続不能を HTTP の応答へ一度だけ変換する。
 export async function runWrite(call: (client: BackendClient) => Promise<unknown>): Promise<Response> {
   const client = getBackendClient();
   try {
@@ -247,6 +250,14 @@ export async function runWrite(call: (client: BackendClient) => Promise<unknown>
     const serviceError = error as grpc.ServiceError;
     if (serviceError.code === grpc.status.INVALID_ARGUMENT) {
       return jsonResponse(400, { ok: false, error: serviceError.details || "入力が正しくありません。" });
+    }
+    // 画面が古く、操作の対象が判断待ちの一覧と食い違う、または一覧に無いとき。backend は
+    // 書き込まずに断り、理由を返す（issue #319）。利用者が読み直せるよう、理由をそのまま伝える。
+    if (serviceError.code === grpc.status.FAILED_PRECONDITION) {
+      return jsonResponse(409, { ok: false, error: serviceError.details || STALE_DECISION_MESSAGE });
+    }
+    if (serviceError.code === grpc.status.NOT_FOUND) {
+      return jsonResponse(404, { ok: false, error: serviceError.details || STALE_DECISION_MESSAGE });
     }
     return jsonResponse(500, { ok: false, error: "操作に失敗しました。" });
   }

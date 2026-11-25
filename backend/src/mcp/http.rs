@@ -654,10 +654,15 @@ async fn read_body(body: Incoming) -> Result<Vec<u8>, ExchangeError> {
   Ok(collected.to_bytes().to_vec())
 }
 
+/// HTTP 接続先を区別する鍵。接続先は 127.0.0.1 の URL だけで決まるため、トークン
+/// （authorization）は鍵に入れません。
+pub(super) fn http_connection_key(server: &HttpMcpServer) -> String {
+  format!("http:{}", server.endpoint.url())
+}
+
 impl ToolCaller for HttpReadHandle {
-  /// 接続先は 127.0.0.1 の URL だけで決まるため、トークン（authorization）は鍵に入れません。
   fn connection_key(&self) -> String {
-    format!("http:{}", self.url())
+    http_connection_key(&self.session.inner.server)
   }
 
   fn call_tool<'a>(
