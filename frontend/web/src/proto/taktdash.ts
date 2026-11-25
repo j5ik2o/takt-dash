@@ -500,6 +500,7 @@ export enum ConversationSpeaker {
   CONVERSATION_SPEAKER_USER = 1,
   CONVERSATION_SPEAKER_MANAGER = 2,
   CONVERSATION_SPEAKER_SYSTEM = 3,
+  CONVERSATION_SPEAKER_DIRECTOR = 4,
   UNRECOGNIZED = -1,
 }
 
@@ -517,6 +518,9 @@ export function conversationSpeakerFromJSON(object: any): ConversationSpeaker {
     case 3:
     case "CONVERSATION_SPEAKER_SYSTEM":
       return ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM;
+    case 4:
+    case "CONVERSATION_SPEAKER_DIRECTOR":
+      return ConversationSpeaker.CONVERSATION_SPEAKER_DIRECTOR;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -534,6 +538,8 @@ export function conversationSpeakerToJSON(object: ConversationSpeaker): string {
       return "CONVERSATION_SPEAKER_MANAGER";
     case ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM:
       return "CONVERSATION_SPEAKER_SYSTEM";
+    case ConversationSpeaker.CONVERSATION_SPEAKER_DIRECTOR:
+      return "CONVERSATION_SPEAKER_DIRECTOR";
     case ConversationSpeaker.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -1291,7 +1297,21 @@ export interface ConversationMessage {
   /** 本文 */
   text: string;
   /** 本文に添える注意書き（元記録の文字化けなど） */
-  notice?: string | undefined;
+  notice?:
+    | string
+    | undefined;
+  /** 折りたたみの中で見せる元の入力（出来事や質問への回答から始まったターン） */
+  detail?: ConversationDetail | undefined;
+}
+
+/** 会話の1件の、折りたたみの中で見せる元の入力を表す。 */
+export interface ConversationDetail {
+  /** 質問への回答のときの、質問の文 */
+  question?:
+    | string
+    | undefined;
+  /** 元の JSON（整形済み） */
+  sourceJson: string;
 }
 
 /** 解釈できずスキップした行の理由と件数を表す。 */
@@ -7861,7 +7881,7 @@ export const GetConversationRequest: MessageFns<GetConversationRequest> = {
 };
 
 function createBaseConversationMessage(): ConversationMessage {
-  return { seq: 0, occurredAt: undefined, speaker: 0, text: "", notice: undefined };
+  return { seq: 0, occurredAt: undefined, speaker: 0, text: "", notice: undefined, detail: undefined };
 }
 
 export const ConversationMessage: MessageFns<ConversationMessage> = {
@@ -7880,6 +7900,9 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
     }
     if (message.notice !== undefined) {
       writer.uint32(42).string(message.notice);
+    }
+    if (message.detail !== undefined) {
+      ConversationDetail.encode(message.detail, writer.uint32(50).fork()).join();
     }
     return writer;
   },
@@ -7937,6 +7960,14 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
             message.notice = reader.string();
             continue;
           }
+          case 6: {
+            if (tag !== 50) {
+              break;
+            }
+
+            message.detail = ConversationDetail.decode(reader, reader.uint32());
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -7960,6 +7991,7 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
       speaker: isSet(object.speaker) ? conversationSpeakerFromJSON(object.speaker) : 0,
       text: isSet(object.text) ? globalThis.String(object.text) : "",
       notice: isSet(object.notice) ? globalThis.String(object.notice) : undefined,
+      detail: isSet(object.detail) ? ConversationDetail.fromJSON(object.detail) : undefined,
     };
   },
 
@@ -7980,6 +8012,9 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
     if (message.notice !== undefined) {
       obj.notice = message.notice;
     }
+    if (message.detail !== undefined) {
+      obj.detail = ConversationDetail.toJSON(message.detail);
+    }
     return obj;
   },
 
@@ -7993,6 +8028,98 @@ export const ConversationMessage: MessageFns<ConversationMessage> = {
     message.speaker = object.speaker ?? 0;
     message.text = object.text ?? "";
     message.notice = object.notice ?? undefined;
+    message.detail = (object.detail !== undefined && object.detail !== null)
+      ? ConversationDetail.fromPartial(object.detail)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseConversationDetail(): ConversationDetail {
+  return { question: undefined, sourceJson: "" };
+}
+
+export const ConversationDetail: MessageFns<ConversationDetail> = {
+  encode(message: ConversationDetail, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.question !== undefined) {
+      writer.uint32(10).string(message.question);
+    }
+    if (message.sourceJson !== "") {
+      writer.uint32(18).string(message.sourceJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConversationDetail {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const previousRecursionDepth = (reader as any).__tsProtoDecodeDepth ?? 0;
+    if (previousRecursionDepth >= 100) {
+      throw new globalThis.Error("protobuf decode recursion limit exceeded");
+    }
+    (reader as any).__tsProtoDecodeDepth = previousRecursionDepth + 1;
+    try {
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseConversationDetail();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.question = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.sourceJson = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    } finally {
+      (reader as any).__tsProtoDecodeDepth = previousRecursionDepth;
+    }
+  },
+
+  fromJSON(object: any): ConversationDetail {
+    return {
+      question: isSet(object.question) ? globalThis.String(object.question) : undefined,
+      sourceJson: isSet(object.sourceJson)
+        ? globalThis.String(object.sourceJson)
+        : isSet(object.source_json)
+        ? globalThis.String(object.source_json)
+        : "",
+    };
+  },
+
+  toJSON(message: ConversationDetail): unknown {
+    const obj: any = {};
+    if (message.question !== undefined) {
+      obj.question = message.question;
+    }
+    if (message.sourceJson !== "") {
+      obj.sourceJson = message.sourceJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ConversationDetail>, I>>(base?: I): ConversationDetail {
+    return ConversationDetail.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConversationDetail>, I>>(object: I): ConversationDetail {
+    const message = createBaseConversationDetail();
+    message.question = object.question ?? undefined;
+    message.sourceJson = object.sourceJson ?? "";
     return message;
   },
 };

@@ -79,6 +79,7 @@ export const CONVERSATION_SPEAKER = {
   USER: 1,
   MANAGER: 2,
   SYSTEM: 3,
+  DIRECTOR: 4,
 } as const;
 
 // proto の JSON 表現（DashboardState.toJSON）は列挙型を名称文字列で出す。受信側で
@@ -135,6 +136,7 @@ const ENUM_NAME_TO_NUMBER: Record<string, Record<string, number>> = {
     CONVERSATION_SPEAKER_USER: 1,
     CONVERSATION_SPEAKER_MANAGER: 2,
     CONVERSATION_SPEAKER_SYSTEM: 3,
+    CONVERSATION_SPEAKER_DIRECTOR: 4,
     UNRECOGNIZED: -1,
   },
   ConnectionState: {

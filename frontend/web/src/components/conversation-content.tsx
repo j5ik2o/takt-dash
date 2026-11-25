@@ -15,6 +15,7 @@ type ConversationContentProps = {
 };
 
 // 会話の表示は読み取り専用とし、発話者・時刻・本文を seq の昇順で出す。
+// 出来事や質問への回答から始まったターンの元の入力は、本文の下の折りたたみに入れる。
 // unavailable_reason は会話が無い理由として、skipped は理由と件数として補足表示する。
 // 取得中・取得失敗は本文を出さず、ヘッダのプロジェクトと食い違わせない。
 // picker は対象プロジェクトの選択 UI で、main の先頭に置く（補助技術が main の中として読む）。
@@ -75,6 +76,19 @@ export function ConversationContent({
               </p>
             ) : null}
             <p className="conversation-text">{message.text}</p>
+            {message.detail !== undefined ? (
+              <details className="conversation-detail">
+                <summary>元の内容を表示します。</summary>
+                {message.detail.question !== undefined ? (
+                  <>
+                    <p className="conversation-detail-label">質問</p>
+                    <p className="conversation-text">{message.detail.question}</p>
+                    <p className="conversation-detail-label">元の JSON</p>
+                  </>
+                ) : null}
+                <pre>{message.detail.sourceJson}</pre>
+              </details>
+            ) : null}
           </li>
         ))}
       </ol>

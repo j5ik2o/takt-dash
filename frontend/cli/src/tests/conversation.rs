@@ -28,6 +28,21 @@ fn conversation_rendering_marks_empty_conversation() {
 }
 
 #[test]
+fn conversation_rendering_labels_the_director() {
+  let rendered = render_conversation(&conversation_page(
+    "corporate-site",
+    "session-1",
+    vec![conversation_message(1, 1_731_600_000, v1::ConversationSpeaker::Director, "director の依頼です。")],
+    1,
+    false,
+  ))
+  .expect("有効です");
+
+  assert!(rendered.contains("ディレクター"), "director の依頼の話者はディレクターと表示する必要があります: {rendered}");
+  assert!(rendered.contains("director の依頼です。"), "{rendered}");
+}
+
+#[test]
 fn conversation_command_prints_messages_in_seq_order_and_follows_has_more() {
   let runtime =
     tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("テスト用の実行環境を作れませんでした");

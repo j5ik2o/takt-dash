@@ -147,6 +147,7 @@ enum ConversationSpeaker {
   CONVERSATION_SPEAKER_USER = 1;
   CONVERSATION_SPEAKER_MANAGER = 2;
   CONVERSATION_SPEAKER_SYSTEM = 3;
+  CONVERSATION_SPEAKER_DIRECTOR = 4;
 }
 
 // 集約対象のサーバーを表す。
@@ -546,6 +547,13 @@ message ConversationMessage {
   ConversationSpeaker speaker = 3;            // 発話者
   string text = 4;                            // 本文
   optional string notice = 5;                 // 本文に添える注意書き（元記録の文字化けなど）
+  optional ConversationDetail detail = 6;     // 折りたたみの中で見せる元の入力（出来事や質問への回答から始まったターン）
+}
+
+// 会話の1件の、折りたたみの中で見せる元の入力を表す。
+message ConversationDetail {
+  optional string question = 1;  // 質問への回答のときの、質問の文
+  string source_json = 2;        // 元の JSON（整形済み）
 }
 
 // 解釈できずスキップした行の理由と件数を表す。

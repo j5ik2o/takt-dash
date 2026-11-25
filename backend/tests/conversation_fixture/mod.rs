@@ -208,6 +208,144 @@ pub fn wrapped_user_without_speaker_data(internal_text: &str, time: i64) -> Stri
     .expect("user の data を組み立てられます")
 }
 
+/// 応答形式の指示（JSON schema）。実データでは包みの末尾に必ず付く。
+pub const RESPONSE_FORMAT: &str = r#"次の JSON schema に一致する fenced JSON block をちょうど1つ返してください:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "message": { "type": "string", "minLength": 1 },
+    "summary": { "type": ["object", "null"] }
+  },
+  "required": ["message", "summary"]
+}
+```
+
+JSON block の前後に余計なテキストを含めないでください。
+
+StructuredOutput ツールは呼び出さないでください。このリクエストでは利用できません。"#;
+
+/// 実データの Business context の行。
+pub const BUSINESS_CONTEXT: &str = r#"Business context (not approval): {"assignment":{"kind":"repository","repositoryDirectory":"/tmp/takt-dash"},"pending":null,"epics":[]}"#;
+
+/// 人の発言ではないターンの包み。見出しのあとの空行、説明文、JSON の行、Business context、
+/// 応答形式の指示の並びを、実データと同じ形で組み立てる。
+fn non_speech_turn_data(
+  description: Option<&str>,
+  input: &serde_json::Value,
+  business_context: bool,
+  time: i64,
+) -> String {
+  turn_data(description, input, business_context, true, time)
+}
+
+/// 包みの部品の有無を指定して user の `data` を組み立てる。`response_format`
+/// が偽なら応答形式の指示を付けない。
+pub fn turn_data(
+  description: Option<&str>,
+  input: &serde_json::Value,
+  business_context: bool,
+  response_format: bool,
+  time: i64,
+) -> String {
+  let mut text = String::from("\n## このターンの入力\n\n\n\n\n\n\n\n");
+  if let Some(description) = description {
+    text.push_str(description);
+    text.push_str("\n\n\n\n\n");
+  }
+  text.push_str(&serde_json::to_string(input).expect("入力の JSON を組み立てられます"));
+  text.push_str("\n\n");
+  if business_context {
+    text.push_str(BUSINESS_CONTEXT);
+    text.push_str("\n\n");
+  }
+  if response_format {
+    text.push_str(RESPONSE_FORMAT);
+    text.push('\n');
+  }
+  serde_json::to_string(&serde_json::json!({ "time": { "created": time }, "text": text }))
+    .expect("user の data を組み立てられます")
+}
+
+/// director 自身の依頼から始まったターンの user の `data`。
+pub fn director_turn_data(text: &str, business_context: bool, time: i64) -> String {
+  let input = serde_json::json!({
+    "text": text,
+    "origin": "director",
+    "directorConversationId": "director-e61579db1f9e18cbbe88de98df4bf0747e786e1d8065e15fc567d6a4bcab8910",
+  });
+  non_speech_turn_data(
+    Some("このターンは director 自身の依頼から始まりました。origin は director です。director の依頼として、既存の合意と対象の状態に沿って判断します。"),
+    &input,
+    business_context,
+    time,
+  )
+}
+
+/// `kind` を持たない古い形の、保存した質問への回答のターンの user の `data`。
+pub fn legacy_inquiry_answered_data(question: &str, answer: serde_json::Value, time: i64) -> String {
+  let input = serde_json::json!({
+    "goalId": null,
+    "questionId": "c160b458-d312-456e-bb4c-de6c56182ec5",
+    "question": question,
+    "answer": answer,
+  });
+  non_speech_turn_data(
+    Some("このターンは保存した質問への人の回答から始まりました。配送はイベントや director を経由しています。質問と回答を対応させ、人の判断を対象の作業に反映します。goalId が null の場合はゴールに属さない質問です。"),
+    &input,
+    false,
+    time,
+  )
+}
+
+pub fn event_turn_data(
+  description: Option<&str>,
+  event: &serde_json::Value,
+  business_context: bool,
+  time: i64,
+) -> String {
+  let input = serde_json::json!({
+    "event": event,
+    "instruction": "To advance the assigned goals, compare the change conveyed by this event with the current state.",
+  });
+  non_speech_turn_data(description, &input, business_context, time)
+}
+
+/// 保存した質問への人の回答から始まったターンの user の `data`。
+pub fn inquiry_answered_data(question: &str, answer: &str, business_context: bool, time: i64) -> String {
+  inquiry_answered_with_answer_data(
+    question,
+    serde_json::json!({ "text": answer, "source": "takt-mcp", "answeredAt": "2026-11-20T08:00:00.000Z" }),
+    business_context,
+    time,
+  )
+}
+
+/// 回答（`answer`）の中身を指定した、保存した質問への回答のターンの user の `data`。
+/// 作業の依頼への回答は `{"report":"completed"}` のように `text` を持たないことがある。
+pub fn inquiry_answered_with_answer_data(
+  question: &str,
+  answer: serde_json::Value,
+  business_context: bool,
+  time: i64,
+) -> String {
+  let input = serde_json::json!({
+    "kind": "inquiry_answered",
+    "repositoryDirectory": "/tmp/takt-dash",
+    "goalId": "394569b2-57db-4b07-8bc1-3ca0b51988bc",
+    "questionId": "751b5b5f-f32f-4105-b0d3-683f7c32f29c",
+    "question": question,
+    "answer": answer,
+  });
+  non_speech_turn_data(
+    Some("このターンは保存した質問への人の回答から始まりました。配送はイベントや director を経由しています。質問と回答を対応させ、人の判断を対象の作業に反映します。goalId が null の場合はゴールに属さない質問です。"),
+    &input,
+    business_context,
+    time,
+  )
+}
+
 /// 包みを持たない user の `data`。
 pub fn plain_user_data(text: &str, time: i64) -> String {
   serde_json::to_string(&serde_json::json!({ "text": text, "time": time }))

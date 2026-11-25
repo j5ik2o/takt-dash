@@ -190,6 +190,7 @@ fn conversation_speaker_label(speaker: i32) -> &'static str {
     | Ok(proto::v1::ConversationSpeaker::User) => "ユーザー",
     | Ok(proto::v1::ConversationSpeaker::Manager) => "manager",
     | Ok(proto::v1::ConversationSpeaker::System) => "システム",
+    | Ok(proto::v1::ConversationSpeaker::Director) => "ディレクター",
     | _ => "不明",
   }
 }

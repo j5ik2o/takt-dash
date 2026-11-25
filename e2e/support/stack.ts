@@ -266,6 +266,8 @@ export type StartStackOptions = {
   projects?: readonly StackProject[];
   serverName?: string;
   mockState?: (now: Date) => Record<string, unknown>;
+  // backend の起動前に、一時ホーム（manager の会話の保存先）へ記録を置く。
+  seedHome?: (homeDir: string, projectDir: string) => Promise<void>;
 };
 
 type StackConfigInput = {
@@ -470,6 +472,7 @@ export async function startStack(options: StartStackOptions = {}): Promise<Stack
     // backend がモックを起動する前に遅延 0（透過）を用意し、ラッパーが初回から同じ契約で読めるようにする。
     await writeFile(delayPath, JSON.stringify({ stdoutDelayMs: 0 }), "utf8");
     await mkdir(homeDir, { recursive: true });
+    await options.seedHome?.(homeDir, projectDir);
     const backendPort = await freePort();
     backendAddress = `127.0.0.1:${backendPort}`;
     await writeFile(

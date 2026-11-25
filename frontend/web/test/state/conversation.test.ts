@@ -70,10 +70,11 @@ test("unavailable_reason と skipped を応答の JSON から復元する", () =
   assert.deepEqual(page.messages, []);
 });
 
-test("発話者はユーザー・manager・システムの表示名へ変換する", () => {
+test("発話者はユーザー・manager・システム・ディレクターの表示名へ変換する", () => {
   assert.equal(conversationSpeakerLabel(ConversationSpeaker.CONVERSATION_SPEAKER_USER), "ユーザー");
   assert.equal(conversationSpeakerLabel(ConversationSpeaker.CONVERSATION_SPEAKER_MANAGER), "manager");
   assert.equal(conversationSpeakerLabel(ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM), "システム");
+  assert.equal(conversationSpeakerLabel(ConversationSpeaker.CONVERSATION_SPEAKER_DIRECTOR), "ディレクター");
   assert.equal(conversationSpeakerLabel(ConversationSpeaker.CONVERSATION_SPEAKER_UNSPECIFIED), "不明");
   assert.equal(conversationSpeakerLabel(99), "不明");
 });
