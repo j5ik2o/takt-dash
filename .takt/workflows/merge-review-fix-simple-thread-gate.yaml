@@ -60,8 +60,11 @@ loop_monitors:
   # refresh_ci → fix_ci → review_ci_fix → push_ci_fix を監視する（issue #336）。
   # 途中の wait_ci・collect_ci_failure・investigate_ci・refresh_ci・rerun_ci は、CI の待ちや
   # 再実行で回数が変わるので ignore_steps で外し、外側の流れの骨格だけを数える。
-  # push_ci_fix から始まる流れを2周し、3回目の CI 修正を push する手前で、判定役の答えによらず
-  # （規則は when(true) だけ）ci_fix_loop_stopped へ進んで PR にコメントし、ABORT する。
+  # push_ci_fix から始まる流れを2周し、3回目の CI 修正を push する手前で判定役を呼ぶ。
+  # 判定役が答えを返せば、規則は when(true) だけなので、内容によらず ci_fix_loop_stopped へ
+  # 進んで PR にコメントし、ABORT する。判定役がプロバイダの障害などで答えを返せないときは、
+  # TAKT は自然な遷移（push_ci_fix）へ進んで数を0に戻す（LoopMonitorJudgeRunner）ため、
+  # そのときは止まらない。
   # いまの経路では、refresh_ci の fixRounds < 2（fixRounds は push_ci_fix の実行回数）が先に効き、
   # 3回目の fix_ci へ進まないため、この監視は発火しない。fixRounds の関門が外れたときや
   # TAKT の挙動が変わったときの安全網である。caccia から数えて2周で止めると、2回目の修正を
