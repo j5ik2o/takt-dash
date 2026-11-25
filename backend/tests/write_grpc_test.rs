@@ -659,6 +659,55 @@ async fn goal_registration_proposal_with_object_summary_appears_in_pending_decis
 }
 
 #[tokio::test]
+async fn a_list_response_that_carries_the_summary_needs_no_body_read() {
+  // 一覧に本文を載せる旧版の takt-mcp（takt 39a34288c より前）は、本文の道具を持たない。
+  // その版では、一覧が運んだ本文をそのまま使い、本文の道具を呼ぼうとしないことを観測する。
+  let conversation_id = format!("manager-{}", "a".repeat(64));
+  let (harness, mut poller) = polled_harness(json!({
+    "responses": {
+      "takt_list_goal_registration_proposals": {
+        "proposals": [
+          {
+            "revision": 3,
+            "conversationId": conversation_id,
+            "repositoryDirectory": "/abs/takt-dash",
+            "summary": { "objective": "旧版の一覧が運ぶ本文" }
+          }
+        ]
+      }
+    },
+    "toolErrors": { "takt_get_goal_registration_proposal": "未知の道具です: takt_get_goal_registration_proposal" }
+  }))
+  .await;
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let state = client
+    .get_pending_decisions(GetPendingDecisionsRequest {})
+    .await
+    .expect("判断待ちを取得できます")
+    .into_inner()
+    .state
+    .expect("状態があります");
+  let proposals: Vec<_> =
+    state.pending_decisions.iter().filter(|d| d.r#type == PendingDecisionType::GoalRegistration as i32).collect();
+  assert_eq!(proposals.len(), 1, "本文の道具が無くても登録案は一覧に現れます");
+  assert_eq!(proposals[0].revision, Some(3), "一覧の revision をそのまま写します");
+  assert!(
+    proposals[0].body.contains("旧版の一覧が運ぶ本文"),
+    "一覧が運んだ本文を表示本文にします: {}",
+    proposals[0].body
+  );
+  assert!(
+    calls_named(&harness, "takt_get_goal_registration_proposal").is_empty(),
+    "一覧に本文があるときは本文を読み直しません"
+  );
+
+  poller.shutdown().await;
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn malformed_proposal_response_does_not_fail_the_next_poll_cycle() {
   // 同じ poller で「正常な提案を読むサイクル」→「提案の解析に失敗するサイクル」を続け、
   // 2回目も周期が失敗せず、前回の提案が判断待ちの射影に残ることを一続きに観測する。

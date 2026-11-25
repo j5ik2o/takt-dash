@@ -38,13 +38,21 @@ fn project_dir(directory: &std::path::Path) -> std::path::PathBuf {
 #[tokio::test]
 async fn http_handle_reads_tools_over_the_resident_server() {
   // 常駐サーバーへ tools/call を送り、応答の本文を道具の結果として読める。
+  // ゴール登録案の本文は一覧に無いため、常駐接続のまま一覧の conversationId で読み直す。
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let state = write_state(
     directory.path(),
     json!({
       "goals": [ { "id": "g1", "status": "created", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1" } ],
       "tasks": [ { "name": "implement", "status": "running", "runSlug": "r1", "startedAt": "2026-11-13T09:00:00Z" } ],
-      "runs": { "r1": { "runSlug": "r1", "status": "running", "startedAt": "2026-11-13T09:00:00Z" } }
+      "runs": { "r1": { "runSlug": "r1", "status": "running", "startedAt": "2026-11-13T09:00:00Z" } },
+      "proposals": [
+        {
+          "revision": 3,
+          "repositoryDirectory": "/abs/takt-dash",
+          "summary": { "objective": "常駐接続でも登録案の本文を読む" }
+        }
+      ]
     }),
   );
   let server = HttpMockServer::start(&state, None);
@@ -55,10 +63,26 @@ async fn http_handle_reads_tools_over_the_resident_server() {
 
   assert_eq!(snapshot.goals.len(), 1, "HTTP 経由でゴールを読めます");
   assert_eq!(snapshot.tasks.first().expect("タスクがあります").status, TaskStatus::Running);
+  let proposal = snapshot.proposals.first().expect("HTTP 経由で登録案を読めます");
+  assert_eq!(proposal.revision.get(), 3, "一覧の revision をそのまま保ちます");
+  assert!(
+    proposal.summary.contains("常駐接続でも登録案の本文を読む"),
+    "一覧の conversationId で読んだ本文がスナップショットに入ります: {}",
+    proposal.summary
+  );
   let calls = server.recorded_calls();
   assert!(
     calls.iter().any(|call| call["name"] == "takt_list_goals"),
     "HTTP サーバーへ takt_list_goals を送ります: {calls:?}"
+  );
+  let body_call = calls
+    .iter()
+    .find(|call| call["name"] == "takt_get_goal_registration_proposal")
+    .expect("本文の取得も常駐接続で行います");
+  assert_eq!(
+    body_call["arguments"]["conversationId"],
+    json!(proposal.conversation_id.as_str()),
+    "一覧が返した持ち主の会話で本文を読みます: {body_call:?}"
   );
   assert_eq!(handle.session_count(), 1, "1 つのハンドルはサーバー上に 1 セッションだけ作ります");
 }
