@@ -49,25 +49,42 @@ def workflow_name(path):
     """YAML の先頭にある `name:` の値を返す。無ければファイル名を workflow 名とする。
 
     `.takt/workflows/*.yaml` は先頭行に `name:` を置く。PyYAML を使わずに読める形なので、
-    標準ライブラリだけで済ませる。
+    標準ライブラリだけで済ませる。値の後ろのコメント（`name: taktdash-change # 説明`）は
+    名前ではないため落とす。
     """
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.startswith("name:"):
-            value = line.partition(":")[2].strip().strip("'\"")
+            value = yaml_scalar(line.partition(":")[2])
             if value:
                 return value
             break
     return path.stem
 
 
+def yaml_scalar(text):
+    """YAML の 1 行の値を読む。引用符を外し、行末のコメントを落とす。"""
+    value = text.strip()
+    if value[:1] in ("'", '"'):
+        end = value.find(value[0], 1)
+        if end != -1:
+            return value[1:end].strip()
+    return value.split(" #", 1)[0].strip()
+
+
 def locate_takt():
-    """takt の実体を返す。`TAKT_BIN` の指定を優先し、無ければ PATH から探す。"""
+    """takt の実体を絶対パスで返す。`TAKT_BIN` の指定を優先し、無ければ PATH から探す。
+
+    inspect は root を子プロセスの作業ディレクトリにする。相対パスのまま渡すと、検索した
+    ときと起動したときで基準が変わり、実行ファイルを見つけられない。見つけた時点で、呼び
+    出したときの作業ディレクトリを基準に絶対化する。
+    """
     override = os.environ.get("TAKT_BIN", "").strip()
     if override:
-        if Path(override).is_file():
-            return override
-        return shutil.which(override)
-    return shutil.which("takt")
+        path = Path(override).expanduser()
+        if path.is_file():
+            return str(path.absolute())
+    binary = shutil.which(override or "takt")
+    return None if binary is None else str(Path(binary).absolute())
 
 
 def inspect(binary, name, root):

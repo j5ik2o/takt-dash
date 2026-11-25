@@ -15,6 +15,10 @@
      検査をスキップしたことを表示する。
   4. 引数: 名前を渡すと、その名前だけを inspect する。
   5. `TAKT_BIN` の指す実行ファイルが無いときは、黙ってスキップせず 1 を返す。
+  6. `name:` の行末コメントは workflow 名として渡さない。
+  7. 相対パスの `TAKT_BIN` と、相対ディレクトリを含む PATH の takt は、呼び出したときの
+     作業ディレクトリを基準に起動する（検査の cwd はリポジトリルートなので、相対のままだと
+     起動できない）。
 """
 import contextlib
 import io
@@ -99,6 +103,24 @@ def environment(**values):
                 os.environ[key] = value
 
 
+@contextlib.contextmanager
+def working_directory(directory):
+    """作業ディレクトリを一時的に変え、抜けたら元へ戻す。"""
+    saved = os.getcwd()
+    try:
+        os.chdir(directory)
+        yield
+    finally:
+        os.chdir(saved)
+
+
+def read_log(path):
+    """偽の takt が記録した名前を読む。takt が 1 度も起動しなければ空列を返す。"""
+    if not path.is_file():
+        return []
+    return [name for name in path.read_text(encoding="utf-8").splitlines() if name]
+
+
 def run_main(argv, root):
     """main を呼び、終了コードと標準出力と標準エラーを返す。"""
     stdout = io.StringIO()
@@ -156,7 +178,7 @@ def test_targets_limit_the_inspection():
             TAKT_BIN=str(write_fake_takt(root)), FAKE_TAKT_FAIL=None, FAKE_TAKT_LOG=str(log)
         ):
             code, stdout, stderr = run_main(["alpha"], root)
-        inspected = log.read_text(encoding="utf-8").split()
+        inspected = read_log(log)
     assert code == 0, (code, stdout, stderr)
     assert inspected == ["alpha"], inspected
     assert "1/1 件の workflow を inspect できました" in stdout, stdout
@@ -170,6 +192,60 @@ def test_missing_takt_binary_is_not_skipped_silently():
     assert stdout == "", stdout
 
 
+def test_name_comment_is_not_part_of_the_name():
+    with temporary_repository() as root:
+        workflows = root / ".takt" / "workflows"
+        (workflows / "delta.yaml").write_text(
+            "name: delta # 行末のコメントは名前ではない\n", encoding="utf-8"
+        )
+        (workflows / "epsilon.yml").write_text(
+            "name: 'epsilon #1'\n", encoding="utf-8"
+        )
+        log = root / "inspected.txt"
+        with environment(
+            TAKT_BIN=str(write_fake_takt(root)), FAKE_TAKT_FAIL=None, FAKE_TAKT_LOG=str(log)
+        ):
+            code, stdout, stderr = run_main([], root)
+        inspected = read_log(log)
+    assert code == 0, (code, stdout, stderr)
+    assert "delta" in inspected, inspected
+    # 引用符の中の # はコメントではなく名前の一部である。
+    assert "epsilon #1" in inspected, inspected
+    assert "delta: OK" in stdout, stdout
+    assert "#" not in stdout.replace("epsilon #1", ""), stdout
+
+
+def test_relative_takt_bin_is_resolved_from_the_caller():
+    with temporary_repository() as root:
+        caller = root / "caller"
+        caller.mkdir()
+        write_fake_takt(caller)
+        log = root / "inspected.txt"
+        with environment(
+            TAKT_BIN="./takt", FAKE_TAKT_FAIL=None, FAKE_TAKT_LOG=str(log)
+        ), working_directory(caller):
+            code, stdout, stderr = run_main([], root)
+        inspected = read_log(log)
+    assert code == 0, (code, stdout, stderr)
+    assert inspected == WORKFLOW_STEMS, inspected
+
+
+def test_relative_path_entry_is_resolved_from_the_caller():
+    with temporary_repository() as root:
+        caller = root / "caller"
+        bin_dir = caller / "bin"
+        bin_dir.mkdir(parents=True)
+        write_fake_takt(bin_dir)
+        log = root / "inspected.txt"
+        with environment(
+            TAKT_BIN=None, PATH="./bin", FAKE_TAKT_FAIL=None, FAKE_TAKT_LOG=str(log)
+        ), working_directory(caller):
+            code, stdout, stderr = run_main([], root)
+        inspected = read_log(log)
+    assert code == 0, (code, stdout, stderr)
+    assert inspected == WORKFLOW_STEMS, inspected
+
+
 def main():
     tests = [
         test_all_success_returns_zero,
@@ -177,6 +253,9 @@ def main():
         test_missing_takt_skips_with_zero,
         test_targets_limit_the_inspection,
         test_missing_takt_binary_is_not_skipped_silently,
+        test_name_comment_is_not_part_of_the_name,
+        test_relative_takt_bin_is_resolved_from_the_caller,
+        test_relative_path_entry_is_resolved_from_the_caller,
     ]
     failures = 0
     for test in tests:
