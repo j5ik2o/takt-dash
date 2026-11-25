@@ -7,7 +7,7 @@ import {
   GoalNotFoundError,
 } from "../grpc/client";
 import type { GetGoalDetailResponse } from "../proto/taktdash";
-import { createLastLoaded } from "../state/last-loaded";
+import { lastGoalDetails } from "../state/last-loaded";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { LiveGoalDetail } from "./live-goal-detail";
 
@@ -24,7 +24,6 @@ type LoadResult =
 // 落とさず、接続できない旨を表示する。前に読めたゴールなら、見出しと内容を残して
 // その上に切断の通知を出す（issue #309）。通知は 1 秒更新の表示が持ち、次の取得が
 // 成功したら消す。
-const lastGoalDetails = createLastLoaded<GetGoalDetailResponse>();
 
 export async function GoalDetailLoader({ params }: GoalDetailLoaderProps): Promise<ReactElement> {
   const { goalId } = await params;

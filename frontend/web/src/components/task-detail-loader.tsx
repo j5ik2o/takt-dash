@@ -7,7 +7,7 @@ import {
   TaskNotFoundError,
 } from "../grpc/client";
 import type { GetTaskDetailResponse } from "../proto/taktdash";
-import { createLastLoaded } from "../state/last-loaded";
+import { lastTaskDetails, taskDetailKey } from "../state/last-loaded";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
 import { LiveTaskDetail } from "./live-task-detail";
 
@@ -29,7 +29,6 @@ const firstValue = (value: string | string[] | undefined): string | undefined =>
 // ときはページを落とさず、接続できない旨を表示する。前に読めたタスクなら、見出しと
 // 内容を残してその上に切断の通知を出す（issue #309）。通知は 1 秒更新の表示が持ち、
 // 次の取得が成功したら消す。
-const lastTaskDetails = createLastLoaded<GetTaskDetailResponse>();
 
 export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoaderProps): Promise<ReactElement> {
   const { project } = await params;
@@ -53,8 +52,7 @@ export async function TaskDetailLoader({ params, searchParams }: TaskDetailLoade
       throw error;
     }
   }
-  // goalId の有無で別のタスクになるため、未指定と空文字を区別してキーに含める。
-  const key = JSON.stringify([project, taskName, goalId ?? null]);
+  const key = taskDetailKey(project, taskName, goalId);
   if (result.kind === "unavailable") {
     const last = lastTaskDetails.recall(key);
     if (last === undefined) {

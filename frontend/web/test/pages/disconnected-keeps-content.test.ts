@@ -2,13 +2,15 @@
 // （issue #309）。概要と判断待ちと同じ動きを、プロジェクト・アクティビティ・
 // run・ゴール・タスク・会話のローダーでも確かめる。一度も読めていないページは
 // unavailable.test.ts のとおり、バナーだけのままにする。
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import type { ReactElement } from "react";
+import { NextRequest } from "next/server";
 import { renderToStaticMarkup } from "react-dom/server";
 import { startTaktDashServer, type ServerBehavior } from "../support/grpc-server.ts";
 import {
   createActivityResponse,
+  createConversationMessages,
   createConversationResponse,
   createDashboardState,
   createGoalDetailResponse,
@@ -16,6 +18,10 @@ import {
   createTaskDetailResponse,
 } from "../support/fixtures.ts";
 import { closeBackendClient } from "../../src/grpc/client.ts";
+import { formatClock } from "../../src/state/format.ts";
+import { GET as getConversationUpdate } from "../../app/api/conversations/route.ts";
+import { GET as getGoalUpdate } from "../../app/api/goals/[goalId]/route.ts";
+import { GET as getTaskUpdate } from "../../app/api/tasks/[project]/route.ts";
 import { ActivityLoader } from "../../src/components/activity-loader.tsx";
 import { ConversationsLoader } from "../../src/components/conversations-loader.tsx";
 import { GoalDetailLoader } from "../../src/components/goal-detail-loader.tsx";
@@ -137,4 +143,106 @@ test("前に読めた run と違う run は、切断中は前の内容を出さ�
   );
   assert.match(html, /role="alert"/);
   assert.doesNotMatch(html, /<h1>/);
+});
+
+// 1 秒更新（Route Handler）で読めた内容も覚え、切断中に開き直したときはそれを出す。
+const renderAfterUpdateAndDisconnect = async (
+  initial: ServerBehavior,
+  updated: ServerBehavior,
+  render: () => Promise<ReactElement>,
+  update: () => Promise<Response>,
+): Promise<string> => {
+  const first = await startTaktDashServer(initial);
+  try {
+    await withBackendAddress(first.address, async () => renderToStaticMarkup(await render()));
+  } finally {
+    await first.shutdown();
+  }
+  const second = await startTaktDashServer(updated);
+  try {
+    await withBackendAddress(second.address, async () => {
+      assert.equal((await update()).status, 200);
+    });
+  } finally {
+    await second.shutdown();
+  }
+  return withBackendAddress(second.address, async () => renderToStaticMarkup(await render()));
+};
+
+test("切断中に開き直したゴール詳細は、1 秒更新で最後に読めた内容を出す", async () => {
+  const html = await renderAfterUpdateAndDisconnect(
+    { goalDetail: createGoalDetailResponse({ goalId: "goal-7", objective: "最初に読めた目的です。" }) },
+    { goalDetail: createGoalDetailResponse({ goalId: "goal-7", objective: "更新で読めた目的です。" }) },
+    () => GoalDetailLoader({ params: Promise.resolve({ goalId: "goal-7" }) }),
+    () =>
+      getGoalUpdate(new NextRequest("http://localhost/api/goals/goal-7"), {
+        params: Promise.resolve({ goalId: "goal-7" }),
+      }),
+  );
+  assert.match(html, DISCONNECTED_BANNER);
+  assert.match(html, /更新で読めた目的です。/);
+});
+
+test("切断中に開き直したタスク詳細は、1 秒更新で最後に読めた内容を出す", async () => {
+  const taskName = "求人一覧を直す";
+  const html = await renderAfterUpdateAndDisconnect(
+    { taskDetail: createTaskDetailResponse({ taskName, summary: "最初に読めた要約です。" }) },
+    { taskDetail: createTaskDetailResponse({ taskName, summary: "更新で読めた要約です。" }) },
+    () =>
+      TaskDetailLoader({
+        params: Promise.resolve({ project: "corporate-site" }),
+        searchParams: Promise.resolve({ task: taskName, goal: "goal-1" }),
+      }),
+    () =>
+      getTaskUpdate(
+        new NextRequest(`http://localhost/api/tasks/corporate-site?task=${encodeURIComponent(taskName)}&goal=goal-1`),
+        { params: Promise.resolve({ project: "corporate-site" }) },
+      ),
+  );
+  assert.match(html, DISCONNECTED_BANNER);
+  assert.match(html, /更新で読めた要約です。/);
+});
+
+test("切断中に開き直した会話は、1 秒更新で届いた発言も出す", async () => {
+  const added = {
+    seq: 4,
+    occurredAt: new Date("2026-11-13T07:29:00Z"),
+    speaker: createConversationMessages()[0]!.speaker,
+    text: "更新で届いた発言です。",
+  };
+  const html = await renderAfterUpdateAndDisconnect(
+    { overview: createDashboardState(), conversation: createConversationResponse() },
+    { conversation: createConversationResponse({ messages: [added], nextAfterSeq: 4 }) },
+    () => ConversationsLoader(),
+    () =>
+      getConversationUpdate(
+        new NextRequest(
+          "http://localhost/api/conversations?project=corporate-site&session_id=session-conv-1&after_seq=3&limit=200",
+        ),
+      ),
+  );
+  assert.match(html, /会話を取得できません/);
+  assert.match(html, /採用ページの見出しを直してください。/);
+  assert.match(html, /更新で届いた発言です。/);
+});
+
+test("切断中のアクティビティは、最終更新に描画した時刻ではなく読めた時刻を出す", async () => {
+  const readAt = new Date("2026-11-13T01:00:00Z");
+  const renderedAt = new Date("2026-11-13T03:30:00Z");
+  mock.timers.enable({ apis: ["Date"], now: readAt });
+  try {
+    const server = await startTaktDashServer({ overview: createDashboardState(), activity: createActivityResponse() });
+    try {
+      await withBackendAddress(server.address, async () => renderToStaticMarkup(await ActivityLoader()));
+    } finally {
+      await server.shutdown();
+    }
+    mock.timers.setTime(renderedAt.getTime());
+    const html = await withBackendAddress(server.address, async () => renderToStaticMarkup(await ActivityLoader()));
+    assert.match(html, DISCONNECTED_BANNER);
+    assert.ok(html.includes(`最終更新は ${formatClock(readAt)} です。`), "読めた時刻を出す");
+    assert.ok(!html.includes(formatClock(renderedAt)), "描画した時刻を出さない");
+  } finally {
+    mock.timers.reset();
+  }
 });

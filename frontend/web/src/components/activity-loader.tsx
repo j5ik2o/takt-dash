@@ -7,7 +7,8 @@ import { measurePage } from "../telemetry/timing";
 import { BackendUnavailableOver } from "./backend-unavailable-notice";
 import { ActivityContent } from "./activity-content";
 
-const lastActivity = createLastLoaded<GetActivityResponse>(1);
+// 読めた時刻も一緒に覚え、切断中は最終更新にその時刻を出す。
+const lastActivity = createLastLoaded<{ response: GetActivityResponse; readAt: Date }>(1);
 const ACTIVITY_KEY = "activity";
 
 // アクティビティは出来事の一覧と日次集計を GetActivity から取得し、サーバー名の解決には
@@ -17,12 +18,14 @@ const ACTIVITY_KEY = "activity";
 export async function ActivityLoader(): Promise<ReactElement> {
   return measurePage("/activity", async (timing) => {
     const shared = await loadServerState();
-    const render = (response: GetActivityResponse): ReactElement => (
-      <ActivityContent state={shared.state} response={response} now={new Date()} />
-    );
-    const withNotice = (error: BackendUnavailableError, response: GetActivityResponse | undefined): ReactElement => (
-      <BackendUnavailableOver situation={backendUnavailableSituation(error)}>
-        {shared.snapshotLoaded && response !== undefined ? render(response) : null}
+    const render = (
+      error: BackendUnavailableError | undefined,
+      loaded: { response: GetActivityResponse; readAt: Date } | undefined,
+    ): ReactElement => (
+      <BackendUnavailableOver situation={error === undefined ? undefined : backendUnavailableSituation(error)}>
+        {loaded !== undefined && (error === undefined || shared.snapshotLoaded) ? (
+          <ActivityContent state={shared.state} response={loaded.response} now={loaded.readAt} />
+        ) : null}
       </BackendUnavailableOver>
     );
     let response: GetActivityResponse;
@@ -32,9 +35,10 @@ export async function ActivityLoader(): Promise<ReactElement> {
       if (!(error instanceof BackendUnavailableError)) {
         throw error;
       }
-      return withNotice(shared.error ?? error, lastActivity.recall(ACTIVITY_KEY));
+      return render(shared.error ?? error, lastActivity.recall(ACTIVITY_KEY));
     }
-    lastActivity.remember(ACTIVITY_KEY, response);
-    return shared.error === undefined ? render(response) : withNotice(shared.error, response);
+    const loaded = { response, readAt: new Date() };
+    lastActivity.remember(ACTIVITY_KEY, loaded);
+    return render(shared.error, loaded);
   });
 }

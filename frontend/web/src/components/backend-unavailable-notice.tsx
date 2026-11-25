@@ -60,20 +60,22 @@ export function BackendUnavailableNotice({
 }
 
 /**
- * 切断の通知と、前に読めた内容を重ねて描画する（issue #309）。前に読めた内容が
- * 無いページは children を渡さず、通知だけを出す。概要と判断待ちと同じく、
- * 通知は見出しと内容の上に置く。
+ * 切断の通知と、前に読めた内容を重ねて描画する（issue #309）。概要と判断待ちと
+ * 同じく、通知は見出しと内容の上に置く。接続中は situation を渡さず、通知の位置を
+ * 空けたまま内容だけを出す。接続中と切断中で内容の位置を変えないため、切断から
+ * 戻ったときに内容の中の状態（run のログの追従など）が作り直されない。前に読めた
+ * 内容が無いページは children を渡さず、通知だけを出す。
  */
 export function BackendUnavailableOver({
   situation,
   children,
 }: {
-  situation: BackendUnavailableSituation;
+  situation?: BackendUnavailableSituation;
   children?: ReactNode;
 }): ReactElement {
   return (
     <>
-      <BackendUnavailableNotice situation={situation} />
+      {situation === undefined ? null : <BackendUnavailableNotice situation={situation} />}
       {children}
     </>
   );

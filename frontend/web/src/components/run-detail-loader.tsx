@@ -49,5 +49,9 @@ export async function RunDetailLoader({ params }: RunDetailLoaderProps): Promise
     );
   }
   lastRunDetails.remember(slug, result.detail);
-  return <RunDetailContent detail={result.detail} now={new Date()} />;
+  return (
+    <BackendUnavailableOver>
+      <RunDetailContent detail={result.detail} now={new Date()} />
+    </BackendUnavailableOver>
+  );
 }

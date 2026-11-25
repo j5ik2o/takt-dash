@@ -12,12 +12,9 @@ import { ProjectsContent } from "./projects-content";
 export async function ProjectsLoader(): Promise<ReactElement> {
   return measurePage("/projects", async () => {
     const { state, snapshotLoaded, error } = await loadServerState();
-    if (error === undefined) {
-      return <ProjectsContent state={state} now={new Date()} />;
-    }
     return (
-      <BackendUnavailableOver situation={backendUnavailableSituation(error)}>
-        {snapshotLoaded ? <ProjectsContent state={state} now={new Date()} /> : null}
+      <BackendUnavailableOver situation={error === undefined ? undefined : backendUnavailableSituation(error)}>
+        {error === undefined || snapshotLoaded ? <ProjectsContent state={state} now={new Date()} /> : null}
       </BackendUnavailableOver>
     );
   });
