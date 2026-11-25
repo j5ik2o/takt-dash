@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
 import { BackendUnavailableError, getBackendClient } from "../../../src/grpc/client";
 import { GetConversationResponse } from "../../../src/proto/taktdash";
+import { restoreConversationResponse } from "../../../src/state/conversation";
+import { rememberConversationUpdate } from "../../../src/state/last-loaded";
 
 export const dynamic = "force-dynamic";
 
@@ -61,6 +63,8 @@ export async function GET(request: NextRequest): Promise<Response> {
     const json = GetConversationResponse.toJSON(response) as Record<string, unknown>;
     json.hasMore = response.hasMore;
     json.nextAfterSeq = response.nextAfterSeq;
+    // 切断中にページを開き直したとき、この更新で読めた発言も出す（issue #309）。
+    rememberConversationUpdate(restoreConversationResponse(json));
     return Response.json(json, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (error instanceof BackendUnavailableError) {

@@ -9,13 +9,19 @@ import { startPolling } from "./polling";
 type LiveGoalDetailProps = {
   initialDetail: GetGoalDetailResponse;
   goalId: string;
+  /** 前に読めた内容で描画し、切断の通知を出した状態で始めるか（issue #309）。 */
+  initialDisconnected?: boolean;
 };
 
 // 詳細は RSC が取得した初期表示をそのまま使い、1秒を基本に Route Handler から
 // 取得した値だけを差し替える。ページ全体の再読み込みはしない。
-export function LiveGoalDetail({ initialDetail, goalId }: LiveGoalDetailProps): ReactElement {
+export function LiveGoalDetail({
+  initialDetail,
+  goalId,
+  initialDisconnected = false,
+}: LiveGoalDetailProps): ReactElement {
   const [detail, setDetail] = useState(initialDetail);
-  const [disconnected, setDisconnected] = useState(false);
+  const [disconnected, setDisconnected] = useState(initialDisconnected);
 
   useEffect(() => {
     const controller = new AbortController();

@@ -199,11 +199,12 @@ test("応答の goalId が要求と一致しないときも本番経路で notFo
 test("backend に接続できないときゴール詳細のローダーは落ちず不通の旨を描画する", async () => {
   // このテストは、一度も backend の応答を受けていない Web プロセスを前提にする。
   // 同じファイルの成功ケースで残った接続履歴の影響を受けないよう、前提を明示する。
+  // 前に読めたゴールは切断中も内容を残すため（issue #309）、まだ読んでいないゴールを開く。
   resetBackendResponded();
   const closedAddress = await reserveClosedAddress();
   await withServerEnv(closedAddress, async () => {
     const html = renderToStaticMarkup(
-      await GoalDetailLoader({ params: Promise.resolve({ goalId: "goal-1" }) }),
+      await GoalDetailLoader({ params: Promise.resolve({ goalId: "goal-never-read" }) }),
     );
     assert.match(html, /backend に接続できません/);
     assert.match(html, /TAKTDASH_BACKEND_ADDR/);
