@@ -185,7 +185,11 @@ async fn cancelled_call_does_not_leave_its_reply_for_the_next_call() {
   // 読まれない。
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let state = write_state(directory.path(), json!({ "splitReplies": { "takt_list_goals": 1000 } }));
-  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let spawn_log = directory.path().join("spawn.log");
+  let mut config = mock_config(directory.path(), &state, None);
+  config.args.push("--spawn-log".to_owned());
+  config.args.push(spawn_log.display().to_string());
+  let mut client = mock_client(config);
   client.warm_up().await.expect("起動できます");
 
   let cancelled =
@@ -198,6 +202,9 @@ async fn cancelled_call_does_not_leave_its_reply_for_the_next_call() {
     .expect("打ち切った呼び出しの残りに邪魔されずに応答を読めます");
 
   assert!(text.contains("\"goals\""), "次の呼び出しの応答を返します: {text}");
+  let log = std::fs::read_to_string(&spawn_log).expect("起動の記録を読めます");
+  let ready: Vec<&str> = log.lines().filter(|line| line.starts_with("ready ")).collect();
+  assert_eq!(ready.len(), 2, "打ち切った呼び出しの子プロセスを捨て、次の呼び出しで作り直します: {log}");
   client.shutdown().await;
 }
 

@@ -184,6 +184,24 @@ async fn requests_without_a_key_keep_writing_each_time() {
 }
 
 #[tokio::test]
+async fn a_write_without_a_key_finishes_after_the_caller_gives_up() {
+  // 鍵のない書き込みも、呼び出し側が待つのをやめた後まで実行する。takt へ送った書き込みの
+  // 子プロセスを打ち切らず、成功を書き込みの通し番号に記録します。
+  let harness = harness_with(json!({ "delays": { "takt_merge_goal_pr": SLOW_REPLY_MS } }));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let first = client.approve_goal_merge(within(merge(None), CALLER_DEADLINE)).await;
+  assert!(first.is_err(), "応答が期限内に届かないため、呼び出しは失敗します");
+  tokio::time::sleep(Duration::from_millis(SLOW_REPLY_MS + 1000)).await;
+
+  assert_eq!(call_count(&harness, "takt_merge_goal_pr"), 1, "takt へ書き込みが届いています");
+  assert_eq!(harness.registry.write_sequence("mac-mini", "takt-dash"), 1, "書き込みの応答を受け取って記録します");
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn a_rejected_write_can_be_retried_with_the_same_key() {
   let harness = harness_with(json!({ "isError": ["takt_approve_goal_registration"] }));
   let server = start_server(&harness).await;
