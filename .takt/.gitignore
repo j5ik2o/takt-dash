@@ -4,6 +4,9 @@
 # This file itself
 !.gitignore
 
+# 運用の手順（古い TAKT へ戻すときの順序と既知の制限）
+!README.md
+
 # Project configuration
 !config.yaml
 !runtime.yaml
