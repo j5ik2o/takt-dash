@@ -694,9 +694,12 @@ impl Poller {
     }
   }
 
-  /// すべてのプロジェクトの子プロセスを終了する。
+  /// すべてのプロジェクトの子プロセスを終了し、常駐 HTTP サーバーに作ったセッションを閉じる。
   pub async fn shutdown(&mut self) {
     self.registry.shutdown_all().await;
+    for read in std::mem::take(&mut self.reads).into_values() {
+      read.handle.lock().await.close().await;
+    }
   }
 
   fn sync_clients(&self, config: &Config) {

@@ -14,7 +14,7 @@ mod registry;
 pub mod tools;
 
 pub use client::{CallError, McpClient, McpClientConfig, ToolCallError, ToolCaller, TransportError};
-pub use http::HttpReadHandle;
+pub use http::{HttpReadHandle, HttpSession};
 pub use metrics::{ToolCallMetrics, ToolCallOutcome, ToolCallStat};
 pub use registry::{ClientHandle, Lane, McpClientRegistry};
 pub use tools::{

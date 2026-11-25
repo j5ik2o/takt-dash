@@ -108,3 +108,62 @@ async fn screen_reads_return_over_http_without_spawning_a_child_process() {
 
   server.stop().await;
 }
+
+#[tokio::test]
+async fn repeated_screen_reads_do_not_accumulate_sessions_on_the_http_server() {
+  // 画面の読み取りを繰り返しても、takt-mcp の HTTP サーバーに生きているセッションは増えない
+  // （issue #310）。takt-mcp はセッションに期限を持たないため、RPC ごとにセッションを作って
+  // 閉じないと、サーバー側にたまり続ける。
+  let harness = http_harness();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  for _ in 0..4 {
+    client
+      .get_run_detail(GetRunDetailRequest { run_slug: "run-1".to_owned() })
+      .await
+      .expect("GetRunDetail が HTTP 経由で返ります");
+    client
+      .get_goal_detail(GetGoalDetailRequest { goal_id: "g1".to_owned() })
+      .await
+      .expect("GetGoalDetail が HTTP 経由で返ります");
+  }
+
+  let http = harness.http_server();
+  assert_eq!(
+    http.created_session_count(),
+    1,
+    "8 回の画面読み取りは 1 つのセッションを使い回します: {:?}",
+    http.session_events()
+  );
+  assert_eq!(http.live_session_count(), 1, "生きているセッションは 1 つです: {:?}", http.session_events());
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn concurrent_screen_reads_share_one_session() {
+  // 同時に届いた画面の読み取りも、セッションを 1 つだけ作って共有する。
+  let harness = http_harness();
+  let server = start_server(&harness).await;
+  let mut readers = Vec::new();
+  for _ in 0..6 {
+    let mut client = client(server.address).await;
+    readers.push(tokio::spawn(async move {
+      client.get_goal_detail(GetGoalDetailRequest { goal_id: "g1".to_owned() }).await.map(|_| ())
+    }));
+  }
+  for reader in readers {
+    reader.await.expect("読み取りのタスクが終わります").expect("GetGoalDetail が HTTP 経由で返ります");
+  }
+
+  let http = harness.http_server();
+  assert_eq!(
+    http.created_session_count(),
+    1,
+    "同時の読み取りは 1 つのセッションを共有します: {:?}",
+    http.session_events()
+  );
+
+  server.stop().await;
+}

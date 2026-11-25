@@ -22,8 +22,8 @@ use std::{
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::{McpClient, McpClientConfig};
-use crate::domain::ScreenReadLanes;
+use super::{HttpSession, McpClient, McpClientConfig};
+use crate::{config::HttpMcpServer, domain::ScreenReadLanes};
 
 /// takt-mcp への接続の用途を表すレーン。
 ///
@@ -100,22 +100,30 @@ struct Entry {
   client: ClientHandle,
 }
 
+/// 常駐 HTTP サーバー 1 台分のセッションと、その接続先。
+struct HttpEntry {
+  server:  HttpMcpServer,
+  session: HttpSession,
+}
+
 /// レジストリの内部状態。map と「作り直した」集合と書き込みの通し番号を同じロックで保護します。
 #[derive(Default)]
 struct RegistryInner {
-  clients:      BTreeMap<ClientKey, Entry>,
-  rebuilt:      BTreeSet<ProjectKey>,
+  clients:       BTreeMap<ClientKey, Entry>,
+  rebuilt:       BTreeSet<ProjectKey>,
   /// 設定再読込で HTTP
   /// と分かったサーバー。旧設定で開始済みの要求にレーンを再登録させないために使います。
-  http_servers: BTreeSet<String>,
+  http_servers:  BTreeSet<String>,
+  /// 常駐 HTTP サーバーごとのセッション。画面の読み取りと書き込みの要求が共有します。
+  http_sessions: BTreeMap<String, HttpEntry>,
   /// 画面読み取りレーンの次回割り当て位置。プロジェクトごとにラウンドロビンで進めます。
-  screen_next:  BTreeMap<ProjectKey, u32>,
+  screen_next:   BTreeMap<ProjectKey, u32>,
   /// プロジェクトごとの書き込みの通し番号。書き込みが成功するたびに1つ進めます。
-  write_counts: BTreeMap<ProjectKey, u64>,
+  write_counts:  BTreeMap<ProjectKey, u64>,
   /// プロジェクトごとの書き込みゲート。書き込み経路と定期読み取りの反映の段が共有し、
   /// 通し番号の前進と読み取り結果の反映を直列化します。通し番号そのものとは別の構造に
   /// することで、ゲートを保持したまま通し番号を記録してもデッドロックしません。
-  write_gates:  BTreeMap<ProjectKey, Arc<AsyncMutex<()>>>,
+  write_gates:   BTreeMap<ProjectKey, Arc<AsyncMutex<()>>>,
 }
 
 /// プロジェクトごとの takt-mcp クライアントをレーン別に所有するレジストリ。
@@ -179,6 +187,28 @@ impl McpClientRegistry {
       index
     };
     self.client_for_key(server_id, project, LaneKey::Screen(index), make()).0
+  }
+
+  /// 常駐 HTTP サーバーのセッションを返す。画面の読み取りと書き込みの要求が共有します。
+  ///
+  /// takt-mcp はセッションに期限を持たないため、要求ごとにセッションを作らず、サーバーごとに
+  /// 1 つを使い回します。登録済みの接続先（URL とトークン）が `server` と異なる場合は、
+  /// 置き場を作り直します。外した置き場は、利用中の要求が終わって最後の持ち主が消えた
+  /// 時点で、古いセッションを DELETE で閉じます。
+  pub fn http_session(&self, server_id: &str, server: &HttpMcpServer) -> HttpSession {
+    let (session, replaced) = {
+      let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+      if let Some(entry) = inner.http_sessions.get(server_id) {
+        if &entry.server == server {
+          return entry.session.clone();
+        }
+      }
+      let session = HttpSession::for_server(server.clone());
+      let entry = HttpEntry { server: server.clone(), session: session.clone() };
+      (session, inner.http_sessions.insert(server_id.to_owned(), entry))
+    };
+    drop(replaced);
+    session
   }
 
   /// プロジェクトの全レーンのクライアントをそろえる。poller のセットアップが使います。
@@ -285,6 +315,7 @@ impl McpClientRegistry {
   /// 誰も保持していないクライアントはここで破棄され、子プロセスは
   /// [`McpClient`] の `kill_on_drop` で停止します。利用者がまだ同じハンドルを
   /// 保持している場合は、その操作が終わってハンドルが消えた時点で停止します。
+  /// 設定から消えた HTTP サーバーのセッションも、同じように手放して閉じます。
   pub(crate) fn retain_configured(&self, wanted: &BTreeSet<ProjectKey>, http_servers: BTreeSet<String>) {
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
     let keep_stdio = |key: &ProjectKey| !http_servers.contains(&key.0) && wanted.contains(key);
@@ -293,7 +324,15 @@ impl McpClientRegistry {
     inner.screen_next.retain(|key, _| keep_stdio(key));
     inner.write_counts.retain(|key, _| wanted.contains(key));
     inner.write_gates.retain(|key, _| wanted.contains(key));
+    let removed: Vec<HttpEntry> = {
+      let stale: Vec<String> =
+        inner.http_sessions.keys().filter(|server_id| !http_servers.contains(*server_id)).cloned().collect();
+      stale.iter().filter_map(|server_id| inner.http_sessions.remove(server_id)).collect()
+    };
     inner.http_servers = http_servers;
+    // 設定から消えた HTTP サーバーの置き場は、map のロックを解放してから破棄します。
+    drop(inner);
+    drop(removed);
   }
 
   /// プロジェクトの現在の書き込みの通し番号を返す。書き込みがまだ無ければ0です。
@@ -329,7 +368,8 @@ impl McpClientRegistry {
     inner.write_gates.entry(key).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
   }
 
-  /// すべてのクライアントを map から取り出し、1 件ずつ排他取得して停止する。
+  /// すべてのクライアントを map から取り出し、1 件ずつ排他取得して停止する。常駐 HTTP
+  /// サーバーのセッションも、DELETE で閉じます。
   ///
   /// map のロックは取り出しの後すぐに解放します。クライアントごとのロックだけを
   /// 取得するため、停止が別の操作を待つことはあってもデッドロックしません。
@@ -341,6 +381,13 @@ impl McpClientRegistry {
     };
     for client in clients {
       client.lock().await.shutdown().await;
+    }
+    let sessions: Vec<HttpSession> = {
+      let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+      std::mem::take(&mut inner.http_sessions).into_values().map(|entry| entry.session).collect()
+    };
+    for session in sessions {
+      session.close().await;
     }
   }
 }

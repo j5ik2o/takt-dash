@@ -7,16 +7,18 @@
 //   - path は `/` のみ（他は 404）
 //   - `POST /` で `Mcp-Session-Id` を採番し、既知の ID の要求は同一セッションへ再利用する
 //   - 未知の `Mcp-Session-Id`（サーバー再起動で消えた場合）は 404
+//   - `DELETE /` と既知の `Mcp-Session-Id` でセッションを破棄する（以後その ID は 404）
 //   - body は JSON-RPC（initialize・notifications/initialized・tools/call）
 //
 // 状態ファイル（--state）は mock_mcp_server.mjs と同じ形式を使い、読み取り道具の応答を返す。
 // --port を省略した場合は OS が空きポートを採番する。採番した実際のポートと URL は
 // --ready-file に JSON で書き出す（テストが接続先を組み立てるため）。
-// --behavior で `deny`（常に 401）・`drop-session`（常に 404）を起こせる。
+// --behavior で `deny`（常に 401）・`drop-session`（常に 404）・`fail-initialized`
+// （notifications/initialized だけ 500）を起こせる。
 //
 // 追加の検証用オプション:
 //   --calls <path>         受け取った tools/call を {"name","arguments"} の JSONL で追記する
-//   --session-log <path>   セッション採番と再利用のたびに "new" / "reuse" を追記する
+//   --session-log <path>   セッションの採番・再利用・破棄のたびに "new" / "reuse" / "close" を追記する
 //   --require-auth <token> 期待する Authorization の値（未指定なら "Bearer test-token"）
 import { appendFileSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -297,6 +299,7 @@ const handleToolCall = (name, args) => {
 
 // 採番済みセッションの集合。未知の ID は 404 で返す（実機の serverHttpTransport.js と同じ）。
 const sessions = new Set();
+let sessionCounter = 0;
 
 const jsonBody = (response, status, message, extraHeaders = {}) => {
   const body = JSON.stringify(message);
@@ -326,6 +329,24 @@ const server = createServer((request, response) => {
     jsonBody(response, 404, { jsonrpc: "2.0", error: { code: -32601, message: "not found" }, id: null });
     return;
   }
+  if (request.method === "DELETE") {
+    // 実機は Mcp-Session-Id の無い DELETE を 400、未知の ID を 404 で返し、既知の ID は破棄する。
+    const sessionId = request.headers["mcp-session-id"];
+    request.resume();
+    if (sessionId === undefined) {
+      response.writeHead(400).end();
+      return;
+    }
+    if (!sessions.delete(sessionId)) {
+      response.writeHead(404).end();
+      return;
+    }
+    if (sessionLogPath !== undefined) {
+      appendFileSync(sessionLogPath, `close ${sessionId}\n`);
+    }
+    response.writeHead(200).end();
+    return;
+  }
   if (request.method !== "POST") {
     response.writeHead(405).end();
     return;
@@ -351,7 +372,8 @@ const server = createServer((request, response) => {
         initializeHung = true;
         return;
       }
-      const sessionId = `sess-${sessions.size + 1}-${Date.now()}`;
+      sessionCounter += 1;
+      const sessionId = `sess-${sessionCounter}-${Date.now()}`;
       sessions.add(sessionId);
       if (sessionLogPath !== undefined) {
         appendFileSync(sessionLogPath, `new ${sessionId}\n`);
@@ -383,6 +405,11 @@ const server = createServer((request, response) => {
       }
     }
     if (message.method === "notifications/initialized") {
+      if (behavior === "fail-initialized") {
+        // セッションは採番済みだが、初期化の通知が失敗する状態を再現する。
+        response.writeHead(500).end();
+        return;
+      }
       response.writeHead(202).end();
       return;
     }

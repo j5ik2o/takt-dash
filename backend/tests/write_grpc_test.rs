@@ -1734,3 +1734,53 @@ async fn write_over_http_routes_to_the_http_write_server() {
 
   server.stop().await;
 }
+
+#[tokio::test]
+async fn repeated_writes_over_http_do_not_accumulate_sessions() {
+  // 書き込みを繰り返しても、takt-mcp の HTTP サーバーに生きているセッションは増えない
+  // （issue #310）。
+  let goal_id = "11111111-1111-4111-8111-111111111111";
+  let inquiries = ["8f14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e", "9a14e45f-ceea-4f6a-9a3c-0f1a2b3c4d5e"];
+  let harness = GrpcHarness::builder()
+    .single_project(project("takt-dash", std::path::Path::new("/abs/takt-dash")), server_meta(), json!({}))
+    .http_read()
+    .http_write()
+    .build();
+  harness.store.record_success(
+    "takt-dash",
+    snapshot_with(inquiries.iter().map(|id| inquiry_entry(id, goal_id, InquiryKind::Question)).collect()),
+    time("2026-11-13T12:00:00Z"),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  for inquiry_id in inquiries {
+    client
+      .answer_inquiry(AnswerInquiryRequest {
+        idempotency_key: None,
+        server_id:       "mac-mini".to_owned(),
+        project:         "takt-dash".to_owned(),
+        goal_id:         Some(goal_id.to_owned()),
+        inquiry_id:      inquiry_id.to_owned(),
+        text:            Some("はい".to_owned()),
+        report:          None,
+      })
+      .await
+      .expect("書き込み先の HTTP サーバーで回答できます");
+  }
+
+  let http = harness.http_server();
+  assert_eq!(
+    http.recorded_calls().iter().filter(|call| call["name"] == "takt_answer_goal_question").count(),
+    2,
+    "2 回の書き込みが HTTP サーバーへ渡ります"
+  );
+  assert_eq!(
+    http.created_session_count(),
+    1,
+    "2 回の書き込みは 1 つのセッションを使い回します: {:?}",
+    http.session_events()
+  );
+
+  server.stop().await;
+}

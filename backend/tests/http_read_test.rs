@@ -11,7 +11,7 @@ mod common;
 use common::*;
 use serde_json::json;
 use takt_dash_backend::{
-  mcp::{HttpReadHandle, ToolError},
+  mcp::{HttpReadHandle, HttpSession, ToolError},
   model::TaskStatus,
 };
 
@@ -260,4 +260,90 @@ async fn write_handle_never_retries_a_write_when_the_connection_drops_during_a_c
     1,
     "書き込み道具は 1 回だけサーバーへ渡ります: {calls:?}"
   );
+}
+
+#[tokio::test]
+async fn dropping_the_last_handle_closes_its_session_on_the_server() {
+  // セッションを使い終えたら（最後の持ち主が消えたら）DELETE で閉じる。接続先の設定が
+  // 変わって作り直した読み取りハンドルの古いセッションを、サーバーに残さない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let server = HttpMockServer::start(&state, None);
+  let cwd = project_dir(directory.path());
+  let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
+  handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("読み取れます");
+  assert_eq!(server.live_session_count(), 1, "読み取りの間はセッションが 1 つ生きています");
+
+  drop(handle);
+
+  server.wait_for_live_sessions(0).await;
+}
+
+#[tokio::test]
+async fn handles_sharing_a_session_recover_together_after_a_server_restart() {
+  // 画面の読み取りと書き込みは、サーバーごとの 1 つのセッションを共有する。サーバーの再起動で
+  // そのセッションが消えても、共有するハンドルは自動で作り直し、作り直すのは 1 つだけ。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let cwd = project_dir(directory.path());
+  let healthy = HttpMockServer::start(&state, None);
+  let session = HttpSession::new(healthy.connection());
+  let timeout = std::time::Duration::from_secs(10);
+  let mut first = HttpReadHandle::with_session(session.clone(), timeout);
+  let mut second = HttpReadHandle::with_session(session.clone(), timeout);
+
+  first.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("1 つ目のハンドルで読み取れます");
+  second.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("2 つ目のハンドルで読み取れます");
+  assert_eq!(healthy.created_session_count(), 1, "2 つのハンドルは 1 つのセッションを共有します");
+
+  let port = healthy.port();
+  drop(healthy);
+  let restarted = HttpMockServer::start_on_port(&state, None, port);
+  let logs = run_logs(&cwd);
+  let (first_read, second_read) =
+    tokio::join!(first.read_snapshot(&cwd, None, &logs), second.read_snapshot(&cwd, None, &logs));
+  first_read.expect("再起動後、1 つ目のハンドルは自動で再接続します");
+  second_read.expect("再起動後、2 つ目のハンドルは自動で再接続します");
+
+  assert_eq!(
+    restarted.created_session_count(),
+    1,
+    "再起動後に作り直すセッションは 1 つだけです: {:?}",
+    restarted.session_events()
+  );
+}
+
+#[tokio::test]
+async fn closing_a_session_deletes_it_and_the_next_call_creates_a_new_one() {
+  // backend の停止時は、DELETE の応答を待ってセッションを閉じる。閉じたあとの要求は、
+  // セッションを作り直して通る。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let server = HttpMockServer::start(&state, None);
+  let cwd = project_dir(directory.path());
+  let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
+  handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("読み取れます");
+
+  handle.close().await;
+
+  assert_eq!(server.live_session_count(), 0, "閉じたセッションはサーバーに残りません: {:?}", server.session_events());
+  assert_eq!(handle.session_count(), 0, "閉じたハンドルはセッションを保持しません");
+  handle.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect("閉じたあとの読み取りは作り直して通ります");
+  assert_eq!(server.live_session_count(), 1, "作り直したセッションが 1 つ生きています");
+}
+
+#[tokio::test]
+async fn a_session_whose_initialization_fails_midway_is_closed() {
+  // initialize は成功したが notifications/initialized が失敗した場合、サーバーはセッションを
+  // 作り終えている。保存しないセッションを残さないよう、DELETE で閉じる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let server = HttpMockServer::start(&state, Some("fail-initialized"));
+  let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
+
+  handle.connect().await.expect_err("初期化の通知が失敗した接続は失敗です");
+
+  assert_eq!(handle.session_count(), 0, "確立に失敗したセッションは保持しません");
+  server.wait_for_live_sessions(0).await;
+  assert_eq!(server.created_session_count(), 1, "サーバーはセッションを 1 つ作っていました");
 }

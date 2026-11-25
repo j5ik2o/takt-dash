@@ -1,15 +1,23 @@
 //! 常駐する takt-mcp HTTP サーバーとの JSON-RPC（MCP）通信。
 //!
 //! 読み取り経路と書き込み経路が、home ごとに常駐する takt-mcp の HTTP サーバーへ
-//! `tools/call` を送ります。子プロセスは起動せず、`initialize` で作った 1 つのセッションを
-//! 使い回します。未知セッション（サーバー再起動などで消えた場合の 404）は、要求が処理されて
+//! `tools/call` を送ります。子プロセスは起動せず、`initialize` で作った 1 つのセッション
+//! （[`HttpSession`]）を使い回し、使い終えたら DELETE で閉じます。takt-mcp はセッションに
+//! 期限を持たないため、要求ごとに作って閉じないと、サーバー側にたまり続けます。
+//! 未知セッション（サーバー再起動などで消えた場合の 404）は、要求が処理されて
 //! いないことが分かるため、セッションを作り直して 1 回だけ再試行します。読み取りでは、
-//! 接続の失敗（I/O エラー）でも同じ再試行をします。書き込みでは、サーバーが書き込みを
-//! 適用した後で接続が切れた場合と区別できないため、I/O エラーでは再試行せず、輸送エラー
-//! として表面化させます。それ以外の失敗も輸送エラーとして表面化させ、空の結果へ
-//! 縮退しません。
+//! 接続の失敗（I/O エラー）のとき、同じセッションで 1 回送り直します。書き込みでは、
+//! サーバーが書き込みを適用した後で接続が切れた場合と区別できないため、I/O エラーでは
+//! 再試行せず、輸送エラーとして表面化させます。それ以外の失敗も輸送エラーとして
+//! 表面化させ、空の結果へ縮退しません。
 
-use std::time::Duration;
+use std::{
+  sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+  },
+  time::Duration,
+};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -23,7 +31,7 @@ use hyper_util::{
   rt::TokioExecutor,
 };
 use serde_json::{json, Value};
-use tokio::time::timeout;
+use tokio::{sync::Mutex as AsyncMutex, time::timeout};
 
 use super::{
   client::{extract_tool_text, CallError, ToolCaller, TransportError},
@@ -31,91 +39,104 @@ use super::{
 };
 use crate::config::HttpMcpServer;
 
-/// 1 台の常駐 HTTP サーバーへ読み取りの `tools/call` を送るハンドル。
+/// セッションを閉じる DELETE を待つ上限。閉じる処理は後始末であり、応答しないサーバーに
+/// 引きずられないよう、道具の呼び出しより短く打ち切ります。
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+type HttpClient = Client<HttpConnector, Full<Bytes>>;
+
+/// 1 台の常駐 HTTP サーバーに作る 1 つのセッション。
 ///
-/// `initialize` で作ったセッション ID を保持し、以降の要求へ `Mcp-Session-Id` として付けます。
-/// 未知セッション（404）は、セッションが消えたとみなして作り直し、同じ要求を 1 回だけ
-/// 再試行します。ハンドルは自分が保持するセッションを高々 1 つに保ちます。
-pub struct HttpReadHandle {
-  server:                   HttpMcpServer,
-  request_timeout:          Duration,
-  session_id:               Option<String>,
-  next_id:                  u64,
-  client:                   Client<HttpConnector, Full<Bytes>>,
-  /// 接続の失敗（I/O エラー）でセッションが消えた場合に再試行するか。読み取りは再試行し、
-  /// 書き込みは再試行しません（適用済みの書き込みを重複送信しないため）。
-  retry_on_io_session_loss: bool,
+/// takt-mcp の HTTP サーバーはセッションに期限を持たず、DELETE を受けるか再起動するまで
+/// 持ち続けます。そのため、セッションは要求ごとに作らず、この値を複製して複数のハンドルで
+/// 共有します。最後の持ち主が消えたとき、または [`HttpSession::close`] で、サーバーへ
+/// DELETE を送ってセッションを閉じます。
+#[derive(Clone)]
+pub struct HttpSession {
+  inner: Arc<SessionInner>,
 }
 
-impl HttpReadHandle {
-  /// 接続先と 1 呼び出しのタイムアウトからハンドルを作る。まだセッションは作りません。
+struct SessionInner {
+  server:       HttpMcpServer,
+  client:       HttpClient,
+  /// サーバーが採番したセッション ID。未確立なら `None`。ガードは `.await` を跨ぎません。
+  session_id:   Mutex<Option<String>>,
+  /// セッションの確立を直列化する鍵。同時に届いた要求がセッションを 1 つずつ作らないよう、
+  /// initialize から ID の保存までの間だけ保持します。
+  establishing: AsyncMutex<()>,
+  next_id:      AtomicU64,
+}
+
+impl HttpSession {
+  /// 接続先からセッションの置き場を作る。まだセッションは作りません。
   ///
-  /// HTTP 接続先だけを受け付けます。stdio の起動方法を渡した場合は、常駐サーバーへ読み取りを
-  /// 向ける前提が崩れているため、パニックではなく MCP の契約違反として扱えるようエラーにします。
-  pub fn new(connection: crate::config::McpConnection, request_timeout: Duration) -> Self {
-    Self::create(connection, request_timeout, true)
-  }
-
-  /// 書き込み用のハンドルを作る。接続の失敗（I/O エラー）では再試行しません。サーバーが
-  /// 書き込みを適用した後で接続が切れた場合と区別できず、再試行すると書き込みを重複して
-  /// 送信するためです。未知セッション（404）の再試行は、要求が処理されていないことが
-  /// 分かるため、書き込みでも行います。
-  pub fn new_for_write(connection: crate::config::McpConnection, request_timeout: Duration) -> Self {
-    Self::create(connection, request_timeout, false)
-  }
-
-  fn create(
-    connection: crate::config::McpConnection,
-    request_timeout: Duration,
-    retry_on_io_session_loss: bool,
-  ) -> Self {
-    let server = match connection {
-      | crate::config::McpConnection::Http(server) => server,
+  /// HTTP 接続先だけを受け付けます。stdio の起動方法を渡した場合は、常駐サーバーへ要求を
+  /// 向ける前提が崩れているため、パニックします。
+  pub fn new(connection: crate::config::McpConnection) -> Self {
+    match connection {
+      | crate::config::McpConnection::Http(server) => Self::for_server(server),
       | crate::config::McpConnection::Stdio(_) => {
-        panic!("HttpReadHandle は HTTP 接続先だけを受け付けます。stdio 接続先が渡されました。")
+        panic!("HttpSession は HTTP 接続先だけを受け付けます。stdio 接続先が渡されました。")
       },
-    };
-    HttpReadHandle {
-      server,
-      request_timeout,
-      session_id: None,
-      next_id: 1,
-      client: Client::builder(TokioExecutor::new()).build(HttpConnector::new()),
-      retry_on_io_session_loss,
     }
   }
 
-  /// このハンドルが現在保持しているセッション数（0 または 1）。
-  pub fn session_count(&self) -> usize {
-    usize::from(self.session_id.is_some())
+  /// HTTP 接続先からセッションの置き場を作る。まだセッションは作りません。
+  pub fn for_server(server: HttpMcpServer) -> Self {
+    // 接続は要求ごとに張り、使い終えた接続を持ち越しません。サーバーが待機中の接続を
+    // 閉じるのと同時に要求を送ると、要求が届いたか分からない接続の失敗になり、書き込みでは
+    // 再試行できないためです。接続先はループバックで、張り直しの費用は小さく済みます。
+    let client = Client::builder(TokioExecutor::new()).pool_max_idle_per_host(0).build(HttpConnector::new());
+    HttpSession {
+      inner: Arc::new(SessionInner {
+        server,
+        client,
+        session_id: Mutex::new(None),
+        establishing: AsyncMutex::new(()),
+        next_id: AtomicU64::new(1),
+      }),
+    }
   }
 
-  /// 接続先の URL。テストから接続状態の観測に使います。
-  pub fn url(&self) -> String {
-    self.server.endpoint.url()
-  }
-
-  fn take_id(&mut self) -> u64 {
-    let id = self.next_id;
-    self.next_id += 1;
-    id
-  }
-
-  /// セッションを確立する。確立済みなら何もしません。
+  /// 保持しているセッションをサーバーへの DELETE で閉じ、応答（または打ち切り）まで待つ。
   ///
-  /// 書き込みの前に呼ぶと、道具を送る前の失敗と、送ったあとの失敗を呼び出し側が区別できます。
-  pub async fn connect(&mut self) -> Result<(), TransportError> {
-    self.ensure_session().await.map(|_| ())
+  /// backend の停止時に使います。閉じたあとに要求が届けば、セッションを作り直します。
+  pub async fn close(&self) {
+    if let Some(closing) = self.inner.take_and_close() {
+      closing.await;
+    }
+  }
+}
+
+impl SessionInner {
+  fn current(&self) -> Option<String> {
+    self.session_id.lock().expect("HTTP セッションのロックが壊れています").clone()
   }
 
-  async fn ensure_session(&mut self) -> Result<String, TransportError> {
-    if let Some(session) = &self.session_id {
-      return Ok(session.clone());
+  /// 保持しているセッションが `lost` のままなら手放す。ほかの要求が先に作り直した
+  /// セッションは捨てません。
+  fn forget(&self, lost: &str) {
+    let mut current = self.session_id.lock().expect("HTTP セッションのロックが壊れています");
+    if current.as_deref() == Some(lost) {
+      *current = None;
     }
-    let id = self.take_id();
+  }
+
+  fn take_id(&self) -> u64 {
+    self.next_id.fetch_add(1, Ordering::Relaxed)
+  }
+
+  /// セッションを確立して保存する。確立済みなら、そのセッションを返します。
+  async fn establish(&self, request_timeout: Duration) -> Result<String, TransportError> {
+    let _establishing = timeout(request_timeout, self.establishing.lock())
+      .await
+      .map_err(|_| TransportError::Timeout(request_timeout.as_secs()))?;
+    if let Some(session) = self.current() {
+      return Ok(session);
+    }
     let initialize = json!({
       "jsonrpc": "2.0",
-      "id": id,
+      "id": self.take_id(),
       "method": "initialize",
       "params": {
         "protocolVersion": PROTOCOL_VERSION,
@@ -123,101 +144,119 @@ impl HttpReadHandle {
         "clientInfo": { "name": "taktdash-backend", "version": env!("CARGO_PKG_VERSION") },
       },
     });
-    let (header, incoming) = self.exchange(initialize, None).await.map_err(ExchangeError::into_transport)?;
+    let (header, incoming) =
+      self.exchange(initialize, None, request_timeout).await.map_err(ExchangeError::into_transport)?;
+    let session = header;
     if let Some(error) = incoming.error {
+      self.close_unsaved(session);
       return Err(TransportError::Rpc { code: error.code, message: error.message });
     }
-    let session = header
+    let session = session
       .ok_or_else(|| TransportError::Protocol("initialize の応答に Mcp-Session-Id ヘッダがありません".to_owned()))?;
     let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-    self.notify(initialized, &session).await?;
-    self.session_id = Some(session.clone());
+    if let Err(error) = self.exchange(initialized, Some(&session), request_timeout).await {
+      // サーバーはセッションを作り終えています。保存しないセッションを残さないよう閉じます。
+      self.close_unsaved(Some(session));
+      return Err(error.into_transport());
+    }
+    *self.session_id.lock().expect("HTTP セッションのロックが壊れています") = Some(session.clone());
     Ok(session)
   }
 
-  /// 1 回の tools/call を送る。未知セッション（404）は、要求が処理されていないことが
-  /// 分かるため、セッションを作り直して 1 回再試行します。接続の失敗（I/O エラー）も
-  /// セッションの消失として再試行しますが、書き込み用のハンドルでは再試行しません
-  /// （`retry_on_io_session_loss`）。サーバー再起動では保持していた接続とセッションが
-  /// 同時に失効するためです。それ以外の失敗は輸送エラーとして表面化させます。
-  async fn tools_call(&mut self, name: &str, arguments: Value) -> Result<Value, TransportError> {
-    let session = self.ensure_session().await?;
-    let id = self.take_id();
-    let request =
-      json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
-    match self.exchange(request.clone(), Some(&session)).await {
-      | Ok((_, incoming)) => self.unwrap_result(name, incoming),
-      | Err(error) if error.session_lost() && (self.retry_on_io_session_loss || error.unknown_session()) => {
-        // セッションが消えた（サーバー再起動など）。セッションを作り直して 1 回だけ再試行します。
-        self.session_id = None;
-        let session = self.ensure_session().await?;
-        let id = self.take_id();
-        let retry = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
-        match self.exchange(retry, Some(&session)).await {
-          | Ok((_, incoming)) => self.unwrap_result(name, incoming),
-          | Err(error) => Err(error.into_transport()),
-        }
+  /// 確立の途中で失敗し、保存しなかったセッションを背後で閉じる。
+  fn close_unsaved(&self, session: Option<String>) {
+    if let Some(closing) = session.and_then(|session| self.closing(&session)) {
+      spawn_close(closing);
+    }
+  }
+
+  /// 保持しているセッションを手放し、閉じる処理を返す。セッションが無ければ `None`。
+  fn take_and_close(&self) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+    let session = self.session_id.lock().expect("HTTP セッションのロックが壊れています").take()?;
+    self.closing(&session)
+  }
+
+  /// `session` へ DELETE を送る処理を作る。失敗は呼び出し側へ返しません。サーバーが
+  /// 止まっていればセッションも消えており、閉じる必要が無いためです。
+  fn closing(&self, session: &str) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+    let request = match self.request("DELETE", Some(session), None) {
+      | Ok(request) => request,
+      | Err(error) => {
+        tracing::debug!(%error, "takt-mcp の HTTP セッションを閉じる要求を作れませんでした。");
+        return None;
       },
-      | Err(error) => Err(error.into_transport()),
-    }
+    };
+    let client = self.client.clone();
+    Some(async move {
+      let sent = timeout(CLOSE_TIMEOUT, async {
+        let response = client.request(request).await.map_err(|error| error.to_string())?;
+        let status = response.status();
+        // 応答本文を読み切り、接続を最後まで使い終えます。
+        let _ = response.into_body().collect().await;
+        Ok::<StatusCode, String>(status)
+      })
+      .await;
+      match sent {
+        | Ok(Ok(status)) if status.is_success() || status == StatusCode::NOT_FOUND => {},
+        | Ok(Ok(status)) => tracing::debug!(%status, "takt-mcp の HTTP セッションを閉じられませんでした。"),
+        | Ok(Err(error)) => tracing::debug!(%error, "takt-mcp の HTTP セッションを閉じる要求が届きませんでした。"),
+        | Err(_) => tracing::debug!("takt-mcp の HTTP セッションを閉じる要求が時間切れになりました。"),
+      }
+    })
   }
 
-  fn unwrap_result(&self, _name: &str, incoming: JsonRpcIncoming) -> Result<Value, TransportError> {
-    if let Some(error) = incoming.error {
-      return Err(TransportError::Rpc { code: error.code, message: error.message });
-    }
-    Ok(incoming.result.unwrap_or(Value::Null))
-  }
-
-  /// 通知（応答本文を持たない）を送る。既知セッションの通知はサーバーが 202 を返します。
-  async fn notify(&self, message: Value, session: &str) -> Result<(), TransportError> {
-    match self.exchange(message, Some(session)).await {
-      | Ok(_) => Ok(()),
-      | Err(error) => Err(error.into_transport()),
-    }
-  }
-
-  async fn exchange(
+  /// 1 つの HTTP 要求を組み立てる。`body` が無い要求（DELETE）は本文を持ちません。
+  fn request(
     &self,
-    message: Value,
+    method: &str,
     session: Option<&str>,
-  ) -> Result<(Option<String>, JsonRpcIncoming), ExchangeError> {
-    let body = serde_json::to_vec(&message)
-      .map_err(|error| ExchangeError::Transport(TransportError::InvalidJson(error.to_string())))?;
-    let uri = hyper::Uri::try_from(self.server.endpoint.url()).map_err(|error| {
-      ExchangeError::Transport(TransportError::Protocol(format!("HTTP 接続先の URL を解釈できませんでした: {error}")))
-    })?;
-    let mut builder = Request::builder().method("POST").uri(uri).header("content-type", "application/json");
-    let authorization = HeaderValue::from_str(&self.server.authorization).map_err(|error| {
-      ExchangeError::Transport(TransportError::Protocol(format!("Authorization ヘッダを作れませんでした: {error}")))
-    })?;
+    body: Option<Vec<u8>>,
+  ) -> Result<Request<Full<Bytes>>, TransportError> {
+    let uri = hyper::Uri::try_from(self.server.endpoint.url())
+      .map_err(|error| TransportError::Protocol(format!("HTTP 接続先の URL を解釈できませんでした: {error}")))?;
+    let mut builder = Request::builder().method(method).uri(uri);
+    if body.is_some() {
+      builder = builder.header("content-type", "application/json");
+    }
+    let authorization = HeaderValue::from_str(&self.server.authorization)
+      .map_err(|error| TransportError::Protocol(format!("Authorization ヘッダを作れませんでした: {error}")))?;
     builder = builder.header("authorization", authorization);
     // MCP の Streamable HTTP では、応答が JSON と SSE のどちらでも返せることを
     // Accept で申告しなければならない。実 takt-mcp は申告が無い要求を 406 で拒否する。
     builder = builder.header("accept", "application/json, text/event-stream");
     if let Some(session) = session {
-      let value = HeaderValue::from_str(session).map_err(|error| {
-        ExchangeError::Transport(TransportError::Protocol(format!("Mcp-Session-Id を作れませんでした: {error}")))
-      })?;
+      let value = HeaderValue::from_str(session)
+        .map_err(|error| TransportError::Protocol(format!("Mcp-Session-Id を作れませんでした: {error}")))?;
       builder = builder.header(HeaderName::from_static("mcp-session-id"), value);
       // 初期化で合意した版（2025-06-18）では、初期化後の要求に MCP-Protocol-Version が
       // 必須です。付けないと、サーバーは要求を旧版として解釈することがあります。
       builder =
         builder.header(HeaderName::from_static("mcp-protocol-version"), HeaderValue::from_static(PROTOCOL_VERSION));
     }
-    let request = builder
-      .body(Full::new(Bytes::from(body)))
-      .map_err(|error| ExchangeError::Transport(TransportError::Protocol(error.to_string())))?;
-    let response = timeout(self.request_timeout, self.client.request(request))
+    builder
+      .body(Full::new(Bytes::from(body.unwrap_or_default())))
+      .map_err(|error| TransportError::Protocol(error.to_string()))
+  }
+
+  async fn exchange(
+    &self,
+    message: Value,
+    session: Option<&str>,
+    request_timeout: Duration,
+  ) -> Result<(Option<String>, JsonRpcIncoming), ExchangeError> {
+    let body = serde_json::to_vec(&message)
+      .map_err(|error| ExchangeError::Transport(TransportError::InvalidJson(error.to_string())))?;
+    let request = self.request("POST", session, Some(body)).map_err(ExchangeError::Transport)?;
+    let response = timeout(request_timeout, self.client.request(request))
       .await
-      .map_err(|_| ExchangeError::Transport(TransportError::Timeout(self.request_timeout.as_secs())))?
+      .map_err(|_| ExchangeError::Transport(TransportError::Timeout(request_timeout.as_secs())))?
       .map_err(|error| ExchangeError::Transport(TransportError::Io(error.to_string())))?;
     let status = response.status();
     let content_type = response.headers().get("content-type").and_then(|value| value.to_str().ok()).map(str::to_owned);
     let session_id = response.headers().get("mcp-session-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
-    let collected = timeout(self.request_timeout, read_body(response.into_body()))
+    let collected = timeout(request_timeout, read_body(response.into_body()))
       .await
-      .map_err(|_| ExchangeError::Transport(TransportError::Timeout(self.request_timeout.as_secs())))??;
+      .map_err(|_| ExchangeError::Transport(TransportError::Timeout(request_timeout.as_secs())))??;
     if !status.is_success() && status != StatusCode::ACCEPTED && status != StatusCode::NO_CONTENT {
       return Err(ExchangeError::Status(status));
     }
@@ -228,6 +267,147 @@ impl HttpReadHandle {
     let incoming = parse_incoming(&collected, content_type.as_deref())?;
     Ok((session_id, incoming))
   }
+}
+
+impl Drop for SessionInner {
+  /// 最後の持ち主が消えたら、保持しているセッションを背後で閉じる。接続先の設定が変わって
+  /// 置き場を作り直したときに、古いセッションをサーバーへ残しません。
+  fn drop(&mut self) {
+    if let Some(closing) = self.take_and_close() {
+      spawn_close(closing);
+    }
+  }
+}
+
+/// セッションを閉じる処理を背後で走らせる。ランタイムの外（停止の途中など）では送りません。
+fn spawn_close(closing: impl std::future::Future<Output = ()> + Send + 'static) {
+  if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+    runtime.spawn(closing);
+  }
+}
+
+/// 1 台の常駐 HTTP サーバーへ `tools/call` を送るハンドル。
+///
+/// [`HttpSession`] のセッション ID を、要求へ `Mcp-Session-Id` として付けます。セッションは
+/// 同じ接続先のハンドルどうしで共有でき、要求は互いを待たずに並行して送ります。
+/// 未知セッション（404）は、セッションが消えたとみなして作り直し、同じ要求を 1 回だけ
+/// 再試行します。
+pub struct HttpReadHandle {
+  session:           HttpSession,
+  request_timeout:   Duration,
+  /// 接続の失敗（I/O エラー）で同じ要求を送り直すか。読み取りは送り直し、書き込みは
+  /// 送り直しません（適用済みの書き込みを重複送信しないため）。
+  retry_on_io_error: bool,
+}
+
+impl HttpReadHandle {
+  /// 接続先と 1 呼び出しのタイムアウトからハンドルを作る。まだセッションは作りません。
+  /// このハンドルだけが使うセッションを持ち、ハンドルが消えるとセッションを閉じます。
+  pub fn new(connection: crate::config::McpConnection, request_timeout: Duration) -> Self {
+    Self::with_session(HttpSession::new(connection), request_timeout)
+  }
+
+  /// 書き込み用のハンドルを作る。接続の失敗（I/O エラー）では再試行しません。サーバーが
+  /// 書き込みを適用した後で接続が切れた場合と区別できず、再試行すると書き込みを重複して
+  /// 送信するためです。未知セッション（404）の再試行は、要求が処理されていないことが
+  /// 分かるため、書き込みでも行います。
+  pub fn new_for_write(connection: crate::config::McpConnection, request_timeout: Duration) -> Self {
+    Self::with_session_for_write(HttpSession::new(connection), request_timeout)
+  }
+
+  /// 共有するセッションを使う読み取り用のハンドルを作る。
+  pub fn with_session(session: HttpSession, request_timeout: Duration) -> Self {
+    HttpReadHandle { session, request_timeout, retry_on_io_error: true }
+  }
+
+  /// 共有するセッションを使う書き込み用のハンドルを作る。再試行の扱いは
+  /// [`Self::new_for_write`] と同じです。
+  pub fn with_session_for_write(session: HttpSession, request_timeout: Duration) -> Self {
+    HttpReadHandle { session, request_timeout, retry_on_io_error: false }
+  }
+
+  /// このハンドルのセッションが確立済みかどうかを数で返す（0 または 1）。
+  pub fn session_count(&self) -> usize {
+    usize::from(self.session.inner.current().is_some())
+  }
+
+  /// 接続先の URL。テストから接続状態の観測に使います。
+  pub fn url(&self) -> String {
+    self.session.inner.server.endpoint.url()
+  }
+
+  /// セッションをサーバーへの DELETE で閉じ、応答（または打ち切り）まで待つ。
+  pub async fn close(&self) {
+    self.session.close().await;
+  }
+
+  /// セッションを確立する。確立済みなら何もしません。
+  ///
+  /// 書き込みの前に呼ぶと、道具を送る前の失敗と、送ったあとの失敗を呼び出し側が区別できます。
+  pub async fn connect(&mut self) -> Result<(), TransportError> {
+    self.ensure_session().await.map(|_| ())
+  }
+
+  /// セッションを得る。確立は別のタスクで最後まで走らせます。呼び出しが途中で打ち切られても、
+  /// サーバーが作り終えたセッションを保存し、次の要求が使えるようにするためです。
+  async fn ensure_session(&self) -> Result<String, TransportError> {
+    if let Some(session) = self.session.inner.current() {
+      return Ok(session);
+    }
+    let inner = self.session.inner.clone();
+    let request_timeout = self.request_timeout;
+    tokio::spawn(async move { inner.establish(request_timeout).await })
+      .await
+      .map_err(|error| TransportError::Io(format!("HTTP セッションの確立が中断されました: {error}")))?
+  }
+
+  /// 1 回の tools/call を送る。
+  ///
+  /// 接続の失敗（I/O エラー）は、読み取りだけ同じセッションで 1 回送り直します。書き込み用の
+  /// ハンドルでは送り直しません（`retry_on_io_error`）。未知セッション（404）は、要求が
+  /// 処理されていないことが分かるため、セッションを作り直して 1 回だけ再試行します。
+  /// サーバーの再起動は、送り直した要求への 404 として分かります。それ以外の失敗は
+  /// 輸送エラーとして表面化させます。
+  async fn tools_call(&mut self, name: &str, arguments: Value) -> Result<Value, TransportError> {
+    let session = self.ensure_session().await?;
+    let mut failure = match self.call_once(name, &arguments, &session).await {
+      | Ok(incoming) => return unwrap_result(incoming),
+      | Err(error) => error,
+    };
+    if failure.io_error() && self.retry_on_io_error {
+      failure = match self.call_once(name, &arguments, &session).await {
+        | Ok(incoming) => return unwrap_result(incoming),
+        | Err(error) => error,
+      };
+    }
+    if !failure.unknown_session() {
+      return Err(failure.into_transport());
+    }
+    // セッションが消えた（サーバー再起動など）。セッションを作り直して 1 回だけ再試行します。
+    self.session.inner.forget(&session);
+    let session = self.ensure_session().await?;
+    match self.call_once(name, &arguments, &session).await {
+      | Ok(incoming) => unwrap_result(incoming),
+      | Err(error) => Err(error.into_transport()),
+    }
+  }
+
+  async fn call_once(&self, name: &str, arguments: &Value, session: &str) -> Result<JsonRpcIncoming, ExchangeError> {
+    let request = json!({
+      "jsonrpc": "2.0",
+      "id": self.session.inner.take_id(),
+      "method": "tools/call",
+      "params": { "name": name, "arguments": arguments },
+    });
+    self.session.inner.exchange(request, Some(session), self.request_timeout).await.map(|(_, incoming)| incoming)
+  }
+}
+
+fn unwrap_result(incoming: JsonRpcIncoming) -> Result<Value, TransportError> {
+  if let Some(error) = incoming.error {
+    return Err(TransportError::Rpc { code: error.code, message: error.message });
+  }
+  Ok(incoming.result.unwrap_or(Value::Null))
 }
 
 /// 応答本文を JSON-RPC メッセージとして読む。
@@ -389,7 +569,7 @@ async fn read_body(body: Incoming) -> Result<Vec<u8>, ExchangeError> {
 impl ToolCaller for HttpReadHandle {
   /// 接続先は 127.0.0.1 の URL だけで決まるため、トークン（authorization）は鍵に入れません。
   fn connection_key(&self) -> String {
-    format!("http:{}", self.server.endpoint.url())
+    format!("http:{}", self.url())
   }
 
   fn call_tool<'a>(
@@ -411,13 +591,9 @@ enum ExchangeError {
 }
 
 impl ExchangeError {
-  /// この失敗が、既存セッションの失効（サーバー再起動での接続断・未知セッション）を表すか。
-  fn session_lost(&self) -> bool {
-    match self {
-      | ExchangeError::Status(status) => *status == StatusCode::NOT_FOUND,
-      | ExchangeError::Transport(TransportError::Io(_)) => true,
-      | ExchangeError::Transport(_) => false,
-    }
+  /// 接続の失敗（I/O エラー）かどうか。要求がサーバーに届いたかは分かりません。
+  fn io_error(&self) -> bool {
+    matches!(self, ExchangeError::Transport(TransportError::Io(_)))
   }
 
   /// 未知セッション（404）かどうか。この応答を受けた要求はサーバーに処理されていない
