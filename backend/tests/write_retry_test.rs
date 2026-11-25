@@ -44,6 +44,7 @@ fn harness_with(state: Value) -> GrpcHarness {
       proposals: vec![RegistrationProposalEntry {
         revision:             RegistrationRevision::try_from(3).expect("テストの revision は有効です"),
         source:               harness.proposal_source("takt-dash"),
+        conversation_id:      default_conversation_id(),
         repository_directory: "/abs/takt-dash".to_owned(),
         summary:              "新しいゴール".to_owned(),
       }],
@@ -356,6 +357,7 @@ async fn a_write_rejected_by_the_pending_list_is_not_recorded_under_its_key() {
       proposals: vec![RegistrationProposalEntry {
         revision:             RegistrationRevision::try_from(3).expect("テストの revision は有効です"),
         source:               harness.proposal_source("takt-dash"),
+        conversation_id:      default_conversation_id(),
         repository_directory: "/abs/takt-dash".to_owned(),
         summary:              "新しいゴール".to_owned(),
       }],

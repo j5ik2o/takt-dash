@@ -19,7 +19,10 @@ use super::{
 };
 use crate::{
   config::StdioMcpServer,
-  domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
+  domain::{
+    ConversationId, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug,
+    TaskName,
+  },
   model::{
     ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
     InquiryEntry, NotificationEntry, ProjectSnapshot, ProposalSource, RegistrationProposalEntry, RunEntry, TaskDetail,
@@ -884,6 +887,10 @@ impl<'a> ToolSetCore<'a> {
             "revision",
             RegistrationRevision::try_from(required_i32(proposal, "revision")?),
           )?,
+          conversation_id:      domain_value(
+            "conversation ID",
+            ConversationId::try_from(required_string(proposal, "conversationId")?.as_str()),
+          )?,
           repository_directory: required_string(proposal, "repositoryDirectory")?,
           summary:              registration_summary_text(proposal.get("summary"))?,
         })
@@ -892,11 +899,20 @@ impl<'a> ToolSetCore<'a> {
   }
 
   /// ゴール登録の承認待ちを承認する。承認した revision と、登録されたゴールの ID を返します。
+  ///
+  /// `conversation_id` は、一覧が返した登録案の持ち主です。takt-mcp は必須の入力として受け取り、
+  /// 持ち主でなければ断ります。
   pub async fn approve_goal_registration(
     &mut self,
     revision: RegistrationRevision,
+    conversation_id: &ConversationId,
   ) -> Result<ApproveGoalRegistrationResult, ToolError> {
-    let value = self.call_json("takt_approve_goal_registration", json!({ "revision": revision.get() })).await?;
+    let value = self
+      .call_json(
+        "takt_approve_goal_registration",
+        json!({ "revision": revision.get(), "conversationId": conversation_id.as_str() }),
+      )
+      .await?;
     let goal = value.get("goal").ok_or_else(|| ToolError::Parse("応答に goal がありません".to_owned()))?;
     let goal_id = domain_value("ゴール ID", GoalId::try_from(required_string(goal, "id")?.as_str()))?;
     let revision = domain_value("revision", RegistrationRevision::try_from(required_i32(&value, "revision")?))?;
@@ -904,11 +920,18 @@ impl<'a> ToolSetCore<'a> {
   }
 
   /// ゴール登録の承認待ちを却下する。却下した revision を返します。
+  /// `conversation_id` の扱いは承認と同じです。
   pub async fn reject_goal_registration(
     &mut self,
     revision: RegistrationRevision,
+    conversation_id: &ConversationId,
   ) -> Result<RegistrationRevision, ToolError> {
-    let value = self.call_json("takt_reject_goal_registration", json!({ "revision": revision.get() })).await?;
+    let value = self
+      .call_json(
+        "takt_reject_goal_registration",
+        json!({ "revision": revision.get(), "conversationId": conversation_id.as_str() }),
+      )
+      .await?;
     domain_value("revision", RegistrationRevision::try_from(required_i32(&value, "revision")?))
   }
 

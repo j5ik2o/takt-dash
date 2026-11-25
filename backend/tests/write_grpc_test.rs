@@ -368,6 +368,7 @@ async fn approve_goal_registration_sends_the_revision() {
   let calls = calls_named(&harness, "takt_approve_goal_registration");
   assert_eq!(calls.len(), 1);
   assert_eq!(calls[0]["revision"], json!(3), "revision は正整数で渡します");
+  assert_eq!(calls[0]["conversationId"], json!(DEFAULT_CONVERSATION), "承認待ちの持ち主を一緒に渡します");
 
   server.stop().await;
 }
@@ -423,6 +424,7 @@ async fn reject_goal_registration_calls_reject_and_not_approve() {
   let reject_calls = calls_named(&harness, "takt_reject_goal_registration");
   assert_eq!(reject_calls.len(), 1);
   assert_eq!(reject_calls[0]["revision"], json!(3));
+  assert_eq!(reject_calls[0]["conversationId"], json!(DEFAULT_CONVERSATION), "承認待ちの持ち主を一緒に渡します");
   assert!(calls_named(&harness, "takt_approve_goal_registration").is_empty(), "却下で承認の道具を呼びません");
 
   server.stop().await;
@@ -1741,6 +1743,7 @@ fn snapshot_with_proposals(harness: &GrpcHarness, project: &str, revisions: &[i3
       .map(|revision| RegistrationProposalEntry {
         revision:             RegistrationRevision::try_from(*revision).expect("テストの revision は有効です"),
         source:               source.clone(),
+        conversation_id:      default_conversation_id(),
         repository_directory: "/abs/takt-dash".to_owned(),
         summary:              "新しいゴール".to_owned(),
       })
@@ -2162,4 +2165,107 @@ async fn goal_registration_approval_passes_for_a_proposal_taken_in_by_the_poller
 
   poller.shutdown().await;
   server.stop().await;
+}
+
+// --- 登録案の持ち主（conversationId）（issue #363） ---
+
+/// 持ち主を明示した承認待ち1件を持つ mock の状態。
+fn state_with_owned_proposal(owner: &str) -> serde_json::Value {
+  json!({
+    "proposals": [
+      { "revision": 3, "conversationId": owner, "repositoryDirectory": "/abs/takt-dash", "summary": "新しいゴール" }
+    ]
+  })
+}
+
+#[tokio::test]
+async fn goal_registration_writes_send_the_owner_read_from_the_pending_list() {
+  // takt-mcp は、承認・却下で登録案の持ち主（conversationId）を必須にする。画面は revision
+  // だけを送るので、backend が定期読み取りで一覧から読んだ持ち主を付けて送る。
+  let owner = "director-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  let (harness, mut poller) = polled_harness(state_with_owned_proposal(owner)).await;
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  client
+    .approve_goal_registration(ApproveGoalRegistrationRequest {
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        3,
+    })
+    .await
+    .expect("一覧の持ち主を付けた承認は通ります");
+  client
+    .reject_goal_registration(RejectGoalRegistrationRequest {
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        3,
+    })
+    .await
+    .expect("一覧の持ち主を付けた却下は通ります");
+
+  for name in ["takt_approve_goal_registration", "takt_reject_goal_registration"] {
+    let calls = calls_named(&harness, name);
+    assert_eq!(calls.len(), 1, "{name} を1回呼びます: {calls:?}");
+    assert_eq!(calls[0]["revision"], json!(3));
+    assert_eq!(calls[0]["conversationId"], json!(owner), "{name} に一覧の持ち主を渡します");
+  }
+
+  poller.shutdown().await;
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn goal_registration_writes_refused_by_takt_as_stale_are_failed_precondition() {
+  // 状態ストアの承認待ちが takt より古いと、backend の照合は通り、takt-mcp が断る。登録案が
+  // 作り直されたとき（stale_summary）と、会話が持ち主でなくなったときの2通りを、一覧との
+  // 食い違いと同じ FAILED_PRECONDITION で返す。
+  let stale = "stale_summary: The displayed proposal has changed";
+  let states = [
+    (
+      "登録案が作り直された",
+      json!({ "toolErrors": {
+      "takt_approve_goal_registration": format!("Goal registration approval failed: {stale}"),
+      "takt_reject_goal_registration": format!("Goal registration rejection failed: {stale}"),
+    } }),
+    ),
+    (
+      "会話が持ち主でない",
+      state_with_owned_proposal("director-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+    ),
+  ];
+  for (case, state) in states {
+    // 状態ストアは、既定の持ち主の revision 3 を持つ。mock の takt はそれと食い違う。
+    let harness = harness_with_pending_proposals(state, &[3]);
+    let server = start_server(&harness).await;
+    let mut client = client(server.address).await;
+
+    let approval = client
+      .approve_goal_registration(ApproveGoalRegistrationRequest {
+        idempotency_key: None,
+        server_id:       "mac-mini".to_owned(),
+        project:         "takt-dash".to_owned(),
+        revision:        3,
+      })
+      .await
+      .expect_err("takt-mcp が断った承認は失敗します");
+    let rejection = client
+      .reject_goal_registration(RejectGoalRegistrationRequest {
+        idempotency_key: None,
+        server_id:       "mac-mini".to_owned(),
+        project:         "takt-dash".to_owned(),
+        revision:        3,
+      })
+      .await
+      .expect_err("takt-mcp が断った却下は失敗します");
+
+    for status in [&approval, &rejection] {
+      assert_eq!(status.code(), Code::FailedPrecondition, "{case}: {}", status.message());
+      assert!(status.message().contains("読み込み直"), "{case}: 画面の読み直しを案内します: {}", status.message());
+    }
+
+    server.stop().await;
+  }
 }

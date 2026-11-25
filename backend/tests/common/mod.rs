@@ -101,6 +101,14 @@ pub fn tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> ReadToolSet<'a> {
   ReadToolSet::new(client, cwd.to_path_buf())
 }
 
+/// mock の takt-mcp が、conversationId を持たない登録案に付ける既定の持ち主。
+pub const DEFAULT_CONVERSATION: &str = "manager-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// mock の takt-mcp の既定の持ち主を、登録案の持ち主の型で返す。
+pub fn default_conversation_id() -> takt_dash_backend::domain::ConversationId {
+  takt_dash_backend::domain::ConversationId::try_from(DEFAULT_CONVERSATION).expect("既定の持ち主は有効です")
+}
+
 /// 書き込み専用の道具のまとまりを作る。書き込みレーンのテストが使う。
 pub fn write_tool_set<'a>(client: &'a mut McpClient, cwd: &Path) -> WriteToolSet<'a> {
   WriteToolSet::new(client, cwd.to_path_buf())

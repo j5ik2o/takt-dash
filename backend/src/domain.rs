@@ -110,6 +110,7 @@ text_value!(ProjectName, "プロジェクト名", "集約対象のプロジェ�
 text_value!(GoalId, "ゴール ID", "ゴールの識別子。");
 text_value!(TaskName, "タスク名", "タスクの名前。");
 text_value!(InquiryId, "inquiry ID", "問い合わせの識別子。");
+text_value!(ConversationId, "conversation ID", "manager の会話の識別子。ゴール登録案の持ち主を表します。");
 
 /// run のディレクトリ名。パスの区切りや親ディレクトリを指す名前は受け付けません。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

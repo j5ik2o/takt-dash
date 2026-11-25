@@ -196,7 +196,7 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
     let error = write_tool_set(&mut client, cwd)
-      .approve_goal_registration(revision(3))
+      .approve_goal_registration(revision(3), &default_conversation_id())
       .await
       .map(|_| ())
       .expect_err("応答がなければタイムアウトします");
@@ -206,7 +206,7 @@ async fn write_tools_time_out_finitely_when_the_server_hangs() {
   {
     let mut client = mock_client(mock_config_with_timeout(cwd, &state, Some("hang"), 1));
     let error = write_tool_set(&mut client, cwd)
-      .reject_goal_registration(revision(3))
+      .reject_goal_registration(revision(3), &default_conversation_id())
       .await
       .map(|_| ())
       .expect_err("応答がなければタイムアウトします");
@@ -694,14 +694,14 @@ async fn write_tool_responses_missing_required_fields_are_parse_errors() {
   }
 
   let error = expect_parse("takt_approve_goal_registration", async |mut tools| {
-    tools.approve_goal_registration(revision(3)).await.map(|_| ())
+    tools.approve_goal_registration(revision(3), &default_conversation_id()).await.map(|_| ())
   })
   .await
   .expect_err("応答に revision が無ければ解析エラーです");
   assert!(matches!(error, ToolError::Parse(_)), "takt_approve_goal_registration の欠落は解析エラー: {error}");
 
   let error = expect_parse("takt_reject_goal_registration", async |mut tools| {
-    tools.reject_goal_registration(revision(3)).await.map(|_| ())
+    tools.reject_goal_registration(revision(3), &default_conversation_id()).await.map(|_| ())
   })
   .await
   .expect_err("応答に revision が無ければ解析エラーです");
@@ -821,7 +821,7 @@ async fn summary_object_is_composed_into_the_body() {
           "proposals": [
             {
               "revision": 6,
-              "repositoryDirectory": "/abs/takt-dash",
+              "conversationId": DEFAULT_CONVERSATION, "repositoryDirectory": "/abs/takt-dash",
               "summary": {
                 "objective": "稼働状況を一覧できるようにする",
                 "outOfScope": ["認証", "ネイティブ版"],
@@ -875,7 +875,7 @@ async fn summary_object_with_missing_and_unknown_keys_is_accepted() {
           "proposals": [
             {
               "revision": 7,
-              "repositoryDirectory": "/abs/takt-dash",
+              "conversationId": DEFAULT_CONVERSATION, "repositoryDirectory": "/abs/takt-dash",
               "summary": { "objective": "目標だけを持つ提案", "unexpectedKey": "無視する値" }
             }
           ]
@@ -906,7 +906,7 @@ async fn summary_string_is_kept_as_the_body() {
       "responses": {
         "takt_list_goal_registration_proposals": {
           "proposals": [
-            { "revision": 8, "repositoryDirectory": "/abs/takt-dash", "summary": "文字列の要約" }
+            { "revision": 8, "conversationId": DEFAULT_CONVERSATION, "repositoryDirectory": "/abs/takt-dash", "summary": "文字列の要約" }
           ]
         }
       }
@@ -934,7 +934,7 @@ async fn malformed_proposal_summary_keeps_previous_proposals() {
       "responses": {
         "takt_list_goal_registration_proposals": {
           "proposals": [
-            { "revision": 6, "repositoryDirectory": "/abs/takt-dash", "summary": 123 }
+            { "revision": 6, "conversationId": DEFAULT_CONVERSATION, "repositoryDirectory": "/abs/takt-dash", "summary": 123 }
           ]
         }
       }
@@ -948,6 +948,7 @@ async fn malformed_proposal_summary_keeps_previous_proposals() {
         connection: "stdio:previous".to_owned(),
         cwd:        std::path::PathBuf::from("/abs/takt-dash"),
       },
+      conversation_id:      default_conversation_id(),
       repository_directory: "/abs/takt-dash".to_owned(),
       summary:              "前回の提案".to_owned(),
     }],
@@ -973,7 +974,7 @@ async fn malformed_proposal_summary_without_previous_yields_empty_proposals() {
       "responses": {
         "takt_list_goal_registration_proposals": {
           "proposals": [
-            { "revision": 6, "repositoryDirectory": "/abs/takt-dash", "summary": 123 }
+            { "revision": 6, "conversationId": DEFAULT_CONVERSATION, "repositoryDirectory": "/abs/takt-dash", "summary": 123 }
           ]
         }
       }
@@ -1004,6 +1005,7 @@ async fn proposal_transport_error_is_not_degraded_to_the_previous_proposals() {
         connection: "stdio:previous".to_owned(),
         cwd:        std::path::PathBuf::from("/abs/takt-dash"),
       },
+      conversation_id:      default_conversation_id(),
       repository_directory: "/abs/takt-dash".to_owned(),
       summary:              "前回の提案".to_owned(),
     }],
@@ -1324,7 +1326,7 @@ async fn revision_at_the_i32_maximum_is_accepted() {
       "responses": {
         "takt_list_goal_registration_proposals": {
           "proposals": [
-            { "revision": 2147483647, "repositoryDirectory": "/abs/takt-dash", "summary": "上限の提案" }
+            { "revision": 2147483647, "conversationId": DEFAULT_CONVERSATION, "repositoryDirectory": "/abs/takt-dash", "summary": "上限の提案" }
           ]
         }
       }
@@ -1352,7 +1354,7 @@ async fn revision_beyond_i32_is_a_parse_error() {
       "responses": {
         "takt_list_goal_registration_proposals": {
           "proposals": [
-            { "revision": 4294967297i64, "repositoryDirectory": "/abs/takt-dash", "summary": "範囲外の提案" }
+            { "revision": 4294967297i64, "conversationId": DEFAULT_CONVERSATION, "repositoryDirectory": "/abs/takt-dash", "summary": "範囲外の提案" }
           ]
         }
       }
@@ -1718,4 +1720,53 @@ async fn read_snapshot_degrades_a_timed_out_run_to_the_previous_value() {
   assert_eq!(snapshot.runs.len(), 1, "期限切れの run は前回値で残ります");
   assert_eq!(snapshot.runs[0].last_log_at, Some(time("2026-11-13T10:05:00Z")), "期限切れの run は前回値です");
   client.shutdown().await;
+}
+
+#[tokio::test]
+async fn proposal_owner_is_read_from_the_list() {
+  // takt-mcp は、登録案の持ち主（conversationId）を一覧で返し、承認・却下で必須にする
+  // （issue #363）。一覧の値をそのまま写す。
+  let owner = "director-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "proposals": [
+        { "revision": 3, "conversationId": owner, "repositoryDirectory": "/abs/takt-dash", "summary": "新しいゴール" }
+      ]
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let proposals =
+    tool_set(&mut client, directory.path()).list_goal_registration_proposals().await.expect("提案を取得できます");
+  client.shutdown().await;
+
+  assert_eq!(proposals.len(), 1);
+  assert_eq!(proposals[0].conversation_id.as_str(), owner, "一覧の conversationId を写します");
+}
+
+#[tokio::test]
+async fn proposal_without_an_owner_is_a_parse_error() {
+  // 持ち主の無い登録案は承認・却下できないため、一覧に載せずに解析エラーとして扱う。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    json!({
+      "responses": {
+        "takt_list_goal_registration_proposals": {
+          "proposals": [{ "revision": 3, "repositoryDirectory": "/abs/takt-dash", "summary": "新しいゴール" }]
+        }
+      }
+    }),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let error = tool_set(&mut client, directory.path())
+    .list_goal_registration_proposals()
+    .await
+    .expect_err("conversationId が無ければ解析エラーです");
+  client.shutdown().await;
+
+  assert!(matches!(error, ToolError::Parse(_)), "conversationId の欠落は解析エラー: {error}");
 }
