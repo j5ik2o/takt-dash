@@ -45,12 +45,10 @@ fn is_omitted(value: &Value, key: &str) -> bool {
     .any(|path| path == field || path.strip_prefix(field.as_str()).is_some_and(|rest| rest.starts_with(['.', '['])))
 }
 
-/// 項目の値に含まれる文字列のバイト数の合計。
-fn text_bytes(value: &Value) -> usize {
-  match value {
-    | Value::String(text) => text.len(),
-    | Value::Array(items) => items.iter().map(text_bytes).sum(),
-    | _ => 0,
+/// 上限で読み切れなかった文字列は、先頭だけの候補のうち長いほうを残す。
+fn keep_longer(text: &mut String, candidate: String) {
+  if candidate.len() > text.len() {
+    *text = candidate;
   }
 }
 
@@ -143,18 +141,24 @@ impl ToolSetCore<'_> {
         continue;
       }
       let path = format!("summary.{key}");
+      let first = object.get(key);
       let (full, read_all) = if LIST_FIELDS.contains(&key) {
-        let (items, read_all) = self.read_proposal_list(&mut reader, &path).await?;
+        let first_items = first
+          .and_then(Value::as_array)
+          .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+          .unwrap_or_default();
+        let (items, read_all) = self.read_proposal_list(&mut reader, &path, first_items).await?;
         (Value::Array(items.into_iter().map(Value::String).collect()), read_all)
       } else {
-        let (text, read_all) = self.read_proposal_text(&mut reader, &path).await?;
+        let first_text = first.and_then(Value::as_str).unwrap_or_default().to_owned();
+        let (mut text, read_all) = self.read_proposal_text(&mut reader, &path).await?;
+        if !read_all {
+          keep_longer(&mut text, first_text);
+        }
         (Value::String(text), read_all)
       };
       complete &= read_all;
-      // 上限で読み切れなかった項目は、最初の応答の先頭より短くなるなら最初の応答を残します。
-      if read_all || text_bytes(&full) > object.get(key).map_or(0, text_bytes) {
-        object.insert(key.to_owned(), full);
-      }
+      object.insert(key.to_owned(), full);
     }
     let mut summary = compose_registration_summary(&object);
     if !complete {
@@ -187,14 +191,15 @@ impl ToolSetCore<'_> {
   }
 
   /// 登録案の一覧の項目を offset で読み、全要素を返す。takt-mcp が要素を先頭だけにしたページは、
-  /// そのページの要素を 1 つずつ textOffset で読み直します。読み取りの上限に達したら、読めた分と
-  /// false を返します。
+  /// そのページの要素を 1 つずつ textOffset で読み直します。`entries` は最初の応答の要素で、
+  /// 読めた要素だけを同じ番号で置き換えます。読み取りの上限に達したら、まだ読んでいない要素は
+  /// 最初の応答のまま残し、false を返します。
   async fn read_proposal_list(
     &mut self,
     reader: &mut FieldReader<'_>,
     path: &str,
+    mut entries: Vec<String>,
   ) -> Result<(Vec<String>, bool), ToolError> {
-    let mut entries = Vec::new();
     let mut offset = 0;
     while let Some(page) = self.read_proposal_field(reader, json!({ "path": path, "offset": offset })).await? {
       let items = page
@@ -203,23 +208,36 @@ impl ToolSetCore<'_> {
         .ok_or_else(|| ToolError::Parse(format!("{path} の items が配列ではありません")))?;
       let shortened = page.get("omissions").and_then(Value::as_array).is_some_and(|omissions| !omissions.is_empty());
       for (index, item) in items.iter().enumerate() {
-        let text = item.as_str().ok_or_else(|| ToolError::Parse(format!("{path} の要素が文字列ではありません")))?;
-        if !shortened {
-          entries.push(text.to_owned());
-          continue;
+        let at = offset as usize + index;
+        let mut text =
+          item.as_str().ok_or_else(|| ToolError::Parse(format!("{path} の要素が文字列ではありません")))?.to_owned();
+        let mut read_all = true;
+        if shortened {
+          let (full, read) = self.read_proposal_text(reader, &format!("{path}.{at}")).await?;
+          read_all = read;
+          if read_all {
+            text = full;
+          } else {
+            keep_longer(&mut text, full);
+            if let Some(first) = entries.get(at) {
+              keep_longer(&mut text, first.clone());
+            }
+          }
         }
-        let (full, read_all) = self.read_proposal_text(reader, &format!("{path}.{}", offset + index as u64)).await?;
+        match entries.get_mut(at) {
+          | Some(entry) => *entry = text,
+          | None => entries.push(text),
+        }
         if !read_all {
-          // 読めた分を残し、残りの要素は先頭だけのまま並べます。
-          entries.push(if full.len() > text.len() { full } else { text.to_owned() });
-          entries.extend(items[index + 1..].iter().filter_map(Value::as_str).map(str::to_owned));
           return Ok((entries, false));
         }
-        entries.push(full);
       }
       match page.get("nextOffset").and_then(Value::as_u64) {
         | Some(next) => offset = next,
-        | None => return Ok((entries, true)),
+        | None => {
+          entries.truncate(offset as usize + items.len());
+          return Ok((entries, true));
+        },
       }
     }
     Ok((entries, false))

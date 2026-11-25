@@ -2414,11 +2414,7 @@ async fn long_proposal_fields_are_read_in_full() {
   assert!(bodies[0].contains(&criterion), "受入条件の長い項目も全文で出します");
   assert!(bodies[0].contains("短い条件"), "省略されていない項目も残ります");
   assert!(bodies[0].contains("開始ブランチ: main"), "省略されていない項目も残ります");
-  assert!(
-    !bodies[0].contains("先頭だけを表示"),
-    "全文を読めたら省略の注記を付けません: {}",
-    &bodies[0][bodies[0].len() - 200..]
-  );
+  assert!(!bodies[0].contains("先頭だけを表示"), "全文を読めたら省略の注記を付けません");
   let read_count = reads().len();
   assert!(read_count > 1, "続きを path で読みます");
   assert!(
@@ -2454,6 +2450,25 @@ async fn long_proposal_field_reads_stop_at_the_limit() {
   assert!(bodies[0].contains("先頭だけを表示"), "省略があることを書きます");
   assert!(bodies[0].contains("短い条件"), "上限のあとの項目も、最初の応答の分は残ります");
   assert!(bodies[0].contains(&"え".repeat(1_000)), "上限のあとの長い項目も、最初の応答の先頭は残ります");
+
+  poller.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_list_read_cut_by_the_limit_keeps_the_later_items() {
+  // 受入条件の長い要素を読み直す途中で上限に達しても、最初の応答にあった後ろの要素は残す。
+  // 長い要素は 64 KiB を超えるため、takt-mcp は一覧のページにその要素だけを載せる。
+  let objective = format!("{}目的の終わり", "あ".repeat(40_000));
+  let criterion = format!("{}条件の終わり", "い".repeat(80_000));
+  let (harness, mut poller) =
+    polled_harness(state_with_long_proposal(&objective, &["短い条件", &criterion, "監査ログを残す"])).await;
+
+  let bodies = stored_proposal_bodies(&harness);
+  assert!(bodies[0].contains(&objective), "目的は上限までに読み切ります");
+  assert!(!bodies[0].contains("条件の終わり"), "長い条件は上限で読み切れません");
+  assert!(bodies[0].contains("短い条件"), "長い条件の前の要素は残ります");
+  assert!(bodies[0].contains("監査ログを残す"), "長い条件の後ろの要素も、最初の応答の分は残ります");
+  assert!(bodies[0].contains("先頭だけを表示"), "省略があることを書きます");
 
   poller.shutdown().await;
 }

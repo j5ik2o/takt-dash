@@ -415,10 +415,10 @@ const readProposal = (args, pending) => {
   if (Array.isArray(value)) {
     const offset = Number(args.offset ?? 0);
     const limit = Number(args.limit ?? PAGE_SIZE);
-    const page = value.slice(offset, offset + limit);
-    const nextOffset = offset + page.length < value.length ? offset + page.length : null;
-    return asText(
-      boundedResponse({
+    const listPage = (count) => {
+      const page = value.slice(offset, offset + count);
+      const nextOffset = offset + page.length < value.length ? offset + page.length : null;
+      return {
         ...extra,
         items: page,
         collection: "items",
@@ -428,8 +428,12 @@ const readProposal = (args, pending) => {
         offset,
         nextOffset,
         truncated: nextOffset !== null,
-      }),
-    );
+      };
+    };
+    // 実 takt-mcp の pageFitCount と同じく、64 KiB に収まる件数まで減らす（最低 1 件）。
+    let count = Math.min(limit, Math.max(0, value.length - offset));
+    while (count > 1 && Buffer.byteLength(JSON.stringify(listPage(count))) > RESPONSE_MAX_BYTES) count--;
+    return asText(boundedResponse(listPage(count)));
   }
   if (typeof value === "string") {
     return asText({ ...extra, ...textPage(value, args.textOffset, args.maxBytes) });
