@@ -11,11 +11,12 @@ import {
   buildMergeAction,
   decisionActionState,
   isPositiveInteger,
+  pullRequestLinkUrl,
 } from "./decision-action-builders";
 import { decisionKey, decisionLabel } from "./decision-labels";
 
 export type { DecisionAction, DecisionActionState };
-export { decisionActionState, buildAnswerAction, buildGoalRegistrationAction, buildMergeAction };
+export { decisionActionState, buildAnswerAction, buildGoalRegistrationAction, buildMergeAction, pullRequestLinkUrl };
 export { decisionKey, decisionLabel };
 export { decisionTargetDescription, decisionTargetLabel, decisionTypeLabel } from "./decision-labels";
 
@@ -70,8 +71,8 @@ export function openDecisionDialog(
   switch (dialog) {
     case "merge": {
       const prNumber = decision.pullRequest?.number;
-      const url = decision.pullRequest?.url;
-      if (!isPositiveInteger(prNumber) || typeof url !== "string" || url === "") {
+      const url = pullRequestLinkUrl(decision.pullRequest?.url);
+      if (!isPositiveInteger(prNumber) || url === undefined) {
         return undefined;
       }
       return { kind: "merge", prNumber, url };

@@ -12,6 +12,7 @@ import {
   decisionTargetDescription,
   decisionTargetLabel,
   openDecisionDialogState,
+  pullRequestLinkUrl,
   resolveDecisionIntent,
   toDecisionResult,
   type DecisionAction,
@@ -36,10 +37,18 @@ type DecisionActionsViewProps = {
   onAction: (intent: DecisionActionsIntent) => void;
 };
 
+// 確認ダイアログに出す対象の1行。href があれば、値を新しいタブで開くリンクにする。
+type ConfirmDialogDetail = {
+  label: string;
+  value: string;
+  href?: string;
+};
+
 type ConfirmDialogProps = {
   dialog: DialogKind;
   title: string;
   message: string;
+  details: ConfirmDialogDetail[];
   confirmLabel: string;
   busy: boolean;
   onAction: (intent: DecisionActionsIntent) => void;
@@ -145,7 +154,7 @@ export function decideDecisionTransition(input: {
   }
 }
 
-function ConfirmDialog({ dialog, title, message, confirmLabel, busy, onAction }: ConfirmDialogProps): ReactElement {
+function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, onAction }: ConfirmDialogProps): ReactElement {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -178,7 +187,7 @@ function ConfirmDialog({ dialog, title, message, confirmLabel, busy, onAction }:
       return;
     }
     const tabbableElements = (): HTMLElement[] =>
-      Array.from(dialogElement.querySelectorAll<HTMLElement>("button:not([disabled])"));
+      Array.from(dialogElement.querySelectorAll<HTMLElement>("a[href], button:not([disabled])"));
     const inside = (target: EventTarget | null): boolean =>
       target instanceof Node && dialogElement.contains(target);
 
@@ -256,6 +265,24 @@ function ConfirmDialog({ dialog, title, message, confirmLabel, busy, onAction }:
         <h2 id={headingId} ref={headingRef} tabIndex={-1}>
           {title}
         </h2>
+        {details.length === 0 ? null : (
+          <dl className="dialog-target">
+            {details.map((detail) => (
+              <div key={detail.label}>
+                <dt>{detail.label}</dt>
+                <dd>
+                  {detail.href === undefined ? (
+                    detail.value
+                  ) : (
+                    <a href={detail.href} target="_blank" rel="noopener noreferrer">
+                      {detail.value}
+                    </a>
+                  )}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
         <p className="dialog-message">{message}</p>
         <div className="actions">
           <button type="button" disabled={busy} onClick={cancel}>
@@ -274,6 +301,7 @@ type ConfirmDialogConfig = {
   dialog: DialogKind;
   title: string;
   message: string;
+  details: ConfirmDialogDetail[];
   confirmLabel: string;
 };
 
@@ -292,7 +320,9 @@ const DIALOG_TRIGGERS = {
 
 type DialogGroup = "merge" | "goal-registration";
 
-// 種別ごとの見出し・本文・確定ボタン名。本文は対象の値（PR 番号・revision）を差し込む。
+// 種別ごとの見出し・対象・本文・確定ボタン名。本文は対象の値（PR 番号・revision）を差し込む。
+// マージは、別のプロジェクトのプルリクエストと取り違えないよう、プロジェクトと、
+// プルリクエストを新しいタブで開くリンクを対象として出す（issue #304）。
 // 確認ダイアログを開いた時点の値を dialogTarget に保っている場合、開いた後に SSE で
 // 一覧が更新されても、確認する対象は開いた時点の値を表示する。
 function buildConfirmDialogs(
@@ -303,10 +333,16 @@ function buildConfirmDialogs(
   if (group === "merge") {
     const prNumber =
       dialogTarget?.kind === "merge" ? dialogTarget.prNumber : decision.pullRequest?.number;
+    const prUrl =
+      dialogTarget?.kind === "merge" ? dialogTarget.url : pullRequestLinkUrl(decision.pullRequest?.url);
     return [
       {
         dialog: "merge",
         title: "マージの承認",
+        details: [
+          { label: "プロジェクト", value: decision.project },
+          { label: "プルリクエスト", value: `#${prNumber ?? ""} を開く（新しいタブ）`, href: prUrl },
+        ],
         message: `プルリクエスト #${prNumber ?? ""} のマージを承認します。よろしいですか。`,
         confirmLabel: "マージする",
       },
@@ -320,12 +356,14 @@ function buildConfirmDialogs(
     {
       dialog: "approve-registration",
       title: "ゴール登録の承認",
+      details: [],
       message: `revision ${revision ?? ""} のゴール登録を承認します。よろしいですか。`,
       confirmLabel: "承認",
     },
     {
       dialog: "reject-registration",
       title: "ゴール登録の却下",
+      details: [],
       message: `revision ${revision ?? ""} のゴール登録を却下します。よろしいですか。`,
       confirmLabel: "却下",
     },
@@ -390,6 +428,7 @@ function DialogActionSection({
           dialog={current.dialog}
           title={current.title}
           message={current.message}
+          details={current.details}
           confirmLabel={current.confirmLabel}
           busy={busy}
           onAction={onAction}
