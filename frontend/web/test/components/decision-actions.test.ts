@@ -881,3 +881,59 @@ test("切断中は開いていたマージの確認でも確定できず、や�
   assert.equal(confirm.hasAttribute("disabled"), true);
   assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes(OFFLINE_NOTE));
 });
+
+// 性質: 判断待ちのすべての種別、送信中・切断・確認ダイアログ・入力のすべての組み合わせで、
+// 送信につながる操作要素は「送信中でも切断中でもない」ときだけ押せ、「やめる」は送信中だけ
+// 押せず、理由の文は切断中で操作のある項目にだけ出る（issue #307）。除外は付けない。
+test("性質: 判断待ちの操作要素は、送信中か切断中なら押せず、やめるは送信中だけ押せない", () => {
+  const dialogsFor = (decision: PendingDecision): DialogKind[] => {
+    if (decision.type === PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE) {
+      return [null, "merge"];
+    }
+    if (decision.type === PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION) {
+      return [null, "approve-registration", "reject-registration"];
+    }
+    return [null];
+  };
+  let checked = 0;
+  for (const decision of decisions) {
+    for (const dialog of dialogsFor(decision)) {
+      for (const busy of [false, true]) {
+        for (const disconnected of [false, true]) {
+          for (const text of ["", "回答"]) {
+            const html = renderToStaticMarkup(
+              createElement(DecisionActionsView, {
+                decision,
+                text,
+                dialog,
+                busy,
+                disconnected,
+                dialogTarget: dialog === null ? null : openDecisionDialog(decision, dialog),
+                onTextChange: noop,
+                onAction: noop,
+              }),
+            );
+            const document = new JSDOM(html).window.document;
+            const controls = Array.from(document.querySelectorAll("button, input"));
+            const where = JSON.stringify({ type: decision.type, dialog, busy, disconnected, text });
+            for (const control of controls) {
+              const disabled = control.hasAttribute("disabled");
+              if (control.textContent === "やめる") {
+                assert.equal(disabled, busy, `やめる ${where}`);
+              } else if (control.getAttribute("type") === "submit") {
+                assert.equal(disabled, busy || disconnected || text === "", `回答する ${where}`);
+              } else {
+                assert.equal(disabled, busy || disconnected, `${control.outerHTML} ${where}`);
+              }
+              checked += 1;
+            }
+            const notes = html.split("再接続するまで操作できません。").length - 1;
+            const expected = controls.length === 0 || !disconnected ? 0 : dialog === null ? 1 : 2;
+            assert.equal(notes, expected, `理由の文 ${where}`);
+          }
+        }
+      }
+    }
+  }
+  assert.ok(checked > 0);
+});
