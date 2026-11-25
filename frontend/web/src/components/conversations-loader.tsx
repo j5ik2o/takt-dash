@@ -1,17 +1,24 @@
 import type { ReactElement } from "react";
 import { BackendUnavailableError, backendUnavailableSituation, getBackendClient } from "../grpc/client";
 import { GetConversationResponse } from "../proto/taktdash";
-import { restoreConversationResponse, type ConversationPage } from "../state/conversation";
-import { BackendUnavailableNotice } from "./backend-unavailable-notice";
+import { restoreConversationResponse } from "../state/conversation";
+import { recallConversation, rememberConversation, type LastConversation } from "../state/last-loaded";
+import { BackendUnavailableNotice, BackendUnavailableOver, backendUnavailableMessage } from "./backend-unavailable-notice";
 import { LiveConversation } from "./live-conversation";
 
-type LoadResult =
-  | { kind: "ok"; projects: string[]; page: ConversationPage }
-  | { kind: "unavailable"; error: BackendUnavailableError }
-  | { kind: "empty" };
+type LoadResult = LastConversation | { kind: "unavailable"; error: BackendUnavailableError };
+
+const EmptyConversations = (): ReactElement => (
+  <main className="page">
+    <p className="note">プロジェクトがありません。</p>
+  </main>
+);
 
 // プロジェクト一覧から先頭の会話を取得し、1秒更新の表示へ渡す。
-// backend に接続できないときはページを落とさず、接続できない旨を表示する。
+// backend に接続できないときはページを落とさず、接続できない旨を表示する。前に読めた
+// 会話があれば、見出しと内容を残して会話の取得失敗の通知を出す（issue #309）。通知は
+// 1 秒更新の表示が持ち、次の取得が成功したら消す。
+
 export async function ConversationsLoader(): Promise<ReactElement> {
   const client = getBackendClient();
   let result: LoadResult;
@@ -33,15 +40,33 @@ export async function ConversationsLoader(): Promise<ReactElement> {
   }
 
   switch (result.kind) {
-    case "unavailable":
-      return <BackendUnavailableNotice situation={backendUnavailableSituation(result.error)} />;
-    case "empty":
+    case "unavailable": {
+      const situation = backendUnavailableSituation(result.error);
+      const last = recallConversation();
+      if (last === undefined) {
+        return <BackendUnavailableNotice situation={situation} />;
+      }
+      if (last.kind === "empty") {
+        return (
+          <BackendUnavailableOver situation={situation}>
+            <EmptyConversations />
+          </BackendUnavailableOver>
+        );
+      }
       return (
-        <main className="page">
-          <p className="note">プロジェクトがありません。</p>
-        </main>
+        <LiveConversation
+          projects={last.projects}
+          initialProject={last.projects[0]!}
+          initialPage={last.page}
+          initialError={backendUnavailableMessage(situation)}
+        />
       );
+    }
+    case "empty":
+      rememberConversation(result);
+      return <EmptyConversations />;
     case "ok":
+      rememberConversation(result);
       return (
         <LiveConversation projects={result.projects} initialProject={result.projects[0]!} initialPage={result.page} />
       );
