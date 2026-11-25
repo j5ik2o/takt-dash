@@ -187,6 +187,46 @@ const runTaskResponse = (state, args) => {
 };
 
 
+// 実 takt-mcp は、登録案の一覧に持ち主の会話（conversationId）を付け、承認・却下で必須にする
+// （takt-custom features/mcp/schemas.js の goalRegistrationOwnerSchema）。状態が
+// conversationId を持たない提案には、この既定の持ち主を付ける。
+const DEFAULT_CONVERSATION_ID = `manager-${"a".repeat(64)}`;
+const CONVERSATION_ID_PATTERN = /^(manager|director)-[a-f0-9]{64}$/;
+
+const withOwner = (proposals) =>
+  proposals.map((proposal) => ({ conversationId: DEFAULT_CONVERSATION_ID, ...proposal }));
+
+// 承認・却下の conversationId を、実 takt-mcp と同じ順に確かめる。形の誤りは入力の検証、
+// 持ち主の食い違いは道具エラー。問題が無ければ undefined を返す。
+const registrationOwnerError = (name, args, pending) => {
+  const invalid = (detail) => ({
+    content: [
+      { type: "text", text: `MCP error -32602: Input validation error: Invalid arguments for tool ${name}: ${detail} at conversationId` },
+    ],
+    isError: true,
+  });
+  if (typeof args.conversationId !== "string") {
+    return invalid("Invalid input: expected string, received undefined");
+  }
+  if (!CONVERSATION_ID_PATTERN.test(args.conversationId)) {
+    return invalid("Invalid string: must match pattern /^(manager|director)-[a-f0-9]{64}$/");
+  }
+  const owner = pending[0]?.conversationId ?? DEFAULT_CONVERSATION_ID;
+  if (args.conversationId !== owner) {
+    const label = name === "takt_approve_goal_registration" ? "approval" : "rejection";
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Goal registration ${label} failed: The conversationId ${args.conversationId} does not own the pending registration proposal of ${args.cwd}`,
+        },
+      ],
+      isError: true,
+    };
+  }
+  return undefined;
+};
+
 // tools/call に応答する。mock_mcp_server.mjs と同じく、状態ファイルの内容を読み取り道具の応答にする。
 const handleToolCall = (name, args) => {
   const state = loadState();
@@ -194,6 +234,10 @@ const handleToolCall = (name, args) => {
   const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? args.workflow ?? ""}`;
   if (isError.has(name) || isError.has(scopedKey)) {
     return { content: [{ type: "text", text: `${name} は失敗しました。` }], isError: true };
+  }
+  // 道具エラーの文言の指定。実 takt-mcp が返す文言（stale_summary など）を再現する。
+  if (state.toolErrors !== undefined && Object.prototype.hasOwnProperty.call(state.toolErrors, name)) {
+    return { content: [{ type: "text", text: state.toolErrors[name] }], isError: true };
   }
   switch (name) {
     case "takt_list_goals":
@@ -277,14 +321,20 @@ const handleToolCall = (name, args) => {
       });
     }
     case "takt_list_goal_registration_proposals":
-      return asText({ proposals: state.proposals ?? [] });
+      return asText({ proposals: withOwner(state.proposals ?? []) });
     // 書き込み系。応答の形は stdio 版モック（mock_mcp_server.mjs）と同じにします。
     case "takt_answer_goal_question":
       return asText({ goalId: args.goalId, questionId: args.questionId, answer: args.answer });
     case "takt_approve_goal_registration":
-      return asText({ revision: args.revision, goal: { id: `approved-${args.revision}` } });
+      return (
+        registrationOwnerError(name, args, withOwner(state.proposals ?? [])) ??
+        asText({ revision: args.revision, goal: { id: `approved-${args.revision}` } })
+      );
     case "takt_reject_goal_registration":
-      return asText({ revision: args.revision, notice: "却下しました" });
+      return (
+        registrationOwnerError(name, args, withOwner(state.proposals ?? [])) ??
+        asText({ revision: args.revision, notice: "却下しました" })
+      );
     case "takt_merge_goal_pr":
       return asText({
         taskName: "merge",
