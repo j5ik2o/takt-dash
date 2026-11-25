@@ -13,6 +13,18 @@ mod protocol;
 mod registry;
 pub mod tools;
 
+/// 設定の接続先を区別する鍵。[`ToolCaller::connection_key`] と同じ値です。
+///
+/// 読み取り結果がどの接続先から読まれたかを、設定から解決した接続先と比べるために使います。
+pub fn connection_key(connection: &crate::config::McpConnection) -> String {
+  match connection {
+    | crate::config::McpConnection::Stdio(server) => {
+      client::stdio_connection_key(&server.command, &server.args, &server.env)
+    },
+    | crate::config::McpConnection::Http(server) => http::http_connection_key(server),
+  }
+}
+
 pub use client::{CallError, McpClient, McpClientConfig, ToolCallError, ToolCaller, TransportError};
 pub use http::HttpReadHandle;
 pub use metrics::{ToolCallMetrics, ToolCallOutcome, ToolCallStat};

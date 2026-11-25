@@ -578,10 +578,15 @@ enum OperationAnswerReport {
 // DEADLINE_EXCEEDED を返す。状態を確かめたあとのやり直しには新しい鍵を使う。
 
 // 問い合わせへの回答を要求する。
+//
+// 回答は、判断待ちの一覧（GetPendingDecisions、WatchState）にある問い合わせにだけ送る。一覧に無い
+// inquiry_id は NOT_FOUND で断る。goal_id を指定したときは、一覧の判断待ちが持つゴールと照合し、
+// 食い違えば takt へ送らずに FAILED_PRECONDITION で断る。断られたら、一覧を取得し直してから
+// やり直す。
 message AnswerInquiryRequest {
   string server_id = 1;                              // サーバー
   string project = 2;                                // プロジェクト
-  optional string goal_id = 3;                       // ゴール ID（明示指定するか判断待ちの一覧から引き当てる。ゴールに属さない問い合わせには回答できない）
+  optional string goal_id = 3;                       // ゴール ID（省略すると判断待ちの一覧から引き当てる。指定するなら一覧のゴールと同じ値。ゴールに属さない問い合わせには回答できない）
   string inquiry_id = 4;                             // 問い合わせの識別子（判断待ちの inquiry_id）
   optional string text = 5;                          // 自由記述または選択肢の回答（質問への回答で使う）
   optional OperationAnswerReport report = 6;         // 作業の依頼への回答（operation_request で使う）
@@ -610,6 +615,10 @@ message ApproveGoalMergeResponse {
 }
 
 // ゴール登録の承認を要求する。
+//
+// revision は、判断待ちの一覧（GetPendingDecisions、WatchState、ListGoalRegistrationProposals）に
+// ある承認待ちと照合する。一覧に無い revision と、接続先の設定が変わる前に読んだ一覧の revision は、
+// takt へ送らずに FAILED_PRECONDITION で断る。断られたら、一覧を取得し直してからやり直す。
 message ApproveGoalRegistrationRequest {
   string server_id = 1;  // サーバー
   string project = 2;    // プロジェクト
@@ -623,7 +632,7 @@ message ApproveGoalRegistrationResponse {
   string goal_id = 2;    // 登録されたゴールの ID
 }
 
-// ゴール登録の却下を要求する。
+// ゴール登録の却下を要求する。revision の照合は ApproveGoalRegistrationRequest と同じ。
 message RejectGoalRegistrationRequest {
   string server_id = 1;  // サーバー
   string project = 2;    // プロジェクト

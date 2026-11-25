@@ -48,7 +48,7 @@ module pendingCheck_test {
       .then(after::decideRegistration)
       .then(all {
         assert(after::appliedRevisions == Set({ revision: 1, current: 1 })),
-        assert(after::taktRevision == 0),
+        assert(not(after::taktPending)),
         after::poll,
       })
 
@@ -91,5 +91,24 @@ module pendingCheck_test {
         assert(unguarded::appliedRevisions == Set({ revision: 1, current: 2 })),
         assert(not(unguarded::appliedRevisionIsCurrent)),
         unguarded::poll,
+      })
+
+  // 修正案。承認のあとに新しい登録案ができても、番号は使い回されない。承認済みの revision を
+  // 表示したままの画面からの承認は、新しい登録案に適用されない。
+  run approvedRevisionIsNotReusedTest =
+    after::init
+      .then(after::taktRevise)
+      .then(after::poll)
+      .then(after::render)
+      .then(after::decideRegistration)
+      .then(after::taktRevise)
+      .then(after::poll)
+      .then(after::decideRegistration)
+      .then(all {
+        assert(after::taktRevision == 2),
+        assert(after::taktPending),
+        assert(after::appliedRevisions == Set({ revision: 1, current: 1 })),
+        assert(after::rejectedByBackend == 1),
+        after::poll,
       })
 }

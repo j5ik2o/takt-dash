@@ -256,6 +256,18 @@ impl GrpcHarness {
     &self.config_path
   }
 
+  /// いまの設定で、指定したプロジェクトの登録案の一覧を読む接続先。状態ストアへ承認待ちを
+  /// 直接置くテストが、定期読み取りが付けるのと同じ値を付けるために使います。
+  pub fn proposal_source(&self, name: &str) -> takt_dash_backend::model::ProposalSource {
+    let config = takt_dash_backend::config::load_config(&self.config_path).expect("設定を読めます");
+    let project = config.projects.iter().find(|project| project.name == name).expect("プロジェクトが設定にあります");
+    let connection = config.servers.get(project.server.as_str()).expect("サーバーが設定にあります").connection();
+    takt_dash_backend::model::ProposalSource {
+      connection: takt_dash_backend::mcp::connection_key(&connection),
+      cwd:        project.cwd.clone(),
+    }
+  }
+
   /// manager の記録と opencode の DB を置く、テスト用のホーム。
   pub fn home(&self) -> &Path {
     &self.home

@@ -944,6 +944,10 @@ async fn malformed_proposal_summary_keeps_previous_proposals() {
   let prev = takt_dash_backend::model::ProjectSnapshot {
     proposals: vec![takt_dash_backend::model::RegistrationProposalEntry {
       revision:             revision(5),
+      source:               takt_dash_backend::model::ProposalSource {
+        connection: "stdio:previous".to_owned(),
+        cwd:        std::path::PathBuf::from("/abs/takt-dash"),
+      },
       repository_directory: "/abs/takt-dash".to_owned(),
       summary:              "前回の提案".to_owned(),
     }],
@@ -996,6 +1000,10 @@ async fn proposal_transport_error_is_not_degraded_to_the_previous_proposals() {
   let prev = takt_dash_backend::model::ProjectSnapshot {
     proposals: vec![takt_dash_backend::model::RegistrationProposalEntry {
       revision:             revision(5),
+      source:               takt_dash_backend::model::ProposalSource {
+        connection: "stdio:previous".to_owned(),
+        cwd:        std::path::PathBuf::from("/abs/takt-dash"),
+      },
       repository_directory: "/abs/takt-dash".to_owned(),
       summary:              "前回の提案".to_owned(),
     }],

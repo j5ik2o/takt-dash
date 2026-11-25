@@ -30,8 +30,12 @@ module pendingCheck {
   // 要求が goal_id を持たないこと。
   pure val NO_GOAL: Goal = ""
 
-  // 承認待ちの revision。0 は承認待ちが無いこと。
+  // takt が最後に振った revision。作り直しのたびに増え、承認・却下のあとも戻らない。
+  // 同じ番号が別の登録案に振られることはない（1つの cwd の中では）。
   var taktRevision: int
+  // takt に承認待ちがあるか。あるなら、その revision は taktRevision。
+  var taktPending: bool
+  // 状態ストアと画面が持つ承認待ちの revision。0 は承認待ちが無いこと。
   var storeRevision: int
   var screenRevision: int
   var sentRevisions: Set[SentRevision]
@@ -43,6 +47,7 @@ module pendingCheck {
 
   action init = all {
     taktRevision' = 0,
+    taktPending' = false,
     storeRevision' = 0,
     screenRevision' = 0,
     sentRevisions' = Set(),
@@ -56,6 +61,7 @@ module pendingCheck {
   action taktRevise = all {
     taktRevision < MAX_REVISION,
     taktRevision' = taktRevision + 1,
+    taktPending' = true,
     storeRevision' = storeRevision,
     screenRevision' = screenRevision,
     sentRevisions' = sentRevisions,
@@ -68,7 +74,8 @@ module pendingCheck {
   // backend の定期読み取りが、takt の値を状態ストアへ写す。
   action poll = all {
     taktRevision' = taktRevision,
-    storeRevision' = taktRevision,
+    taktPending' = taktPending,
+    storeRevision' = if (taktPending) taktRevision else 0,
     screenRevision' = screenRevision,
     sentRevisions' = sentRevisions,
     appliedRevisions' = appliedRevisions,
@@ -80,6 +87,7 @@ module pendingCheck {
   // 画面が、状態ストアの値を表示し直す。
   action render = all {
     taktRevision' = taktRevision,
+    taktPending' = taktPending,
     storeRevision' = storeRevision,
     screenRevision' = storeRevision,
     sentRevisions' = sentRevisions,
@@ -92,7 +100,8 @@ module pendingCheck {
   // 利用者が、画面に出ている登録案を承認（または却下）する。
   action decideRegistration = {
     val accepted = if (CHECK) screenRevision == storeRevision else true
-    val applies = accepted and (if (TAKT_GUARD) screenRevision == taktRevision else true)
+    // 承認待ちが無ければ、takt-mcp の照合の有無によらず、適用する相手が無い。
+    val applies = accepted and taktPending and (if (TAKT_GUARD) screenRevision == taktRevision else true)
     all {
       screenRevision > 0,
       sentRevisions' = if (accepted) sentRevisions.union(Set({ revision: screenRevision, listed: storeRevision }))
@@ -102,7 +111,8 @@ module pendingCheck {
         else appliedRevisions,
       rejectedByBackend' = if (accepted) rejectedByBackend else rejectedByBackend + 1,
       // 適用された登録案は、承認待ちでなくなる。状態ストアと画面は、次の読み取りまで知らない。
-      taktRevision' = if (applies) 0 else taktRevision,
+      taktRevision' = taktRevision,
+      taktPending' = if (applies) false else taktPending,
       storeRevision' = storeRevision,
       screenRevision' = screenRevision,
       questionListed' = questionListed,
@@ -121,6 +131,7 @@ module pendingCheck {
       // 判断待ちのゴールへ届いた回答で、問い合わせは回答済みになる。
       questionListed' = if (accepted and target == OWNER) false else questionListed,
       taktRevision' = taktRevision,
+      taktPending' = taktPending,
       storeRevision' = storeRevision,
       screenRevision' = screenRevision,
       sentRevisions' = sentRevisions,

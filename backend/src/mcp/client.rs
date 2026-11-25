@@ -84,13 +84,18 @@ pub trait ToolCaller: Send {
   }
 }
 
+/// stdio 接続先を区別する鍵。環境変数はトークンを含みうるため、値を鍵に入れず、ハッシュだけを
+/// 入れます。
+pub(super) fn stdio_connection_key(command: &str, args: &[String], env: &BTreeMap<String, String>) -> String {
+  use std::hash::{Hash, Hasher};
+  let mut hasher = std::collections::hash_map::DefaultHasher::new();
+  env.hash(&mut hasher);
+  format!("stdio:{command:?}:{args:?}:env-{:016x}", hasher.finish())
+}
+
 impl ToolCaller for McpClient {
-  /// 環境変数はトークンを含みうるため、値を鍵に入れず、ハッシュだけを入れます。
   fn connection_key(&self) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut env = std::collections::hash_map::DefaultHasher::new();
-    self.config.env.hash(&mut env);
-    format!("stdio:{:?}:{:?}:env-{:016x}", self.config.command, self.config.args, env.finish())
+    stdio_connection_key(&self.config.command, &self.config.args, &self.config.env)
   }
 
   fn call_tool<'a>(

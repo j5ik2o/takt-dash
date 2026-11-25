@@ -22,8 +22,8 @@ use crate::{
   domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName},
   model::{
     ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
-    InquiryEntry, NotificationEntry, ProjectSnapshot, RegistrationProposalEntry, RunEntry, TaskDetail, TaskEntry,
-    TaskStatus, TerminalReads,
+    InquiryEntry, NotificationEntry, ProjectSnapshot, ProposalSource, RegistrationProposalEntry, RunEntry, TaskDetail,
+    TaskEntry, TaskStatus, TerminalReads,
   },
   run_progress::{read_run, retain_runs, RunLogHandle, RunReadFailure},
 };
@@ -874,10 +874,12 @@ impl<'a> ToolSetCore<'a> {
     let proposals = value.get("proposals").and_then(Value::as_array).ok_or_else(|| {
       ToolError::Parse("takt_list_goal_registration_proposals の応答に proposals の配列がありません".to_owned())
     })?;
+    let source = ProposalSource { connection: self.client.connection_key(), cwd: self.cwd.clone() };
     proposals
       .iter()
       .map(|proposal| {
         Ok(RegistrationProposalEntry {
+          source:               source.clone(),
           revision:             domain_value(
             "revision",
             RegistrationRevision::try_from(required_i32(proposal, "revision")?),

@@ -24,7 +24,9 @@
 ## モデルの範囲
 
 - 登場するのは takt、backend の状態ストア、画面です。状態ストアは定期読み取り（`poll`）で takt の値を写し、画面は描画（`render`）で状態ストアの値を写します。どちらも遅れます。
-- 登録案の revision は 1 から 3 まで、1 プロジェクト分です。0 は承認待ちが無いことを表します。承認と却下は区別しません。
+- 登録案の revision は 1 から 3 まで、1 プロジェクト分です。takt は作り直しのたびに番号を増やし、承認・却下のあとも戻しません（takt-custom の `conversationService.ts` の `nextRevision`）。モデルも同じで、同じ番号が別の登録案に振られることはありません。承認待ちの有無は `taktPending` で持ちます。状態ストアと画面の 0 は、承認待ちが無いことを表します。承認と却下は区別しません。
+- 接続先の切替は含めていません。revision は会話（cwd）ごとに振られるため、設定で cwd や接続先を切り替えると、切替前の一覧の番号が、切替後の接続先の別の登録案の番号と重なりえます。実装は、登録案を読んだ接続先を一覧に持たせ、書き込み先と同じ接続先から読んだ一覧とだけ照合します（`backend/tests/write_grpc_test.rs` の `goal_registration_writes_reject_a_list_read_before_the_connection_changed`）。
+- 照合と送信は 1 つの遷移（`decideRegistration`）です。実装は、書き込みゲートを取ってから照合し、定期読み取りは同じゲートを保持して一覧を反映するので、照合から送信までのあいだに一覧は変わりません（同じテストファイルの `goal_registration_approval_checks_the_list_after_taking_the_write_gate`）。
 - 問い合わせは 1 件で、ゴール `g1` に属します。要求の goal_id は、無し、`g1`、`g2` のどれかです。
 - 冪等キーと台帳（issue #305、`../decision-write-retry/`）、書き込みゲート、複数のプロジェクト、マージの承認（issue #112）は含めていません。
 
@@ -77,9 +79,9 @@ quint run pendingCheck.qnt --main=fixed \
 
 | 条件 | 到達した trace |
 | --- | --- |
-| `freshRegistrationApplied` | 30160 / 50000（60.32%） |
-| `correctAnswerSent` | 48548 / 50000（97.10%） |
-| `staleWriteRejected` | 49419 / 50000（98.84%） |
+| `freshRegistrationApplied` | 30215 / 50000（60.43%） |
+| `correctAnswerSent` | 48823 / 50000（97.65%） |
+| `staleWriteRejected` | 49602 / 50000（99.20%） |
 
 ### 修正案の限界：takt-mcp が照合しなければ反例あり
 
@@ -98,4 +100,4 @@ backend の照合は、状態ストアより古い画面からの書き込みを
 quint test pendingCheck_test.qnt --main=pendingCheck_test
 ```
 
-6 件すべて成功。`staleRevisionIsSentBeforeFixTest` と `answerToAnotherGoalIsSentBeforeFixTest` は、修正前の遷移で食い違う書き込みが takt へ送られることを固定します。
+7 件すべて成功。`staleRevisionIsSentBeforeFixTest` と `answerToAnotherGoalIsSentBeforeFixTest` は、修正前の遷移で食い違う書き込みが takt へ送られることを固定します。`approvedRevisionIsNotReusedTest` は、承認済みの revision を表示したままの画面からの承認が、あとからできた登録案に適用されないことを固定します。

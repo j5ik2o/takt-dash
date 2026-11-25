@@ -1284,13 +1284,20 @@ export interface GetConversationResponse {
 export interface WatchStateRequest {
 }
 
-/** 問い合わせへの回答を要求する。 */
+/**
+ * 問い合わせへの回答を要求する。
+ *
+ * 回答は、判断待ちの一覧（GetPendingDecisions、WatchState）にある問い合わせにだけ送る。一覧に無い
+ * inquiry_id は NOT_FOUND で断る。goal_id を指定したときは、一覧の判断待ちが持つゴールと照合し、
+ * 食い違えば takt へ送らずに FAILED_PRECONDITION で断る。断られたら、一覧を取得し直してから
+ * やり直す。
+ */
 export interface AnswerInquiryRequest {
   /** サーバー */
   serverId: string;
   /** プロジェクト */
   project: string;
-  /** ゴール ID（明示指定するか判断待ちの一覧から引き当てる。ゴールに属さない問い合わせには回答できない） */
+  /** ゴール ID（省略すると判断待ちの一覧から引き当てる。指定するなら一覧のゴールと同じ値。ゴールに属さない問い合わせには回答できない） */
   goalId?:
     | string
     | undefined;
@@ -1338,7 +1345,13 @@ export interface ApproveGoalMergeResponse {
   workflow: string;
 }
 
-/** ゴール登録の承認を要求する。 */
+/**
+ * ゴール登録の承認を要求する。
+ *
+ * revision は、判断待ちの一覧（GetPendingDecisions、WatchState、ListGoalRegistrationProposals）に
+ * ある承認待ちと照合する。一覧に無い revision と、接続先の設定が変わる前に読んだ一覧の revision は、
+ * takt へ送らずに FAILED_PRECONDITION で断る。断られたら、一覧を取得し直してからやり直す。
+ */
 export interface ApproveGoalRegistrationRequest {
   /** サーバー */
   serverId: string;
@@ -1358,7 +1371,7 @@ export interface ApproveGoalRegistrationResponse {
   goalId: string;
 }
 
-/** ゴール登録の却下を要求する。 */
+/** ゴール登録の却下を要求する。revision の照合は ApproveGoalRegistrationRequest と同じ。 */
 export interface RejectGoalRegistrationRequest {
   /** サーバー */
   serverId: string;

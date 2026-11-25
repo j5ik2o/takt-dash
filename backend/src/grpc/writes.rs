@@ -12,7 +12,10 @@ use tonic::Status;
 use super::{answer_payload, lanes::WriteLane, write_failure, write_ledger::WriteFailure, TaktDashServiceImpl};
 use crate::{
   domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ServerId},
+  mcp::connection_key,
   model,
+  model::ProposalSource,
+  store::StateStore,
   takt_dash::v1::{
     AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest, ApproveGoalMergeResponse,
     ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse, RejectGoalRegistrationRequest,
@@ -164,9 +167,11 @@ impl TaktDashServiceImpl {
     &self,
     request: ApproveGoalRegistrationRequest,
   ) -> Result<impl Future<Output = Result<ApproveGoalRegistrationResponse, WriteFailure>> + Send + 'static, Status> {
-    let (revision, lane) = self.pending_registration_target(request.revision, &request.server_id, &request.project)?;
+    let target = self.registration_target(request.revision, &request.server_id, &request.project)?;
     Ok(async move {
+      let RegistrationTarget { revision, ref lane, .. } = target;
       let _write_gate = lane.gate().await;
+      target.check_pending()?;
       let mut source = lane.connected_source().await?;
       let result = source.approve_goal_registration(&lane.resolved.cwd, revision).await.map_err(write_failure)?;
       lane.record_write();
@@ -183,9 +188,11 @@ impl TaktDashServiceImpl {
     &self,
     request: RejectGoalRegistrationRequest,
   ) -> Result<impl Future<Output = Result<RejectGoalRegistrationResponse, WriteFailure>> + Send + 'static, Status> {
-    let (revision, lane) = self.pending_registration_target(request.revision, &request.server_id, &request.project)?;
+    let target = self.registration_target(request.revision, &request.server_id, &request.project)?;
     Ok(async move {
+      let RegistrationTarget { revision, ref lane, .. } = target;
       let _write_gate = lane.gate().await;
+      target.check_pending()?;
       let mut source = lane.connected_source().await?;
       let rejected = source.reject_goal_registration(&lane.resolved.cwd, revision).await.map_err(write_failure)?;
       lane.record_write();
@@ -193,18 +200,11 @@ impl TaktDashServiceImpl {
     })
   }
 
-  /// ゴール登録の承認・却下の対象を検証し、承認待ちの一覧と照合して、書き込み先を解決する。
+  /// ゴール登録の承認・却下の対象を検証し、書き込み先を解決する。
   ///
-  /// revision は、状態ストアが持つ対象プロジェクトの承認待ちと照合します。一覧に無い revision
-  /// （作り直される前の登録案、決着済みの登録案、まだ読めていないプロジェクト）は、takt へ
-  /// 送らずに断ります（issue #319）。状態ストアが takt より古いときの最終の判定は takt-mcp が
-  /// 行います。
-  fn pending_registration_target(
-    &self,
-    revision: i32,
-    server_id: &str,
-    project: &str,
-  ) -> Result<(RegistrationRevision, WriteLane), Status> {
+  /// 承認待ちの一覧との照合（[`RegistrationTarget::check_pending`]）は、書き込みゲートを
+  /// 取ってから行います。
+  fn registration_target(&self, revision: i32, server_id: &str, project: &str) -> Result<RegistrationTarget, Status> {
     if revision <= 0 {
       return Err(Status::invalid_argument("revision は正の整数で指定してください。"));
     }
@@ -220,14 +220,54 @@ impl TaktDashServiceImpl {
       .map_err(|error| Status::invalid_argument(format!("server_id が不正です: {error}")))?;
     let project = ProjectName::try_from(project)
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
-    let target = self.resolve_write_target(&server_id, &project)?;
-    let pending = self.store.registration_proposals(&server_id, &project);
-    if !pending.iter().any(|proposal| proposal.revision == revision) {
-      return Err(Status::failed_precondition(format!(
-        "ゴール登録案 revision {} は、いまの承認待ちにありません。画面を読み込み直してから、もう一度操作してください。",
-        revision.get()
-      )));
+    let lane = self.write_lane(self.resolve_write_target(&server_id, &project)?);
+    Ok(RegistrationTarget { revision, server_id, project, lane, store: self.store.clone() })
+  }
+}
+
+/// ゴール登録の承認・却下の、検証済みの対象。
+struct RegistrationTarget {
+  revision:  RegistrationRevision,
+  server_id: ServerId,
+  project:   ProjectName,
+  lane:      WriteLane,
+  store:     std::sync::Arc<StateStore>,
+}
+
+impl RegistrationTarget {
+  /// revision を、状態ストアが持つ対象プロジェクトの承認待ちと照合する（issue #319）。
+  ///
+  /// 書き込みゲートを保持したまま呼びます。定期読み取りは同じゲートを保持して一覧を反映する
+  /// ため、照合から送信までのあいだに一覧は変わりません。
+  ///
+  /// 照合に使うのは、書き込み先と同じ接続先・同じ cwd から読んだ承認待ちだけです。設定で
+  /// 接続先や cwd を切り替えた直後は、状態ストアに切替前の一覧が残ります。revision は cwd ごとの
+  /// 小さな整数なので、切替前の一覧の revision を切替後の接続先へ送ると、同じ番号の別の登録案に
+  /// 当たりえます。
+  ///
+  /// 一覧に無い revision（作り直される前の登録案、決着済みの登録案、まだ読めていない
+  /// プロジェクト）は、takt へ送らずに断ります。状態ストアが takt より古いときの最終の判定は
+  /// takt-mcp が行います。
+  fn check_pending(&self) -> Result<(), Status> {
+    let resolved = &self.lane.resolved;
+    let source = ProposalSource { connection: connection_key(&resolved.connection), cwd: resolved.cwd.clone() };
+    let listed: Vec<_> = self
+      .store
+      .registration_proposals(&self.server_id, &self.project)
+      .into_iter()
+      .filter(|proposal| proposal.revision == self.revision)
+      .collect();
+    if listed.iter().any(|proposal| proposal.source == source) {
+      return Ok(());
     }
-    Ok((revision, self.write_lane(target)))
+    let reason = if listed.is_empty() {
+      "いまの承認待ちにありません"
+    } else {
+      "接続先の設定が変わる前に読んだものです"
+    };
+    Err(Status::failed_precondition(format!(
+      "ゴール登録案 revision {} は、{reason}。画面を読み込み直してから、もう一度操作してください。",
+      self.revision.get()
+    )))
   }
 }
