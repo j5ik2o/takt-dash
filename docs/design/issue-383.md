@@ -19,7 +19,7 @@
 - backend の `WatchState` は接続直後に全件を 1 回送り、その後は状態が変わらなくても **15 秒ごと**（`WATCH_RESEND_INTERVAL`、`backend/src/grpc/mod.rs:77,742`）に `assemble_state_for` を実行して再送します。
 - 実際の受信間隔の上限は **「15 秒 ＋ 状態の組み立て・送信時間」** です。
 - 見張り時間は **40 秒（`40_000` ms）** とします。
-  - 計算根拠：15 秒の再送間隔に対して **25 秒の余裕** があり、**状態の組み立てやネットワーク遅延が最大 25 秒遅れても誤検知しません**（再送 1 回分が抜けて次の再送が 10 秒遅れても 40 秒未満なら切断しません）。
+  - 計算根拠：15 秒の再送間隔に対して **25 秒の余裕** があり、**状態の組み立てやネットワーク遅延が最大 25 秒遅れても誤検知しません**。
   - 一方で、本当に半開きで無音になった場合は最後の受信から 40 秒で切断を検知でき、長時間切断の文面しきい値（`BACKEND_UNREACHABLE_LONG_THRESHOLD_MS = 60_000` ms）より早く開き直しに入れます。
 - **タブを裏に回したときの間引き・凍結からの復帰**：
   - ブラウザはバックグラウンドタブの `setTimeout` を間引くことがあります（例：数秒〜最大 1 分単位）。裏にいる間は見張りタイマーの発火が遅れることがありますが、その間は利用者が画面のボタンを押すことはありません。
@@ -127,19 +127,20 @@
 
 `specs/quint/state-stream-watchdog/` に Quint の仕様とテストを置いています。
 
-- `specs/quint/state-stream-watchdog/stateStreamWatchdog.qnt`：単調時計（`monoNow`）と壁時計（`wallNow`）の 2 本の時計を持つ状態機械、`deliverMessage(id)`・`deliverError(id)` の一本化、実状態のみで記述した 9 つの安全不変条件（`safety`）、7 つの到達条件（`witnessWatchdogRecover` を含む）
-- `specs/quint/state-stream-watchdog/stateStreamWatchdog_test.qnt`：16 件の筋書きテスト
+- `specs/quint/state-stream-watchdog/stateStreamWatchdog.qnt`：単調時計（`monoNow`）と壁時計（`wallNow`）の 2 本の時計を持つ状態機械、`deliverMessage(id)`・`deliverError(id)` の一本化、実状態のみで記述した 9 つの安全不変条件（`safety`）、8 つの到達条件（見張りタイマーで切って戻る `witnessWatchdogTimerRecover` と、復帰時確認で切って戻る `witnessWakeCheckRecover` を含む）。不変条件 4 は、切断のたびに残す原因（`lastDisconnectCause`）と切った時点の壁時計の経過（`lastDisconnectGap`）で書く
+- `specs/quint/state-stream-watchdog/stateStreamWatchdog_test.qnt`：17 件の筋書きテスト
 - `specs/quint/state-stream-watchdog/README.md`：モデルの範囲・前提・変異の反例・実行結果
 
 検査結果（quint 0.32.0）：
 
 - `quint typecheck`：`stateStreamWatchdog.qnt`・`stateStreamWatchdog_test.qnt` ともにエラーなし。
-- `quint test stateStreamWatchdog_test.qnt --main=stateStreamWatchdog_test`：16 件すべて成功（1020ms）。
+- `quint test stateStreamWatchdog_test.qnt --main=stateStreamWatchdog_test`：17 件すべて成功（992ms）。
 - `quint run --main=current --invariant=silentConnectionMustDisconnect --max-steps=25 --max-samples=10000 --seed=0x383`：4 手で違反（修正前の半開き未検知を再現）。
 - `quint run --main=watchdogOnly --invariant=safety --max-steps=25 --max-samples=10000 --seed=0x383`：8 手で違反（古い接続の遅延受信で `disconnected` が `false` に戻り `connectedImpliesValidActiveConn` 等を破る反例）。
 - `quint run --main=noWakeRearm --invariant=silentConnectionMustDisconnect --max-steps=25 --max-samples=10000 --seed=0x383`：6 手で違反（部分スリープ後に残り時間で張り直さないと期限超過する反例）。
-- `quint run --main=fixed --invariant=safety --max-steps=40 --max-samples=20000 --seed=0x383`：20,000 サンプルすべて反例なし、全 7 つの witness（`witnessWatchdogRecover` を含む）が到達。
-- `quint run --main=fixedOpenSession --invariant=safety --max-steps=60 --max-samples=20000 --seed=0x383`：20,000 サンプルすべて反例なし、`witnessWatchdogDisconnect` 662 件（3.31%）、`witnessWatchdogRecover` 3,019 件（15.10%）。詳細は `specs/quint/state-stream-watchdog/README.md`。
+- `quint run --main=earlyWakeCutoff --invariant=safety --max-steps=25 --max-samples=10000 --seed=0x383`：4 手で違反（`checkStale` が 25 秒で切断し、`lastDisconnectGap = 5 < 8` で不変条件 4 を破る反例）。
+- `quint run --main=fixed --invariant=safety --max-steps=40 --max-samples=20000 --seed=0x383`：20,000 サンプルすべて反例なし、8 つの witness すべてが到達（`witnessWatchdogTimerRecover` 2 件、`witnessWakeCheckRecover` 276 件）。
+- `quint run --main=fixedOpenSession --invariant=safety --max-steps=60 --max-samples=20000 --seed=0x383`：20,000 サンプルすべて反例なし、`witnessWatchdogDisconnect` 662 件（3.31%）、`witnessWatchdogTimerRecover` 36 件（0.18%）、`witnessWakeCheckRecover` 2,985 件（14.92%）。見張りタイマーで切って戻る経路は薄いため、筋書きテストでも決まった手順で通す。詳細は `specs/quint/state-stream-watchdog/README.md`。
 
 ## 壊しうる入力の一覧
 
@@ -179,3 +180,11 @@
 | 6 | 低 | 別件 | 見捨てられた接続のサーバー側負荷は [j5ik2o/takt-dash#385](https://github.com/j5ik2o/takt-dash/issues/385) に切り出し、本設計の「範囲の外」と「影響」にリンクを追記。 |
 | 7 | 低 | 直す | 既存単体テストの `open` ヘルパの既定を偽の見張りスケジューラにして本物の 40 秒タイマーを残さない方針を明記。e2e は Playwright の `page.clock` で時間を進める方針を明記。 |
 | 8 | 低 | 直す | Quint の witness に「見張りで切断 → 開き直し → 受信で戻る」の一続き（`witnessWatchdogRecover`）を追加し、見張り経路を厚く通る `fixedOpenSession` の実行結果を `README.md` に追加。 |
+
+## 再レビュー（2 回目）を受けて変えた点
+
+| # | 重要度 | 扱い | 変更内容 |
+| --- | --- | --- | --- |
+| 1 | 中 | 直す | 見張りタイマーでも `checkStale` でも、切るたびに原因（`lastDisconnectCause`）と切った時点の壁時計の経過（`lastDisconnectGap`）を状態に残し、不変条件 4 を「原因が見張りか復帰確認なら `lastDisconnectGap >= STALE_TIMEOUT`」と書き直した。`checkStale` が 10 秒で切る変異 `earlyWakeCutoff` で `safety` が破れることを `README.md` に記録。 |
+| 2 | 低 | 直す | witness を `witnessWatchdogTimerRecover` と `witnessWakeCheckRecover` に分け、`README.md` の書き方を実行結果の数に合わせた。 |
+| 3 | 低 | 直す | §1 の括弧書きを消した。`README.md` の前提に、壁時計が前へ飛ぶ場合は `wakeFromSleep` でしか表していないことを足した。 |

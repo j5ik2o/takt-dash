@@ -1,11 +1,12 @@
 // -*- mode: Bluespec; -*-
 // issue #383 の筋書きを、修正前（current）・見張りのみ（watchdogOnly）・
-// スリープ張り直し無し（noWakeRearm）・修正案（fixed）でたどる。
+// スリープ張り直し無し（noWakeRearm）・早期復帰切断変異（earlyWakeCutoff）・修正案（fixed）でたどる。
 module stateStreamWatchdog_test {
-  import stateStreamWatchdog(WATCHDOG = false, STALE_GUARD = false, REARM_ON_WAKE = false, ALLOW_CLOSE = true) as before from "./stateStreamWatchdog"
-  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = false, REARM_ON_WAKE = true, ALLOW_CLOSE = true) as watchdogOnly from "./stateStreamWatchdog"
-  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = true, REARM_ON_WAKE = false, ALLOW_CLOSE = true) as noWakeRearm from "./stateStreamWatchdog"
-  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = true, REARM_ON_WAKE = true, ALLOW_CLOSE = true) as after from "./stateStreamWatchdog"
+  import stateStreamWatchdog(WATCHDOG = false, STALE_GUARD = false, REARM_ON_WAKE = false, WAKE_CUTOFF = 8, ALLOW_CLOSE = true) as before from "./stateStreamWatchdog"
+  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = false, REARM_ON_WAKE = true, WAKE_CUTOFF = 8, ALLOW_CLOSE = true) as watchdogOnly from "./stateStreamWatchdog"
+  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = true, REARM_ON_WAKE = false, WAKE_CUTOFF = 8, ALLOW_CLOSE = true) as noWakeRearm from "./stateStreamWatchdog"
+  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = true, REARM_ON_WAKE = true, WAKE_CUTOFF = 2, ALLOW_CLOSE = true) as earlyWakeCutoff from "./stateStreamWatchdog"
+  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = true, REARM_ON_WAKE = true, WAKE_CUTOFF = 8, ALLOW_CLOSE = true) as after from "./stateStreamWatchdog"
 
   // 定数の前提: 見張り時間は backend 再送間隔（15 秒 = 3 目盛り）の 2 倍より長い。
   run timeoutExceedsTwiceResendIntervalTest = all {
@@ -20,20 +21,22 @@ module stateStreamWatchdog_test {
       .then(9.reps(_ => before::tick))
       .expect(not(before::disconnected) and before::activeConn == 0 and not(before::silentConnectionMustDisconnect))
 
-  // 修正案: 半開きになって見張り時間に達したら切断になり、再接続して新しい受信で復帰する。
+  // 修正案: 半開きになって見張りタイマーで切断し、再接続して新しい受信で復帰する。
   run halfOpenDisconnectsAndRecoversTest =
     after::init
       .then(after::goHalfOpen)
       .then(8.reps(_ => after::tick))
       .then(after::watchdogFire)
       .expect(after::disconnected and after::activeConn == after::NONE and after::pendingReconnects == 1
-        and after::conns.get(0) == after::Closed and after::safety)
+        and after::conns.get(0) == after::Closed and after::lastDisconnectCause == after::WatchdogTimer
+        and after::lastDisconnectGap == 8 and after::safety)
       .then(after::reconnectFire)
       .expect(after::disconnected and after::activeConn == 1 and after::pendingReconnects == 0 and after::safety)
       .then(after::deliverMessage(1))
-      .expect(not(after::disconnected) and after::activeConn == 1 and after::recoveredAfterWatchdog and after::safety)
+      .expect(not(after::disconnected) and after::activeConn == 1
+        and after::recoveredAfterWatchdogTimer and not(after::recoveredAfterWakeCheck) and after::safety)
 
-  // 修正案: 健全な（Open の）接続でも 40 秒黙り続ければ見張りで切断し、
+  // 修正案: 健全な（Open の）接続でも 40 秒黙り続ければ見張りタイマーで切断し、
   // 遅れて届いた旧接続の受信は捨て、次の接続の受信で復帰する。
   run silentHealthyConnDisconnectsAndRecoversTest =
     after::init
@@ -44,7 +47,7 @@ module stateStreamWatchdog_test {
       .expect(after::disconnected and after::activeConn == after::NONE and after::safety)
       .then(after::reconnectFire)
       .then(after::deliverMessage(1))
-      .expect(not(after::disconnected) and after::activeConn == 1 and after::recoveredAfterWatchdog and after::safety)
+      .expect(not(after::disconnected) and after::activeConn == 1 and after::recoveredAfterWatchdogTimer and after::safety)
 
   // 修正案: backend の再送間隔（15 秒 = 3 目盛り）ごとに受信が続いていれば、
   // 合計時間が見張り時間（40 秒 = 8 目盛り）を大幅に超えても切断にならない。
@@ -115,18 +118,28 @@ module stateStreamWatchdog_test {
       .expect(not(after::disconnected) and after::activeConn == 1 and after::safety)
 
   // 修正案: スリープ後も TCP が生きている（Open のままの）接続で見張り時間以上経っていれば
-  // 復帰時に即座に切断し、遅れて届いた旧接続の受信は捨て、次の接続で復帰する。
+  // 復帰時の checkStale で即座に切断し、遅れて届いた旧接続の受信は捨て、次の接続で復帰する。
   run sleepWakeAliveTcpDisconnectsAndRecoversTest =
     after::init
       .then(after::tick)
       .then(after::wakeFromSleep(12))
       .expect(after::disconnected and after::activeConn == after::NONE and after::pendingReconnects == 1
-        and after::wakeDisconnects == 1 and after::safety)
+        and after::wakeDisconnects == 1 and after::lastDisconnectCause == after::WakeCheck
+        and after::lastDisconnectGap == 13 and after::safety)
       .then(after::deliverMessage(0))
       .expect(after::disconnected and after::activeConn == after::NONE and after::safety)
       .then(after::reconnectFire)
       .then(after::deliverMessage(1))
-      .expect(not(after::disconnected) and after::activeConn == 1 and after::recoveredAfterWatchdog and after::safety)
+      .expect(not(after::disconnected) and after::activeConn == 1
+        and after::recoveredAfterWakeCheck and not(after::recoveredAfterWatchdogTimer) and after::safety)
+
+  // 早期復帰切断変異（earlyWakeCutoff）: checkStale が 10 秒（2 目盛り）で切断すると
+  // 不変条件 4（noPrematureWatchdogDisconnect）に違反する。
+  run earlyWakeCutoffViolatesPrematureInvariantTest =
+    earlyWakeCutoff::init
+      .then(earlyWakeCutoff::wakeFromSleep(2))
+      .expect(earlyWakeCutoff::disconnected and earlyWakeCutoff::lastDisconnectCause == earlyWakeCutoff::WakeCheck
+        and earlyWakeCutoff::lastDisconnectGap == 2 and not(earlyWakeCutoff::noPrematureWatchdogDisconnect))
 
   // スリープ復帰の張り直し無し（noWakeRearm）: 期限未満の部分スリープ（25 秒）で単調時計が止まったあと、
   // 残り時間で張り直さないと壁時計が 40 秒を超えても切断にならず不変条件 1 に違反する。

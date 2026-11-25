@@ -8,18 +8,19 @@
 
 | ファイル | 内容 |
 | --- | --- |
-| `stateStreamWatchdog.qnt` | 単調時計・壁時計の 2 時計を持つ状態機械、実状態の 9 つの安全不変条件（`safety`）、7 つの到達条件（witnesses） |
-| `stateStreamWatchdog_test.qnt` | issue #383 の筋書きを 4 構成でたどる 16 件のテスト |
+| `stateStreamWatchdog.qnt` | 単調時計・壁時計の 2 時計を持つ状態機械、実状態の 9 つの安全不変条件（`safety`）、8 つの到達条件（witnesses） |
+| `stateStreamWatchdog_test.qnt` | issue #383 の筋書きを 5 構成でたどる 17 件のテスト |
 
-`stateStreamWatchdog.qnt` は遷移を 4 つの定数で切り替えます。
+`stateStreamWatchdog.qnt` は遷移を 5 つの定数で切り替えます。`WAKE_CUTOFF` は復帰時 `checkStale` が切断と判定する壁時計経過のしきい値で、`earlyWakeCutoff` 以外は `STALE_TIMEOUT` と同じ 8 です。
 
-| モジュール | `WATCHDOG` | `STALE_GUARD` | `REARM_ON_WAKE` | `ALLOW_CLOSE` | 表すもの |
-| --- | --- | --- | --- | --- | --- |
-| `current` | false | false | false | true | 修正前。無音見張りも古い接続の遮断も無い |
-| `watchdogOnly` | true | false | true | true | 無音見張りだけを入れ、古い接続からの遅延 `onmessage` / `onerror` を無視しない変異 |
-| `noWakeRearm` | true | true | false | true | 復帰時 `checkStale` で期限未満のときに残り時間で張り直さない変異 |
-| `fixed` | true | true | true | true | 修正案（`closeStream` を含む全遷移） |
-| `fixedOpenSession` | true | true | true | false | 修正案でタブを閉じずに長く開いたまま探索する構成（見張り経路の厚い到達確認用） |
+| モジュール | `WATCHDOG` | `STALE_GUARD` | `REARM_ON_WAKE` | `WAKE_CUTOFF` | `ALLOW_CLOSE` | 表すもの |
+| --- | --- | --- | --- | --- | --- | --- |
+| `current` | false | false | false | 8 | true | 修正前。無音見張りも古い接続の遮断も無い |
+| `watchdogOnly` | true | false | true | 8 | true | 無音見張りだけを入れ、古い接続からの遅延 `onmessage` / `onerror` を無視しない変異 |
+| `noWakeRearm` | true | true | false | 8 | true | 復帰時 `checkStale` で期限未満のときに残り時間で張り直さない変異 |
+| `earlyWakeCutoff` | true | true | true | 2 | true | 復帰時 `checkStale` が 10 秒で切断してしまう変異 |
+| `fixed` | true | true | true | 8 | true | 修正案（`closeStream` を含む全遷移） |
+| `fixedOpenSession` | true | true | true | 8 | false | 修正案でタブを閉じずに長く開いたまま探索する構成 |
 
 ## モデルの範囲と前提
 
@@ -31,6 +32,7 @@
 - `deliverMessage(id)` と `deliverError(id)` は各 1 本の action にまとめ、実装と同じ判定（`closed` または `id != activeConn` なら無視）で処理します。
 - 健全な `Open` 接続であっても期限を越えて黙り続ける経路（`tick` の無制限進行）と、スリープ後も TCP が生きている経路（`Open` のまま `wakeFromSleep` して遅延 `deliverMessage` が届く）をそのまま許しています。猶予の見張りは入れず、期限を越えたら一度切断して閉じ、遅れて届いた受信を捨て、次の接続で復帰する設計を検証します。
 - `wakeFromSleep` はスリープ後にブラウザの復帰イベント（`visibilitychange` / `online` / `focus`）で `checkStale()` が呼ばれる前提を表しています。画面が前面のままイベントが出ず OS が `setTimeout` を止めていた場合は、復帰後最大 `STALE_TIMEOUT` で見張りタイマーが発火します。
+- 壁時計が前へ飛ぶ場合（NTP の補正など）は `wakeFromSleep` でしか表していません。単調時計が進まないまま壁時計だけが進む点はスリープと同じなので、同じ遷移で代表させています。
 - 不正ペイロード（`restoreDashboardState` の検証失敗）は `receiveInvalidMessage` で表し、`lastActivityWall`・`disconnected`・`consecutiveFailures`・見張り期限のいずれも更新しません。
 - 次の実装詳細はモデルに含めていません：再接続バックオフの具体的なミリ秒計算（1 秒から倍々、上限 30 秒）、`staleTimeoutMs` の数値検証（`RangeError`）、見捨てられた旧接続のサーバー側負荷（別件 [j5ik2o/takt-dash#385](https://github.com/j5ik2o/takt-dash/issues/385)）、React Context の再描画とフォーカス復帰（`specs/quint/decision-offline-actions` が扱います）。
 
@@ -44,7 +46,7 @@
 - `noReconnectWhileConnected`：接続が開いている間に再接続を同時に予約しない。
 - `connectedImpliesValidActiveConn`：接続中（`not(closed) and not(disconnected)`）なら現在の接続が存在し、再接続後の接続（`activeConn > 0`）ではその接続自身で少なくとも 1 回は受信している。
 - `appliedStateMatchesActiveWhenConnected`：接続中に最後に適用した状態は、現在の接続から届いたものだけ。
-- `noPrematureWatchdogDisconnect`：期限より前に見張りで切らない。
+- `noPrematureWatchdogDisconnect`：期限より前に見張りタイマーでも復帰時確認（`checkStale`）でも切らない。切断のたびに原因（`lastDisconnectCause`）と切った時点の壁時計の経過（`lastDisconnectGap = wallNow - lastActivityWall`）を状態に残し、「原因が `WatchdogTimer` か `WakeCheck` なら `lastDisconnectGap >= STALE_TIMEOUT`」と状態で書いています。
 - `watchdogMatchesActiveConn`：見張りタイマーは開いている現在の接続 1 本だけに紐づく。
 - `nothingActiveWhenClosed`：`stream.close()` 後は接続もタイマーも残らない。
 - `safety`：上の 9 つをすべて満たす。
@@ -55,7 +57,8 @@
 - `witnessWatchdogDisconnect`：無音見張りタイマーで切断を検知する。
 - `witnessWakeDisconnect`：スリープ復帰時の鮮度確認で切断を検知する。
 - `witnessReconnectAndRecover`：切断後に再接続し、新しい接続の受信で復帰する。
-- `witnessWatchdogRecover`：見張り切断（または復帰時切断）→ 開き直し → 新しい接続の受信で戻る一続きを完走する。
+- `witnessWatchdogTimerRecover`：見張りタイマーで切断 → 開き直し → 新しい接続の受信で戻る一続きを完走する。
+- `witnessWakeCheckRecover`：復帰時確認（`checkStale`）で切断 → 開き直し → 新しい接続の受信で戻る一続きを完走する。
 - `witnessStaleEventIgnored`：古い接続や `close` 後の遅延イベントを無視する。
 - `witnessStreamClosed`：`stream.close()` で正常に終了する。
 
@@ -90,12 +93,22 @@ quint run stateStreamWatchdog.qnt --main=noWakeRearm --invariant=silentConnectio
 
 6 手で `silentConnectionMustDisconnect` に違反します（期限未満の部分スリープで単調時計 `monoNow` が遅れたまま見張りタイマーを残り時間で張り直さないため、`wallNow = 9 > lastActivityWall + 8` になっても `monoNow = 4 < watchdogDeadlineMono = 8` のまま `disconnected = false` が残る）。
 
+### 復帰時確認が早すぎる（`earlyWakeCutoff`）：期限前の切断で `safety` が破れる
+
+```sh
+quint run stateStreamWatchdog.qnt --main=earlyWakeCutoff --invariant=safety \
+  --max-steps=25 --max-samples=10000 --seed=0x383
+```
+
+4 手で `safety` に違反します（最後の受信から壁時計で 25 秒（5 目盛り）の `wakeFromSleep(5)` で `checkStale` が切断し、`lastDisconnectCause = WakeCheck`・`lastDisconnectGap = 5 < 8` となって `noPrematureWatchdogDisconnect` に違反）。前の版では復帰時の切断の枝が不変条件 4 の観測に入っておらず、この変異でも `safety` が通っていました。
+
 ### 修正案（`fixed`）：反例なし
 
 ```sh
 quint run stateStreamWatchdog.qnt --main=fixed --invariant=safety \
   --witnesses witnessMessageReceived witnessWatchdogDisconnect witnessWakeDisconnect \
-    witnessReconnectAndRecover witnessWatchdogRecover witnessStaleEventIgnored witnessStreamClosed \
+    witnessReconnectAndRecover witnessWatchdogTimerRecover witnessWakeCheckRecover \
+    witnessStaleEventIgnored witnessStreamClosed \
   --max-steps=40 --max-samples=20000 --seed=0x383
 ```
 
@@ -107,18 +120,20 @@ quint run stateStreamWatchdog.qnt --main=fixed --invariant=safety \
 | `witnessWatchdogDisconnect` | 31 / 20,000（0.15%） |
 | `witnessWakeDisconnect` | 5,794 / 20,000（28.97%） |
 | `witnessReconnectAndRecover` | 536 / 20,000（2.68%） |
-| `witnessWatchdogRecover` | 278 / 20,000（1.39%） |
+| `witnessWatchdogTimerRecover` | 2 / 20,000（0.01%） |
+| `witnessWakeCheckRecover` | 276 / 20,000（1.38%） |
 | `witnessStaleEventIgnored` | 20,000 / 20,000（100.00%） |
 | `witnessStreamClosed` | 19,991 / 20,000（99.95%） |
 
-### 修正案・長時間セッション（`fixedOpenSession`）：見張り経路を厚く通って反例なし
+### 修正案・長時間セッション（`fixedOpenSession`）：反例なし
 
-`ALLOW_CLOSE = false` でタブを閉じない長期セッションを探索し、見張り切断と「見張りで切断 → 開き直し → 受信で戻る」の一続きを厚く確認しました。
+`ALLOW_CLOSE = false` でタブを閉じない長期セッションを探索しました。`fixed` では見張りタイマーで切って戻る一続きが 2 件しか通らないため、この構成で 36 件まで増やしています。見張りタイマーの経路は 1 件あたりの手数が長く、復帰時確認の経路（2,985 件）に比べると薄いままです。筋書きテスト `halfOpenDisconnectsAndRecoversTest`・`silentHealthyConnDisconnectsAndRecoversTest` が、この経路を決まった手順で通します。
 
 ```sh
 quint run stateStreamWatchdog.qnt --main=fixedOpenSession --invariant=safety \
   --witnesses witnessMessageReceived witnessWatchdogDisconnect witnessWakeDisconnect \
-    witnessReconnectAndRecover witnessWatchdogRecover witnessStaleEventIgnored \
+    witnessReconnectAndRecover witnessWatchdogTimerRecover witnessWakeCheckRecover \
+    witnessStaleEventIgnored \
   --max-steps=60 --max-samples=20000 --seed=0x383
 ```
 
@@ -130,7 +145,8 @@ quint run stateStreamWatchdog.qnt --main=fixedOpenSession --invariant=safety \
 | `witnessWatchdogDisconnect` | 662 / 20,000（3.31%） |
 | `witnessWakeDisconnect` | 19,554 / 20,000（97.77%） |
 | `witnessReconnectAndRecover` | 5,196 / 20,000（25.98%） |
-| `witnessWatchdogRecover` | 3,019 / 20,000（15.10%） |
+| `witnessWatchdogTimerRecover` | 36 / 20,000（0.18%） |
+| `witnessWakeCheckRecover` | 2,985 / 20,000（14.92%） |
 | `witnessStaleEventIgnored` | 19,999 / 20,000（100.00%） |
 
 ### 筋書きテスト
@@ -139,7 +155,7 @@ quint run stateStreamWatchdog.qnt --main=fixedOpenSession --invariant=safety \
 quint test stateStreamWatchdog_test.qnt --main=stateStreamWatchdog_test
 ```
 
-16 件すべて成功（1020ms）。
+17 件すべて成功（992ms）。
 
 ## 更新のタイミング
 
