@@ -1972,13 +1972,26 @@ async fn unchanged_client_settings_keep_the_baseline_and_emit_no_duplicate_event
 async fn unchanged_client_settings_reuse_the_child_process_between_cycles() {
   // 設定を変えないサイクルでは同じ子プロセスを再利用する。毎サイクル起動し直す実装では、
   // 起動時にだけ書かれる PID ファイルが2サイクル目に再生成され、ここで検出できる。
+  //
+  // 最初のサイクルは、読み取りレーンに加えて書き込みレーンの子プロセスも裏で温める。温めは
+  // サイクルを止めないため、その子プロセスが起動する時刻は決まらない。書き込みレーンに同じ
+  // 起動設定を渡すと2本が同じ PID ファイルを書き、遅れて起動した温めの書き込みが2サイクル目の
+  // 最中に重なると、読み取りレーンの再起動と区別できない。書き込みレーンだけ別の起動設定に
+  // 分け、PID ファイルを読み取りレーンの子プロセスだけが書くようにする。
   let harness = Harness::new(state_with_goal("g1"));
   let pid_path = harness._directory.path().join("mock.pid");
   let pid_for_config = pid_path.clone();
+  let state_for_write = harness.state_path.clone();
   harness.rewrite_config(|value| {
     let args = value["mcpServers"]["mac-mini"]["args"].as_array_mut().expect("起動引数があります");
     args.push(json!("--pid-file"));
     args.push(json!(pid_for_config.display().to_string()));
+    value["mcpServers"]["mac-mini-write"] = json!({
+      "command": "node",
+      "args": [mock_script().display().to_string(), "--state", state_for_write.display().to_string()],
+      "env": {},
+    });
+    value["projects"][0]["writeServer"] = json!("mac-mini-write");
   });
 
   let mut poller = harness.poller();
