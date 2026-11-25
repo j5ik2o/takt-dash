@@ -1,7 +1,8 @@
 //! 出来事の SQLite への記録と、アクティビティのクエリ。
 //!
 //! 日付の区切りは日本標準時（JST）の日で行います。判断待ちと異常に数える種類は
-//! 問い合わせ・マージ待ちの2種類だけです。接続の切断・復帰は総数には含めますが数えません。
+//! 問い合わせ・マージ待ちの2種類だけです。接続の切断・復帰、タスクと run の失敗、backend の起動は
+//! 総数には含めますが数えません。
 
 use std::{
   path::Path,
@@ -313,12 +314,14 @@ impl ActivityStore {
   }
 
   /// `now` を含む JST の日の、サーバーごとの出来事の件数を返す。
+  ///
+  /// backend の起動のように、どのサーバーにも属さない出来事（サーバーが空）は数えません。
   pub fn today_counts_by_server(&self, now: DateTime<Utc>) -> rusqlite::Result<Vec<ServerCount>> {
     self.with_reader(|connection| {
       let jst = FixedOffset::east_opt(9 * 3600).expect("JST のオフセットは固定です");
       let date = now.with_timezone(&jst).date_naive().format("%Y-%m-%d").to_string();
       let mut statement = connection.prepare(
-        "SELECT server_id, COUNT(*) FROM events WHERE date(occurred_at, '+9 hours') = ?1
+        "SELECT server_id, COUNT(*) FROM events WHERE date(occurred_at, '+9 hours') = ?1 AND server_id != ''
          GROUP BY server_id ORDER BY COUNT(*) DESC, server_id",
       )?;
       let rows = statement.query_map(params![date], |row| {

@@ -73,6 +73,12 @@ pub fn activity_kind(kind: model::EventKind) -> v1::ActivityKind {
     | model::EventKind::Blocked => v1::ActivityKind::Blocked,
     | model::EventKind::ConnectionLost => v1::ActivityKind::ConnectionLost,
     | model::EventKind::ConnectionRestored => v1::ActivityKind::ConnectionRestored,
+    | model::EventKind::TaskFailed => v1::ActivityKind::TaskFailed,
+    | model::EventKind::TaskExceeded => v1::ActivityKind::TaskExceeded,
+    | model::EventKind::TaskPrFailed => v1::ActivityKind::TaskPrFailed,
+    | model::EventKind::RunFailed => v1::ActivityKind::RunFailed,
+    | model::EventKind::RunAborted => v1::ActivityKind::RunAborted,
+    | model::EventKind::BackendStarted => v1::ActivityKind::BackendStarted,
   }
 }
 

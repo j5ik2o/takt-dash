@@ -243,6 +243,18 @@ export enum ActivityKind {
   ACTIVITY_KIND_BLOCKED = 7,
   ACTIVITY_KIND_CONNECTION_LOST = 8,
   ACTIVITY_KIND_CONNECTION_RESTORED = 9,
+  /** ACTIVITY_KIND_TASK_FAILED - タスクが失敗した */
+  ACTIVITY_KIND_TASK_FAILED = 10,
+  /** ACTIVITY_KIND_TASK_EXCEEDED - タスクが上限を超えて止まった */
+  ACTIVITY_KIND_TASK_EXCEEDED = 11,
+  /** ACTIVITY_KIND_TASK_PR_FAILED - タスクのプルリクエストの作成に失敗した */
+  ACTIVITY_KIND_TASK_PR_FAILED = 12,
+  /** ACTIVITY_KIND_RUN_FAILED - run が失敗で終わった */
+  ACTIVITY_KIND_RUN_FAILED = 13,
+  /** ACTIVITY_KIND_RUN_ABORTED - run が中断された */
+  ACTIVITY_KIND_RUN_ABORTED = 14,
+  /** ACTIVITY_KIND_BACKEND_STARTED - taktDash の backend が起動した */
+  ACTIVITY_KIND_BACKEND_STARTED = 15,
   UNRECOGNIZED = -1,
 }
 
@@ -278,6 +290,24 @@ export function activityKindFromJSON(object: any): ActivityKind {
     case 9:
     case "ACTIVITY_KIND_CONNECTION_RESTORED":
       return ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED;
+    case 10:
+    case "ACTIVITY_KIND_TASK_FAILED":
+      return ActivityKind.ACTIVITY_KIND_TASK_FAILED;
+    case 11:
+    case "ACTIVITY_KIND_TASK_EXCEEDED":
+      return ActivityKind.ACTIVITY_KIND_TASK_EXCEEDED;
+    case 12:
+    case "ACTIVITY_KIND_TASK_PR_FAILED":
+      return ActivityKind.ACTIVITY_KIND_TASK_PR_FAILED;
+    case 13:
+    case "ACTIVITY_KIND_RUN_FAILED":
+      return ActivityKind.ACTIVITY_KIND_RUN_FAILED;
+    case 14:
+    case "ACTIVITY_KIND_RUN_ABORTED":
+      return ActivityKind.ACTIVITY_KIND_RUN_ABORTED;
+    case 15:
+    case "ACTIVITY_KIND_BACKEND_STARTED":
+      return ActivityKind.ACTIVITY_KIND_BACKEND_STARTED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -307,6 +337,18 @@ export function activityKindToJSON(object: ActivityKind): string {
       return "ACTIVITY_KIND_CONNECTION_LOST";
     case ActivityKind.ACTIVITY_KIND_CONNECTION_RESTORED:
       return "ACTIVITY_KIND_CONNECTION_RESTORED";
+    case ActivityKind.ACTIVITY_KIND_TASK_FAILED:
+      return "ACTIVITY_KIND_TASK_FAILED";
+    case ActivityKind.ACTIVITY_KIND_TASK_EXCEEDED:
+      return "ACTIVITY_KIND_TASK_EXCEEDED";
+    case ActivityKind.ACTIVITY_KIND_TASK_PR_FAILED:
+      return "ACTIVITY_KIND_TASK_PR_FAILED";
+    case ActivityKind.ACTIVITY_KIND_RUN_FAILED:
+      return "ACTIVITY_KIND_RUN_FAILED";
+    case ActivityKind.ACTIVITY_KIND_RUN_ABORTED:
+      return "ACTIVITY_KIND_RUN_ABORTED";
+    case ActivityKind.ACTIVITY_KIND_BACKEND_STARTED:
+      return "ACTIVITY_KIND_BACKEND_STARTED";
     case ActivityKind.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -822,7 +864,7 @@ export interface ActivityEvent {
   occurredAt:
     | Date
     | undefined;
-  /** サーバー */
+  /** サーバー（backend の起動は、どのサーバーにも属さないため空にする） */
   serverId: string;
   /** プロジェクト（接続断などサーバー全体の出来事は省略する） */
   project?:

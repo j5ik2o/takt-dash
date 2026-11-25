@@ -2,6 +2,8 @@
 //!
 //! 出来事は「前回の状態との差分」であり、前回が無い初回の読み取りでは何も出しません
 //! （基準化のみ）。変化がなければ何も出しません。接続断は接続から非接続への遷移で1回だけ出します。
+//! タスクと run の失敗も差分から出すため、backend の起動の直後の読み取りは、すでに失敗していた
+//! ものを新しい失敗として出しません。
 
 use std::collections::BTreeMap;
 
@@ -9,7 +11,9 @@ use chrono::{DateTime, Utc};
 
 use crate::{
   domain::{GoalId, RunSlug},
-  model::{ActivityEvent, ConnectionState, ConnectionTransition, EventKind, ProjectSnapshot, TaskStatus},
+  model::{
+    ActivityEvent, ConnectionState, ConnectionTransition, EventKind, ProjectSnapshot, RunStatus, TaskEntry, TaskStatus,
+  },
   store::{is_human_merge_wait, GoalTermination},
 };
 
@@ -80,6 +84,7 @@ pub fn detect_with_terminations(
   }
   detect_goals(server_id, project, prev, next, terminations, now, &mut events);
   detect_tasks(server_id, project, prev, next, now, &mut events);
+  detect_runs(server_id, project, prev, next, now, &mut events);
   detect_inquiries(server_id, project, prev, next, now, &mut events);
   detect_notifications(server_id, project, prev, next, now, &mut events);
   events
@@ -152,7 +157,7 @@ fn detect_tasks(
   events: &mut Vec<ActivityEvent>,
 ) {
   for task in &next.tasks {
-    let previous = prev.tasks.iter().find(|entry| entry.name == task.name);
+    let previous = previous_task(prev, task);
     if task.status == TaskStatus::Running && previous.map(|entry| entry.status) != Some(TaskStatus::Running) {
       events.push(event(
         now,
@@ -171,6 +176,70 @@ fn detect_tasks(
         EventKind::TaskCompleted,
         format!("タスク「{}」が完了しました。", task.name),
         task.run_slug.clone(),
+      ));
+    }
+    if let Some((kind, outcome)) = task_failure(task.status) {
+      if previous.map(|entry| entry.status) != Some(task.status) {
+        events.push(event(
+          now,
+          server_id,
+          Some(project),
+          kind,
+          format!("タスク「{}」が{outcome}。", task.name),
+          task.run_slug.clone(),
+        ));
+      }
+    }
+  }
+}
+
+/// 前回の読み取りで同じタスクを探す。
+///
+/// タスク名の一意性はゴール内に限られるため（`docs/domain-primitives.md`）、名前だけで探すと
+/// 別のゴールにある同名タスクの状態を前回の状態として使ってしまいます。ゴール ID とタスク名の
+/// 組で照合します。
+fn previous_task<'a>(prev: &'a ProjectSnapshot, task: &TaskEntry) -> Option<&'a TaskEntry> {
+  prev.tasks.iter().find(|entry| entry.name == task.name && entry.goal_id == task.goal_id)
+}
+
+/// タスクの状態が失敗の一種なら、出来事の種類と本文の述部を返す。
+fn task_failure(status: TaskStatus) -> Option<(EventKind, &'static str)> {
+  match status {
+    | TaskStatus::Failed => Some((EventKind::TaskFailed, "失敗しました")),
+    | TaskStatus::Exceeded => Some((EventKind::TaskExceeded, "上限を超えて止まりました")),
+    | TaskStatus::PrFailed => Some((EventKind::TaskPrFailed, "プルリクエストの作成に失敗しました")),
+    | TaskStatus::Pending | TaskStatus::Running | TaskStatus::Completed => None,
+  }
+}
+
+/// run の失敗と中断を検出する。
+///
+/// snapshot が持つ run は、タスクが running のあいだの run だけです。タスクが running のまま
+/// run だけが失敗か中断で終わった場合を、ここで出来事にします。タスクが失敗へ移った場合は
+/// [`detect_tasks`] が出来事にします。
+fn detect_runs(
+  server_id: &str,
+  project: &str,
+  prev: &ProjectSnapshot,
+  next: &ProjectSnapshot,
+  now: DateTime<Utc>,
+  events: &mut Vec<ActivityEvent>,
+) {
+  for run in &next.runs {
+    let (kind, outcome) = match run.status {
+      | RunStatus::Failed => (EventKind::RunFailed, "失敗で終わりました"),
+      | RunStatus::Aborted => (EventKind::RunAborted, "中断されました"),
+      | RunStatus::Running | RunStatus::Completed => continue,
+    };
+    let previous = prev.runs.iter().find(|entry| entry.run_slug == run.run_slug);
+    if previous.map(|entry| entry.status) != Some(run.status) {
+      events.push(event(
+        now,
+        server_id,
+        Some(project),
+        kind,
+        format!("タスク「{}」の run が{outcome}。", run.task_name),
+        RunSlug::try_from(run.run_slug.as_str()).ok(),
       ));
     }
   }
@@ -226,6 +295,13 @@ fn detect_notifications(
       ));
     }
   }
+}
+
+/// backend の起動の出来事を作る。
+///
+/// 起動はどのサーバーにもプロジェクトにも属さないため、サーバーは空、プロジェクトは無しにします。
+pub fn backend_started(occurred_at: DateTime<Utc>) -> ActivityEvent {
+  event(occurred_at, "", None, EventKind::BackendStarted, "taktDash の backend が起動しました。".to_owned(), None)
 }
 
 fn event(

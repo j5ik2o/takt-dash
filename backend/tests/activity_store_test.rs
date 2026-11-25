@@ -341,3 +341,20 @@ fn last_connection_event_returns_the_newest_connection_event_for_the_project() {
     .expect("復帰が最後の接続の出来事です");
   assert_eq!(kind, EventKind::ConnectionRestored, "復帰を記録したら最後の接続の出来事は復帰です");
 }
+
+#[test]
+fn today_counts_by_server_leaves_out_events_that_belong_to_no_server() {
+  let store = ActivityStore::open_in_memory().expect("SQLite を開けます");
+  let now = DateTime::parse_from_rfc3339("2026-11-13T10:00:00Z").unwrap().with_timezone(&Utc);
+  store.record(&takt_dash_backend::events::backend_started(now)).expect("起動を記録できます");
+  store
+    .record(&event("2026-11-13T09:00:00Z", "mini", Some("p"), EventKind::TaskFailed, "失敗"))
+    .expect("失敗を記録できます");
+
+  let counts = store.today_counts_by_server(now).expect("サーバーが空の出来事があっても件数を取得できます");
+  let summaries = store.daily_summaries(now).expect("日次集計を取得できます");
+
+  assert_eq!(counts.len(), 1, "どのサーバーにも属さない出来事は、サーバー別に数えません");
+  assert_eq!(counts[0].server_id.as_str(), "mini");
+  assert_eq!(summaries.last().expect("当日があります").total, 2, "日ごとの総数には含めます");
+}

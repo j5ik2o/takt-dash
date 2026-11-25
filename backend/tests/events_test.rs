@@ -1,4 +1,4 @@
-//! 出来事検出の純粋関数を検証する。9種の検出、初回の基準化、変化なし、
+//! 出来事検出の純粋関数を検証する。種類ごとの検出（失敗と中断を含む）、初回の基準化、変化なし、
 //! 接続断と復帰の1回だけを確かめる。
 
 mod common;
@@ -428,4 +428,151 @@ fn awaiting_merge_event_still_emits_for_open_pull_request() {
   let events = detect_with_terminations(SERVER, PROJECT, Some(&prev), &next, Some(stable()), Some(&terminated), now);
 
   assert_eq!(ids(&events), vec![EventKind::AwaitingMerge]);
+}
+
+fn kind_names(events: &[takt_dash_backend::model::ActivityEvent]) -> Vec<&'static str> {
+  events.iter().map(|event| event.kind.as_str()).collect()
+}
+
+#[test]
+fn task_leaving_for_a_failure_status_is_detected_with_the_kind_of_that_failure() {
+  let now = time("2026-11-13T10:00:00Z");
+  let cases = [
+    (TaskStatus::Failed, "task_failed"),
+    (TaskStatus::Exceeded, "task_exceeded"),
+    (TaskStatus::PrFailed, "task_pr_failed"),
+  ];
+  for (status, expected) in cases {
+    let prev = snapshot(vec![], vec![task("a", TaskStatus::Running)], vec![], vec![], vec![]);
+    let failed = TaskEntry {
+      run_slug: Some(RunSlug::try_from("20261113-abc").expect("テストの run slug は有効です")),
+      ..task("a", status)
+    };
+    let next = snapshot(vec![], vec![failed], vec![], vec![], vec![]);
+
+    let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
+
+    assert_eq!(kind_names(&events), vec![expected], "{status:?} への遷移を1件の出来事にします");
+    assert_eq!(events[0].run_slug.as_ref().map(RunSlug::as_str), Some("20261113-abc"));
+    assert!(events[0].body.contains("「a」"), "本文で対象のタスクが分かります: {}", events[0].body);
+  }
+}
+
+#[test]
+fn task_staying_in_a_failure_status_emits_no_event() {
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(vec![], vec![task("a", TaskStatus::Failed)], vec![], vec![], vec![]);
+
+  let events = detect(SERVER, PROJECT, Some(&prev), &prev, Some(stable()), now);
+
+  assert!(events.is_empty(), "失敗のままのタスクを新しい失敗として出しません: {:?}", kind_names(&events));
+}
+
+#[test]
+fn task_failing_again_after_a_retry_is_detected_again() {
+  let now = time("2026-11-13T10:00:00Z");
+  let retried = snapshot(vec![], vec![task("a", TaskStatus::Pending)], vec![], vec![], vec![]);
+  let failed = snapshot(vec![], vec![task("a", TaskStatus::Failed)], vec![], vec![], vec![]);
+
+  let events = detect(SERVER, PROJECT, Some(&retried), &failed, Some(stable()), now);
+
+  assert_eq!(kind_names(&events), vec!["task_failed"]);
+}
+
+#[test]
+fn first_read_with_already_failed_tasks_and_runs_emits_no_event() {
+  let now = time("2026-11-13T10:00:00Z");
+  let failed_run = takt_dash_backend::model::RunEntry {
+    status: takt_dash_backend::model::RunStatus::Failed,
+    ..run("20261113-abc", "b", now)
+  };
+  let next = snapshot(
+    vec![],
+    vec![task("a", TaskStatus::Failed), task("b", TaskStatus::Running)],
+    vec![],
+    vec![failed_run],
+    vec![],
+  );
+
+  let events = detect(SERVER, PROJECT, None, &next, None, now);
+
+  assert!(events.is_empty(), "基準が無い最初の読み取りは、過去の失敗を出来事にしません: {:?}", kind_names(&events));
+}
+
+#[test]
+fn run_ending_in_failure_or_abort_is_detected_once_with_the_kind_of_that_end() {
+  let now = time("2026-11-13T10:00:00Z");
+  let cases = [
+    (takt_dash_backend::model::RunStatus::Failed, "run_failed"),
+    (takt_dash_backend::model::RunStatus::Aborted, "run_aborted"),
+  ];
+  for (status, expected) in cases {
+    let tasks = vec![task("a", TaskStatus::Running)];
+    let prev = snapshot(vec![], tasks.clone(), vec![], vec![run("20261113-abc", "a", now)], vec![]);
+    let ended = takt_dash_backend::model::RunEntry { status, ..run("20261113-abc", "a", now) };
+    let next = snapshot(vec![], tasks, vec![], vec![ended], vec![]);
+
+    let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
+    assert_eq!(kind_names(&events), vec![expected], "run の {status:?} を1件の出来事にします");
+    assert_eq!(events[0].run_slug.as_ref().map(RunSlug::as_str), Some("20261113-abc"));
+
+    let unchanged = detect(SERVER, PROJECT, Some(&next), &next, Some(stable()), now);
+    assert!(unchanged.is_empty(), "同じ状態のままの run を繰り返し出しません: {:?}", kind_names(&unchanged));
+  }
+}
+
+#[test]
+fn failure_of_a_task_whose_name_another_goal_shares_is_detected_once() {
+  // タスク名の一意性はゴール内に限られます（docs/domain-primitives.md）。ゴール A の build が
+  // すでに失敗していて、ゴール B の build が running から失敗へ移ったとき、名前だけで前回の
+  // タスクを探す実装は A の build を見て、B の失敗を取りこぼします。
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(
+    vec![],
+    vec![
+      task_for_goal("build", "g1", TaskStatus::Failed, false),
+      task_for_goal("build", "g2", TaskStatus::Running, false),
+    ],
+    vec![],
+    vec![],
+    vec![],
+  );
+  let next = snapshot(
+    vec![],
+    vec![
+      task_for_goal("build", "g1", TaskStatus::Failed, false),
+      task_for_goal("build", "g2", TaskStatus::Failed, false),
+    ],
+    vec![],
+    vec![],
+    vec![],
+  );
+
+  let events = detect(SERVER, PROJECT, Some(&prev), &next, Some(stable()), now);
+
+  assert_eq!(kind_names(&events), vec!["task_failed"], "別ゴールの同名タスクが失敗へ移った回を1件にします");
+  let unchanged = detect(SERVER, PROJECT, Some(&next), &next, Some(stable()), now);
+  assert!(unchanged.is_empty(), "失敗のままの同名タスクを繰り返し出しません: {:?}", kind_names(&unchanged));
+}
+
+#[test]
+fn unchanged_task_whose_name_another_goal_shares_does_not_repeat_a_failure() {
+  // ゴール A の build が pending のまま、ゴール B の build が失敗のままの周期では、何も
+  // 起きていません。名前だけで前回のタスクを探す実装は A の build を見て、B の失敗を毎周期
+  // 記録し直し、失敗の履歴を重複させます。
+  let now = time("2026-11-13T10:00:00Z");
+  let prev = snapshot(
+    vec![],
+    vec![
+      task_for_goal("build", "g1", TaskStatus::Pending, false),
+      task_for_goal("build", "g2", TaskStatus::Failed, false),
+    ],
+    vec![],
+    vec![],
+    vec![],
+  );
+
+  let events = detect(SERVER, PROJECT, Some(&prev), &prev, Some(stable()), now);
+
+  assert!(events.is_empty(), "別ゴールの同名タスクの状態を失敗の判定に使いません: {:?}", kind_names(&events));
 }

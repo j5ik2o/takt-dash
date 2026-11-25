@@ -30,13 +30,25 @@ const kindLabel = (kind: ActivityKind): string => {
       return "接続の切断";
     case ACTIVITY_KIND.CONNECTION_RESTORED:
       return "接続の復帰";
+    case ACTIVITY_KIND.TASK_FAILED:
+      return "タスクの失敗";
+    case ACTIVITY_KIND.TASK_EXCEEDED:
+      return "タスクの上限超過";
+    case ACTIVITY_KIND.TASK_PR_FAILED:
+      return "PR 失敗";
+    case ACTIVITY_KIND.RUN_FAILED:
+      return "run の失敗";
+    case ACTIVITY_KIND.RUN_ABORTED:
+      return "run の中断";
+    case ACTIVITY_KIND.BACKEND_STARTED:
+      return "backend の起動";
     default:
       return "その他";
   }
 };
 
-// 種類ごとの状態色。実行中・完了・復帰は live、人の判断や異常は warn、
-// 登録・一時停止は idle にする。
+// 種類ごとの状態色。実行中・完了・復帰は live、人の判断や異常（失敗と中断を含む）は warn、
+// 登録・一時停止・backend の起動は idle にする。
 const kindState = (kind: ActivityKind): "live" | "warn" | "idle" => {
   switch (kind) {
     case ACTIVITY_KIND.RUN_STARTED:
@@ -47,11 +59,20 @@ const kindState = (kind: ActivityKind): "live" | "warn" | "idle" => {
     case ACTIVITY_KIND.AWAITING_MERGE:
     case ACTIVITY_KIND.BLOCKED:
     case ACTIVITY_KIND.CONNECTION_LOST:
+    case ACTIVITY_KIND.TASK_FAILED:
+    case ACTIVITY_KIND.TASK_EXCEEDED:
+    case ACTIVITY_KIND.TASK_PR_FAILED:
+    case ACTIVITY_KIND.RUN_FAILED:
+    case ACTIVITY_KIND.RUN_ABORTED:
       return "warn";
     default:
       return "idle";
   }
 };
+
+// backend の起動は、どのサーバーにも属さないためサーバーが空で届く。空欄にせず taktDash と出す。
+const serverLabel = (serverNames: ReadonlyMap<string, string>, serverId: string): string =>
+  serverId === "" ? "taktDash" : (serverNames.get(serverId) ?? serverId);
 
 const eventTime = (event: ActivityEvent): number => (event.occurredAt ? event.occurredAt.getTime() : 0);
 
@@ -110,7 +131,7 @@ export function ActivityContent({ state, response, now }: ActivityContentProps):
                       </Fragment>
                     ))}
                   </span>
-                  <span className="sv">{serverNames.get(newest.serverId) ?? newest.serverId}</span>
+                  <span className="sv">{serverLabel(serverNames, newest.serverId)}</span>
                 </li>
               );
             })}

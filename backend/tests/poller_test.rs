@@ -1972,13 +1972,26 @@ async fn unchanged_client_settings_keep_the_baseline_and_emit_no_duplicate_event
 async fn unchanged_client_settings_reuse_the_child_process_between_cycles() {
   // 設定を変えないサイクルでは同じ子プロセスを再利用する。毎サイクル起動し直す実装では、
   // 起動時にだけ書かれる PID ファイルが2サイクル目に再生成され、ここで検出できる。
+  //
+  // 最初のサイクルは、読み取りレーンに加えて書き込みレーンの子プロセスも裏で温める。温めは
+  // サイクルを止めないため、その子プロセスが起動する時刻は決まらない。書き込みレーンに同じ
+  // 起動設定を渡すと2本が同じ PID ファイルを書き、遅れて起動した温めの書き込みが2サイクル目の
+  // 最中に重なると、読み取りレーンの再起動と区別できない。書き込みレーンだけ別の起動設定に
+  // 分け、PID ファイルを読み取りレーンの子プロセスだけが書くようにする。
   let harness = Harness::new(state_with_goal("g1"));
   let pid_path = harness._directory.path().join("mock.pid");
   let pid_for_config = pid_path.clone();
+  let state_for_write = harness.state_path.clone();
   harness.rewrite_config(|value| {
     let args = value["mcpServers"]["mac-mini"]["args"].as_array_mut().expect("起動引数があります");
     args.push(json!("--pid-file"));
     args.push(json!(pid_for_config.display().to_string()));
+    value["mcpServers"]["mac-mini-write"] = json!({
+      "command": "node",
+      "args": [mock_script().display().to_string(), "--state", state_for_write.display().to_string()],
+      "env": {},
+    });
+    value["projects"][0]["writeServer"] = json!("mac-mini-write");
   });
 
   let mut poller = harness.poller();
@@ -2035,6 +2048,81 @@ async fn failed_event_record_keeps_the_baseline_and_records_the_event_once_after
     .collect();
   assert_eq!(created.len(), 1, "記録に失敗したサイクルの変化が失われず、二重にもなりません: {created:?}");
   assert!(created[0].contains("g2"), "回復後に記録された変化は失敗したサイクルの状態です: {created:?}");
+}
+
+fn state_with_task(status: &str) -> Value {
+  json!({ "tasks": [ { "name": "build", "status": status, "runSlug": "20261116-build", "startedAt": "2026-11-16T08:00:00Z" } ] })
+}
+
+fn recorded_kinds(harness: &Harness) -> Vec<&'static str> {
+  let mut events = harness.activity.recent_events(50).expect("記録した出来事を読めます");
+  events.reverse();
+  events.iter().map(|event| event.kind.as_str()).collect()
+}
+
+#[tokio::test]
+async fn task_failure_between_cycles_is_recorded_once_and_not_again_after_a_restart() {
+  // 11/16 の本番では、失敗が21件あったのに失敗の出来事は0件でした（issue #151）。
+  let harness = Harness::new(state_with_task("pending"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  harness.rewrite_state(state_with_task("failed"));
+  poller.read_cycle_once().await.expect("失敗を読むサイクルを実行できます");
+  poller.read_cycle_once().await.expect("失敗のままのサイクルを実行できます");
+  poller.shutdown().await;
+  assert_eq!(recorded_kinds(&harness), vec!["task_failed"], "失敗への遷移を1回だけ記録します");
+
+  let (mut restarted, _restarted_store) = harness.restarted_poller();
+  restarted.read_cycle_once().await.expect("再起動後の最初のサイクルを実行できます");
+  restarted.read_cycle_once().await.expect("再起動後の2回目のサイクルを実行できます");
+  restarted.shutdown().await;
+  assert_eq!(recorded_kinds(&harness), vec!["task_failed"], "再起動で過去の失敗を新しい失敗として足しません");
+}
+
+#[tokio::test]
+async fn task_failure_whose_record_failed_is_recorded_once_after_the_record_recovers() {
+  let harness = Harness::new(state_with_task("pending"));
+  let mut poller = harness.poller();
+  poller.read_cycle_once().await.expect("初回のサイクルを実行できます");
+
+  harness.rewrite_state(state_with_task("pr_failed"));
+  fail_event_recording_for(&harness.activity_db_path, "mac-mini");
+  poller.read_cycle_once().await.expect_err("記録できないサイクルは記録の失敗で終わります");
+  assert!(recorded_kinds(&harness).is_empty(), "記録に失敗した失敗は残っていません");
+
+  allow_event_recording(&harness.activity_db_path);
+  poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
+  poller.read_cycle_once().await.expect("その次のサイクルを実行できます");
+  poller.shutdown().await;
+  assert_eq!(recorded_kinds(&harness), vec!["task_pr_failed"], "基準を進めずに持ち越した失敗を1回だけ記録します");
+}
+
+#[tokio::test]
+async fn backend_start_whose_record_failed_is_recorded_once_after_the_record_recovers() {
+  let harness = Harness::new(state_with_goal("g1"));
+  let started_at = common::time("2026-11-16T09:00:00Z");
+  let mut poller = harness.poller().with_start_recorded(started_at);
+
+  // 起動の出来事はどのサーバーにも属さないため、サーバーが空の記録だけを失敗させます。
+  fail_event_recording_for(&harness.activity_db_path, "");
+  poller.read_cycle_once().await.expect_err("起動を記録できないサイクルは記録の失敗で終わります");
+  assert!(recorded_kinds(&harness).is_empty(), "記録に失敗した起動は残っていません");
+  assert!(
+    harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).is_some(),
+    "起動の記録の失敗は読み取りを止めません"
+  );
+
+  allow_event_recording(&harness.activity_db_path);
+  let recovered = poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
+  assert_eq!(recovered.events_recorded, 1, "持ち越した起動を記録します");
+  poller.read_cycle_once().await.expect("その次のサイクルを実行できます");
+  poller.shutdown().await;
+
+  let events = harness.activity.recent_events(50).expect("記録した出来事を読めます");
+  assert_eq!(recorded_kinds(&harness), vec!["backend_started"], "起動を1回だけ記録します");
+  assert_eq!(events[0].occurred_at, started_at, "記録する時刻は、記録できた時刻ではなく起動の時刻です");
+  assert_eq!(events[0].project, None);
 }
 
 #[tokio::test]
