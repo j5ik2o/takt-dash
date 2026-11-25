@@ -43,6 +43,11 @@ use crate::config::HttpMcpServer;
 /// 引きずられないよう、道具の呼び出しより短く打ち切ります。
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// セッションを閉じるときに、進行中の確立が終わるのを待つ上限。確立が終わる前に閉じると、
+/// あとから保存されたセッションが残るため、確立を待ってから閉じます。応答しないサーバーで
+/// backend の停止が長引かないよう、この時間で打ち切ります。
+const CLOSE_WAIT_FOR_ESTABLISH: Duration = Duration::from_secs(10);
+
 type HttpClient = Client<HttpConnector, Full<Bytes>>;
 
 /// 1 台の常駐 HTTP サーバーに作る 1 つのセッション。
@@ -104,10 +109,21 @@ impl HttpSession {
     Arc::ptr_eq(&self.inner, &other.inner)
   }
 
+  /// この置き場の持ち主の数。レジストリが置き場を手放したことをテストで確かめるために使います。
+  #[cfg(test)]
+  pub(crate) fn holder_count(&self) -> usize {
+    Arc::strong_count(&self.inner)
+  }
+
   /// 保持しているセッションをサーバーへの DELETE で閉じ、応答（または打ち切り）まで待つ。
   ///
   /// backend の停止時に使います。閉じたあとに要求が届けば、セッションを作り直します。
+  ///
+  /// 確立の途中なら、終わるまで待ってから閉じます（[`CLOSE_WAIT_FOR_ESTABLISH`] まで）。
+  /// 確立は ID を保存してから鍵を放すため、待てば、作り終えたセッションを取りこぼしません。
+  /// 確立に失敗して保存しなかったセッションの DELETE も、鍵を持ったまま済ませています。
   pub async fn close(&self) {
+    let _established = timeout(CLOSE_WAIT_FOR_ESTABLISH, self.inner.establishing.lock()).await;
     if let Some(closing) = self.inner.take_and_close() {
       closing.await;
     }
@@ -132,11 +148,19 @@ impl SessionInner {
     self.next_id.fetch_add(1, Ordering::Relaxed)
   }
 
+  /// 確立の鍵を待つ上限。鍵の持ち主は、initialize と notifications/initialized の 2 往復
+  /// （1 往復は、応答の先頭までと本文の読み取りで `request_timeout` を 2 回まで使う）と、
+  /// 失敗したときの DELETE のあいだ鍵を持ちます。待つ側の上限をそれに合わせ、先行する確立が
+  /// 成功するのに、待つ側だけが時間切れになることを防ぎます。
+  fn establish_wait(request_timeout: Duration) -> Duration {
+    request_timeout * 4 + CLOSE_TIMEOUT
+  }
+
   /// セッションを確立して保存する。確立済みなら、そのセッションを返します。
   async fn establish(&self, request_timeout: Duration) -> Result<String, TransportError> {
-    let _establishing = timeout(request_timeout, self.establishing.lock())
-      .await
-      .map_err(|_| TransportError::Timeout(request_timeout.as_secs()))?;
+    let wait = Self::establish_wait(request_timeout);
+    let _establishing =
+      timeout(wait, self.establishing.lock()).await.map_err(|_| TransportError::Timeout(wait.as_secs()))?;
     if let Some(session) = self.current() {
       return Ok(session);
     }
@@ -150,29 +174,38 @@ impl SessionInner {
         "clientInfo": { "name": "taktdash-backend", "version": env!("CARGO_PKG_VERSION") },
       },
     });
-    let (header, incoming) =
-      self.exchange(initialize, None, request_timeout).await.map_err(ExchangeError::into_transport)?;
-    let session = header;
+    let reply = self.send(initialize, None, request_timeout).await.map_err(ExchangeError::into_transport)?;
+    // 応答の先頭で Mcp-Session-Id を受け取っていれば、サーバーはセッションを作り終えています。
+    // このあとのどの失敗でも、保存しないセッションを残さないよう閉じます。
+    let session = reply.session_id;
+    let incoming = match reply.body {
+      | Ok(incoming) => incoming,
+      | Err(error) => {
+        self.close_unsaved(session).await;
+        return Err(error.into_transport());
+      },
+    };
     if let Some(error) = incoming.error {
-      self.close_unsaved(session);
+      self.close_unsaved(session).await;
       return Err(TransportError::Rpc { code: error.code, message: error.message });
     }
     let session = session
       .ok_or_else(|| TransportError::Protocol("initialize の応答に Mcp-Session-Id ヘッダがありません".to_owned()))?;
     let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
     if let Err(error) = self.exchange(initialized, Some(&session), request_timeout).await {
-      // サーバーはセッションを作り終えています。保存しないセッションを残さないよう閉じます。
-      self.close_unsaved(Some(session));
+      self.close_unsaved(Some(session)).await;
       return Err(error.into_transport());
     }
     *self.session_id.lock().expect("HTTP セッションのロックが壊れています") = Some(session.clone());
     Ok(session)
   }
 
-  /// 確立の途中で失敗し、保存しなかったセッションを背後で閉じる。
-  fn close_unsaved(&self, session: Option<String>) {
+  /// 確立の途中で失敗し、保存しなかったセッションを閉じる。確立の鍵を持ったまま DELETE の
+  /// 応答（または打ち切り）まで待つので、[`HttpSession::close`] は鍵を待てば、この DELETE も
+  /// 済んだあとに進みます。
+  async fn close_unsaved(&self, session: Option<String>) {
     if let Some(closing) = session.and_then(|session| self.closing(&session)) {
-      spawn_close(closing);
+      closing.await;
     }
   }
 
@@ -244,12 +277,26 @@ impl SessionInner {
       .map_err(|error| TransportError::Protocol(error.to_string()))
   }
 
+  /// 1 つの JSON-RPC メッセージを送り、応答の本文まで読んで JSON-RPC メッセージとして返す。
   async fn exchange(
     &self,
     message: Value,
     session: Option<&str>,
     request_timeout: Duration,
   ) -> Result<(Option<String>, JsonRpcIncoming), ExchangeError> {
+    let reply = self.send(message, session, request_timeout).await?;
+    Ok((reply.session_id, reply.body?))
+  }
+
+  /// 1 つの JSON-RPC メッセージを送る。応答の先頭を受け取る前の失敗は `Err` で返します。
+  /// 受け取ったあとの失敗（成功でない状態、本文の読み取りの失敗や時間切れ、解析の失敗）は、
+  /// 応答の先頭にあった `Mcp-Session-Id` と一緒に [`Reply`] の中で返します。
+  async fn send(
+    &self,
+    message: Value,
+    session: Option<&str>,
+    request_timeout: Duration,
+  ) -> Result<Reply, ExchangeError> {
     let body = serde_json::to_vec(&message)
       .map_err(|error| ExchangeError::Transport(TransportError::InvalidJson(error.to_string())))?;
     let request = self.request("POST", session, Some(body)).map_err(ExchangeError::Transport)?;
@@ -270,19 +317,28 @@ impl SessionInner {
     let status = response.status();
     let content_type = response.headers().get("content-type").and_then(|value| value.to_str().ok()).map(str::to_owned);
     let session_id = response.headers().get("mcp-session-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
-    let collected = timeout(request_timeout, read_body(response.into_body()))
-      .await
-      .map_err(|_| ExchangeError::Transport(TransportError::Timeout(request_timeout.as_secs())))??;
-    if !status.is_success() && status != StatusCode::ACCEPTED && status != StatusCode::NO_CONTENT {
-      return Err(ExchangeError::Status(status));
+    let body = async {
+      let collected = timeout(request_timeout, read_body(response.into_body()))
+        .await
+        .map_err(|_| ExchangeError::Transport(TransportError::Timeout(request_timeout.as_secs())))??;
+      if !status.is_success() && status != StatusCode::ACCEPTED && status != StatusCode::NO_CONTENT {
+        return Err(ExchangeError::Status(status));
+      }
+      if collected.is_empty() {
+        // 通知の受け付けなど、応答本文を持たない応答。
+        return Ok(JsonRpcIncoming { id: None, result: Some(Value::Null), error: None, method: None });
+      }
+      parse_incoming(&collected, content_type.as_deref())
     }
-    if collected.is_empty() {
-      // 通知の受け付けなど、応答本文を持たない応答。
-      return Ok((session_id, JsonRpcIncoming { id: None, result: Some(Value::Null), error: None, method: None }));
-    }
-    let incoming = parse_incoming(&collected, content_type.as_deref())?;
-    Ok((session_id, incoming))
+    .await;
+    Ok(Reply { session_id, body })
   }
+}
+
+/// 応答の先頭を受け取ったあとの結果。本文の段で失敗しても、先頭の `Mcp-Session-Id` を失いません。
+struct Reply {
+  session_id: Option<String>,
+  body:       Result<JsonRpcIncoming, ExchangeError>,
 }
 
 impl Drop for SessionInner {
@@ -388,7 +444,10 @@ impl HttpReadHandle {
   /// サーバーの再起動は、送り直した要求への 404 として分かります。それ以外の失敗は
   /// 輸送エラーとして表面化させます。
   async fn tools_call(&mut self, name: &str, arguments: Value) -> Result<Value, TransportError> {
-    let session = self.ensure_session().await?;
+    // ここまで道具は送っていません。書き込みの前の接続の確認（`connect`）のあとで、ほかの
+    // 要求が 404 を受けて共有セッションを手放していると、ここで作り直します。その失敗も
+    // 「送る前の失敗」として返します。
+    let session = self.ensure_session().await.map_err(not_sent)?;
     let mut failure = match self.call_once(name, &arguments, &session).await {
       | Ok(incoming) => return unwrap_result(incoming),
       | Err(error) => error,
@@ -406,10 +465,7 @@ impl HttpReadHandle {
     // 404 を受けた要求は処理されておらず、作り直しに失敗すれば再試行も送っていません。
     // 作り直しの失敗は、種類によらず「送る前の失敗」として返します。
     self.session.inner.forget(&session);
-    let session = self.ensure_session().await.map_err(|error| match error {
-      | error @ TransportError::NotSent(_) => error,
-      | error => TransportError::NotSent(format!("消えたセッションを作り直せませんでした（{error}）")),
-    })?;
+    let session = self.ensure_session().await.map_err(not_sent)?;
     match self.call_once(name, &arguments, &session).await {
       | Ok(incoming) => unwrap_result(incoming),
       | Err(error) => Err(error.into_transport()),
@@ -424,6 +480,14 @@ impl HttpReadHandle {
       "params": { "name": name, "arguments": arguments },
     });
     self.session.inner.exchange(request, Some(session), self.request_timeout).await.map(|(_, incoming)| incoming)
+  }
+}
+
+/// セッションを確立できなかった失敗を、道具を送る前の失敗として返す。
+fn not_sent(error: TransportError) -> TransportError {
+  match error {
+    | error @ TransportError::NotSent(_) => error,
+    | error => TransportError::NotSent(format!("セッションを確立できませんでした（{error}）")),
   }
 }
 

@@ -408,3 +408,97 @@ async fn a_write_whose_lost_session_cannot_be_recreated_is_reported_as_not_sent(
   );
   assert_eq!(server.created_session_count(), 1, "作り直しは成功していません");
 }
+
+#[tokio::test]
+async fn a_session_whose_initialize_body_cannot_be_read_is_closed() {
+  // initialize の応答の先頭で Mcp-Session-Id を受け取ったあと、本文を読めなかった場合も、
+  // サーバーはセッションを作り終えている。ID を失わずに DELETE で閉じる。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let server = HttpMockServer::start(&state, Some("garble-initialize"));
+  let mut handle = HttpReadHandle::new(server.connection(), std::time::Duration::from_secs(10));
+
+  handle.connect().await.expect_err("本文を読めない initialize は失敗です");
+
+  assert_eq!(server.created_session_count(), 1, "サーバーはセッションを 1 つ作っていました");
+  assert_eq!(
+    server.live_session_count(),
+    0,
+    "確立が失敗として返った時点で、作られたセッションは閉じています: {:?}",
+    server.session_events()
+  );
+}
+
+#[tokio::test]
+async fn closing_waits_for_an_establishment_in_flight_and_closes_its_session() {
+  // backend の停止時に確立の途中だったセッションも、確立が終わるのを待ってから閉じる。
+  // 待たずに閉じると、あとから保存されたセッションがサーバーに残る。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let server = HttpMockServer::start(&state, Some("slow-initialize:300"));
+  let session = HttpSession::new(server.connection());
+  let mut handle = HttpReadHandle::with_session(session.clone(), std::time::Duration::from_secs(10));
+  let connecting = tokio::spawn(async move { handle.connect().await });
+  // サーバーが initialize を受け取り、セッションを採番するまで待つ（応答はまだ返っていない）。
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+  while server.created_session_count() == 0 {
+    assert!(std::time::Instant::now() < deadline, "initialize がサーバーに届きません");
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+
+  session.close().await;
+
+  assert_eq!(server.live_session_count(), 0, "確立の途中だったセッションも閉じています: {:?}", server.session_events());
+  connecting.await.expect("確立のタスクが終わります").expect("確立そのものは成功しています");
+}
+
+#[tokio::test]
+async fn a_request_waiting_for_a_slow_establishment_does_not_time_out_before_it_finishes() {
+  // 確立は initialize と notifications/initialized の 2 往復のあいだ鍵を持つ。1 往復の
+  // 上限より長くかかっても成功する確立を、同時に来た要求が待ち切れずに時間切れにしない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  // 1 往復は 1.7 秒（上限の 3 秒以内）。確立の全体は 3.4 秒かかり、1 往復の上限を超える。
+  let server = HttpMockServer::start(&state, Some("slow-initialize:1700"));
+  let session = HttpSession::new(server.connection());
+  let timeout = std::time::Duration::from_secs(3);
+  let mut first = HttpReadHandle::with_session(session.clone(), timeout);
+  let mut second = HttpReadHandle::with_session(session, timeout);
+
+  let (first_result, second_result) = tokio::join!(first.connect(), second.connect());
+
+  first_result.expect("先に始めた確立は成功します");
+  second_result.expect("確立を待っていた要求も、同じセッションで成功します");
+  assert_eq!(server.created_session_count(), 1, "作るセッションは 1 つだけです");
+}
+
+#[tokio::test]
+async fn a_write_that_must_recreate_a_session_dropped_by_another_request_is_reported_as_not_sent() {
+  // 書き込みの前の接続の確認のあとで、ほかの要求が 404 を受けて共有セッションを手放すと、
+  // 書き込みは道具を送る前にセッションを作り直す。その失敗は、道具を送っていないので、
+  // 送る前の失敗として返す。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let server = HttpMockServer::start(&state, Some("drop-session-then-refuse-initialize"));
+  let cwd = project_dir(directory.path());
+  let session = HttpSession::new(server.connection());
+  let timeout = std::time::Duration::from_secs(10);
+  let mut reader = HttpReadHandle::with_session(session.clone(), timeout);
+  let mut writer = HttpReadHandle::with_session_for_write(session, timeout);
+  writer.connect().await.expect("書き込みの前の接続の確認は通ります");
+  reader.read_snapshot(&cwd, None, &run_logs(&cwd)).await.expect_err("読み取りは 404 を受け、作り直しにも失敗します");
+  assert_eq!(writer.session_count(), 0, "読み取りが共有セッションを手放しています");
+  let calls_before = server.recorded_calls().len();
+  let (goal_id, question_id) = answer_ids();
+
+  let error = takt_dash_backend::mcp::WriteToolSet::new(&mut writer, cwd)
+    .answer_goal_question(&goal_id, &question_id, json!({ "text": "はい" }))
+    .await
+    .expect_err("セッションを作り直せない書き込みは失敗です");
+
+  assert!(
+    matches!(error, ToolError::Transport(TransportError::NotSent(_))),
+    "道具を送る前の作り直しの失敗は、送る前の失敗です: {error:?}"
+  );
+  assert_eq!(server.recorded_calls().len(), calls_before, "書き込み道具はサーバーへ送っていません");
+}

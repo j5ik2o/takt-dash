@@ -15,7 +15,9 @@
 // --ready-file に JSON で書き出す（テストが接続先を組み立てるため）。
 // --behavior で `deny`（常に 401）・`drop-session`（常に 404）・`fail-initialized`
 // （notifications/initialized だけ 500）・`drop-session-then-refuse-initialize`（tools/call は
-// 404、2 回目以降の initialize は 500）などを起こせる。
+// 404、2 回目以降の initialize は 500）・`garble-initialize`（initialize の本文が壊れている）・
+// `slow-initialize`（initialize と notifications/initialized を --delay-ms だけ遅らせる）などを
+// 起こせる。
 //
 // 追加の検証用オプション:
 //   --calls <path>         受け取った tools/call を {"name","arguments"} の JSONL で追記する
@@ -384,6 +386,25 @@ const server = createServer((request, response) => {
       if (sessionLogPath !== undefined) {
         appendFileSync(sessionLogPath, `new ${sessionId}\n`);
       }
+      if (behavior === "garble-initialize") {
+        // セッションは採番して Mcp-Session-Id を返すが、本文が JSON として壊れている状態を再現する。
+        response.writeHead(200, { "content-type": "application/json", "mcp-session-id": sessionId });
+        response.end("{ 壊れた本文");
+        return;
+      }
+      if (behavior === "slow-initialize") {
+        // セッションは採番するが、応答を遅らせる。確立の途中で閉じる・同時に待つ状態を再現する。
+        const delay = Number(option("--delay-ms") ?? 300);
+        setTimeout(() => {
+          jsonBody(
+            response,
+            200,
+            { jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "taktdash-mock-http", version: "0.0.0" } } },
+            { "mcp-session-id": sessionId },
+          );
+        }, delay);
+        return;
+      }
       jsonBody(
         response,
         200,
@@ -409,6 +430,11 @@ const server = createServer((request, response) => {
       if (sessionLogPath !== undefined) {
         appendFileSync(sessionLogPath, `reuse ${sessionId}\n`);
       }
+    }
+    if (message.method === "notifications/initialized" && behavior === "slow-initialize") {
+      // 通知の受け付けも遅らせ、確立が 2 往復ぶん鍵を持つ状態を再現する。
+      setTimeout(() => response.writeHead(202).end(), Number(option("--delay-ms") ?? 300));
+      return;
     }
     if (message.method === "notifications/initialized") {
       if (behavior === "fail-initialized") {

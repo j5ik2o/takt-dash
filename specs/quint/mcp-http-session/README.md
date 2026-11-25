@@ -25,9 +25,9 @@ backend が takt-mcp の HTTP サーバーに作るセッションが、画面�
 - takt-mcp は、セッションに期限を持ちません。生きたセッションが消えるのは停止のときだけです。
 - 未知セッション（404）を受けた要求は処理されておらず、セッションを 1 回だけ作り直します。slot を空けるのは、slot が自分の使ったセッションのままのときだけです。
 - 道具を送る段の失敗は 2 種類あります。takt-mcp が止まっていて接続を張れない失敗（`call` の停止中の枝）は、要求が届いていません。応答を受け取れなかった失敗（`lostResponse`）は、要求が届いて処理されています。
-- 読み取りは、どちらの失敗でも同じセッションで 1 回だけ送り直します。書き込みは送り直しません。どちらも slot には触れません。
+- 読み取りは、どちらの失敗でも同じセッションで 1 回だけ送り直します。404 でセッションを作り直したあとは、送り直さずに失敗として返します。書き込みは送り直しません。どちらも slot には触れません。
 - セッションの確立は 1 つの遷移です（実装は確立の間だけ鍵を持ち、同時に 2 つは作りません）。
-- 次のものは含めていません。置き場の持ち主がいなくなったときと backend の停止時に送る DELETE、確立の途中で失敗したセッションへの DELETE、poller がプロジェクトごとに持つ読み取りハンドル、接続先の設定の変更、冪等キーの台帳（`specs/quint/decision-write-retry` が扱います）。
+- 次のものは含めていません。置き場の持ち主がいなくなったときと backend の停止時に送る DELETE（確立の途中なら終わるのを待つこと）、確立の途中で失敗したセッションへの DELETE、確立の鍵を待つ時間の上限、poller がプロジェクトごとに持つ読み取りハンドル、接続先の設定の変更、冪等キーの台帳（`specs/quint/decision-write-retry` が扱います）。
 
 ## 条件
 
@@ -38,7 +38,8 @@ backend が takt-mcp の HTTP サーバーに作るセッションが、画面�
 - `writeDeliveredAtMostOnce`：書き込みが takt-mcp に届くのは 1 回まで。
 - `unknownMeansDelivered`：「結果は不明」と伝えた書き込みは、takt-mcp に届いている。
 - `rejectedWriteNotDelivered`：「失敗した」と伝えた書き込みは、takt-mcp に届いていない。
-- `safety`：上の 5 つをすべて満たす。
+- `readDeliveredAtMostThreeTimes`：1 件の読み取りが takt-mcp に届くのは 3 回まで（最初の送信、送り直し、作り直したあとの再試行）。
+- `safety`：上の 6 つをすべて満たす。
 
 進行の条件（到達できること。`--witnesses` で数えます）
 
@@ -86,18 +87,18 @@ quint run httpSession.qnt --main=fixed --invariant=safety \
 
 50000 サンプル、max-steps 30、seed 0x310 で `safety` の反例なし。不変条件は、修正前と共有だけの版の検査と同じものです。
 
-trace の長さは最短 17、最長 31、平均 25.02 です。30 に届かない trace は、6 件の要求がすべて終わり、停止の回数も使い切って、進める遷移が無くなったものです。
+trace の長さは最短 17、最長 31、平均 24.97 です。30 に届かない trace は、6 件の要求がすべて終わり、停止の回数も使い切って、進める遷移が無くなったものです。
 
 進行の条件は次の数の trace で到達しました。
 
 | 条件 | 到達した trace |
 | --- | --- |
-| `reconnectsAfterRestart` | 12252 / 50000（24.50%） |
-| `sessionIsReused` | 46177 / 50000（92.35%） |
-| `readSurvivesConnectionFailure` | 25832 / 50000（51.66%） |
-| `writeRejectedWhileDown` | 10806 / 50000（21.61%） |
-| `writeUnknownAfterLostResponse` | 38897 / 50000（77.79%） |
-| `allRequestsSettle` | 47439 / 50000（94.88%） |
+| `reconnectsAfterRestart` | 11076 / 50000（22.15%） |
+| `sessionIsReused` | 45777 / 50000（91.55%） |
+| `readSurvivesConnectionFailure` | 23360 / 50000（46.72%） |
+| `writeRejectedWhileDown` | 10764 / 50000（21.53%） |
+| `writeUnknownAfterLostResponse` | 39103 / 50000（78.21%） |
+| `allRequestsSettle` | 48533 / 50000（97.07%） |
 
 ### 筋書きテスト
 
@@ -105,7 +106,7 @@ trace の長さは最短 17、最長 31、平均 25.02 です。30 に届かな�
 quint test httpSession_test.qnt --main=httpSession_test
 ```
 
-9 件すべて成功。`screenReadsLeaveSessionsBeforeFixTest` は、修正前の遷移で 3 回の読み取りが 3 つのセッションを残すことを固定します。`unsentWriteBecomesUnknownWithoutClassificationTest` は、共有だけの版で、届いていない書き込みが結果不明になることを固定します。
+10 件すべて成功。`screenReadsLeaveSessionsBeforeFixTest` は、修正前の遷移で 3 回の読み取りが 3 つのセッションを残すことを固定します。`unsentWriteBecomesUnknownWithoutClassificationTest` は、共有だけの版で、届いていない書き込みが結果不明になることを固定します。
 
 ## 実物で確かめたこと
 

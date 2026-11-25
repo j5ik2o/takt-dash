@@ -146,10 +146,15 @@ async fn concurrent_screen_reads_share_one_session() {
   // 同時に届いた画面の読み取りも、セッションを 1 つだけ作って共有する。
   let harness = http_harness();
   let server = start_server(&harness).await;
+  // 6 件の接続を先に済ませ、開始の合図で同時に最初の要求を送る。確立が必ず重なるようにして、
+  // 直列化が外れたら検出できるようにする。
+  let start = std::sync::Arc::new(tokio::sync::Barrier::new(6));
   let mut readers = Vec::new();
   for _ in 0..6 {
     let mut client = client(server.address).await;
+    let start = start.clone();
     readers.push(tokio::spawn(async move {
+      start.wait().await;
       client.get_goal_detail(GetGoalDetailRequest { goal_id: "g1".to_owned() }).await.map(|_| ())
     }));
   }

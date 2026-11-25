@@ -318,7 +318,12 @@ impl HttpMockServer {
       .stdout(Stdio::null())
       .stderr(Stdio::null());
     if let Some(behavior) = behavior {
-      command.arg("--behavior").arg(behavior);
+      // `slow-initialize:<ミリ秒>` のように、挙動に遅延を添えられます。
+      let (name, delay) = behavior.split_once(':').unwrap_or((behavior, ""));
+      command.arg("--behavior").arg(name);
+      if !delay.is_empty() {
+        command.arg("--delay-ms").arg(delay);
+      }
     }
     let mut child = command.spawn().expect("mock HTTP MCP サーバを起動できます");
     let deadline = Instant::now() + Duration::from_secs(10);

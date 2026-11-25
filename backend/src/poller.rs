@@ -730,8 +730,10 @@ impl Poller {
     let http_servers = config
       .servers
       .iter()
-      .filter(|(_, server)| matches!(server, McpServer::Http(_)))
-      .map(|(id, _)| id.clone())
+      .filter_map(|(id, server)| match server {
+        | McpServer::Http(http) => Some((id.clone(), http.clone())),
+        | McpServer::Stdio(_) => None,
+      })
       .collect();
     self.registry.retain_configured(&wanted, http_servers);
     for project in &config.projects {

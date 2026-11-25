@@ -85,7 +85,8 @@ module httpSession {
   }
 
   // 道具を送る。
-  // - takt-mcp が止まっていれば、接続を張れない。要求は届かない。読み取りは1回だけ送り直す。
+  // - takt-mcp が止まっていれば、接続を張れない。要求は届かない。読み取りは1回だけ送り直す
+  //   （404 でセッションを作り直したあとは、送り直さずに失敗として返す）。
   //   書き込みは送り直さない。CLASSIFY = false だと結果不明、true だと失敗として返す。
   // - セッションが生きていれば、届いて処理され、成功する。
   // - セッションが消えていれば 404（処理されない）で、1回だけ作り直す。修正案は、slot が
@@ -97,7 +98,7 @@ module httpSession {
       if (not(up)) all {
         requests' = requests.set(id,
           if (r.write) { ...r, phase: if (CLASSIFY) Rejected else Unknown }
-          else if (r.resent) { ...r, phase: Rejected }
+          else if (r.resent or r.retried) { ...r, phase: Rejected }
           else { ...r, resent: true }),
         slot' = slot,
       } else if (live.contains(r.sid)) all {
@@ -112,7 +113,8 @@ module httpSession {
   }
 
   // 道具は届いて処理されたが、応答を受け取れなかった（応答の前の切断、時間切れ）。
-  // 読み取りは同じセッションで1回だけ送り直す。書き込みは送り直さず、結果不明として返す。
+  // 読み取りは同じセッションで1回だけ送り直す（404 でセッションを作り直したあとは、送り直さずに
+  // 失敗として返す）。書き込みは送り直さず、結果不明として返す。
   // セッションと slot には触れない（セッションが消えたかどうかは 404 で知る）。
   action lostResponse(id: int): bool = {
     val r = requests.get(id)
@@ -122,7 +124,7 @@ module httpSession {
       live.contains(r.sid),
       requests' = requests.set(id,
         if (r.write) { ...r, phase: Unknown, delivered: r.delivered + 1 }
-        else if (r.resent) { ...r, phase: Rejected, delivered: r.delivered + 1 }
+        else if (r.resent or r.retried) { ...r, phase: Rejected, delivered: r.delivered + 1 }
         else { ...r, resent: true, delivered: r.delivered + 1 }),
       up' = up, live' = live, slot' = slot, nextSid' = nextSid, stops' = stops,
     }
@@ -180,7 +182,12 @@ module httpSession {
 
   val sessionSafety: bool = sessionsDoNotGrowWithRequests and onlySlotSessionLives
   val writeSafety: bool = writeDeliveredAtMostOnce and unknownMeansDelivered and rejectedWriteNotDelivered
-  val safety: bool = sessionSafety and writeSafety
+  // 読み取りを送り直すのは、404 でセッションを作り直す前の1回だけ。1件の読み取りが
+  // takt-mcp に届くのは、最初の送信、送り直し、作り直したあとの再試行の3回まで。
+  val readDeliveredAtMostThreeTimes: bool =
+    requests.keys().forall(i => requests.get(i).delivered <= 3)
+
+  val safety: bool = sessionSafety and writeSafety and readDeliveredAtMostThreeTimes
 
   // 進行の条件（到達できること。--witnesses で数える）。
   // 停止と起動のあと、404 を受けた要求が作り直して成功する。

@@ -87,4 +87,13 @@ module httpSession_test {
       .then(after::stop)
       .then(after::acquire(0))
       .expect(after::requests.get(0).phase == after::Rejected and after::safety)
+
+  // 修正案：404 でセッションを作り直したあとの読み取りは、応答を失っても送り直さない。
+  run readIsNotResentAfterRecoveryTest =
+    after::init
+      .then(after::arrive(0, false)).then(after::acquire(0))
+      .then(after::stop).then(after::start)
+      .then(after::call(0)).then(after::acquire(0))
+      .then(after::lostResponse(0))
+      .expect(after::requests.get(0).phase == after::Rejected and not(after::requests.get(0).resent) and after::safety)
 }

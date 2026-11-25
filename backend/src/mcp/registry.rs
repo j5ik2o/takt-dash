@@ -326,7 +326,11 @@ impl McpClientRegistry {
   /// [`McpClient`] の `kill_on_drop` で停止します。利用者がまだ同じハンドルを
   /// 保持している場合は、その操作が終わってハンドルが消えた時点で停止します。
   /// 設定から消えた HTTP サーバーのセッションも、同じように手放して閉じます。
-  pub(crate) fn retain_configured(&self, wanted: &BTreeSet<ProjectKey>, http_servers: BTreeSet<String>) {
+  ///
+  /// `http` は、設定にある HTTP サーバーとその接続先です。接続先（URL とトークン）が変わった
+  /// サーバーのセッションも、次の画面の要求を待たずにここで手放して閉じます。
+  pub(crate) fn retain_configured(&self, wanted: &BTreeSet<ProjectKey>, http: BTreeMap<String, HttpMcpServer>) {
+    let http_servers: BTreeSet<String> = http.keys().cloned().collect();
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
     let keep_stdio = |key: &ProjectKey| !http_servers.contains(&key.0) && wanted.contains(key);
     inner.clients.retain(|(server_id, project, _), _| keep_stdio(&(server_id.clone(), project.clone())));
@@ -335,8 +339,12 @@ impl McpClientRegistry {
     inner.write_counts.retain(|key, _| wanted.contains(key));
     inner.write_gates.retain(|key, _| wanted.contains(key));
     let removed: Vec<HttpEntry> = {
-      let stale: Vec<String> =
-        inner.http_sessions.keys().filter(|server_id| !http_servers.contains(*server_id)).cloned().collect();
+      let stale: Vec<String> = inner
+        .http_sessions
+        .iter()
+        .filter(|(id, entry)| http.get(*id) != Some(&entry.server))
+        .map(|(id, _)| id.clone())
+        .collect();
       stale.iter().filter_map(|server_id| inner.http_sessions.remove(server_id)).collect()
     };
     inner.http_servers = http_servers;
@@ -410,7 +418,12 @@ mod tests {
   //! クライアントは子プロセスを起動しないまま作れるため、ハンドルの同一性だけで
   //! レーンの割り当てを観測します。
 
-  use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
+  use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+  };
 
   use super::{Lane, LaneKey, McpClientRegistry};
   use crate::{domain::ScreenReadLanes, mcp::McpClientConfig};
@@ -445,11 +458,11 @@ mod tests {
     let registry = McpClientRegistry::new();
     let wanted = BTreeSet::from([("switching".to_owned(), "proj".to_owned()), ("local".to_owned(), "proj".to_owned())]);
     let (local, _) = registry.client("local", "proj", Lane::Write, config);
-    registry.retain_configured(&wanted, BTreeSet::from(["switching".to_owned()]));
+    registry.retain_configured(&wanted, BTreeMap::from([("switching".to_owned(), http_server(4100))]));
     let (late, _) = registry.client("switching", "proj", Lane::Write, config);
     assert!(Arc::ptr_eq(&local, &registry.client("local", "proj", Lane::Write, config).0));
 
-    registry.retain_configured(&wanted, BTreeSet::new());
+    registry.retain_configured(&wanted, BTreeMap::new());
     let (switched_back, created) = registry.client("switching", "proj", Lane::Write, config);
     assert!(created, "HTTP に切り替えた後に到着した旧レーンは、再利用のために残しません");
     assert!(!Arc::ptr_eq(&late, &switched_back));
@@ -591,16 +604,35 @@ mod tests {
     // 設定から消えた HTTP サーバーを、旧設定で解決済みの要求が登録し直さない。
     let registry = McpClientRegistry::new();
     let before = registry.http_session("resident", &http_server(4100));
-    registry.retain_configured(&BTreeSet::new(), BTreeSet::new());
+    registry.retain_configured(&BTreeSet::new(), BTreeMap::new());
 
     let stale = registry.http_session("resident", &http_server(4100));
     let again = registry.http_session("resident", &http_server(4100));
     assert!(!before.shares_with(&stale), "設定から消えたサーバーの置き場は外れています");
     assert!(!stale.shares_with(&again), "旧設定の要求は、その要求だけのセッションを使い、登録し直しません");
 
-    registry.retain_configured(&BTreeSet::new(), BTreeSet::from(["resident".to_owned()]));
+    registry.retain_configured(&BTreeSet::new(), BTreeMap::from([("resident".to_owned(), http_server(4100))]));
     let restored = registry.http_session("resident", &http_server(4100));
     let shared = registry.http_session("resident", &http_server(4100));
     assert!(restored.shares_with(&shared), "設定に戻ったサーバーは、また 1 つのセッションを共有します");
+  }
+
+  #[test]
+  fn reloading_a_config_with_a_changed_endpoint_drops_the_old_session() {
+    // 同じサーバー ID の接続先が変わったら、次の画面の要求を待たずに、設定の反映で旧接続先の
+    // 置き場を手放す（最後の持ち主が消えた時点でセッションを閉じる）。
+    let registry = McpClientRegistry::new();
+    let old = registry.http_session("resident", &http_server(4100));
+    let holders_before = old.holder_count();
+
+    registry.retain_configured(&BTreeSet::new(), BTreeMap::from([("resident".to_owned(), http_server(4101))]));
+
+    assert_eq!(old.holder_count(), holders_before - 1, "レジストリは旧接続先の置き場を手放します");
+    let kept = registry.http_session("resident", &http_server(4101));
+    registry.retain_configured(&BTreeSet::new(), BTreeMap::from([("resident".to_owned(), http_server(4101))]));
+    assert!(
+      kept.shares_with(&registry.http_session("resident", &http_server(4101))),
+      "接続先が同じなら置き場を保ちます"
+    );
   }
 }
