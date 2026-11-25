@@ -5,19 +5,22 @@
 // DashboardState を受け取る。VPN・Wi-Fi の切り替えやスリープからの復帰で接続が半開きに
 // なると onerror が出ず、画面は切断に気づけない。
 //
-// 時間は 1 目盛り = 5 秒の離散時刻で表す。
+// 時計は実装と同じ 2 本に分ける（1 目盛り = 5 秒）:
+// - monoNow: タイマー（setTimeout）が使う単調時計。OS スリープ中は進まないことがある。
+// - wallNow: Date.now() の壁時計。OS スリープ中は進み、NTP 等で逆行することもある。
 // - RESEND_INTERVAL = 3（15 秒。backend の WATCH_RESEND_INTERVAL）
-// - STALE_TIMEOUT   = 8（40 秒。2 * 15 秒 + 10 秒の余裕）
+// - STALE_TIMEOUT   = 8（40 秒。15 秒再送に対し組み立て・遅延を最大 25 秒許容）
 //
 // 定数による遷移の切り替え:
-// - WATCHDOG = false, STALE_GUARD = false（current）: 修正前。無音の見張りも古い接続の無視も無い。
-// - WATCHDOG = true,  STALE_GUARD = false（watchdogOnly）: 見張りだけを入れ、古い接続からの
-//   遅延 onmessage / onerror を無視しない版。
-// - WATCHDOG = true,  STALE_GUARD = true（fixed）: 修正案。無音の見張りとスリープ復帰時の
-//   鮮度確認を入れ、現在の接続以外からの受信・エラー・見張り発火をすべて無視する。
+// - WATCHDOG: 無音見張りタイマーとスリープ復帰時の鮮度確認（checkStale）の有無。
+// - STALE_GUARD: closed または id != activeConn の受信・エラー・見張り発火を無視するか。
+// - REARM_ON_WAKE: checkStale で期限未満のときに残り時間で見張りを張り直すか。
+// - ALLOW_CLOSE: stream.close() を遷移に含めるか（false は長時間開いたタブの探索用）。
 module stateStreamWatchdog {
   const WATCHDOG: bool
   const STALE_GUARD: bool
+  const REARM_ON_WAKE: bool
+  const ALLOW_CLOSE: bool
 
   type ConnStatus = Open | HalfOpen | Closed
 
@@ -27,25 +30,32 @@ module stateStreamWatchdog {
   pure val STALE_TIMEOUT: int = 8
   // 状態空間を閉じるための上限。
   pure val MAX_CONNS: int = 4
-  pure val MAX_TIME: int = 32
-  // スリープ時間の候補（2=10秒、8=40秒、12=60秒）。
-  pure val SLEEP_JUMPS: Set[int] = Set(2, 8, 12)
+  pure val MAX_TIME: int = 40
+  // スリープ時間の候補（2=10秒、5=25秒は期限未満の部分スリープ、8=40秒、12=60秒は期限以上）。
+  pure val SLEEP_JUMPS: Set[int] = Set(2, 5, 8, 12)
+  // NTP 等による壁時計の逆行幅（1=5秒、2=10秒）。
+  pure val REWIND_STEPS: Set[int] = Set(1, 2)
 
   var closed: bool
   var disconnected: bool
   var activeConn: int
   var nextConn: int
   var conns: int -> ConnStatus
+  // 有効な DashboardState を一度でも適用した接続 ID の集合（状態不変条件に使う）。
+  var receivedConns: Set[int]
+  // 最後に状態を適用した接続 ID（初回 SSR 状態は NONE）。
+  var lastAppliedConn: int
   var pendingReconnects: int
   var watchdogArmed: bool
   var watchdogConn: int
-  var lastActivity: int
-  var now: int
+  // 単調時計（タイマー用）と壁時計（now() 用）。
+  var monoNow: int
+  var wallNow: int
+  var lastActivityWall: int
+  var watchdogDeadlineMono: int
   var consecutiveFailures: int
 
-  // 性質の検証と到達確認に使う記録。
-  var staleStateApplied: bool
-  var staleErrorApplied: bool
+  // 到達確認（witness）と不変条件 4 の観測用。
   var prematureWatchdogDisconnect: bool
   var watchdogDisconnections: int
   var wakeDisconnects: int
@@ -53,12 +63,14 @@ module stateStreamWatchdog {
   var messagesReceived: int
   var invalidMessages: int
   var staleEventsIgnored: int
+  var lastDisconnectByWatchdog: bool
+  var recoveredAfterWatchdog: bool
 
-  // 現在の接続で見張り期限に達しているか。
-  // WATCHDOG = true のとき、時刻は期限を素通りできず、先に watchdogTimeout が発火する。
+  // 単調時計が見張り期限に達しているか。
+  // WATCHDOG = true のとき、通常の時刻進行（tick）は期限を素通りできない。
   val watchdogDue: bool =
     WATCHDOG and watchdogArmed and not(closed) and activeConn != NONE
-      and now >= lastActivity + STALE_TIMEOUT
+      and monoNow >= watchdogDeadlineMono
 
   action init: bool = all {
     closed' = false,
@@ -66,14 +78,16 @@ module stateStreamWatchdog {
     activeConn' = 0,
     nextConn' = 1,
     conns' = Map(0 -> Open),
+    receivedConns' = Set(),
+    lastAppliedConn' = NONE,
     pendingReconnects' = 0,
     watchdogArmed' = WATCHDOG,
     watchdogConn' = if (WATCHDOG) 0 else NONE,
-    lastActivity' = 0,
-    now' = 0,
+    monoNow' = 0,
+    wallNow' = 0,
+    lastActivityWall' = 0,
+    watchdogDeadlineMono' = if (WATCHDOG) STALE_TIMEOUT else 0,
     consecutiveFailures' = 0,
-    staleStateApplied' = false,
-    staleErrorApplied' = false,
     prematureWatchdogDisconnect' = false,
     watchdogDisconnections' = 0,
     wakeDisconnects' = 0,
@@ -81,27 +95,31 @@ module stateStreamWatchdog {
     messagesReceived' = 0,
     invalidMessages' = 0,
     staleEventsIgnored' = 0,
+    lastDisconnectByWatchdog' = false,
+    recoveredAfterWatchdog' = false,
   }
 
-  // 時刻を 1 目盛り（5 秒）進める。
-  // 健全な Open 接続では、backend の再送間隔の余裕（STALE_TIMEOUT 未満）の範囲内までしか
-  // 無音のまま時刻は進まない（それを超える無音は goHalfOpen で半開きになった状態として表す）。
+  // 通常の時刻進行（1 目盛り = 5 秒）。単調時計と壁時計の両方が 1 進む。
+  // Open のまま黙り続ける経路（backend 遅延や一時停止）も制限せずに許す。
   action tick: bool = all {
     not(closed),
-    now < MAX_TIME,
+    wallNow < MAX_TIME,
+    monoNow < MAX_TIME,
     not(watchdogDue),
-    (activeConn != NONE and conns.get(activeConn) == Open)
-      implies (now + 1 < lastActivity + STALE_TIMEOUT),
-    now' = now + 1,
+    monoNow' = monoNow + 1,
+    wallNow' = wallNow + 1,
     closed' = closed, disconnected' = disconnected, activeConn' = activeConn,
-    nextConn' = nextConn, conns' = conns, pendingReconnects' = pendingReconnects,
+    nextConn' = nextConn, conns' = conns, receivedConns' = receivedConns,
+    lastAppliedConn' = lastAppliedConn, pendingReconnects' = pendingReconnects,
     watchdogArmed' = watchdogArmed, watchdogConn' = watchdogConn,
-    lastActivity' = lastActivity, consecutiveFailures' = consecutiveFailures,
-    staleStateApplied' = staleStateApplied, staleErrorApplied' = staleErrorApplied,
+    lastActivityWall' = lastActivityWall, watchdogDeadlineMono' = watchdogDeadlineMono,
+    consecutiveFailures' = consecutiveFailures,
     prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
     watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
     reconnections' = reconnections, messagesReceived' = messagesReceived,
     invalidMessages' = invalidMessages, staleEventsIgnored' = staleEventsIgnored,
+    lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+    recoveredAfterWatchdog' = recoveredAfterWatchdog,
   }
 
   // VPN・Wi-Fi の切り替えなどで、現在の接続が onerror を出さずに半開きになる。
@@ -111,35 +129,57 @@ module stateStreamWatchdog {
     conns.get(activeConn) == Open,
     conns' = conns.set(activeConn, HalfOpen),
     closed' = closed, disconnected' = disconnected, activeConn' = activeConn,
-    nextConn' = nextConn, pendingReconnects' = pendingReconnects,
+    nextConn' = nextConn, receivedConns' = receivedConns,
+    lastAppliedConn' = lastAppliedConn, pendingReconnects' = pendingReconnects,
     watchdogArmed' = watchdogArmed, watchdogConn' = watchdogConn,
-    lastActivity' = lastActivity, now' = now, consecutiveFailures' = consecutiveFailures,
-    staleStateApplied' = staleStateApplied, staleErrorApplied' = staleErrorApplied,
+    monoNow' = monoNow, wallNow' = wallNow, lastActivityWall' = lastActivityWall,
+    watchdogDeadlineMono' = watchdogDeadlineMono, consecutiveFailures' = consecutiveFailures,
     prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
     watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
     reconnections' = reconnections, messagesReceived' = messagesReceived,
     invalidMessages' = invalidMessages, staleEventsIgnored' = staleEventsIgnored,
+    lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+    recoveredAfterWatchdog' = recoveredAfterWatchdog,
   }
 
-  // 現在の健全な接続で有効な DashboardState を受信する。
-  // 見張りを張り直し、切断フラグと連続失敗回数を戻す。
-  action receiveActiveMessage: bool = all {
-    not(closed),
-    activeConn != NONE,
-    conns.get(activeConn) == Open,
-    disconnected' = false,
-    consecutiveFailures' = 0,
-    lastActivity' = now,
-    watchdogArmed' = WATCHDOG,
-    watchdogConn' = if (WATCHDOG) activeConn else NONE,
-    messagesReceived' = messagesReceived + 1,
+  // 接続 id から onmessage が届く（現在接続の通常受信と、古い・閉じた接続からの遅延受信を 1 本にまとめる）。
+  // 実物と同じ判定: STALE_GUARD = true のとき closed または id != activeConn なら無視する。
+  action deliverMessage(id: int): bool = all {
+    conns.keys().contains(id),
+    // 半開き（HalfOpen）の現在接続からは通常メッセージは届かない。
+    (not(closed) and id == activeConn) implies (conns.get(id) == Open),
+    if (STALE_GUARD and (closed or id != activeConn)) all {
+      staleEventsIgnored' = staleEventsIgnored + 1,
+      disconnected' = disconnected,
+      consecutiveFailures' = consecutiveFailures,
+      lastActivityWall' = lastActivityWall,
+      watchdogArmed' = watchdogArmed,
+      watchdogConn' = watchdogConn,
+      watchdogDeadlineMono' = watchdogDeadlineMono,
+      receivedConns' = receivedConns,
+      lastAppliedConn' = lastAppliedConn,
+      messagesReceived' = messagesReceived,
+      lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+      recoveredAfterWatchdog' = recoveredAfterWatchdog,
+    } else all {
+      staleEventsIgnored' = staleEventsIgnored,
+      disconnected' = false,
+      consecutiveFailures' = 0,
+      lastActivityWall' = wallNow,
+      watchdogArmed' = WATCHDOG,
+      watchdogConn' = if (WATCHDOG) id else NONE,
+      watchdogDeadlineMono' = if (WATCHDOG) monoNow + STALE_TIMEOUT else watchdogDeadlineMono,
+      receivedConns' = receivedConns.union(Set(id)),
+      lastAppliedConn' = id,
+      messagesReceived' = if (not(closed) and id == activeConn) messagesReceived + 1 else messagesReceived,
+      lastDisconnectByWatchdog' = false,
+      recoveredAfterWatchdog' = (recoveredAfterWatchdog or (not(closed) and id == activeConn and disconnected and lastDisconnectByWatchdog)),
+    },
     closed' = closed, activeConn' = activeConn, nextConn' = nextConn, conns' = conns,
-    pendingReconnects' = pendingReconnects, now' = now,
-    staleStateApplied' = staleStateApplied, staleErrorApplied' = staleErrorApplied,
+    pendingReconnects' = pendingReconnects, monoNow' = monoNow, wallNow' = wallNow,
     prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
     watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
     reconnections' = reconnections, invalidMessages' = invalidMessages,
-    staleEventsIgnored' = staleEventsIgnored,
   }
 
   // 現在の接続で検証に失敗する不正なペイロードを受信する。
@@ -150,105 +190,60 @@ module stateStreamWatchdog {
     conns.get(activeConn) == Open,
     invalidMessages' = invalidMessages + 1,
     closed' = closed, disconnected' = disconnected, activeConn' = activeConn,
-    nextConn' = nextConn, conns' = conns, pendingReconnects' = pendingReconnects,
+    nextConn' = nextConn, conns' = conns, receivedConns' = receivedConns,
+    lastAppliedConn' = lastAppliedConn, pendingReconnects' = pendingReconnects,
     watchdogArmed' = watchdogArmed, watchdogConn' = watchdogConn,
-    lastActivity' = lastActivity, now' = now, consecutiveFailures' = consecutiveFailures,
-    staleStateApplied' = staleStateApplied, staleErrorApplied' = staleErrorApplied,
+    monoNow' = monoNow, wallNow' = wallNow, lastActivityWall' = lastActivityWall,
+    watchdogDeadlineMono' = watchdogDeadlineMono, consecutiveFailures' = consecutiveFailures,
     prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
     watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
     reconnections' = reconnections, messagesReceived' = messagesReceived,
     staleEventsIgnored' = staleEventsIgnored,
+    lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+    recoveredAfterWatchdog' = recoveredAfterWatchdog,
   }
 
-  // 古い接続または close 後の接続から遅延して onmessage が届く。
-  // STALE_GUARD = true なら無視する。false なら切断フラグを誤って false に戻してしまう。
-  action receiveStaleMessage(id: int): bool = all {
+  // 接続 id で onerror が発火する（現在接続のエラーと、古い・閉じた接続からの遅延・重複エラーを 1 本にまとめる）。
+  // 実物と同じ判定: closed または（STALE_GUARD = true かつ id != activeConn）なら無視する。
+  action deliverError(id: int): bool = all {
     conns.keys().contains(id),
-    id != activeConn or closed or conns.get(id) == Closed,
-    if (STALE_GUARD) all {
-      staleEventsIgnored' = staleEventsIgnored + 1,
-      disconnected' = disconnected,
-      consecutiveFailures' = consecutiveFailures,
-      lastActivity' = lastActivity,
-      watchdogArmed' = watchdogArmed,
-      watchdogConn' = watchdogConn,
-      staleStateApplied' = staleStateApplied,
-    } else all {
-      staleEventsIgnored' = staleEventsIgnored,
-      disconnected' = false,
-      consecutiveFailures' = 0,
-      lastActivity' = if (WATCHDOG) now else lastActivity,
-      watchdogArmed' = if (WATCHDOG) true else watchdogArmed,
-      watchdogConn' = if (WATCHDOG) id else watchdogConn,
-      staleStateApplied' = true,
-    },
-    closed' = closed, activeConn' = activeConn, nextConn' = nextConn, conns' = conns,
-    pendingReconnects' = pendingReconnects, now' = now,
-    staleErrorApplied' = staleErrorApplied,
-    prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
-    watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
-    reconnections' = reconnections, messagesReceived' = messagesReceived,
-    invalidMessages' = invalidMessages,
-  }
-
-  // 現在の接続で onerror が発火する。接続を閉じ、切断として扱い、再接続を 1 本だけ予約する。
-  action receiveActiveError: bool = all {
-    not(closed),
-    activeConn != NONE,
-    conns' = conns.set(activeConn, Closed),
-    activeConn' = NONE,
-    watchdogArmed' = false,
-    watchdogConn' = NONE,
-    disconnected' = true,
-    consecutiveFailures' = consecutiveFailures + 1,
-    pendingReconnects' = 1,
-    closed' = closed, nextConn' = nextConn, lastActivity' = lastActivity, now' = now,
-    staleStateApplied' = staleStateApplied, staleErrorApplied' = staleErrorApplied,
-    prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
-    watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
-    reconnections' = reconnections, messagesReceived' = messagesReceived,
-    invalidMessages' = invalidMessages, staleEventsIgnored' = staleEventsIgnored,
-  }
-
-  // 古い接続（現在の接続ではない）から遅延または重複して onerror が発火する。
-  // STALE_GUARD = true なら無視する。false なら現在の接続を閉じずに再接続を予約してしまう。
-  action receiveStaleError(id: int): bool = all {
-    not(closed),
-    conns.keys().contains(id),
-    id != activeConn,
-    if (STALE_GUARD) all {
+    if (closed or (STALE_GUARD and id != activeConn)) all {
       staleEventsIgnored' = staleEventsIgnored + 1,
       conns' = conns,
+      activeConn' = activeConn,
+      watchdogArmed' = watchdogArmed,
+      watchdogConn' = watchdogConn,
       disconnected' = disconnected,
       consecutiveFailures' = consecutiveFailures,
       pendingReconnects' = pendingReconnects,
-      staleErrorApplied' = staleErrorApplied,
+      lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
     } else all {
       staleEventsIgnored' = staleEventsIgnored,
       conns' = conns.set(id, Closed),
+      activeConn' = if (id == activeConn) NONE else activeConn,
+      watchdogArmed' = if (id == activeConn) false else watchdogArmed,
+      watchdogConn' = if (id == activeConn) NONE else watchdogConn,
       disconnected' = true,
       consecutiveFailures' = consecutiveFailures + 1,
       pendingReconnects' = 1,
-      staleErrorApplied' = true,
+      lastDisconnectByWatchdog' = false,
     },
-    closed' = closed, activeConn' = activeConn, nextConn' = nextConn,
-    watchdogArmed' = watchdogArmed, watchdogConn' = watchdogConn,
-    lastActivity' = lastActivity, now' = now,
-    staleStateApplied' = staleStateApplied,
+    closed' = closed, nextConn' = nextConn, receivedConns' = receivedConns,
+    lastAppliedConn' = lastAppliedConn, monoNow' = monoNow, wallNow' = wallNow,
+    lastActivityWall' = lastActivityWall, watchdogDeadlineMono' = watchdogDeadlineMono,
     prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
     watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
     reconnections' = reconnections, messagesReceived' = messagesReceived,
-    invalidMessages' = invalidMessages,
+    invalidMessages' = invalidMessages, recoveredAfterWatchdog' = recoveredAfterWatchdog,
   }
 
-  // 無音の見張りタイマーが期限に達して発火する。
-  // 現在の接続を閉じ、切断として扱い、再接続を 1 本だけ予約する。
-  action watchdogTimeout: bool = all {
+  // 見張りタイマーの発火。期限到達時だけでなく早期発火（タイマー揺らぎ等）も許す。
+  // 発火時に wallNow - lastActivityWall を確かめ、期限未満なら残りの時間で張り直して切断しない。
+  // 壁時計が逆行していたら lastActivityWall を wallNow に詰めて STALE_TIMEOUT で張り直す。
+  action watchdogFire: bool = all {
     WATCHDOG,
     watchdogArmed,
     not(closed),
-    activeConn != NONE,
-    now >= lastActivity + STALE_TIMEOUT,
     if (STALE_GUARD and watchdogConn != activeConn) all {
       watchdogArmed' = false,
       watchdogConn' = NONE,
@@ -258,65 +253,154 @@ module stateStreamWatchdog {
       disconnected' = disconnected,
       consecutiveFailures' = consecutiveFailures,
       pendingReconnects' = pendingReconnects,
+      lastActivityWall' = lastActivityWall,
+      watchdogDeadlineMono' = watchdogDeadlineMono,
       watchdogDisconnections' = watchdogDisconnections,
       prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
+      lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+    } else if (wallNow < lastActivityWall) all {
+      // 壁時計が逆行していた場合は基準を現在時刻へ詰めて張り直す。
+      lastActivityWall' = wallNow,
+      watchdogDeadlineMono' = monoNow + STALE_TIMEOUT,
+      watchdogArmed' = true,
+      watchdogConn' = activeConn,
+      conns' = conns,
+      activeConn' = activeConn,
+      disconnected' = disconnected,
+      consecutiveFailures' = consecutiveFailures,
+      pendingReconnects' = pendingReconnects,
+      watchdogDisconnections' = watchdogDisconnections,
+      prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
+      staleEventsIgnored' = staleEventsIgnored,
+      lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+    } else if (wallNow - lastActivityWall < STALE_TIMEOUT) all {
+      // 期限未満なら残り時間で張り直し、切断しない。
+      lastActivityWall' = lastActivityWall,
+      watchdogDeadlineMono' = monoNow + (STALE_TIMEOUT - (wallNow - lastActivityWall)),
+      watchdogArmed' = true,
+      watchdogConn' = activeConn,
+      conns' = conns,
+      activeConn' = activeConn,
+      disconnected' = disconnected,
+      consecutiveFailures' = consecutiveFailures,
+      pendingReconnects' = pendingReconnects,
+      watchdogDisconnections' = watchdogDisconnections,
+      prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
+      staleEventsIgnored' = staleEventsIgnored,
+      lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
     } else all {
-      conns' = conns.set(activeConn, Closed),
+      // 期限以上なら切断して接続を閉じ、再接続を 1 本予約する。
+      conns' = if (activeConn != NONE) conns.set(activeConn, Closed) else conns,
       activeConn' = NONE,
       watchdogArmed' = false,
       watchdogConn' = NONE,
       disconnected' = true,
       consecutiveFailures' = consecutiveFailures + 1,
       pendingReconnects' = 1,
+      lastActivityWall' = lastActivityWall,
+      watchdogDeadlineMono' = watchdogDeadlineMono,
       watchdogDisconnections' = watchdogDisconnections + 1,
-      prematureWatchdogDisconnect' = prematureWatchdogDisconnect or (now - lastActivity < STALE_TIMEOUT),
+      prematureWatchdogDisconnect' = (prematureWatchdogDisconnect or (wallNow - lastActivityWall < STALE_TIMEOUT)),
       staleEventsIgnored' = staleEventsIgnored,
+      lastDisconnectByWatchdog' = true,
     },
-    closed' = closed, nextConn' = nextConn, lastActivity' = lastActivity, now' = now,
-    staleStateApplied' = staleStateApplied, staleErrorApplied' = staleErrorApplied,
+    closed' = closed, nextConn' = nextConn, receivedConns' = receivedConns,
+    lastAppliedConn' = lastAppliedConn, monoNow' = monoNow, wallNow' = wallNow,
     wakeDisconnects' = wakeDisconnects, reconnections' = reconnections,
     messagesReceived' = messagesReceived, invalidMessages' = invalidMessages,
+    recoveredAfterWatchdog' = recoveredAfterWatchdog,
   }
 
-  // OS のスリープからの復帰（壁時計が jump だけ進み、visibilitychange / online / focus で
-  // checkStale が呼ばれる）。経過が見張り時間以上なら即座に切断して再接続を予約する。
-  // 経過が見張り時間未満なら接続を切らない。
+  // OS スリープからの復帰。壁時計（wallNow）だけが jump だけ進み、単調時計（monoNow）は止まったまま。
+  // Open のまま（スリープ後も TCP が生きている場合）でも長いスリープを許す。
+  // 復帰時に checkStale() が走り、期限以上なら即座に切断し、期限未満なら残り時間で見張りを張り直す。
   action wakeFromSleep(jump: int): bool = {
-    val newNow = now + jump
-    val expired = newNow - lastActivity >= STALE_TIMEOUT
+    val newWall = wallNow + jump
+    val elapsed = newWall - lastActivityWall
     all {
       not(closed),
-      newNow <= MAX_TIME,
+      newWall <= MAX_TIME,
       activeConn != NONE,
-      // 健全な接続のまま見張り時間を超えて眠ることはなく、長いスリープでは半開きになる。
-      (conns.get(activeConn) == Open) implies not(expired),
-      now' = newNow,
-      if (WATCHDOG and expired) all {
+      wallNow' = newWall,
+      monoNow' = monoNow,
+      if (WATCHDOG and elapsed >= STALE_TIMEOUT) all {
         conns' = conns.set(activeConn, Closed),
         activeConn' = NONE,
         watchdogArmed' = false,
         watchdogConn' = NONE,
+        watchdogDeadlineMono' = watchdogDeadlineMono,
+        lastActivityWall' = lastActivityWall,
         disconnected' = true,
         consecutiveFailures' = consecutiveFailures + 1,
         pendingReconnects' = 1,
         wakeDisconnects' = wakeDisconnects + 1,
+        lastDisconnectByWatchdog' = true,
+      } else if (WATCHDOG and REARM_ON_WAKE and elapsed >= 0 and elapsed < STALE_TIMEOUT) all {
+        // 期限内なら残り時間で見張りを張り直す（単調時計が止まっていた分の遅れを解消する）。
+        conns' = conns,
+        activeConn' = activeConn,
+        watchdogArmed' = true,
+        watchdogConn' = activeConn,
+        watchdogDeadlineMono' = monoNow + (STALE_TIMEOUT - elapsed),
+        lastActivityWall' = lastActivityWall,
+        disconnected' = disconnected,
+        consecutiveFailures' = consecutiveFailures,
+        pendingReconnects' = pendingReconnects,
+        wakeDisconnects' = wakeDisconnects,
+        lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+      } else if (WATCHDOG and REARM_ON_WAKE and elapsed < 0) all {
+        conns' = conns,
+        activeConn' = activeConn,
+        watchdogArmed' = true,
+        watchdogConn' = activeConn,
+        watchdogDeadlineMono' = monoNow + STALE_TIMEOUT,
+        lastActivityWall' = newWall,
+        disconnected' = disconnected,
+        consecutiveFailures' = consecutiveFailures,
+        pendingReconnects' = pendingReconnects,
+        wakeDisconnects' = wakeDisconnects,
+        lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
       } else all {
         conns' = conns,
         activeConn' = activeConn,
         watchdogArmed' = watchdogArmed,
         watchdogConn' = watchdogConn,
+        watchdogDeadlineMono' = watchdogDeadlineMono,
+        lastActivityWall' = lastActivityWall,
         disconnected' = disconnected,
         consecutiveFailures' = consecutiveFailures,
         pendingReconnects' = pendingReconnects,
         wakeDisconnects' = wakeDisconnects,
+        lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
       },
-      closed' = closed, nextConn' = nextConn, lastActivity' = lastActivity,
-      staleStateApplied' = staleStateApplied, staleErrorApplied' = staleErrorApplied,
+      closed' = closed, nextConn' = nextConn, receivedConns' = receivedConns,
+      lastAppliedConn' = lastAppliedConn,
       prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
       watchdogDisconnections' = watchdogDisconnections, reconnections' = reconnections,
       messagesReceived' = messagesReceived, invalidMessages' = invalidMessages,
       staleEventsIgnored' = staleEventsIgnored,
+      recoveredAfterWatchdog' = recoveredAfterWatchdog,
     }
+  }
+
+  // NTP 等で壁時計（wallNow）だけが逆行する（単調時計は変わらない）。
+  action rewindWallClock(delta: int): bool = all {
+    not(closed),
+    wallNow - delta >= 0,
+    wallNow' = wallNow - delta,
+    monoNow' = monoNow,
+    closed' = closed, disconnected' = disconnected, activeConn' = activeConn,
+    nextConn' = nextConn, conns' = conns, receivedConns' = receivedConns,
+    lastAppliedConn' = lastAppliedConn, pendingReconnects' = pendingReconnects,
+    watchdogArmed' = watchdogArmed, watchdogConn' = watchdogConn,
+    lastActivityWall' = lastActivityWall, watchdogDeadlineMono' = watchdogDeadlineMono,
+    consecutiveFailures' = consecutiveFailures,
+    prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
+    watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
+    reconnections' = reconnections, messagesReceived' = messagesReceived,
+    invalidMessages' = invalidMessages, staleEventsIgnored' = staleEventsIgnored,
+    lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+    recoveredAfterWatchdog' = recoveredAfterWatchdog,
   }
 
   // 予約していた再接続タイマーが発火し、新しい接続を 1 本開く。
@@ -329,21 +413,25 @@ module stateStreamWatchdog {
     activeConn' = nextConn,
     nextConn' = nextConn + 1,
     pendingReconnects' = pendingReconnects - 1,
-    lastActivity' = now,
+    lastActivityWall' = wallNow,
     watchdogArmed' = WATCHDOG,
     watchdogConn' = if (WATCHDOG) nextConn else NONE,
+    watchdogDeadlineMono' = if (WATCHDOG) monoNow + STALE_TIMEOUT else watchdogDeadlineMono,
     reconnections' = reconnections + 1,
-    closed' = closed, disconnected' = disconnected, now' = now,
+    closed' = closed, disconnected' = disconnected, receivedConns' = receivedConns,
+    lastAppliedConn' = lastAppliedConn, monoNow' = monoNow, wallNow' = wallNow,
     consecutiveFailures' = consecutiveFailures,
-    staleStateApplied' = staleStateApplied, staleErrorApplied' = staleErrorApplied,
     prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
     watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
     messagesReceived' = messagesReceived, invalidMessages' = invalidMessages,
     staleEventsIgnored' = staleEventsIgnored,
+    lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+    recoveredAfterWatchdog' = recoveredAfterWatchdog,
   }
 
   // 画面のアンマウントなどで stream.close() を呼ぶ。接続と全タイマーを止める。
   action closeStream: bool = all {
+    ALLOW_CLOSE,
     not(closed),
     closed' = true,
     conns' = if (activeConn != NONE) conns.set(activeConn, Closed) else conns,
@@ -351,42 +439,47 @@ module stateStreamWatchdog {
     pendingReconnects' = 0,
     watchdogArmed' = false,
     watchdogConn' = NONE,
-    disconnected' = disconnected, nextConn' = nextConn, lastActivity' = lastActivity,
-    now' = now, consecutiveFailures' = consecutiveFailures,
-    staleStateApplied' = staleStateApplied, staleErrorApplied' = staleErrorApplied,
+    disconnected' = disconnected, nextConn' = nextConn, receivedConns' = receivedConns,
+    lastAppliedConn' = lastAppliedConn, monoNow' = monoNow, wallNow' = wallNow,
+    lastActivityWall' = lastActivityWall, watchdogDeadlineMono' = watchdogDeadlineMono,
+    consecutiveFailures' = consecutiveFailures,
     prematureWatchdogDisconnect' = prematureWatchdogDisconnect,
     watchdogDisconnections' = watchdogDisconnections, wakeDisconnects' = wakeDisconnects,
     reconnections' = reconnections, messagesReceived' = messagesReceived,
     invalidMessages' = invalidMessages, staleEventsIgnored' = staleEventsIgnored,
+    lastDisconnectByWatchdog' = lastDisconnectByWatchdog,
+    recoveredAfterWatchdog' = recoveredAfterWatchdog,
   }
 
   action step: bool = any {
     tick,
     goHalfOpen,
-    receiveActiveMessage,
-    receiveInvalidMessage,
     {
       nondet id = conns.keys().oneOf()
       any {
-        receiveStaleMessage(id),
-        receiveStaleError(id),
+        deliverMessage(id),
+        deliverError(id),
       }
     },
-    receiveActiveError,
-    watchdogTimeout,
+    receiveInvalidMessage,
+    watchdogFire,
     {
       nondet jump = SLEEP_JUMPS.oneOf()
       wakeFromSleep(jump)
+    },
+    {
+      nondet delta = REWIND_STEPS.oneOf()
+      rewindWallClock(delta)
     },
     reconnectFire,
     closeStream,
   }
 
-  // ===== 不変条件（安全性） =====
+  // ===== 不変条件（安全性。すべて実状態で記述し、印フラグを使わない） =====
 
-  // 1. 見張りの時間を過ぎたら必ず切断になる。
+  // 1. 見張りの時間（壁時計基準）を過ぎたら必ず切断になる（スリープを挟んでも成り立つ）。
   val silentConnectionMustDisconnect: bool =
-    (not(closed) and activeConn != NONE and now > lastActivity + STALE_TIMEOUT)
+    (not(closed) and activeConn != NONE and wallNow > lastActivityWall + STALE_TIMEOUT)
       implies disconnected
 
   // 2a. 開いたままの接続は同時に 1 本まで。
@@ -400,13 +493,18 @@ module stateStreamWatchdog {
   val noReconnectWhileConnected: bool =
     activeConn != NONE implies pendingReconnects == 0
 
-  // 3a. 切断後・開き直し後に、古い接続の受信で状態が戻らない。
-  val noStaleStateRestore: bool = not(staleStateApplied)
+  // 3a. 接続中（disconnected == false）なら、有効な現在接続が存在し、
+  //     再接続後の接続ではその接続自身で少なくとも 1 回は受信している。
+  val connectedImpliesValidActiveConn: bool =
+    (not(closed) and not(disconnected)) implies
+      (activeConn != NONE and (activeConn == 0 or receivedConns.contains(activeConn)))
 
-  // 3b. 古い接続のエラーで現在の接続や再接続予約を壊さない。
-  val noStaleErrorInterference: bool = not(staleErrorApplied)
+  // 3b. 接続中に最後に適用した状態は、現在の接続から届いたものだけ（古い接続の受信で上書きされない）。
+  val appliedStateMatchesActiveWhenConnected: bool =
+    (not(closed) and not(disconnected) and lastAppliedConn != NONE) implies
+      (lastAppliedConn == activeConn)
 
-  // 4. 見張り時間未満で受信が続いている間は切断にしない。
+  // 4. 期限より前に見張りで切らない。
   val noPrematureWatchdogDisconnect: bool = not(prematureWatchdogDisconnect)
 
   // 5. 見張りタイマーは開いている現在の接続 1 本だけに紐づく。
@@ -427,8 +525,8 @@ module stateStreamWatchdog {
     atMostOneUnclosedConn,
     atMostOnePendingReconnect,
     noReconnectWhileConnected,
-    noStaleStateRestore,
-    noStaleErrorInterference,
+    connectedImpliesValidActiveConn,
+    appliedStateMatchesActiveWhenConnected,
     noPrematureWatchdogDisconnect,
     watchdogMatchesActiveConn,
     nothingActiveWhenClosed,
@@ -440,18 +538,28 @@ module stateStreamWatchdog {
   val witnessWatchdogDisconnect: bool = watchdogDisconnections > 0
   val witnessWakeDisconnect: bool = wakeDisconnects > 0
   val witnessReconnectAndRecover: bool = reconnections > 0 and not(disconnected) and activeConn > 0
+  val witnessWatchdogRecover: bool = recoveredAfterWatchdog
   val witnessStaleEventIgnored: bool = staleEventsIgnored > 0
   val witnessStreamClosed: bool = closed
 }
 
 module current {
-  import stateStreamWatchdog(WATCHDOG = false, STALE_GUARD = false).*
+  import stateStreamWatchdog(WATCHDOG = false, STALE_GUARD = false, REARM_ON_WAKE = false, ALLOW_CLOSE = true).*
 }
 
 module watchdogOnly {
-  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = false).*
+  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = false, REARM_ON_WAKE = true, ALLOW_CLOSE = true).*
+}
+
+module noWakeRearm {
+  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = true, REARM_ON_WAKE = false, ALLOW_CLOSE = true).*
 }
 
 module fixed {
-  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = true).*
+  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = true, REARM_ON_WAKE = true, ALLOW_CLOSE = true).*
+}
+
+// タブを閉じずに長く開いたままの状態を探索し、見張り切断→再接続→復帰の経路を厚く通る構成。
+module fixedOpenSession {
+  import stateStreamWatchdog(WATCHDOG = true, STALE_GUARD = true, REARM_ON_WAKE = true, ALLOW_CLOSE = false).*
 }
