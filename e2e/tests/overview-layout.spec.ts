@@ -149,3 +149,50 @@ test("プロジェクトが2件ならカードは同じ行に半分ずつ並ぶ"
     expect(card.width).toBeLessThanOrEqual(list.width / 2);
   }
 });
+
+// issue #283: 狭い幅でマージ待ちの通知のプロジェクト名と、実行中の run のゴール・経過が潰れず読める。
+const NARROW_WIDTHS = [375, 768, 900, 1000] as const;
+
+const lineCount = (page: Page, selector: string): Promise<number> =>
+  page
+    .locator(selector)
+    .first()
+    .evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      const tops = new Set(Array.from(range.getClientRects(), (rect) => Math.round(rect.top)));
+      return tops.size;
+    });
+
+for (const width of NARROW_WIDTHS) {
+  test(`幅 ${width}px で通知のプロジェクト名と run のゴール・経過が潰れず、横にはみ出さない`, async ({ page, stack }) => {
+    await openOverview(page, stack.webUrl, width);
+
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow, "ページが横にはみ出さない").toBeLessThanOrEqual(0);
+
+    const tableOverflow = await page
+      .locator('section[aria-labelledby="h-runs"] .l-table')
+      .evaluate((element) => element.scrollWidth - element.clientWidth);
+    expect(tableOverflow, "run の表が枠の中で横スクロールしない").toBeLessThanOrEqual(0);
+
+    for (const label of ["プロジェクト", "ゴール", "ステップ", "経過", "状態"]) {
+      await expect(page.locator(`.run-row td[data-label="${label}"]`), `列「${label}」の名前が各セルに付く`).toHaveCount(1);
+    }
+
+    const proj = await boxOf(page, ".callout .proj");
+    expect(proj.width, "通知のプロジェクト名が1文字幅に潰れない").toBeGreaterThan(48);
+    expect(await lineCount(page, ".callout .proj"), "プロジェクト名が1〜2行").toBeLessThanOrEqual(2);
+
+    const goal = await boxOf(page, ".run-row .run-goal .g");
+    expect(goal.width, "run のゴールの見出しが潰れない").toBeGreaterThan(120);
+    const goalText = await boxOf(page, ".run-row .run-goal .task");
+    expect(goalText.width, "run のゴールの本文が潰れない").toBeGreaterThan(120);
+
+    const viewport = page.viewportSize()!;
+    for (const selector of [".run-row .run-elapsed span", ".callout .view", ".run-row .run-project .view"]) {
+      const box = await boxOf(page, selector);
+      expect(box.x + box.width, `${selector} が右端で見切れない`).toBeLessThanOrEqual(viewport.width + 0.5);
+    }
+  });
+}

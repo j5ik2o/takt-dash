@@ -654,8 +654,13 @@ a {
   font-weight: 600;
 }
 
-/* 狭い画面では run の表のセルを縦に積み、ゴールの文が1文字ずつに潰れて読めなくならないようにする。 */
-@media (max-width: 860px) {
+/* 表の置かれた幅が狭いときは run の表のセルを縦に積み、ゴールの文が1文字ずつに潰れて読めなくならないようにする。
+   画面の幅ではなく表の幅で決める（サイドバーが幅を取る 761〜1100px でも潰れないようにするため、issue #283）。 */
+.runs-table {
+  container-type: inline-size;
+}
+
+@container (max-width: 800px) {
   .runs-table table,
   .runs-table tbody,
   .runs-table tr,
@@ -669,6 +674,15 @@ a {
 
   .runs-table td {
     border-bottom: 0;
+  }
+
+  /* 見出し行を隠す代わりに、各セルの先頭へ列の名前を出す（縦積みでも各項目の意味が伝わるように）。 */
+  .runs-table td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: var(--font-size-13);
+    font-weight: 600;
   }
 
   .runs-table tbody tr {
@@ -1323,6 +1337,17 @@ ol.log-tail li {
   border-top: none;
 }
 
+/* 通知の幅が狭いときは1項目を縦に積み、プロジェクト名が1文字幅に潰れないようにする。 */
+.callout {
+  container-type: inline-size;
+}
+
+@container (max-width: 560px) {
+  .callout li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .callout li.stale {
   background: var(--orange-soft);
 }
@@ -1471,10 +1496,6 @@ details.side-foot {
   .tiles,
   .cards,
   .sum-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .callout li {
     grid-template-columns: minmax(0, 1fr);
   }
 
