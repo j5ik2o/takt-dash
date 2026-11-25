@@ -78,7 +78,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     shutdown: stop_rx.clone(),
     registry: registry.clone(),
   });
-  let mut poller = Poller::new(arguments.config_path.clone(), activity, store, changes, registry);
+  let mut poller = Poller::new(arguments.config_path.clone(), activity, store, changes, registry)
+    .with_start_recorded(chrono::Utc::now());
   let signal_sender = stop_tx.clone();
   tokio::spawn(async move {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

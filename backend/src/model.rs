@@ -73,6 +73,12 @@ pub enum EventKind {
   Blocked,
   ConnectionLost,
   ConnectionRestored,
+  TaskFailed,
+  TaskExceeded,
+  TaskPrFailed,
+  RunFailed,
+  RunAborted,
+  BackendStarted,
 }
 
 impl EventKind {
@@ -88,6 +94,12 @@ impl EventKind {
       | EventKind::Blocked => "blocked",
       | EventKind::ConnectionLost => "connection_lost",
       | EventKind::ConnectionRestored => "connection_restored",
+      | EventKind::TaskFailed => "task_failed",
+      | EventKind::TaskExceeded => "task_exceeded",
+      | EventKind::TaskPrFailed => "task_pr_failed",
+      | EventKind::RunFailed => "run_failed",
+      | EventKind::RunAborted => "run_aborted",
+      | EventKind::BackendStarted => "backend_started",
     }
   }
 
@@ -103,6 +115,12 @@ impl EventKind {
       | "blocked" => Some(EventKind::Blocked),
       | "connection_lost" => Some(EventKind::ConnectionLost),
       | "connection_restored" => Some(EventKind::ConnectionRestored),
+      | "task_failed" => Some(EventKind::TaskFailed),
+      | "task_exceeded" => Some(EventKind::TaskExceeded),
+      | "task_pr_failed" => Some(EventKind::TaskPrFailed),
+      | "run_failed" => Some(EventKind::RunFailed),
+      | "run_aborted" => Some(EventKind::RunAborted),
+      | "backend_started" => Some(EventKind::BackendStarted),
       | _ => None,
     }
   }

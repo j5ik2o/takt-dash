@@ -109,6 +109,12 @@ enum ActivityKind {
   ACTIVITY_KIND_BLOCKED = 7;
   ACTIVITY_KIND_CONNECTION_LOST = 8;
   ACTIVITY_KIND_CONNECTION_RESTORED = 9;
+  ACTIVITY_KIND_TASK_FAILED = 10;      // タスクが失敗した
+  ACTIVITY_KIND_TASK_EXCEEDED = 11;    // タスクが上限を超えて止まった
+  ACTIVITY_KIND_TASK_PR_FAILED = 12;   // タスクのプルリクエストの作成に失敗した
+  ACTIVITY_KIND_RUN_FAILED = 13;       // run が失敗で終わった
+  ACTIVITY_KIND_RUN_ABORTED = 14;      // run が中断された
+  ACTIVITY_KIND_BACKEND_STARTED = 15;  // taktDash の backend が起動した
 }
 
 // プロジェクトの接続状態を表す。
@@ -304,7 +310,7 @@ message GetActivityRequest {}
 // アクティビティの出来事を表す。
 message ActivityEvent {
   google.protobuf.Timestamp occurred_at = 1;  // 時刻
-  string server_id = 2;                       // サーバー
+  string server_id = 2;                       // サーバー（backend の起動は、どのサーバーにも属さないため空にする）
   optional string project = 3;                // プロジェクト（接続断などサーバー全体の出来事は省略する）
   ActivityKind kind = 4;                      // 種類
   string body = 5;                            // 本文

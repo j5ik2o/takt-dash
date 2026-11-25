@@ -2086,6 +2086,33 @@ async fn task_failure_whose_record_failed_is_recorded_once_after_the_record_reco
 }
 
 #[tokio::test]
+async fn backend_start_whose_record_failed_is_recorded_once_after_the_record_recovers() {
+  let harness = Harness::new(state_with_goal("g1"));
+  let started_at = common::time("2026-11-16T09:00:00Z");
+  let mut poller = harness.poller().with_start_recorded(started_at);
+
+  // 起動の出来事はどのサーバーにも属さないため、サーバーが空の記録だけを失敗させます。
+  fail_event_recording_for(&harness.activity_db_path, "");
+  poller.read_cycle_once().await.expect_err("起動を記録できないサイクルは記録の失敗で終わります");
+  assert!(recorded_kinds(&harness).is_empty(), "記録に失敗した起動は残っていません");
+  assert!(
+    harness.store.slot("takt-dash").and_then(|slot| slot.snapshot).is_some(),
+    "起動の記録の失敗は読み取りを止めません"
+  );
+
+  allow_event_recording(&harness.activity_db_path);
+  let recovered = poller.read_cycle_once().await.expect("記録が回復したサイクルを実行できます");
+  assert_eq!(recovered.events_recorded, 1, "持ち越した起動を記録します");
+  poller.read_cycle_once().await.expect("その次のサイクルを実行できます");
+  poller.shutdown().await;
+
+  let events = harness.activity.recent_events(50).expect("記録した出来事を読めます");
+  assert_eq!(recorded_kinds(&harness), vec!["backend_started"], "起動を1回だけ記録します");
+  assert_eq!(events[0].occurred_at, started_at, "記録する時刻は、記録できた時刻ではなく起動の時刻です");
+  assert_eq!(events[0].project, None);
+}
+
+#[tokio::test]
 async fn failed_event_record_on_the_failure_path_still_marks_the_project_disconnected() {
   // 接続断の出来事の記録に失敗したサイクルでも、そのプロジェクトの connected は偽にします。
   // 記録エラーを `?` で先に伝えて record_failure に到達しない実装では、応答がないプロジェクトが

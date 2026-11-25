@@ -21,7 +21,7 @@ use crate::{
   activity::ActivityStore,
   config::{load_config, Config, HttpMcpServer, McpServer, Project, ServerMeta, Thresholds, DEFAULT_INTERVAL_SECONDS},
   domain::PullRequestNumber,
-  events::{detect, detect_with_terminations},
+  events::{backend_started, detect, detect_with_terminations},
   mcp::{client_config, HttpReadHandle, McpClientRegistry, ReadToolSet, ToolCallMetrics, ToolError},
   model::{
     ActivityEvent, ConnectionState, ConnectionTransition, EventKind, ExecutionStatus, GoalEntry, GoalStatus,
@@ -67,6 +67,9 @@ pub struct Poller {
   /// できません。検出した出来事そのものをここへ残し、記録に成功するまで周期のたびに
   /// 同じ1件を記録し直します。
   unrecorded_lost: BTreeMap<String, ActivityEvent>,
+  /// まだ記録に成功していない backend の起動の出来事。記録に成功するまで周期のたびに
+  /// 同じ1件を記録し直し、成功したら捨てます。
+  pending_start:   Option<ActivityEvent>,
   changes:         broadcast::Sender<()>,
   last_signature:  Option<StoreSignature>,
   #[cfg(test)]
@@ -121,6 +124,7 @@ impl Poller {
       seed_pending: BTreeSet::new(),
       deferred_lost: BTreeMap::new(),
       unrecorded_lost: BTreeMap::new(),
+      pending_start: None,
       changes,
       last_signature: None,
       #[cfg(test)]
@@ -128,6 +132,15 @@ impl Poller {
       run_logs: RunLogHandles::default(),
       gh_program: PathBuf::from("gh"),
     }
+  }
+
+  /// backend の起動を、アクティビティへ1回記録する出来事として持たせる。
+  ///
+  /// 記録は最初の周期の先頭で行います。記録に失敗した周期は出来事を持ち越し、
+  /// 記録に成功した周期で1回だけ記録します。
+  pub fn with_start_recorded(mut self, started_at: DateTime<Utc>) -> Self {
+    self.pending_start = Some(backend_started(started_at));
+    self
   }
 
   /// PR の状態確認に使う gh の実行ファイルを差し替える（テスト用）。
@@ -160,6 +173,8 @@ impl Poller {
   /// 1行のログに出します。
   pub async fn read_cycle_once_at(&mut self, now: DateTime<Utc>) -> Result<CycleReport, crate::config::ConfigError> {
     let started = Instant::now();
+    // 起動の記録は、設定の読み込みや読み取りの成否と独立に行います。
+    let start_record = self.record_pending_start();
     let config = load_config(&self.config_path)?;
     let before = match self.last_signature.take() {
       | Some(signature) => signature,
@@ -181,13 +196,13 @@ impl Poller {
     let mut report = CycleReport {
       projects_read:   0,
       projects_failed: 0,
-      events_recorded: 0,
+      events_recorded: usize::from(matches!(start_record, Ok(true))),
       interval:        Duration::from_secs(config.interval_seconds),
     };
     let mut metrics = ToolCallMetrics::default();
     // 記録に失敗したプロジェクトがあっても、残りのプロジェクトの読み取りと状態変化の通知を
     // 続けるため、最初の記録エラーだけを保持してサイクルの末尾で返します。
-    let mut record_error: Option<crate::config::ConfigError> = None;
+    let mut record_error: Option<crate::config::ConfigError> = start_record.err();
     let mut handles = Vec::with_capacity(config.projects.len());
     for project in &config.projects {
       #[cfg(test)]
@@ -619,6 +634,16 @@ impl Poller {
     }
     report.projects_failed += 1;
     tracing::warn!(project = %project.name, error = %error, "プロジェクトの読み取りに失敗しました。");
+  }
+
+  /// 持ち越している backend の起動の出来事を記録する。記録したら true、持ち越しが無ければ false。
+  fn record_pending_start(&mut self) -> Result<bool, crate::config::ConfigError> {
+    let Some(start) = &self.pending_start else {
+      return Ok(false);
+    };
+    self.record_events(std::slice::from_ref(start))?;
+    self.pending_start = None;
+    Ok(true)
   }
 
   fn record_events(&self, events: &[crate::model::ActivityEvent]) -> Result<(), crate::config::ConfigError> {
