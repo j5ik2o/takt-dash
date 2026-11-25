@@ -433,6 +433,7 @@ enum TurnInput {
   /// 出来事から始まったターン。`{"event":{"kind":…},"instruction":…}` の行と、その前の説明文。
   Event { description: Option<String>, kind: String, event: Value },
   /// 保存した質問への人の回答から始まったターン。`{"kind":"inquiry_answered",…}` の行。
+  /// `answer` は回答の本文（`answer.text`、無ければ `answer.report` を言葉にしたもの）。
   InquiryAnswer { answer: String, question: Option<String>, source: Value },
 }
 
@@ -481,11 +482,25 @@ fn turn_input_from_json(value: Value, description: &[&str]) -> Option<TurnInput>
     return Some(TurnInput::Event { description, kind, event: event.clone() });
   }
   if value.get("kind").and_then(Value::as_str) == Some("inquiry_answered") {
-    let answer = value.get("answer").and_then(|answer| answer.get("text")).and_then(non_empty)?;
+    let answer = value.get("answer").and_then(answer_text)?;
     let question = value.get("question").and_then(non_empty);
     return Some(TurnInput::InquiryAnswer { answer, question, source: value });
   }
   None
+}
+
+/// 回答の本文。人が書いた `text` を優先し、無ければ作業の依頼への報告（`report`）を、
+/// 判断待ちの画面のボタンと同じ言葉にする。
+fn answer_text(answer: &Value) -> Option<String> {
+  let non_empty = |key: &str| answer.get(key).and_then(Value::as_str).filter(|text| !text.is_empty());
+  if let Some(text) = non_empty("text") {
+    return Some(text.to_owned());
+  }
+  non_empty("report").map(|report| match report {
+    | "completed" => "実施した".to_owned(),
+    | "unable" => "対応できない".to_owned(),
+    | other => format!("回答: {other}"),
+  })
 }
 
 fn pretty_json(value: &Value) -> String {

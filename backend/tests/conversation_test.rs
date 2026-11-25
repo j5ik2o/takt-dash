@@ -10,8 +10,8 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use conversation_fixture::{
   assistant_text, data_text, event_turn_data, fenced_assistant_data, fenced_assistant_without_message_data,
-  garbled_user_data, inquiry_answered_data, invalid_fenced_assistant_data, plain_user_data, wrapped_user_data,
-  wrapped_user_without_speaker_data, ConversationFixture, CONVERSATION_SCHEMA,
+  garbled_user_data, inquiry_answered_data, inquiry_answered_with_answer_data, invalid_fenced_assistant_data,
+  plain_user_data, wrapped_user_data, wrapped_user_without_speaker_data, ConversationFixture, CONVERSATION_SCHEMA,
 };
 use takt_dash_backend::{
   conversation::{ConversationPage, ConversationQuery, ConversationReader, ConversationSpeaker},
@@ -1093,6 +1093,51 @@ fn event_turns_without_a_usable_kind_are_left_as_is() {
     assert_eq!(message.speaker, ConversationSpeaker::User, "{event}: 種類が読めなければ話者は変えません");
     assert_eq!(message.text, data_text(&data), "{event}: 種類が読めなければ元の本文を返します");
     assert_eq!(message.detail, None, "{event}: 種類が読めなければ折りたたみはありません");
+  }
+}
+
+#[test]
+fn operation_request_answers_without_text_show_the_chosen_report() {
+  let cases = [
+    (serde_json::json!({ "report": "completed", "source": "takt-dash" }), "実施した"),
+    (serde_json::json!({ "report": "unable", "source": "takt-dash" }), "対応できない"),
+    (serde_json::json!({ "report": "deferred" }), "回答: deferred"),
+    (serde_json::json!({ "text": "", "report": "completed" }), "実施した"),
+    (serde_json::json!({ "text": "人が書いた回答です。", "report": "completed" }), "人が書いた回答です。"),
+  ];
+  for (answer, expected) in cases {
+    let (_directory, fixture) = ConversationFixture::new();
+    let project_cwd = fixture.project_dir("takt-dash");
+    seed_session(&fixture, &project_cwd);
+    let data =
+      inquiry_answered_with_answer_data("PR を手でマージしてください。", answer.clone(), false, FIRST_MESSAGE_AT);
+    fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &data);
+
+    let page = fixture.reader().read(&query("takt-dash", &project_cwd));
+
+    let message = &page.messages[0];
+    assert_eq!(message.speaker, ConversationSpeaker::User, "{answer}: 回答の話者はユーザーです");
+    assert_eq!(message.text, expected, "{answer}: text があれば text、無ければ選んだ報告を本文にします");
+    let detail = message.detail.as_ref().expect("折りたたみがあります");
+    assert_eq!(detail.question.as_deref(), Some("PR を手でマージしてください。"));
+    let folded: serde_json::Value = serde_json::from_str(&detail.source_json).expect("JSON です");
+    assert_eq!(folded["answer"], answer, "{answer}: 折りたたみに元の JSON を置きます");
+  }
+}
+
+#[test]
+fn inquiry_answers_without_text_or_report_are_left_as_is() {
+  for answer in [serde_json::json!({}), serde_json::json!({ "report": "" }), serde_json::json!({ "report": 1 })] {
+    let (_directory, fixture) = ConversationFixture::new();
+    let project_cwd = fixture.project_dir("takt-dash");
+    seed_session(&fixture, &project_cwd);
+    let data = inquiry_answered_with_answer_data("質問", answer.clone(), false, FIRST_MESSAGE_AT);
+    fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &data);
+
+    let page = fixture.reader().read(&query("takt-dash", &project_cwd));
+
+    assert_eq!(page.messages[0].text, data_text(&data), "{answer}: 回答が読めなければ元の本文を返します");
+    assert_eq!(page.messages[0].detail, None);
   }
 }
 

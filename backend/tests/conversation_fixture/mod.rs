@@ -268,13 +268,29 @@ pub fn event_turn_data(
 
 /// 保存した質問への人の回答から始まったターンの user の `data`。
 pub fn inquiry_answered_data(question: &str, answer: &str, business_context: bool, time: i64) -> String {
+  inquiry_answered_with_answer_data(
+    question,
+    serde_json::json!({ "text": answer, "source": "takt-mcp", "answeredAt": "2026-11-20T08:00:00.000Z" }),
+    business_context,
+    time,
+  )
+}
+
+/// 回答（`answer`）の中身を指定した、保存した質問への回答のターンの user の `data`。
+/// 作業の依頼への回答は `{"report":"completed"}` のように `text` を持たないことがある。
+pub fn inquiry_answered_with_answer_data(
+  question: &str,
+  answer: serde_json::Value,
+  business_context: bool,
+  time: i64,
+) -> String {
   let input = serde_json::json!({
     "kind": "inquiry_answered",
     "repositoryDirectory": "/tmp/takt-dash",
     "goalId": "394569b2-57db-4b07-8bc1-3ca0b51988bc",
     "questionId": "751b5b5f-f32f-4105-b0d3-683f7c32f29c",
     "question": question,
-    "answer": { "text": answer, "source": "takt-mcp", "answeredAt": "2026-11-20T08:00:00.000Z" },
+    "answer": answer,
   });
   non_speech_turn_data(
     Some("このターンは保存した質問への人の回答から始まりました。配送はイベントや director を経由しています。質問と回答を対応させ、人の判断を対象の作業に反映します。goalId が null の場合はゴールに属さない質問です。"),

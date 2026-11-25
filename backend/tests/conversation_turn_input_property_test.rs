@@ -10,7 +10,8 @@ mod conversation_fixture;
 use std::path::Path;
 
 use conversation_fixture::{
-  data_text, event_turn_data, inquiry_answered_data, plain_user_data, wrapped_user_data, ConversationFixture,
+  data_text, event_turn_data, inquiry_answered_data, inquiry_answered_with_answer_data, plain_user_data,
+  wrapped_user_data, ConversationFixture,
 };
 use proptest::{collection::vec, prelude::*};
 use serde_json::{Map, Value};
@@ -134,6 +135,32 @@ proptest! {
     prop_assert_eq!(&source["kind"], "inquiry_answered");
     prop_assert_eq!(&source["answer"]["text"], answer.as_str());
     prop_assert_eq!(&source["question"], question.as_str());
+  }
+
+  /// text の無い回答は、報告をボタンと同じ言葉（知らない値なら「回答: 値」）にして本文にする。
+  /// text があれば、報告があっても text を本文にする。
+  #[test]
+  fn inquiry_answer_falls_back_to_the_report(
+    text in proptest::option::of(any::<String>()),
+    report in prop_oneof![Just("completed".to_owned()), Just("unable".to_owned()), any::<String>()]
+      .prop_filter("報告は空でない", |report| !report.is_empty()),
+  ) {
+    let mut answer = serde_json::json!({ "report": report });
+    if let Some(text) = &text {
+      answer["text"] = Value::String(text.clone());
+    }
+    let message = read_single(&inquiry_answered_with_answer_data("質問", answer.clone(), false, AT));
+
+    let expected = match (text.as_deref().filter(|text| !text.is_empty()), report.as_str()) {
+      | (Some(text), _) => text.to_owned(),
+      | (None, "completed") => "実施した".to_owned(),
+      | (None, "unable") => "対応できない".to_owned(),
+      | (None, other) => format!("回答: {other}"),
+    };
+    prop_assert_eq!(message.speaker, ConversationSpeaker::User);
+    prop_assert_eq!(&message.text, &expected);
+    let source: Value = serde_json::from_str(&message.detail.as_ref().expect("折りたたみ").source_json).expect("JSON");
+    prop_assert_eq!(&source["answer"], &answer);
   }
 
   /// 人が話しかけたターンは、これまでどおり人の発言だけを返し、折りたたみを持たない。
