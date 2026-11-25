@@ -6,6 +6,7 @@
 import { useCallback, useState, type ReactElement } from "react";
 import type { PendingDecision } from "../proto/taktdash";
 import {
+  decisionActionState,
   decisionKey,
   decisionTypeLabel,
   pullRequestLinkUrl,
@@ -120,6 +121,10 @@ export function DecisionsContent({ state, snapshotLoaded, now, disconnected, rea
             {decisions.map((decision) => {
               const target = targetLabel(decision);
               const mergeFailureNote = pendingDecisionMergeFailureNote(decision);
+              // 選択肢の回答ボタンを出す項目では、同じ文を一覧でも出さず、ボタンの1か所だけにする。
+              // ボタンを出せない項目は、一覧が選択肢を知る唯一の場所なので残す（issue #200）。
+              const showOptionList =
+                decision.options.length > 0 && decisionActionState(decision).kind !== "question-options";
               // 骨格は見出し行・本文・回答ボタンの3行に固定し、内容の長さで位置をずらさない（issue #121）。
               return (
                 <li
@@ -145,7 +150,7 @@ export function DecisionsContent({ state, snapshotLoaded, now, disconnected, rea
                       ))}
                     </div>
                     {mergeFailureNote !== undefined ? <p>{mergeFailureNote}</p> : null}
-                    {decision.options.length > 0 ? (
+                    {showOptionList ? (
                       <div className="opts">
                         <span className="opts-label">選択肢</span>
                         <ul>

@@ -435,6 +435,31 @@ test("判断待ちページは選択肢から作る文を表示せず、本文�
   }
 });
 
+// issue #200: 回答ボタンがあるときは、同じ選択肢を一覧（opts）でも出さず、1か所だけにする。
+// ボタンが出せない項目（問い合わせの識別子が無いなど）は、一覧が選択肢を知る唯一の場所なので残す。
+test("判断待ちページは回答ボタンがある項目では選択肢の一覧を出さず、ボタンが無い項目では一覧を残す", () => {
+  const withButtons = renderPage(DecisionsPage, {
+    state: stateWithDecision({
+      body: "リリースの日取りはどうしますか。",
+      options: ["今週", "来週"],
+      inquiryId: "inquiry-buttons",
+    }),
+    now: NOW,
+  });
+  assert.equal(elementsByClass(withButtons, "opts").length, 0, "ボタンがあるので一覧は出さない");
+  assert.doesNotMatch(withButtons, /選択肢<\/span>/, "「選択肢」の見出しも出さない");
+  assert.equal(occurrences(withButtons, ">今週<"), 1, "選択肢の文はボタンの1か所だけ");
+  assert.match(withButtons, /<button[^>]*>今週<\/button>/);
+
+  const withoutButtons = renderPage(DecisionsPage, {
+    state: stateWithDecision({ body: "リリースの日取りはどうしますか。", options: ["今週", "来週"] }),
+    now: NOW,
+  });
+  assert.equal(elementsByClass(withoutButtons, "opts").length, 1, "ボタンが無い項目は一覧で選択肢を示す");
+  assert.doesNotMatch(withoutButtons, /<button[^>]*>今週<\/button>/);
+  assert.equal(occurrences(withoutButtons, ">今週<"), 1, "選択肢の文は一覧の1か所だけ");
+});
+
 test("判断待ちページの各項目は見出し行・本文・回答ボタンの3つの子だけをこの順に持つ", () => {
   const html = renderPage(DecisionsPage, {
     state: stateWithDecision({
@@ -453,9 +478,8 @@ test("判断待ちページの各項目は見出し行・本文・回答ボタ�
   assert.ok(hasClassToken(children[2]!.openingTag, "actions"), "3つ目は回答ボタン");
 
   const body = children[1]!.outer;
-  const descIndex = body.indexOf(blockOf(body, "desc"));
-  const optsIndex = body.indexOf(blockOf(body, "opts"));
-  assert.ok(descIndex >= 0 && optsIndex > descIndex, "本文の中で、本文の後ろに選択肢欄が来る");
+  assert.ok(body.indexOf(blockOf(body, "desc")) >= 0, "本文の行に本文が入る");
+  assert.equal(elementsByClass(body, "opts").length, 0, "ボタンがあるので本文の行に選択肢欄は入れない（issue #200）");
   assert.match(children[2]!.outer, /<button[^>]*>今週<\/button>/, "本文の直後の行に回答ボタンがある");
 });
 
