@@ -78,6 +78,15 @@ TAKT の版を戻すときの手順を書く。
 `notify_orca.py` と `notify-orca.json` は残してよい。キーが無ければ呼ばれないだけで、古い
 TAKT もこの 2 つを読まない。
 
+## 版を替えたあとに確かめる（任意）
+
+`make workflow-inspect`（`tools/workflow-inspect/workflow_inspect.py`）は `.takt/workflows`
+の各 workflow に `takt workflow inspect` を流し、解決できない `workflow_call` を名指しで
+出す（`takt workflow doctor` は同じ状態でも `Workflow OK` と言う）。TAKT を流す前に人が
+確かめる入口で、CI と `make done` には入れていない（CI に takt が無いため）。takt が無けれ
+ば検査をスキップし、名前を渡すと 1 件だけ見る（`make workflow-inspect WORKFLOW=taktdash-change`）。
+使う takt は `TAKT_BIN` で指定でき、既定は PATH 上の `takt`。
+
 ## 既知の制限
 
 - SIGINT（Ctrl-C）で止めたタスクは、「中断」ではなく「失敗」で届く。止めたときの理由が
