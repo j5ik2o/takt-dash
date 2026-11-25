@@ -1077,6 +1077,26 @@ fn inquiry_answer_turns_show_only_the_answer_and_fold_the_question_and_source_js
 }
 
 #[test]
+fn event_turns_without_a_usable_kind_are_left_as_is() {
+  for event in
+    [serde_json::json!({ "goalId": "67df7701" }), serde_json::json!({ "kind": "" }), serde_json::json!({ "kind": 3 })]
+  {
+    let (_directory, fixture) = ConversationFixture::new();
+    let project_cwd = fixture.project_dir("takt-dash");
+    seed_session(&fixture, &project_cwd);
+    let data = event_turn_data(Some("このターンはイベントから始まりました。"), &event, false, FIRST_MESSAGE_AT);
+    fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &data);
+
+    let page = fixture.reader().read(&query("takt-dash", &project_cwd));
+
+    let message = &page.messages[0];
+    assert_eq!(message.speaker, ConversationSpeaker::User, "{event}: 種類が読めなければ話者は変えません");
+    assert_eq!(message.text, data_text(&data), "{event}: 種類が読めなければ元の本文を返します");
+    assert_eq!(message.detail, None, "{event}: 種類が読めなければ折りたたみはありません");
+  }
+}
+
+#[test]
 fn human_speech_and_unwrapped_turns_have_no_folded_detail() {
   let (_directory, fixture) = ConversationFixture::new();
   let project_cwd = fixture.project_dir("takt-dash");
