@@ -2,7 +2,7 @@
 
 // 判断待ち1件分の操作の状態を持つ。確認ダイアログの開閉、入力中の本文、送信中を所有し、
 // 送信結果は項目ごとに一意な key を添えて親へ渡す。
-import { useRef, useState, type ReactElement } from "react";
+import { useLayoutEffect, useRef, useState, type ReactElement } from "react";
 import type { PendingDecision } from "../proto/taktdash";
 import {
   INITIAL_DECISION_DIALOG_STATE,
@@ -16,6 +16,7 @@ import {
 } from "../state/decision-actions";
 import {
   DecisionActionsView,
+  acceptsDecisionIntent,
   decideDecisionTransition,
   type DecisionActionsIntent,
 } from "./decision-actions-view";
@@ -32,9 +33,14 @@ export function DecisionActions({ decision, disconnected, onResult }: DecisionAc
   const [busy, setBusy] = useState(false);
   // 成功していない直前の送信。同じ操作のやり直しを、同じ鍵で backend へ送るために持つ。
   const unsettledAttempt = useRef<DecisionAttempt | undefined>(undefined);
+  // 切断中は送らない。ボタンの disabled だけに頼らず、操作の入口でも最新の接続状態を見る。
+  const disconnectedRef = useRef(disconnected);
+  useLayoutEffect(() => {
+    disconnectedRef.current = disconnected;
+  }, [disconnected]);
 
   const run = async (action: DecisionAction | undefined): Promise<void> => {
-    if (action === undefined) {
+    if (action === undefined || disconnectedRef.current) {
       return;
     }
     setBusy(true);
@@ -53,6 +59,9 @@ export function DecisionActions({ decision, disconnected, onResult }: DecisionAc
   };
 
   const handleAction = (intent: DecisionActionsIntent): void => {
+    if (!acceptsDecisionIntent(intent, disconnectedRef.current)) {
+      return;
+    }
     const transition = decideDecisionTransition({ decision, intent, text, state: dialogState });
     switch (transition.kind) {
       case "state":

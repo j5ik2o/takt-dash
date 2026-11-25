@@ -71,12 +71,14 @@ export type DialogKeyDecision =
 // DOM に依存しないため、ダイアログ外フォーカス時の Tab 先を単体テストで確認できる。
 export function decideDialogKey(input: {
   key: string;
+  /** 送信中は「やめる」が無効なので、Escape でも取り消さない（不変条件2）。 */
+  busy: boolean;
   shiftKey: boolean;
   tabbableCount: number;
   activeIndex: number;
 }): DialogKeyDecision {
   if (input.key === "Escape") {
-    return { kind: "cancel" };
+    return input.busy ? { kind: "none" } : { kind: "cancel" };
   }
   if (input.key !== "Tab") {
     return { kind: "none" };
@@ -100,7 +102,8 @@ export type DialogRestoreDecision =
   | { kind: "clear" }
   | { kind: "none" }
   | { kind: "wait"; target: DialogKind }
-  | { kind: "restore"; target: DialogKind };
+  | { kind: "restore"; target: DialogKind }
+  | { kind: "drop" };
 
 // ダイアログの開閉とトリガーの有効性から、閉じた後のフォーカス復帰を決める。
 // DOM に依存しないため、非 busy の即時復帰・busy 中の待機・busy 解除後の復帰を
@@ -110,6 +113,8 @@ export function decideDialogRestore(input: {
   previousDialog: DialogKind | null;
   pendingRestore: DialogKind | null;
   triggers: Record<DialogKind, { disabled: boolean } | null>;
+  /** 復帰を待つ間に、利用者が別の要素へフォーカスを移していたら true。上書きせず、待ちをやめる。 */
+  focusElsewhere: boolean;
 }): DialogRestoreDecision {
   if (input.dialog !== null) {
     return { kind: "clear" };
@@ -122,7 +127,16 @@ export function decideDialogRestore(input: {
   if (trigger === null || trigger.disabled) {
     return { kind: "wait", target };
   }
+  if (input.focusElsewhere) {
+    return { kind: "drop" };
+  }
   return { kind: "restore", target };
+}
+
+// 切断中に受け付ける操作。閉じる操作だけは通し、開く・確定・回答は送信につながるので止める。
+// ボタンの disabled だけに頼らず、操作の入口でもこの判定を通す（issue #307）。
+export function acceptsDecisionIntent(intent: DecisionIntent, disconnected: boolean): boolean {
+  return !disconnected || intent.type === "cancel";
 }
 
 export type DecisionTransition =
@@ -169,6 +183,11 @@ function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, di
   // close を送出したら封じ込めを止める。閉じる途中の focusout で消えゆくダイアログへ
   // フォーカスを戻し、トリガーへの復帰と競合させない。
   const released = useRef(false);
+  // キー処理は document に一度だけ登録するため、送信中かどうかは ref で読む。
+  const busyRef = useRef(busy);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
   const cancel = useCallback((): void => {
     released.current = true;
     onAction({ type: "cancel" });
@@ -225,6 +244,7 @@ function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, di
       const elements = tabbableElements();
       const decision = decideDialogKey({
         key: event.key,
+        busy: busyRef.current,
         shiftKey: event.shiftKey,
         tabbableCount: elements.length,
         activeIndex: active === null ? -1 : elements.indexOf(active),
@@ -485,6 +505,14 @@ export function DecisionActionsView({
   });
   const previousDialog = useRef<DialogKind | null>(null);
   const pendingRestore = useRef<DialogKind | null>(null);
+  // ダイアログの外で、フォーカスのあるボタンや入力欄が切断で無効になったら、フォーカスを外す。
+  // フォーカスを残すブラウザでも、落とすブラウザと同じく body にそろえる（仕様の disconnect）。
+  useEffect(() => {
+    const active = document.activeElement;
+    if (dialog === null && (active instanceof HTMLButtonElement || active instanceof HTMLInputElement) && active.disabled) {
+      active.blur();
+    }
+  }, [dialog, busy, disconnected]);
   useEffect(() => {
     const previous = previousDialog.current;
     previousDialog.current = dialog;
@@ -493,12 +521,16 @@ export function DecisionActionsView({
       previousDialog: previous,
       pendingRestore: pendingRestore.current,
       triggers: triggerRefs.current,
+      focusElsewhere: document.activeElement !== null && document.activeElement !== document.body,
     });
     switch (decision.kind) {
       case "clear":
         pendingRestore.current = null;
         return;
       case "none":
+        return;
+      case "drop":
+        pendingRestore.current = null;
         return;
       case "wait":
         pendingRestore.current = decision.target;

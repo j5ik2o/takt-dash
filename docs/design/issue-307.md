@@ -26,6 +26,7 @@ PR：[j5ik2o/takt-dash#381](https://github.com/j5ik2o/takt-dash/pull/381)
 - 「操作に必要な値が欠けた」項目（`unavailable`）はもともとボタンが無いので変えない。理由の文も出さない。
 - 書き込みの API（`/api/decisions/*`）の側では接続の有無を見ない。画面の切断（SSE）と書き込みの成否は別で、SSE だけ切れて書き込みは通る場合もあるが、最後に読めた内容が古い可能性があるため、画面では止める。API 側の古さの検査は issue #319 の照合が担う。
 - 待ち受けの設定、接続元の制限は触らない。
+- 半開きの接続（SSE が切れたのにエラーが来ない）で切断に気づかない件は、[j5ik2o/takt-dash#383](https://github.com/j5ik2o/takt-dash/issues/383) で扱う。この修正は、画面が切断を知った時点からの挙動だけを決める。
 
 ## 守る不変条件
 
@@ -75,3 +76,23 @@ PR：[j5ik2o/takt-dash#381](https://github.com/j5ik2o/takt-dash/pull/381)
 
 - 単体：切断中・接続中・開いたダイアログの 3 件と、上の性質のテスト。修正前のコードで、追加した 2 件が失敗することを確かめた。
 - e2e：`e2e/tests/issue-307-disconnected-decisions.spec.ts`。`/api/state` を失敗させて開いている EventSource にエラーを伝え、確定が無効・見出しへフォーカス・やめるで閉じる・トリガーが無効・理由の文を確かめる。経路を戻すと再接続し、トリガーが押せてフォーカスが戻り、マージの書き込みは送られていない。修正前のコードで失敗することを確かめた。
+
+## 設計レビューを受けて変えた点（2026-11-26）
+
+設計レビュー（Opus の別担当）の指摘のうち「直す」とされたものを入れました。
+
+1. **再接続でよそのフォーカスを奪わない（指摘 1）**：`decideDialogRestore` に `focusElsewhere`（`document.activeElement` が null でも body でもない）を足した。トリガーが押せるようになった時点でフォーカスが別の要素にあれば、戻さず待ちをやめる（`drop`）。トリガーがまだ押せない間は待ち続ける。Quint に項目の外のフォーカス（`elsewhere`）と移動（`focusElsewhere`）、不変条件 `noFocusOverwrite` を足した。
+2. **入力の空白（指摘 3）**：性質のテストの入力に `" "`、全角空白、前後に空白のある回答を足し、「回答する」の性質を `text.trim() === ""` にそろえた（コードと同じ）。
+3. **操作の名前の集合（指摘 4）**：「操作要素（ボタン・入力欄・リンク）の名前の集合は、送信中・切断に依らない」性質を足した。不変条件 6 を確かめる。
+4. **入口でも止める（指摘 5a）**：`DecisionActions` の `handleAction` と `run` の入口で、最新の接続状態（ref）を見て送らない。判定は `acceptsDecisionIntent`（切断中は `cancel` だけ受け付ける）に出して単体テストで確かめる。
+5. **送信中の Escape（指摘 5b）**：`decideDialogKey` に `busy` を足し、送信中の Escape は取り消さない。「やめる」が送信中に押せないこと（不変条件 2）と合わせた。Quint の `cancel` は「やめる」と Escape の両方を表す。
+6. **ダイアログ内のリンクと、ダイアログの外のフォーカス（指摘 5c・5d）**：Quint のダイアログ内のフォーカスにリンクを足し、切断で動かさないことをテストにした。ダイアログの外で、フォーカスのあるボタンや入力欄が無効になったら、コードがフォーカスを外して body にそろえる（`DecisionActionsView` の effect）。仕様の `disconnect` も同じ。
+7. **Apalache の出力（指摘 6）**：`specs/quint/decision-offline-actions/_apalache-out/` を消し、`.gitignore` に `_apalache-out/` を足した。
+
+別件：半開きの接続（指摘 2）は [j5ik2o/takt-dash#383](https://github.com/j5ik2o/takt-dash/issues/383)。「範囲の外」に書いた。
+
+不変条件に 7 を足す：
+
+7. 再接続でのフォーカスの復帰は、利用者が別の要素に置いたフォーカスを上書きしない。
+
+検査の結果は `specs/quint/decision-offline-actions/README.md` に書いた（テスト 10 件、`fixed` は `safety` を破らない、`fixedWithoutFocusGuard` は `noFocusOverwrite` を破る）。e2e に「切断中に閉じてリンクへフォーカスを移したら、再接続しても奪わない」を足した。

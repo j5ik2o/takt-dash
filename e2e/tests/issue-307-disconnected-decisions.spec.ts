@@ -64,3 +64,36 @@ test("切断中は判断待ちの回答ボタンを押せず、再接続する�
   await expect(page.getByText("再接続するまで操作できません。")).toHaveCount(0);
   expect((await stack.readCalls()).filter((call) => call.name === "takt_merge_goal_pr")).toHaveLength(0);
 });
+
+test("切断中に確認を閉じて別の要素へフォーカスを移したら、再接続してもフォーカスを奪わない", async ({
+  page,
+  isolatedStack: stack,
+}) => {
+  await page.addInitScript(recordEventSources);
+  await page.goto(`${stack.webUrl}/decisions`);
+
+  const item = page
+    .getByRole("region", { name: "判断待ちの一覧" })
+    .getByRole("listitem")
+    .filter({ hasText: "人のマージ待ち" });
+  const trigger = item.getByRole("button", { name: "マージを承認" });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "マージの承認" });
+  await expect(dialog).toBeVisible();
+
+  await page.route(SSE_PATH, (route) => route.abort());
+  await page.evaluate(() => (window as unknown as { __disconnectStateStream: () => void }).__disconnectStateStream());
+  await expect(trigger).toBeDisabled();
+  await dialog.getByRole("button", { name: "やめる" }).click();
+  await expect(dialog).toBeHidden();
+
+  // 一覧のプルリクエストへのリンクは切断中もたどれる。利用者がそこへフォーカスを移す。
+  const link = item.getByRole("link", { name: /プルリクエスト #/ });
+  await link.focus();
+  await expect(link).toBeFocused();
+
+  await page.unroute(SSE_PATH);
+
+  await expect(trigger).toBeEnabled({ timeout: 60_000 });
+  await expect(link).toBeFocused();
+});

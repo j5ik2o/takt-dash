@@ -37,3 +37,6 @@ taktdash.config.json
 
 # E2E の撮影の出力（docs/layout.md の「撮影」）。撮影の結果はコミットしない
 /e2e/screenshots/
+
+# Quint の verify（Apalache）の出力
+_apalache-out/
