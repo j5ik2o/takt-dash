@@ -76,6 +76,9 @@ const writeRoutes: Array<[string, RouteHandler, string, Record<string, unknown>,
   ],
 ];
 
+// 偽の時計の下で、要求が backend に届くまでイベントループを回す回数の上限。
+const MAX_TURNS_UNTIL_REQUEST = 1_000;
+
 test("書き込みの応答が期限内に届かないときは 504 を返し、結果が不明であることを伝える", async () => {
   // backend は要求を受け取るが、応答は Web の期限より遅れる。
   const behavior = { approveGoalMerge: { taskName: "マージ", workflow: "simple" }, writeDelayMs: 2_000 };
@@ -85,10 +88,18 @@ test("書き込みの応答が期限内に届かないときは 504 を返し、
     mock.timers.enable({ apis: ["setTimeout", "Date"] });
     const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: server.address }, writeDeadlineMs: 50 });
     try {
-      const pending = runWrite(() => client.approveGoalMerge({ ...MERGE_BODY, until: "merge" }));
-      while (server.requests.length === 0) {
+      let settled = false;
+      const pending = runWrite(() => client.approveGoalMerge({ ...MERGE_BODY, until: "merge" })).finally(() => {
+        settled = true;
+      });
+      // 要求が届く前に結果が返ったとき（接続の失敗など）や、いつまでも届かないときに、待ち続けない。
+      let turns = 0;
+      while (server.requests.length === 0 && !settled && turns < MAX_TURNS_UNTIL_REQUEST) {
         await nextTurn();
+        turns += 1;
       }
+      assert.equal(settled, false, "要求が backend に届く前に結果が返った");
+      assert.equal(server.requests.length, 1, `${MAX_TURNS_UNTIL_REQUEST} 回待っても要求が backend に届かない`);
       mock.timers.tick(50);
       const response = await pending;
 
