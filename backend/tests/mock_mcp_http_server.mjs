@@ -7,16 +7,21 @@
 //   - path は `/` のみ（他は 404）
 //   - `POST /` で `Mcp-Session-Id` を採番し、既知の ID の要求は同一セッションへ再利用する
 //   - 未知の `Mcp-Session-Id`（サーバー再起動で消えた場合）は 404
+//   - `DELETE /` と既知の `Mcp-Session-Id` でセッションを破棄する（以後その ID は 404）
 //   - body は JSON-RPC（initialize・notifications/initialized・tools/call）
 //
 // 状態ファイル（--state）は mock_mcp_server.mjs と同じ形式を使い、読み取り道具の応答を返す。
 // --port を省略した場合は OS が空きポートを採番する。採番した実際のポートと URL は
 // --ready-file に JSON で書き出す（テストが接続先を組み立てるため）。
-// --behavior で `deny`（常に 401）・`drop-session`（常に 404）を起こせる。
+// --behavior で `deny`（常に 401）・`drop-session`（常に 404）・`fail-initialized`
+// （notifications/initialized だけ 500）・`drop-session-then-refuse-initialize`（tools/call は
+// 404、2 回目以降の initialize は 500）・`garble-initialize`（initialize の本文が壊れている）・
+// `slow-initialize`（initialize と notifications/initialized を --delay-ms だけ遅らせる）などを
+// 起こせる。
 //
 // 追加の検証用オプション:
 //   --calls <path>         受け取った tools/call を {"name","arguments"} の JSONL で追記する
-//   --session-log <path>   セッション採番と再利用のたびに "new" / "reuse" を追記する
+//   --session-log <path>   セッションの採番・再利用・破棄のたびに "new" / "reuse" / "close" を追記する
 //   --require-auth <token> 期待する Authorization の値（未指定なら "Bearer test-token"）
 import { appendFileSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -297,6 +302,7 @@ const handleToolCall = (name, args) => {
 
 // 採番済みセッションの集合。未知の ID は 404 で返す（実機の serverHttpTransport.js と同じ）。
 const sessions = new Set();
+let sessionCounter = 0;
 
 const jsonBody = (response, status, message, extraHeaders = {}) => {
   const body = JSON.stringify(message);
@@ -326,6 +332,24 @@ const server = createServer((request, response) => {
     jsonBody(response, 404, { jsonrpc: "2.0", error: { code: -32601, message: "not found" }, id: null });
     return;
   }
+  if (request.method === "DELETE") {
+    // 実機は Mcp-Session-Id の無い DELETE を 400、未知の ID を 404 で返し、既知の ID は破棄する。
+    const sessionId = request.headers["mcp-session-id"];
+    request.resume();
+    if (sessionId === undefined) {
+      response.writeHead(400).end();
+      return;
+    }
+    if (!sessions.delete(sessionId)) {
+      response.writeHead(404).end();
+      return;
+    }
+    if (sessionLogPath !== undefined) {
+      appendFileSync(sessionLogPath, `close ${sessionId}\n`);
+    }
+    response.writeHead(200).end();
+    return;
+  }
   if (request.method !== "POST") {
     response.writeHead(405).end();
     return;
@@ -345,16 +369,41 @@ const server = createServer((request, response) => {
       return;
     }
     if (message.method === "initialize") {
+      if (behavior === "drop-session-then-refuse-initialize" && sessionCounter > 0) {
+        // 2 回目以降の initialize を拒否する。消えたセッションを作り直せない状態を再現する。
+        jsonBody(response, 500, { jsonrpc: "2.0", error: { code: -32000, message: "unavailable" }, id: message.id ?? null });
+        return;
+      }
       if (behavior === "hang-initialize-once" && !initializeHung) {
         // 最初の initialize だけ応答しない。セッションの確立が時間切れになり、
         // 道具の呼び出しが一度も届いていない状態を再現する。
         initializeHung = true;
         return;
       }
-      const sessionId = `sess-${sessions.size + 1}-${Date.now()}`;
+      sessionCounter += 1;
+      const sessionId = `sess-${sessionCounter}-${Date.now()}`;
       sessions.add(sessionId);
       if (sessionLogPath !== undefined) {
         appendFileSync(sessionLogPath, `new ${sessionId}\n`);
+      }
+      if (behavior === "garble-initialize") {
+        // セッションは採番して Mcp-Session-Id を返すが、本文が JSON として壊れている状態を再現する。
+        response.writeHead(200, { "content-type": "application/json", "mcp-session-id": sessionId });
+        response.end("{ 壊れた本文");
+        return;
+      }
+      if (behavior === "slow-initialize") {
+        // セッションは採番するが、応答を遅らせる。確立の途中で閉じる・同時に待つ状態を再現する。
+        const delay = Number(option("--delay-ms") ?? 300);
+        setTimeout(() => {
+          jsonBody(
+            response,
+            200,
+            { jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "taktdash-mock-http", version: "0.0.0" } } },
+            { "mcp-session-id": sessionId },
+          );
+        }, delay);
+        return;
       }
       jsonBody(
         response,
@@ -382,7 +431,17 @@ const server = createServer((request, response) => {
         appendFileSync(sessionLogPath, `reuse ${sessionId}\n`);
       }
     }
+    if (message.method === "notifications/initialized" && behavior === "slow-initialize") {
+      // 通知の受け付けも遅らせ、確立が 2 往復ぶん鍵を持つ状態を再現する。
+      setTimeout(() => response.writeHead(202).end(), Number(option("--delay-ms") ?? 300));
+      return;
+    }
     if (message.method === "notifications/initialized") {
+      if (behavior === "fail-initialized") {
+        // セッションは採番済みだが、初期化の通知が失敗する状態を再現する。
+        response.writeHead(500).end();
+        return;
+      }
       response.writeHead(202).end();
       return;
     }
@@ -398,7 +457,7 @@ const server = createServer((request, response) => {
         request.socket.destroy();
         return;
       }
-      if (behavior === "drop-session-on-call") {
+      if (behavior === "drop-session-on-call" || behavior === "drop-session-then-refuse-initialize") {
         // initialize は成功してセッションが採番されるが、tools/call の時点では
         // セッションが消えている状態を再現する。呼び出しの記録は残す。
         if (callsPath !== undefined) {

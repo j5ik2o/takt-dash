@@ -272,8 +272,11 @@ fn idempotency_key(key: &Option<String>) -> Result<Option<IdempotencyKey>, Statu
 
 /// 書き込み道具のエラーを、書き込みの失敗へ変換する境界。
 ///
-/// 接続の確立は道具を送る前に済んでいるため、ここへ来るのは道具を送ったあとの失敗です。
-/// takt が拒否を返した失敗（道具のエラー、JSON-RPC のエラー、HTTP のエラーステータス）は、
+/// 接続の確立は道具を送る前に試みていますが、確立済みのセッションを使い回す HTTP 接続先では、
+/// 道具を送る段で初めて接続の失敗が分かることがあります。接続を張れなかった失敗と、消えた
+/// セッションを作り直せなかった失敗（[`TransportError::NotSent`]）は、道具が takt へ届いて
+/// いないので、書き込みは適用されていません。
+/// takt が拒否を返した失敗（道具のエラー、JSON-RPC のエラー、HTTP のエラーステータス）も、
 /// 書き込みが適用されていないと分かります。応答を受け取れなかった失敗と応答を読めなかった失敗は、
 /// 適用されたかどうか分かりません。接続の失敗と区別して DEADLINE_EXCEEDED で返し、結果が不明で
 /// あることを利用者へ伝えます。
@@ -296,7 +299,11 @@ fn write_failure(error: ToolError) -> WriteFailure {
     ))),
     | error @ (ToolError::Tool(_)
     | ToolError::Transport(
-      TransportError::Rpc { .. } | TransportError::Http(_) | TransportError::Spawn(_) | TransportError::Backoff(_),
+      TransportError::Rpc { .. }
+      | TransportError::Http(_)
+      | TransportError::Spawn(_)
+      | TransportError::Backoff(_)
+      | TransportError::NotSent(_),
     )) => WriteFailure::Failed(tool_error_status(error)),
   }
 }
