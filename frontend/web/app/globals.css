@@ -1206,6 +1206,33 @@ ol.log-tail li {
   font-size: var(--font-size-14);
 }
 
+.dialog-target {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  font-size: var(--font-size-14);
+}
+
+.dialog-target > div {
+  display: flex;
+  gap: var(--space-8);
+}
+
+.dialog-target dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.dialog-target dd {
+  overflow-wrap: anywhere;
+}
+
+.dialog-target a,
+.decision-head .target a {
+  color: var(--teal-d);
+  text-decoration: underline;
+}
+
 .decision-results ul {
   display: flex;
   flex-direction: column;

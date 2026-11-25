@@ -712,3 +712,70 @@ test("本文の HTML はエスケープして描画する", () => {
   assert.match(html, /&lt;script/);
   assert.doesNotMatch(html, /<script>alert/);
 });
+
+// issue #304: 複数のプロジェクトの判断待ちが並んでも、確認ダイアログだけで対象を確かめられる。
+test("マージの確認ダイアログはプロジェクト名と、新しいタブで開くプルリクエストへのリンクを表示する", () => {
+  const decision = merge();
+  const html = renderActions(decision, "merge", false, openDecisionDialog(decision, "merge"));
+  const dialog = new JSDOM(html).window.document.querySelector('[role="dialog"]');
+  assert.ok(dialog, "確認ダイアログがある");
+
+  const rows = Array.from(dialog.querySelectorAll("dl > div")).map((row) => [
+    row.querySelector("dt")?.textContent,
+    row.querySelector("dd")?.textContent,
+  ]);
+  assert.deepEqual(rows, [
+    ["プロジェクト", decision.project],
+    ["プルリクエスト", "#418 を開く（新しいタブ）"],
+  ]);
+
+  const links = Array.from(dialog.querySelectorAll("a"));
+  assert.equal(links.length, 1);
+  assert.equal(links[0]?.getAttribute("href"), "https://example.test/pr/418");
+  assert.equal(links[0]?.getAttribute("target"), "_blank");
+  assert.equal(links[0]?.getAttribute("rel"), "noopener noreferrer");
+});
+
+test("マージの確認ダイアログは開いた後に PR が変わっても、開いた時点の PR へのリンクを保つ", () => {
+  const dialogTarget = openDecisionDialog(merge(), "merge");
+  const changed: PendingDecision = {
+    ...merge(),
+    pullRequest: { number: 419, url: "https://example.test/pr/419" },
+  };
+  const html = renderActions(changed, "merge", false, dialogTarget);
+  const link = new JSDOM(html).window.document.querySelector('[role="dialog"] a');
+  assert.equal(link?.getAttribute("href"), "https://example.test/pr/418");
+});
+
+test("プルリクエストを開ける URL が無いマージ待ちは、マージの承認を出さず理由を表示する", () => {
+  for (const url of ["", "javascript:alert(1)", "/pr/418", "ftp://example.test/pr/418"]) {
+    const decision: PendingDecision = { ...merge(), pullRequest: { number: 418, url } };
+    const html = renderActions(decision, null);
+    assert.doesNotMatch(html, /<button/, `URL が ${JSON.stringify(url)} のとき操作ボタンを出さない`);
+    assert.match(html, /プルリクエストの URL が無いため、マージを承認できません。/);
+    assert.equal(openDecisionDialog(decision, "merge"), undefined);
+
+    const list = renderDecisions(stateWith([decision]));
+    assert.doesNotMatch(list, /<a [^>]*href=/, "開けない URL は一覧でもリンクにしない");
+    assert.match(list, /対象: プルリクエスト #418/);
+  }
+});
+
+test("判断待ち一覧のマージ待ちは、対象を新しいタブで開くプルリクエストへのリンクにする", () => {
+  const html = renderDecisions(stateWith([merge()]));
+  const link = new JSDOM(html).window.document.querySelector(".tray-item .target a");
+  assert.ok(link, "対象のリンクがある");
+  assert.equal(link.textContent, "プルリクエスト #418");
+  assert.equal(link.getAttribute("href"), "https://example.test/pr/418");
+  assert.equal(link.getAttribute("target"), "_blank");
+  assert.equal(link.getAttribute("rel"), "noopener noreferrer");
+});
+
+test("ゴール登録の確認ダイアログは対象の一覧もリンクも出さない", () => {
+  const dialog = new JSDOM(renderActions(registration(), "approve-registration")).window.document.querySelector(
+    '[role="dialog"]',
+  );
+  assert.ok(dialog, "確認ダイアログがある");
+  assert.equal(dialog.querySelector("dl"), null);
+  assert.equal(dialog.querySelector("a"), null);
+});

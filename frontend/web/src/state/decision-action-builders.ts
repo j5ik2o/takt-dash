@@ -8,6 +8,16 @@ import { INQUIRY_KIND, OPERATION_ANSWER_REPORT, PENDING_DECISION_TYPE } from "./
 export const isPositiveInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value > 0;
 
+// プルリクエストの URL を、リンクとして開ける形（http・https の絶対 URL）に限って返す。
+// 確認ダイアログと一覧は、この値があるときだけプルリクエストへのリンクを出す。
+export function pullRequestLinkUrl(url: unknown): string | undefined {
+  if (typeof url !== "string" || !URL.canParse(url)) {
+    return undefined;
+  }
+  const protocol = new URL(url).protocol;
+  return protocol === "https:" || protocol === "http:" ? url : undefined;
+}
+
 // 一覧に出す操作の形。必要な値が欠けた項目は操作させず、理由を表示する。
 export type DecisionActionState =
   | { kind: "question-options"; options: string[] }
@@ -25,6 +35,11 @@ const awaitingMergeActionState = (decision: PendingDecision): DecisionActionStat
   }
   if (!isPositiveInteger(decision.pullRequest?.number)) {
     return unavailable("プルリクエストの番号が無いため、マージを承認できません。");
+  }
+  // 確認ダイアログでプルリクエストの中身を開いて確かめられない項目は、取り違えを防ぐため
+  // マージを承認させない（issue #304）。
+  if (pullRequestLinkUrl(decision.pullRequest?.url) === undefined) {
+    return unavailable("プルリクエストの URL が無いため、マージを承認できません。");
   }
   return { kind: "merge" };
 };

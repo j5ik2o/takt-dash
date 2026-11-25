@@ -8,6 +8,7 @@ import type { PendingDecision } from "../proto/taktdash";
 import {
   decisionKey,
   decisionTypeLabel,
+  pullRequestLinkUrl,
   upsertDecisionResult,
   type DecisionResult,
 } from "../state/decision-actions";
@@ -37,9 +38,18 @@ type DecisionsContentProps = {
   unavailableSituation?: BackendUnavailableSituation;
 };
 
-const targetLabel = (decision: PendingDecision): string | undefined => {
+// 対象がプルリクエストなら、中身を確かめられるよう、新しいタブで開くリンクにする（issue #304）。
+const targetLabel = (decision: PendingDecision): ReactElement | string | undefined => {
   if (decision.pullRequest !== undefined) {
-    return `プルリクエスト #${decision.pullRequest.number}`;
+    const label = `プルリクエスト #${decision.pullRequest.number}`;
+    const url = pullRequestLinkUrl(decision.pullRequest.url);
+    return url === undefined ? (
+      label
+    ) : (
+      <a href={url} target="_blank" rel="noopener noreferrer">
+        {label}
+      </a>
+    );
   }
   if (decision.goalId !== undefined) {
     return `ゴール ${decision.goalId}`;
