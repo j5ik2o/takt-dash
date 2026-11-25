@@ -16,6 +16,7 @@ import { DecisionResults } from "../../src/components/decision-results.tsx";
 import {
   INITIAL_DECISION_DIALOG_STATE,
   openDecisionDialog,
+  pullRequestLinkUrl,
   toDecisionResult,
   upsertDecisionResult,
   type DecisionAction,
@@ -748,7 +749,19 @@ test("マージの確認ダイアログは開いた後に PR が変わっても�
 });
 
 test("プルリクエストを開ける URL が無いマージ待ちは、マージの承認を出さず理由を表示する", () => {
-  for (const url of ["", "javascript:alert(1)", "/pr/418", "ftp://example.test/pr/418"]) {
+  const unopenable = [
+    "",
+    "javascript:alert(1)",
+    "/pr/418",
+    "ftp://example.test/pr/418",
+    // // を欠く形は、http の画面では画面の中の相対パスとして開く。
+    "http:git.example/org/repo/pull/418",
+    "https:git.example/org/repo/pull/418",
+    "http:/git.example/org/repo/pull/418",
+    "http://",
+    " https://example.test/pr/418",
+  ];
+  for (const url of unopenable) {
     const decision: PendingDecision = { ...merge(), pullRequest: { number: 418, url } };
     const html = renderActions(decision, null);
     assert.doesNotMatch(html, /<button/, `URL が ${JSON.stringify(url)} のとき操作ボタンを出さない`);
@@ -778,4 +791,18 @@ test("ゴール登録の確認ダイアログは対象の一覧もリンクも�
   assert.ok(dialog, "確認ダイアログがある");
   assert.equal(dialog.querySelector("dl"), null);
   assert.equal(dialog.querySelector("a"), null);
+});
+
+test("プルリクエストの URL の判定は、古いブラウザに無い URL.canParse を使わない", () => {
+  const original = Object.getOwnPropertyDescriptor(URL, "canParse");
+  assert.ok(original, "この実行環境には URL.canParse がある");
+  Object.defineProperty(URL, "canParse", { value: undefined, configurable: true, writable: true });
+  try {
+    assert.equal(pullRequestLinkUrl("https://example.test/pr/418"), "https://example.test/pr/418");
+    assert.equal(pullRequestLinkUrl("HTTP://example.test/pr/418"), "HTTP://example.test/pr/418");
+    assert.equal(pullRequestLinkUrl("not a url"), undefined);
+    assert.match(renderDecisions(stateWith([merge()])), /マージを承認/);
+  } finally {
+    Object.defineProperty(URL, "canParse", original);
+  }
 });
