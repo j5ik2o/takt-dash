@@ -355,4 +355,46 @@ module childProcess_test {
         and after::nextChildId == 1
         and after::safety
       )
+
+  // 14. 修正後: 時刻 0・1・3 で 3 回連続して起動失敗すると 4 単位のバックオフ（nextSpawnAt = 7）に入り、
+  //     時刻 7 で満了したあとに起動して回復する。
+  run threeConsecutiveCallFailuresBackOffAndRecoverAtCapTest =
+    after::init
+      .then(after::arrive(0, after::ReadCall))
+      .then(after::acquireLock(0))
+      .then(after::failSpawnImmediate(0))
+      .expect(after::client.consecutiveFailures == 1 and after::client.nextSpawnAt == 1)
+      .then(after::advanceTime)
+      .then(after::arrive(1, after::ReadCall))
+      .then(after::acquireLock(1))
+      .then(after::failSpawnImmediate(1))
+      .expect(after::client.consecutiveFailures == 2 and after::client.nextSpawnAt == 3)
+      .then(after::advanceTime)
+      .then(after::advanceTime)
+      .then(after::arrive(2, after::ReadCall))
+      .then(after::acquireLock(2))
+      .then(after::failSpawnImmediate(2))
+      .expect(after::client.consecutiveFailures == 3 and after::client.nextSpawnAt == 7)
+      .then(after::advanceTime)
+      .then(after::advanceTime)
+      .then(after::advanceTime)
+      .then(after::arrive(3, after::ReadCall))
+      .then(after::acquireLock(3))
+      .then(after::startBlockedByBackoff(3))
+      .expect(after::now == 6 and after::ops.get(3).phase == after::Failed and after::safety)
+      .then(after::advanceTime)
+      .then(after::arrive(4, after::ReadCall))
+      .then(after::acquireLock(4))
+      .then(after::beginSpawn(4))
+      .then(after::completeSpawn(4))
+      .then(after::beginRequest(4))
+      .then(after::completeExchange(4))
+      .expect(
+        after::now == 7
+        and after::ops.get(4).phase == after::Done
+        and after::client.consecutiveFailures == 0
+        and after::client.nextSpawnAt == after::NONE
+        and after::recoveredAfterBackoff
+        and after::safety
+      )
 }

@@ -90,7 +90,7 @@ module childProcess {
   pure val OP_IDS: Set[int] = 0.to(4)
   pure val ALL_OP_KINDS: Set[OpKind] = Set(WarmUp, ReadCall, UnkeyedWrite, KeyedWrite)
   pure val MAX_SHUTDOWNS: int = 2
-  pure val MAX_TIME: int = 6
+  pure val MAX_TIME: int = 7
 
   var client: ClientState
   var children: int -> ChildProcess
@@ -465,7 +465,15 @@ module childProcess {
         sawRecoveryAfterExchangeFailure:
           audit.sawRecoveryAfterExchangeFailure or audit.sawExchangeFailure,
         sawRebuildAfterExchangeCancel:
-          audit.sawRebuildAfterExchangeCancel or audit.sawCancelDuringExchange,
+          audit.sawRebuildAfterExchangeCancel
+          or (
+            audit.sawCancelDuringExchange
+            and children.keys().exists(c =>
+              c != cid
+              and children.get(c).cancelledWhileActive
+              and children.get(c).status == Closed
+            )
+          ),
       },
       nextChildId' = nextChildId,
       now' = now,

@@ -9,7 +9,7 @@
 | ファイル | 内容 |
 | --- | --- |
 | `childProcess.qnt` | 状態機械、不変条件、進行の条件（witness） |
-| `childProcess_test.qnt` | [PR #379](https://github.com/j5ik2o/takt-dash/pull/379) の筋書きを修正前・途中版・現在（修正後）でたどるテスト（14 件） |
+| `childProcess_test.qnt` | [PR #379](https://github.com/j5ik2o/takt-dash/pull/379) の筋書きを修正前・途中版・現在（修正後）でたどるテスト（15 件） |
 
 `childProcess.qnt` は遷移を 3 つの定数で切り替えます。
 
@@ -52,7 +52,7 @@
 
 含めているもの:
 
-- 1 つの `McpClient`（排他ロック付き）に対する最大 5 件の操作（`WarmUp`、`ReadCall`、`UnkeyedWrite`、`KeyedWrite`）、最大 2 回の `shutdown`、論理時刻 `0..6`（指数バックオフ `1, 2, 4` の満了を含む）。
+- 1 つの `McpClient`（排他ロック付き）に対する最大 5 件の操作（`WarmUp`、`ReadCall`、`UnkeyedWrite`、`KeyedWrite`）、最大 2 回の `shutdown`、論理時刻 `0..7`（指数バックオフ `1, 2, 4` の上限 4 単位の満了を含む）。
 - `command.spawn()` の即時失敗、`initialize` 往復中の失敗および打ち切り、`request` 往復中の成功・通信失敗・呼び出し側打ち切り、複数回の `shutdown` 呼び出し。
 - 子プロセスごとの生死（`Initializing` / `Alive` / `Closed`）、応答の読みかけ状態（`dirty`）、終了回数（`closeCount`）、読みかけ状態での再利用の有無（`usedWhileDirty`）。
 
@@ -118,7 +118,7 @@ quint test childProcess_test.qnt --main=childProcess_test
 ```
 
 - `quint typecheck`: `childProcess.qnt`・`childProcess_test.qnt` ともに成功。
-- `quint test`: 14 件すべて成功（修正前の 3 種の不具合、途中版の鍵なし書き込み中断、修正後の道具エラー再利用と記録分離を固定）。
+- `quint test`: 15 件すべて成功（修正前の 3 種の不具合、途中版の鍵なし書き込み中断、修正後の道具エラー再利用と記録分離、3 回連続失敗による上限 4 単位バックオフの満了と回復を固定）。
 
 ### 修正前（`beforePr379`）と途中版（`withoutUnkeyedDetach`）：期待どおり反例あり
 
@@ -149,23 +149,23 @@ quint run childProcess.qnt --main=current --invariant=safety \
   --max-steps=35 --max-samples=50000 --seed=0x379
 ```
 
-- 50,000 サンプル、`max-steps=35`、`seed=0x379` で `safety` の反例なし（トレース長: 最短 19、最長 36、平均 26.06）。
+- 50,000 サンプル、`max-steps=35`、`seed=0x379` で `safety` の反例なし（トレース長: 最短 20、最長 36、平均 27.09）。
 - すべての進行条件（witness 12 件）が 1 件以上のトレースで到達しました。
 
 | Witness | 到達したトレース |
 | --- | --- |
-| `warmUpSucceeded` | 1582 / 50000（3.16%） |
-| `warmUpFailedWithoutBackoff` | 5285 / 50000（10.57%） |
-| `callBackedOffAfterFailure` | 32558 / 50000（65.12%） |
-| `recoveredAfterBackoff` | 1720 / 50000（3.44%） |
-| `cancelledReadDisposedAndRebuilt` | 18 / 50000（0.04%） |
-| `cancelledDuringSpawnDisposed` | 2777 / 50000（5.55%） |
-| `exchangeFailedAndRecovered` | 533 / 50000（1.07%） |
-| `toolErrorReusesCleanChild` | 6699 / 50000（13.40%） |
-| `unkeyedWriteCompletesAfterCallerCancel` | 3657 / 50000（7.31%） |
-| `keyedWriteCompletesAfterCallerCancel` | 3656 / 50000（7.31%） |
-| `shutdownClosedLiveChild` | 1285 / 50000（2.57%） |
-| `shutdownSkippedWhenAlreadyClosed` | 3362 / 50000（6.72%） |
+| `warmUpSucceeded` | 1616 / 50000（3.23%） |
+| `warmUpFailedWithoutBackoff` | 5404 / 50000（10.81%） |
+| `callBackedOffAfterFailure` | 31425 / 50000（62.85%） |
+| `recoveredAfterBackoff` | 2321 / 50000（4.64%） |
+| `cancelledReadDisposedAndRebuilt` | 8 / 50000（0.02%） |
+| `cancelledDuringSpawnDisposed` | 2828 / 50000（5.66%） |
+| `exchangeFailedAndRecovered` | 537 / 50000（1.07%） |
+| `toolErrorReusesCleanChild` | 6943 / 50000（13.89%） |
+| `unkeyedWriteCompletesAfterCallerCancel` | 3726 / 50000（7.45%） |
+| `keyedWriteCompletesAfterCallerCancel` | 3786 / 50000（7.57%） |
+| `shutdownClosedLiveChild` | 1332 / 50000（2.66%） |
+| `shutdownSkippedWhenAlreadyClosed` | 3446 / 50000（6.89%） |
 
 ### 途中版（`withoutUnkeyedDetach`）：他の不変条件の確認
 
@@ -212,5 +212,5 @@ done
 quint verify childProcess.qnt --main=current --invariant=safety --max-steps=6
 ```
 
-- Apalache 0.56.1 により `safety`（20 個の検証条件）を 6 手まで網羅検査し、`NoError`（反例なし・デッドロックなし、138 秒）。
+- Apalache 0.56.1 により `safety`（20 個の検証条件）を 6 手まで網羅検査し、`NoError`（反例なし・デッドロックなし、105 秒）。
 - `quint verify` の出力先 `_apalache-out/` は `.gitignore` で除外しています。
