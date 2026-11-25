@@ -11,7 +11,13 @@ import { JSDOM } from "jsdom";
 import { PendingDecisionType, type DashboardState, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { createActionableDashboardState, NOW } from "../support/fixtures.ts";
 import { DecisionsContent } from "../../src/components/decisions-content.tsx";
-import { DecisionActionsView, decideDecisionTransition, decideDialogKey, decideDialogRestore } from "../../src/components/decision-actions-view.tsx";
+import {
+  DecisionActionsView,
+  acceptsDecisionIntent,
+  decideDecisionTransition,
+  decideDialogKey,
+  decideDialogRestore,
+} from "../../src/components/decision-actions-view.tsx";
 import { DecisionResults } from "../../src/components/decision-results.tsx";
 import {
   INITIAL_DECISION_DIALOG_STATE,
@@ -65,6 +71,7 @@ const renderActions = (
       text: "",
       dialog,
       busy,
+      disconnected: false,
       dialogTarget,
       onTextChange: noop,
       onAction: noop,
@@ -251,47 +258,47 @@ test("確認ダイアログは見出しを accessible name に使い、確定ボ
   assert.notEqual(heading[1], "マージする");
 });
 
-test("確認ダイアログの Tab はフォーカス位置に依存せず内部へ循環し、Escape は常に閉じる", () => {
+test("確認ダイアログの Tab はフォーカス位置に依存せず内部へ循環し、送信中でなければ Escape は閉じる", () => {
   // ダイアログ外（本文・背景クリックで body に移った状態）からの Tab。
-  assert.deepEqual(decideDialogKey({ key: "Tab", shiftKey: false, tabbableCount: 2, activeIndex: -1 }), {
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Tab", shiftKey: false, tabbableCount: 2, activeIndex: -1 }), {
     kind: "focus",
     target: "first",
   });
-  assert.deepEqual(decideDialogKey({ key: "Tab", shiftKey: true, tabbableCount: 2, activeIndex: -1 }), {
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Tab", shiftKey: true, tabbableCount: 2, activeIndex: -1 }), {
     kind: "focus",
     target: "last",
   });
 
   // 端での循環。内部中央は既定の移動に任せる。
-  assert.deepEqual(decideDialogKey({ key: "Tab", shiftKey: false, tabbableCount: 2, activeIndex: 1 }), {
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Tab", shiftKey: false, tabbableCount: 2, activeIndex: 1 }), {
     kind: "focus",
     target: "first",
   });
-  assert.deepEqual(decideDialogKey({ key: "Tab", shiftKey: true, tabbableCount: 2, activeIndex: 0 }), {
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Tab", shiftKey: true, tabbableCount: 2, activeIndex: 0 }), {
     kind: "focus",
     target: "last",
   });
-  assert.deepEqual(decideDialogKey({ key: "Tab", shiftKey: false, tabbableCount: 3, activeIndex: 1 }), {
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Tab", shiftKey: false, tabbableCount: 3, activeIndex: 1 }), {
     kind: "none",
   });
-  assert.deepEqual(decideDialogKey({ key: "Tab", shiftKey: true, tabbableCount: 3, activeIndex: 1 }), {
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Tab", shiftKey: true, tabbableCount: 3, activeIndex: 1 }), {
     kind: "none",
   });
 
   // 送信中で操作できる要素が無いときも、背景へ抜けず見出しへ留まる。
-  assert.deepEqual(decideDialogKey({ key: "Tab", shiftKey: false, tabbableCount: 0, activeIndex: -1 }), {
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Tab", shiftKey: false, tabbableCount: 0, activeIndex: -1 }), {
     kind: "focus",
     target: "heading",
   });
 
-  // Escape はフォーカス位置に依存せず閉じる。Tab 以外のキーは関与しない。
-  assert.deepEqual(decideDialogKey({ key: "Escape", shiftKey: false, tabbableCount: 2, activeIndex: -1 }), {
+  // 送信中でなければ、Escape はフォーカス位置に依存せず閉じる。Tab 以外のキーは関与しない。
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Escape", shiftKey: false, tabbableCount: 2, activeIndex: -1 }), {
     kind: "cancel",
   });
-  assert.deepEqual(decideDialogKey({ key: "Escape", shiftKey: false, tabbableCount: 0, activeIndex: -1 }), {
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Escape", shiftKey: false, tabbableCount: 0, activeIndex: -1 }), {
     kind: "cancel",
   });
-  assert.deepEqual(decideDialogKey({ key: "Enter", shiftKey: false, tabbableCount: 2, activeIndex: 0 }), {
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Enter", shiftKey: false, tabbableCount: 2, activeIndex: 0 }), {
     kind: "none",
   });
 });
@@ -305,19 +312,19 @@ test("確認ダイアログの復帰は開いたトリガーの有効性で即�
 
   // 表示中は復帰しない。開いたダイアログからフォーカスを奪わない。
   assert.deepEqual(
-    decideDialogRestore({ dialog: "merge", previousDialog: null, pendingRestore: null, triggers: enabled }),
+    decideDialogRestore({ focusElsewhere: false, dialog: "merge", previousDialog: null, pendingRestore: null, triggers: enabled }),
     { kind: "clear" },
   );
 
   // 非 busy で閉じたら、閉じた時点でトリガーへ即時復帰する。
   assert.deepEqual(
-    decideDialogRestore({ dialog: null, previousDialog: "merge", pendingRestore: null, triggers: enabled }),
+    decideDialogRestore({ focusElsewhere: false, dialog: null, previousDialog: "merge", pendingRestore: null, triggers: enabled }),
     { kind: "restore", target: "merge" },
   );
 
   // busy 中に閉じたら、トリガーが無効なので復帰を待つ。
   assert.deepEqual(
-    decideDialogRestore({
+    decideDialogRestore({ focusElsewhere: false,
       dialog: null,
       previousDialog: "approve-registration",
       pendingRestore: null,
@@ -328,7 +335,7 @@ test("確認ダイアログの復帰は開いたトリガーの有効性で即�
 
   // busy 解除後（直前の dialog は既に null、復帰待ちを保持）は同じトリガーへ復帰する。
   assert.deepEqual(
-    decideDialogRestore({
+    decideDialogRestore({ focusElsewhere: false,
       dialog: null,
       previousDialog: null,
       pendingRestore: "approve-registration",
@@ -339,13 +346,13 @@ test("確認ダイアログの復帰は開いたトリガーの有効性で即�
 
   // 戻り先が無ければ復帰しない。
   assert.deepEqual(
-    decideDialogRestore({ dialog: null, previousDialog: null, pendingRestore: null, triggers: enabled }),
+    decideDialogRestore({ focusElsewhere: false, dialog: null, previousDialog: null, pendingRestore: null, triggers: enabled }),
     { kind: "none" },
   );
 
   // トリガーが DOM に無い場合も復帰せず、解除後に備えて待つ。
   assert.deepEqual(
-    decideDialogRestore({
+    decideDialogRestore({ focusElsewhere: false,
       dialog: null,
       previousDialog: "reject-registration",
       pendingRestore: null,
@@ -805,4 +812,219 @@ test("プルリクエストの URL の判定は、古いブラウザに無い UR
   } finally {
     Object.defineProperty(URL, "canParse", original);
   }
+});
+
+// 切断中は、最後に読めた判断待ちを残したまま、回答の操作だけを止める（issue #307）。
+const OFFLINE_NOTE = "再接続するまで操作できません。";
+
+const renderDecisionsConnection = (disconnected: boolean): string =>
+  renderToStaticMarkup(
+    createElement(DecisionsContent, {
+      snapshotLoaded: true,
+      state: createActionableDashboardState(),
+      now: NOW,
+      disconnected,
+    }),
+  );
+
+const controlsOf = (html: string): string[] => {
+  const document = new JSDOM(html).window.document;
+  return Array.from(document.querySelectorAll(".tray-list button, .tray-list input")).map(
+    (element) => element.outerHTML,
+  );
+};
+
+test("切断中は判断待ちの回答ボタンと入力欄をすべて無効にし、再接続するまで操作できないと添える", () => {
+  const html = renderDecisionsConnection(true);
+  const controls = controlsOf(html);
+
+  assert.ok(controls.length > 0, "フィクスチャに操作要素がある");
+  for (const control of controls) {
+    assert.match(control, /\sdisabled=""/, `切断中は押せない: ${control}`);
+  }
+  const document = new JSDOM(html).window.document;
+  const items = Array.from(document.querySelectorAll(".tray-list > li")).filter(
+    (item) => item.querySelector("button, input") !== null,
+  );
+  assert.ok(items.length > 0);
+  for (const item of items) {
+    assert.ok(item.textContent?.includes(OFFLINE_NOTE), "操作のある項目ごとに理由を添える");
+  }
+});
+
+test("接続中は判断待ちの回答ボタンを押せ、操作できない旨を出さない", () => {
+  const html = renderDecisionsConnection(false);
+  const buttons = controlsOf(html).filter(
+    (control) => control.startsWith("<button") && !control.includes('type="submit"'),
+  );
+
+  assert.ok(buttons.length > 0);
+  for (const button of buttons) {
+    assert.doesNotMatch(button, /\sdisabled=""/, `接続中は押せる: ${button}`);
+  }
+  assert.ok(!html.includes(OFFLINE_NOTE));
+});
+
+test("切断中は開いていたマージの確認でも確定できず、やめるだけは押せる", () => {
+  const html = renderToStaticMarkup(
+    createElement(DecisionActionsView, {
+      decision: merge(),
+      text: "",
+      dialog: "merge",
+      busy: false,
+      disconnected: true,
+      dialogTarget: null,
+      onTextChange: noop,
+      onAction: noop,
+    }),
+  );
+  const document = new JSDOM(html).window.document;
+  const dialogButtons = Array.from(document.querySelectorAll('[role="dialog"] button'));
+  const cancel = dialogButtons.find((button) => button.textContent === "やめる");
+  const confirm = dialogButtons.find((button) => button.textContent === "マージする");
+  assert.ok(cancel && confirm);
+  assert.equal(cancel.hasAttribute("disabled"), false);
+  assert.equal(confirm.hasAttribute("disabled"), true);
+  assert.ok(document.querySelector('[role="dialog"]')?.textContent?.includes(OFFLINE_NOTE));
+});
+
+// 性質: 判断待ちのすべての種別、送信中・切断・確認ダイアログ・入力のすべての組み合わせで、
+// 送信につながる操作要素は「送信中でも切断中でもない」ときだけ押せ、「やめる」は送信中だけ
+// 押せず、理由の文は切断中で操作のある項目にだけ出る（issue #307）。除外は付けない。
+test("性質: 判断待ちの操作要素は、送信中か切断中なら押せず、やめるは送信中だけ押せない", () => {
+  const dialogsFor = (decision: PendingDecision): DialogKind[] => {
+    if (decision.type === PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE) {
+      return [null, "merge"];
+    }
+    if (decision.type === PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION) {
+      return [null, "approve-registration", "reject-registration"];
+    }
+    return [null];
+  };
+  let checked = 0;
+  for (const decision of decisions) {
+    for (const dialog of dialogsFor(decision)) {
+      for (const busy of [false, true]) {
+        for (const disconnected of [false, true]) {
+          for (const text of ["", " ", "\u3000", " 回答 ", "回答"]) {
+            const html = renderToStaticMarkup(
+              createElement(DecisionActionsView, {
+                decision,
+                text,
+                dialog,
+                busy,
+                disconnected,
+                dialogTarget: dialog === null ? null : (openDecisionDialog(decision, dialog) ?? null),
+                onTextChange: noop,
+                onAction: noop,
+              }),
+            );
+            const document = new JSDOM(html).window.document;
+            const controls = Array.from(document.querySelectorAll("button, input"));
+            const where = JSON.stringify({ type: decision.type, dialog, busy, disconnected, text });
+            for (const control of controls) {
+              const disabled = control.hasAttribute("disabled");
+              if (control.textContent === "やめる") {
+                assert.equal(disabled, busy, `やめる ${where}`);
+              } else if (control.getAttribute("type") === "submit") {
+                assert.equal(disabled, busy || disconnected || text.trim() === "", `回答する ${where}`);
+              } else {
+                assert.equal(disabled, busy || disconnected, `${control.outerHTML} ${where}`);
+              }
+              checked += 1;
+            }
+            const notes = html.split("再接続するまで操作できません。").length - 1;
+            const expected = controls.length === 0 || !disconnected ? 0 : dialog === null ? 1 : 2;
+            assert.equal(notes, expected, `理由の文 ${where}`);
+          }
+        }
+      }
+    }
+  }
+  assert.ok(checked > 0);
+});
+
+// 性質: 操作要素の名前の集合は、送信中・切断に依らない。切断の前後で同じ操作が並び、
+// 再接続すれば接続中と同じ操作ができる（不変条件6、issue #307）。除外は付けない。
+test("性質: 判断待ちの操作要素の名前の集合は、送信中と切断に依らない", () => {
+  const dialogs: DialogKind[] = [null, "merge", "approve-registration", "reject-registration"];
+  const namesOf = (decision: PendingDecision, dialog: DialogKind, busy: boolean, disconnected: boolean): string[] => {
+    const html = renderToStaticMarkup(
+      createElement(DecisionActionsView, {
+        decision,
+        text: "回答",
+        dialog,
+        busy,
+        disconnected,
+        dialogTarget: dialog === null ? null : (openDecisionDialog(decision, dialog) ?? null),
+        onTextChange: noop,
+        onAction: noop,
+      }),
+    );
+    const document = new JSDOM(html).window.document;
+    return Array.from(document.querySelectorAll("button, input, a[href]"))
+      .map((element) => `${element.tagName}:${element.getAttribute("aria-label") ?? element.textContent ?? ""}`)
+      .sort();
+  };
+  for (const decision of decisions) {
+    for (const dialog of dialogs) {
+      const connected = namesOf(decision, dialog, false, false);
+      for (const busy of [false, true]) {
+        for (const disconnected of [false, true]) {
+          assert.deepEqual(
+            namesOf(decision, dialog, busy, disconnected),
+            connected,
+            JSON.stringify({ type: decision.type, dialog, busy, disconnected }),
+          );
+        }
+      }
+    }
+  }
+});
+
+test("切断中は、開く・確定・回答の操作を入口で受け付けず、やめるだけを受け付ける", () => {
+  const intents = [
+    { type: "answer-text" },
+    { type: "answer-option", option: "今週" },
+    { type: "answer-report", report: 1 },
+    { type: "open", dialog: "merge" },
+    { type: "confirm", dialog: "merge" },
+    { type: "cancel" },
+  ] as const;
+  for (const intent of intents) {
+    assert.equal(acceptsDecisionIntent(intent, false), true, `接続中 ${intent.type}`);
+    assert.equal(acceptsDecisionIntent(intent, true), intent.type === "cancel", `切断中 ${intent.type}`);
+  }
+});
+
+test("確認ダイアログの Escape は、送信中には取り消さない", () => {
+  assert.deepEqual(decideDialogKey({ busy: true, key: "Escape", shiftKey: false, tabbableCount: 0, activeIndex: -1 }), {
+    kind: "none",
+  });
+  assert.deepEqual(decideDialogKey({ busy: false, key: "Escape", shiftKey: false, tabbableCount: 2, activeIndex: -1 }), {
+    kind: "cancel",
+  });
+});
+
+test("確認ダイアログの復帰を待つ間に別の要素へフォーカスが移っていたら、上書きせず待ちをやめる", () => {
+  const enabled = {
+    merge: { disabled: false },
+    "approve-registration": { disabled: false },
+    "reject-registration": { disabled: false },
+  };
+  assert.deepEqual(
+    decideDialogRestore({ focusElsewhere: true, dialog: null, previousDialog: null, pendingRestore: "merge", triggers: enabled }),
+    { kind: "drop" },
+  );
+  // トリガーがまだ押せない間は、よそにフォーカスがあっても待ち続ける。
+  assert.deepEqual(
+    decideDialogRestore({
+      focusElsewhere: true,
+      dialog: null,
+      previousDialog: null,
+      pendingRestore: "merge",
+      triggers: { ...enabled, merge: { disabled: true } },
+    }),
+    { kind: "wait", target: "merge" },
+  );
 });

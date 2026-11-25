@@ -161,7 +161,7 @@ export function DecisionsContent({ state, snapshotLoaded, now, disconnected, rea
                       </div>
                     ) : null}
                   </div>
-                  <DecisionActions decision={decision} onResult={handleResult} />
+                  <DecisionActions decision={decision} disconnected={disconnected} onResult={handleResult} />
                 </li>
               );
             })}
