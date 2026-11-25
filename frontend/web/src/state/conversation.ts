@@ -13,6 +13,13 @@ export type ConversationMessageView = {
   speaker: number;
   text: string;
   notice?: string;
+  detail?: ConversationDetailView;
+};
+
+/** 折りたたみの中で見せる元の入力。出来事や質問への回答から始まったターンだけが持つ。 */
+export type ConversationDetailView = {
+  question?: string;
+  sourceJson: string;
 };
 
 export type ConversationSkippedView = {
@@ -77,12 +84,24 @@ const toDate = (value: unknown): Date | undefined => {
 
 const asNumber = (value: unknown): number => (typeof value === "number" ? value : Number(value ?? 0));
 
+const toDetail = (value: unknown): ConversationDetailView | undefined => {
+  if (value === null || typeof value !== "object") {
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  return {
+    question: typeof raw.question === "string" ? raw.question : undefined,
+    sourceJson: String(raw.sourceJson ?? ""),
+  };
+};
+
 const toMessage = (raw: Record<string, unknown>): ConversationMessageView => ({
   seq: asNumber(raw.seq),
   occurredAt: toDate(raw.occurredAt),
   speaker: enumFromWireOrUnrecognizedName("ConversationSpeaker", raw.speaker),
   text: String(raw.text ?? ""),
   notice: typeof raw.notice === "string" ? raw.notice : undefined,
+  detail: toDetail(raw.detail),
 });
 
 const toSkipped = (raw: Record<string, unknown>): ConversationSkippedView => ({

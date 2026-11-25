@@ -7,11 +7,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { JSDOM } from "jsdom";
 import { GetConversationResponse } from "../../src/proto/taktdash.ts";
 import {
   createConversationMessages,
   createConversationResponse,
+  createEventConversationMessage,
   createGarbledConversationMessage,
+  createInquiryAnswerConversationMessage,
 } from "../support/fixtures.ts";
 import { formatDateTime } from "../../src/state/format.ts";
 import { restoreConversationResponse, type ConversationPage } from "../../src/state/conversation.ts";
@@ -130,4 +133,66 @@ test("印のない発言には文字化けの印を描画しない", () => {
   const html = render(restore());
 
   assert.doesNotMatch(html, /元記録で文字化けしています/);
+});
+
+// 描画した HTML を DOM にし、発言ごとの折りたたみを要約のクリックで開閉して観測する。
+const mountedMessages = (page: ConversationPage): HTMLLIElement[] => {
+  const dom = new JSDOM(render(page));
+  return [...dom.window.document.querySelectorAll<HTMLLIElement>("li.conversation-message")];
+};
+
+const clickSummary = (details: HTMLDetailsElement): void => {
+  const summary = details.querySelector("summary");
+  assert.ok(summary, "折りたたみには要約がある");
+  summary.click();
+};
+
+test("イベント起点の発言は説明文だけを出し、イベントの JSON は折りたたみを開くと読める", () => {
+  const event = createEventConversationMessage();
+  const [item] = mountedMessages(restore({ messages: [event] }));
+  assert.ok(item);
+
+  assert.match(item.textContent ?? "", /システム/);
+  assert.equal(item.querySelector(".conversation-text")?.textContent, event.text, "本文は説明文だけ");
+  const details = item.querySelector("details");
+  assert.ok(details, "イベントの JSON の折りたたみがある");
+  assert.equal(details.open, false, "ふだんは閉じている");
+  assert.equal(details.querySelector("summary")?.textContent, "イベントの JSON を表示します。");
+  assert.equal(details.querySelector("pre")?.textContent, event.detail!.sourceJson, "折りたたみの中にイベントの JSON がある");
+  assert.equal(details.querySelector(".conversation-detail-label"), null, "イベントに質問の欄はない");
+
+  clickSummary(details);
+  assert.equal(details.open, true, "要約をクリックすると開く");
+  clickSummary(details);
+  assert.equal(details.open, false, "もう一度クリックすると閉じる");
+});
+
+test("質問への回答は回答だけを出し、質問の文と元の JSON は折りたたみを開くと読める", () => {
+  const answer = createInquiryAnswerConversationMessage();
+  const [item] = mountedMessages(restore({ messages: [answer] }));
+  assert.ok(item);
+
+  assert.match(item.textContent ?? "", /ユーザー/);
+  const [body, question] = [...item.querySelectorAll(".conversation-text")];
+  assert.equal(body?.textContent, answer.text, "本文は回答だけ");
+  assert.ok(body?.closest("details") === null, "回答は折りたたみの外にある");
+  const details = item.querySelector("details");
+  assert.ok(details, "質問と元の JSON の折りたたみがある");
+  assert.equal(details.open, false, "ふだんは閉じている");
+  assert.equal(details.querySelector("summary")?.textContent, "質問と元の JSON を表示します。");
+  assert.equal(question?.textContent, answer.detail!.question, "折りたたみの中に質問の文がある");
+  assert.ok(question?.closest("details") === details, "質問の文は折りたたみの中にある");
+  assert.equal(details.querySelector("pre")?.textContent, answer.detail!.sourceJson, "折りたたみの中に元の JSON がある");
+
+  clickSummary(details);
+  assert.equal(details.open, true, "要約をクリックすると開く");
+  clickSummary(details);
+  assert.equal(details.open, false, "もう一度クリックすると閉じる");
+});
+
+test("人の発言と包みの無い発言には折りたたみを出さない", () => {
+  const items = mountedMessages(restore());
+
+  assert.equal(items.length, 3);
+  assert.ok(items.every((item) => item.querySelector("details") === null));
 });

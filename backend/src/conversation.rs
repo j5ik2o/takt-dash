@@ -152,12 +152,13 @@ impl ConversationReader {
         | Ok((speaker, raw_text)) => {
           let presented = present_body(speaker, raw_text);
           page.messages.push(ConversationMessage {
-            seq: row.seq,
+            seq:         row.seq,
             occurred_at: DateTime::<Utc>::from_timestamp_millis(row.time_created)
               .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-            speaker,
-            text: presented.text,
-            notice: presented.notice,
+            speaker:     presented.speaker,
+            text:        presented.text,
+            notice:      presented.notice,
+            detail:      presented.detail,
           });
         },
         | Err(reason) => *skipped.entry(reason).or_insert(0) += 1,
@@ -389,54 +390,108 @@ fn classify(row: &MessageRow) -> Result<(ConversationSpeaker, String), String> {
 /// 区別できるようにするためのもので、短い断片にまで付けて誤解を招かないよう、二桁を境界にします。
 const GARBLED_NOTICE_THRESHOLD: usize = 10;
 
-/// 表示用に整形した本文と、本文に添える注意書き。
+/// 表示用に整形した話者・本文・注意書き・折りたたみの中身。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PresentedBody {
-  text:   String,
-  notice: Option<String>,
+  speaker: ConversationSpeaker,
+  text:    String,
+  notice:  Option<String>,
+  detail:  Option<ConversationDetail>,
 }
 
 /// 話者ごとに保存形式から人が読める本文を取り出し、文字化けの印を決める。
 ///
 /// 包みや fenced JSON を解釈できないときは、元の本文をそのまま使います。
 fn present_body(speaker: ConversationSpeaker, raw_text: String) -> PresentedBody {
-  let text = match speaker {
-    | ConversationSpeaker::User => unwrap_user_input(&raw_text).unwrap_or(raw_text),
-    | ConversationSpeaker::Manager => unwrap_assistant_message(&raw_text).unwrap_or(raw_text),
-    | ConversationSpeaker::System => raw_text,
+  let (speaker, text, detail) = match speaker {
+    | ConversationSpeaker::User => match parse_turn_input(&raw_text) {
+      | Some(TurnInput::Speech { text }) => (ConversationSpeaker::User, text, None),
+      | Some(TurnInput::Event { description, kind, event }) => (
+        ConversationSpeaker::System,
+        description.unwrap_or_else(|| format!("イベント: {kind}")),
+        Some(ConversationDetail { question: None, source_json: pretty_json(&event) }),
+      ),
+      | Some(TurnInput::InquiryAnswer { answer, question, source }) => (
+        ConversationSpeaker::User,
+        answer,
+        Some(ConversationDetail { question, source_json: pretty_json(&source) }),
+      ),
+      | None => (ConversationSpeaker::User, raw_text, None),
+    },
+    | ConversationSpeaker::Manager => {
+      (ConversationSpeaker::Manager, unwrap_assistant_message(&raw_text).unwrap_or(raw_text), None)
+    },
+    | ConversationSpeaker::System => (ConversationSpeaker::System, raw_text, None),
   };
   let notice = garbled_notice(&text);
-  PresentedBody { text, notice }
+  PresentedBody { speaker, text, notice, detail }
 }
 
-/// `## このターンの入力` の包みから、`speaker` を持つ JSON の `text` を取り出す。
+/// `## このターンの入力` の包みが示す、このターンの始まり方。
+#[derive(Debug, Clone, PartialEq)]
+enum TurnInput {
+  /// 人が話しかけたターン。`speaker` を持つ JSON の `text`。
+  Speech { text: String },
+  /// 出来事から始まったターン。`{"event":{"kind":…},"instruction":…}` の行と、その前の説明文。
+  Event { description: Option<String>, kind: String, event: Value },
+  /// 保存した質問への人の回答から始まったターン。`{"kind":"inquiry_answered",…}` の行。
+  InquiryAnswer { answer: String, question: Option<String>, source: Value },
+}
+
+/// `## このターンの入力` の包みから、ターンの始まり方を読み取る。
 ///
-/// 見出しより後だけを対象にし、行単位で JSON を解釈します。`speaker` を持たない
-/// JSON や、包みの無い本文は対象にしません。前のターンの本文に同じ見出しが
-/// 含まれていても、現在の包みは行頭の見出しのうち最後のものです。
-fn unwrap_user_input(raw: &str) -> Option<String> {
+/// 見出しより後だけを対象にし、行単位で JSON を解釈します。前のターンの本文に同じ見出しが
+/// 含まれていても、現在の包みは行頭の見出しのうち最後のものです。見出しと JSON の行の間に
+/// ある空でない行を説明文とします。応答形式の指示と Business context は JSON の行より後に
+/// あるため読みません。知らない形の JSON の行は読み飛ばし、どの形にも当たらなければ `None`
+/// を返します。
+fn parse_turn_input(raw: &str) -> Option<TurnInput> {
   const MARKER: &str = "## このターンの入力";
   let start = raw
     .match_indices(MARKER)
     .filter(|(index, _)| *index == 0 || raw.as_bytes()[index - 1] == b'\n')
     .last()
     .map(|(index, _)| index + MARKER.len())?;
+  let mut description: Vec<&str> = Vec::new();
   for line in raw[start..].lines() {
     let trimmed = line.trim();
+    if trimmed.is_empty() {
+      continue;
+    }
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+      description.push(trimmed);
       continue;
     }
     let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
       continue;
     };
-    if value.get("speaker").is_none() {
-      continue;
-    }
-    if let Some(text) = value.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) {
-      return Some(text.to_owned());
+    if let Some(input) = turn_input_from_json(value, &description) {
+      return Some(input);
     }
   }
   None
+}
+
+fn turn_input_from_json(value: Value, description: &[&str]) -> Option<TurnInput> {
+  let non_empty = |value: &Value| value.as_str().filter(|text| !text.is_empty()).map(str::to_owned);
+  if value.get("speaker").is_some() {
+    return value.get("text").and_then(non_empty).map(|text| TurnInput::Speech { text });
+  }
+  if let Some(event) = value.get("event") {
+    let kind = event.get("kind").and_then(non_empty)?;
+    let description = (!description.is_empty()).then(|| description.join("\n"));
+    return Some(TurnInput::Event { description, kind, event: event.clone() });
+  }
+  if value.get("kind").and_then(Value::as_str) == Some("inquiry_answered") {
+    let answer = value.get("answer").and_then(|answer| answer.get("text")).and_then(non_empty)?;
+    let question = value.get("question").and_then(non_empty);
+    return Some(TurnInput::InquiryAnswer { answer, question, source: value });
+  }
+  None
+}
+
+fn pretty_json(value: &Value) -> String {
+  serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 /// 本文全体が `message` を持つ単一の fenced JSON block のとき、`message` を取り出す。
@@ -530,6 +585,18 @@ pub struct ConversationMessage {
   pub speaker:     ConversationSpeaker,
   pub text:        String,
   pub notice:      Option<String>,
+  pub detail:      Option<ConversationDetail>,
+}
+
+/// 本文の代わりに折りたたみの中で見せる、ターンの元の入力。
+///
+/// 出来事から始まったターンと、保存した質問への回答から始まったターンだけが持ちます。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationDetail {
+  /// 質問への回答のときの、質問の文。
+  pub question:    Option<String>,
+  /// 元の JSON（整形済み）。イベントならイベントの JSON、質問への回答なら元の JSON の行。
+  pub source_json: String,
 }
 
 /// 会話の発話者。

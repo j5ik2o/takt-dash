@@ -194,6 +194,10 @@ pub(super) fn conversation_response(page: ConversationPage) -> GetConversationRe
         speaker:     conversation_speaker(message.speaker) as i32,
         text:        message.text,
         notice:      message.notice,
+        detail:      message.detail.map(|detail| v1::ConversationDetail {
+          question:    detail.question,
+          source_json: detail.source_json,
+        }),
       })
       .collect(),
     next_after_seq:     page.next_after_seq,

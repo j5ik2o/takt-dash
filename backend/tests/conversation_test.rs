@@ -9,9 +9,9 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use conversation_fixture::{
-  assistant_text, data_text, fenced_assistant_data, fenced_assistant_without_message_data, garbled_user_data,
-  invalid_fenced_assistant_data, plain_user_data, wrapped_user_data, wrapped_user_without_speaker_data,
-  ConversationFixture, CONVERSATION_SCHEMA,
+  assistant_text, data_text, event_turn_data, fenced_assistant_data, fenced_assistant_without_message_data,
+  garbled_user_data, inquiry_answered_data, invalid_fenced_assistant_data, plain_user_data, wrapped_user_data,
+  wrapped_user_without_speaker_data, ConversationFixture, CONVERSATION_SCHEMA,
 };
 use takt_dash_backend::{
   conversation::{ConversationPage, ConversationQuery, ConversationReader, ConversationSpeaker},
@@ -972,6 +972,124 @@ fn wrapped_user_input_without_a_speaker_is_left_as_is() {
 
   assert_eq!(texts(&page), vec![raw], "speaker を持たない JSON は人の発言として扱わず、元の本文を返す必要があります");
   assert!(page.messages[0].text.contains("このターンの入力"), "包みの無い行は従来どおり本文を保つ必要があります");
+}
+
+struct EventTurnCase {
+  kind:             &'static str,
+  description:      Option<&'static str>,
+  event:            serde_json::Value,
+  business_context: bool,
+  expected_text:    &'static str,
+}
+
+fn event_turn_cases() -> Vec<EventTurnCase> {
+  vec![
+    EventTurnCase {
+      kind:             "goal_registered",
+      description:      Some("このターンはイベントから始まりました。種類: goal_registered（ゴールが登録された）。保存された合意から作業を手配します。"),
+      event:            serde_json::json!({ "kind": "goal_registered", "repositoryDirectory": "/tmp/takt-dash", "goalId": "67df7701" }),
+      business_context: true,
+      expected_text:    "このターンはイベントから始まりました。種類: goal_registered（ゴールが登録された）。保存された合意から作業を手配します。",
+    },
+    EventTurnCase {
+      kind:             "task_completed",
+      description:      Some("このターンはイベントから始まりました。種類: task_completed（タスクが完了した）。結果と成果を確かめ、次の作業を判断します。"),
+      event:            serde_json::json!({ "kind": "task_completed", "task": { "taskName": "issue-200" }, "result": { "success": true } }),
+      business_context: false,
+      expected_text:    "このターンはイベントから始まりました。種類: task_completed（タスクが完了した）。結果と成果を確かめ、次の作業を判断します。",
+    },
+    EventTurnCase {
+      kind:             "task_failed",
+      description:      Some("このターンはイベントから始まりました。種類: task_failed（タスクの失敗・中断の通知）。次の対応を決めるため、通知された終了理由と現在の状態を照合し、そのタスクの停止理由と未決定事項に沿って判断します。"),
+      event:            serde_json::json!({ "kind": "task_failed", "task": { "taskName": "merge-pr-655" }, "result": { "success": false, "failureReason": "Command failed" } }),
+      business_context: false,
+      expected_text:    "このターンはイベントから始まりました。種類: task_failed（タスクの失敗・中断の通知）。次の対応を決めるため、通知された終了理由と現在の状態を照合し、そのタスクの停止理由と未決定事項に沿って判断します。",
+    },
+    EventTurnCase {
+      kind:             "wait_command_completed",
+      description:      None,
+      event:            serde_json::json!({ "kind": "wait_command_completed", "id": "35cb820a", "description": "PR #654 の再実行の完了を待つ", "status": "succeeded", "exitCode": 0 }),
+      business_context: false,
+      expected_text:    "イベント: wait_command_completed",
+    },
+    EventTurnCase {
+      kind:             "watch_observation",
+      description:      Some("このターンは見張りが届けたイベントから始まりました。種類: watch_observation（実行や PR などの状態変化を観測した）。観測の種類と現在の状態を照合します。"),
+      event:            serde_json::json!({ "kind": "watch_observation", "observation": { "kind": "pr_changed", "observedAt": "2026-11-20T09:02:31.057Z" } }),
+      business_context: false,
+      expected_text:    "このターンは見張りが届けたイベントから始まりました。種類: watch_observation（実行や PR などの状態変化を観測した）。観測の種類と現在の状態を照合します。",
+    },
+  ]
+}
+
+#[test]
+fn event_turns_show_the_description_as_the_system_and_fold_the_event_json() {
+  for case in event_turn_cases() {
+    let (_directory, fixture) = ConversationFixture::new();
+    let project_cwd = fixture.project_dir("takt-dash");
+    seed_session(&fixture, &project_cwd);
+    let data = event_turn_data(case.description, &case.event, case.business_context, FIRST_MESSAGE_AT);
+    fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &data);
+
+    let page = fixture.reader().read(&query("takt-dash", &project_cwd));
+
+    let message = &page.messages[0];
+    assert_eq!(message.speaker, ConversationSpeaker::System, "{}: 出来事から始まったターンの話者はシステムです", case.kind);
+    assert_eq!(message.text, case.expected_text, "{}: 本文は包みの説明文（無ければ種類）だけです", case.kind);
+    let detail = message.detail.as_ref().unwrap_or_else(|| panic!("{}: 折りたたみの中身があります", case.kind));
+    assert_eq!(detail.question, None, "{}: イベントに質問の文はありません", case.kind);
+    let folded: serde_json::Value = serde_json::from_str(&detail.source_json).expect("折りたたみの中身は JSON です");
+    assert_eq!(folded, case.event, "{}: 折りたたみにはイベントの JSON を置きます", case.kind);
+    for shown in [message.text.as_str(), detail.source_json.as_str()] {
+      assert!(!shown.contains("JSON schema"), "{}: 応答形式の指示は出しません", case.kind);
+      assert!(!shown.contains("Business context"), "{}: Business context は出しません", case.kind);
+    }
+  }
+}
+
+#[test]
+fn inquiry_answer_turns_show_only_the_answer_and_fold_the_question_and_source_json() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  let question = "PR #654 のマージ用タスクが停止しました。どう進めますか。";
+  let answer = "窓口の回答です。案A で進めてください。\n\n1. 作業ツリーは残っています。";
+  let data = inquiry_answered_data(question, answer, true, FIRST_MESSAGE_AT);
+  fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &data);
+
+  let page = fixture.reader().read(&query("takt-dash", &project_cwd));
+
+  let message = &page.messages[0];
+  assert_eq!(message.speaker, ConversationSpeaker::User, "質問への回答は人が書いた文なので話者はユーザーです");
+  assert_eq!(message.text, answer, "ふだんは回答の本文だけを見せます");
+  let detail = message.detail.as_ref().expect("折りたたみの中身があります");
+  assert_eq!(detail.question.as_deref(), Some(question), "折りたたみに質問の文を置きます");
+  let folded: serde_json::Value = serde_json::from_str(&detail.source_json).expect("折りたたみの中身は JSON です");
+  assert_eq!(folded["kind"], "inquiry_answered", "折りたたみに元の JSON を置きます");
+  assert_eq!(folded["answer"]["text"], answer, "元の JSON は回答を含みます");
+  assert!(!detail.source_json.contains("Business context"), "Business context は折りたたみにも出しません");
+  assert!(!detail.source_json.contains("JSON schema"), "応答形式の指示は折りたたみにも出しません");
+}
+
+#[test]
+fn human_speech_and_unwrapped_turns_have_no_folded_detail() {
+  let (_directory, fixture) = ConversationFixture::new();
+  let project_cwd = fixture.project_dir("takt-dash");
+  seed_session(&fixture, &project_cwd);
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &wrapped_user_data("前のターンの本文", "人の発言です", FIRST_MESSAGE_AT),
+  );
+  fixture.insert_message("ses_alpha", 2, "user", FIRST_MESSAGE_AT + 1, &plain_user_data("包みのない発言", FIRST_MESSAGE_AT + 1));
+
+  let page = fixture.reader().read(&query("takt-dash", &project_cwd));
+
+  assert_eq!(texts(&page), vec!["人の発言です".to_owned(), "包みのない発言".to_owned()]);
+  assert!(page.messages.iter().all(|message| message.speaker == ConversationSpeaker::User), "話者はユーザーのままです");
+  assert!(page.messages.iter().all(|message| message.detail.is_none()), "人の発言と包みの無い行に折りたたみはありません");
 }
 
 #[test]

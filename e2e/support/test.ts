@@ -1,6 +1,7 @@
 import { test as base } from "@playwright/test";
 import { startStack, type Stack } from "./stack";
 import { buildMockState } from "./fixture";
+import { seedConversation } from "./conversation";
 
 // 長い目的文を持つゴールのカードで、題名が1行に収まり親の幅を超えないことを観測するためのスタック。
 // 共有の既定 fixture（buildMockState）を変えず、この spec 専用に長い題名のゴールを1件足す。
@@ -75,9 +76,26 @@ const longServerStack = async ({}, use: (stack: Stack) => Promise<void>): Promis
   }
 };
 
+// manager の会話（人の発言、manager の応答、出来事と質問への回答から始まったターン）を
+// 一時ホームに置いたスタック。会話ページの折りたたみを実ブラウザで開閉する。
+const conversationStack = async ({}, use: (stack: Stack) => Promise<void>): Promise<void> => {
+  const stack = await startStack({ seedHome: seedConversation });
+  try {
+    await use(stack);
+  } finally {
+    await stack.stop();
+  }
+};
+
 // スタックはワーカーごとに1回だけ起動し、spec が失敗しても teardown で必ず止める。
 export const test = base.extend<
-  { isolatedStack: Stack; twoProjectStack: Stack; longServerStack: Stack; longTitleStack: Stack },
+  {
+    isolatedStack: Stack;
+    twoProjectStack: Stack;
+    longServerStack: Stack;
+    longTitleStack: Stack;
+    conversationStack: Stack;
+  },
   { stack: Stack }
 >({
   stack: [
@@ -104,6 +122,7 @@ export const test = base.extend<
   twoProjectStack,
   longServerStack,
   longTitleStack,
+  conversationStack,
 });
 
 export { expect } from "@playwright/test";

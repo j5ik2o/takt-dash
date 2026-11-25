@@ -427,6 +427,33 @@ export function createGarbledConversationMessage(
   };
 }
 
+// 出来事から始まったターン。backend が説明文を本文にし、イベントの JSON を折りたたみに入れた状態を表す。
+export function createEventConversationMessage(): ConversationMessage {
+  return {
+    seq: 5,
+    occurredAt: minutesAgo(2),
+    speaker: ConversationSpeaker.CONVERSATION_SPEAKER_SYSTEM,
+    text: "このターンはイベントから始まりました。種類: goal_registered（ゴールが登録された）。保存された合意から作業を手配します。",
+    detail: {
+      sourceJson: JSON.stringify({ kind: "goal_registered", goalId: "67df7701" }, null, 2),
+    },
+  };
+}
+
+// 保存した質問への回答から始まったターン。回答だけを本文にし、質問と元の JSON を折りたたみに入れた状態を表す。
+export function createInquiryAnswerConversationMessage(): ConversationMessage {
+  return {
+    seq: 6,
+    occurredAt: minutesAgo(1),
+    speaker: ConversationSpeaker.CONVERSATION_SPEAKER_USER,
+    text: "案A で進めてください。",
+    detail: {
+      question: "PR #654 のマージ用タスクが停止しました。どう進めますか。",
+      sourceJson: JSON.stringify({ kind: "inquiry_answered", answer: { text: "案A で進めてください。" } }, null, 2),
+    },
+  };
+}
+
 export function createConversationResponse(
   overrides: Partial<GetConversationResponse> = {},
 ): GetConversationResponse {

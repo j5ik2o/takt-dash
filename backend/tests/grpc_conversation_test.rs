@@ -10,7 +10,10 @@ mod grpc_harness;
 use std::path::Path;
 
 use common::{project, server_meta};
-use conversation_fixture::{fenced_assistant_data, garbled_user_data, wrapped_user_data, ConversationFixture};
+use conversation_fixture::{
+  event_turn_data, fenced_assistant_data, garbled_user_data, inquiry_answered_data, wrapped_user_data,
+  ConversationFixture,
+};
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::json;
 use takt_dash_backend::takt_dash::v1::{ConversationSpeaker, GetConversationRequest, GetConversationResponse};
@@ -282,6 +285,51 @@ async fn get_conversation_returns_presented_bodies_and_a_garbled_notice() {
   assert_eq!(bodies[1], "確認しました。", "fenced JSON の assistant の行は message だけを返す必要があります");
   assert_eq!(bodies[2].matches('\u{FFFD}').count(), 12, "本文の置換文字はそのまま残す必要があります");
   assert_eq!(notices(&response), vec![None, None, Some("元記録で文字化けしています（置換文字 12 個）".to_owned()),]);
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn get_conversation_returns_the_folded_detail_of_non_speech_turns() {
+  let harness = harness();
+  let fixture = ConversationFixture::under(harness.home());
+  let project_cwd = harness.project_dir();
+  fixture.write_manager("alpha", "ses_alpha", project_cwd, "opencode");
+  fixture.insert_session("ses_alpha", project_cwd, 2_000);
+  let event = json!({ "kind": "wait_command_completed", "id": "35cb820a", "status": "succeeded" });
+  fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &event_turn_data(None, &event, false, FIRST_MESSAGE_AT));
+  fixture.insert_message(
+    "ses_alpha",
+    2,
+    "user",
+    1_794_613_222_000,
+    &inquiry_answered_data("どう進めますか。", "案A で進めてください。", true, 1_794_613_222_000),
+  );
+  fixture.insert_message(
+    "ses_alpha",
+    3,
+    "user",
+    1_794_613_223_000,
+    &wrapped_user_data("前のターンの本文", "見出しを直してください。", 1_794_613_223_000),
+  );
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let response = client.get_conversation(request(None, 0, 50)).await.expect("会話を取得できます").into_inner();
+
+  let speakers: Vec<i32> = response.messages.iter().map(|message| message.speaker).collect();
+  assert_eq!(
+    speakers,
+    vec![ConversationSpeaker::System as i32, ConversationSpeaker::User as i32, ConversationSpeaker::User as i32]
+  );
+  assert_eq!(texts(&response), vec!["イベント: wait_command_completed", "案A で進めてください。", "見出しを直してください。"]);
+  let event_detail = response.messages[0].detail.as_ref().expect("イベントの折りたたみがあります");
+  assert_eq!(event_detail.question, None);
+  assert_eq!(serde_json::from_str::<serde_json::Value>(&event_detail.source_json).expect("JSON です"), event);
+  let answer_detail = response.messages[1].detail.as_ref().expect("回答の折りたたみがあります");
+  assert_eq!(answer_detail.question.as_deref(), Some("どう進めますか。"));
+  assert!(answer_detail.source_json.contains("inquiry_answered"), "元の JSON を返す必要があります");
+  assert_eq!(response.messages[2].detail, None, "人の発言に折りたたみはありません");
 
   server.stop().await;
 }
