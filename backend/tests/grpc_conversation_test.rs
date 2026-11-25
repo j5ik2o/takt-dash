@@ -297,7 +297,13 @@ async fn get_conversation_returns_the_folded_detail_of_non_speech_turns() {
   fixture.write_manager("alpha", "ses_alpha", project_cwd, "opencode");
   fixture.insert_session("ses_alpha", project_cwd, 2_000);
   let event = json!({ "kind": "wait_command_completed", "id": "35cb820a", "status": "succeeded" });
-  fixture.insert_message("ses_alpha", 1, "user", FIRST_MESSAGE_AT, &event_turn_data(None, &event, false, FIRST_MESSAGE_AT));
+  fixture.insert_message(
+    "ses_alpha",
+    1,
+    "user",
+    FIRST_MESSAGE_AT,
+    &event_turn_data(None, &event, false, FIRST_MESSAGE_AT),
+  );
   fixture.insert_message(
     "ses_alpha",
     2,
@@ -318,11 +324,16 @@ async fn get_conversation_returns_the_folded_detail_of_non_speech_turns() {
   let response = client.get_conversation(request(None, 0, 50)).await.expect("会話を取得できます").into_inner();
 
   let speakers: Vec<i32> = response.messages.iter().map(|message| message.speaker).collect();
-  assert_eq!(
-    speakers,
-    vec![ConversationSpeaker::System as i32, ConversationSpeaker::User as i32, ConversationSpeaker::User as i32]
-  );
-  assert_eq!(texts(&response), vec!["イベント: wait_command_completed", "案A で進めてください。", "見出しを直してください。"]);
+  assert_eq!(speakers, vec![
+    ConversationSpeaker::System as i32,
+    ConversationSpeaker::User as i32,
+    ConversationSpeaker::User as i32
+  ]);
+  assert_eq!(texts(&response), vec![
+    "イベント: wait_command_completed",
+    "案A で進めてください。",
+    "見出しを直してください。"
+  ]);
   let event_detail = response.messages[0].detail.as_ref().expect("イベントの折りたたみがあります");
   assert_eq!(event_detail.question, None);
   assert_eq!(serde_json::from_str::<serde_json::Value>(&event_detail.source_json).expect("JSON です"), event);

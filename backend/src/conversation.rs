@@ -411,11 +411,9 @@ fn present_body(speaker: ConversationSpeaker, raw_text: String) -> PresentedBody
         description.unwrap_or_else(|| format!("イベント: {kind}")),
         Some(ConversationDetail { question: None, source_json: pretty_json(&event) }),
       ),
-      | Some(TurnInput::InquiryAnswer { answer, question, source }) => (
-        ConversationSpeaker::User,
-        answer,
-        Some(ConversationDetail { question, source_json: pretty_json(&source) }),
-      ),
+      | Some(TurnInput::InquiryAnswer { answer, question, source }) => {
+        (ConversationSpeaker::User, answer, Some(ConversationDetail { question, source_json: pretty_json(&source) }))
+      },
       | None => (ConversationSpeaker::User, raw_text, None),
     },
     | ConversationSpeaker::Manager => {

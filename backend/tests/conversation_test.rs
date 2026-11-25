@@ -1034,7 +1034,12 @@ fn event_turns_show_the_description_as_the_system_and_fold_the_event_json() {
     let page = fixture.reader().read(&query("takt-dash", &project_cwd));
 
     let message = &page.messages[0];
-    assert_eq!(message.speaker, ConversationSpeaker::System, "{}: 出来事から始まったターンの話者はシステムです", case.kind);
+    assert_eq!(
+      message.speaker,
+      ConversationSpeaker::System,
+      "{}: 出来事から始まったターンの話者はシステムです",
+      case.kind
+    );
     assert_eq!(message.text, case.expected_text, "{}: 本文は包みの説明文（無ければ種類）だけです", case.kind);
     let detail = message.detail.as_ref().unwrap_or_else(|| panic!("{}: 折りたたみの中身があります", case.kind));
     assert_eq!(detail.question, None, "{}: イベントに質問の文はありません", case.kind);
@@ -1083,13 +1088,22 @@ fn human_speech_and_unwrapped_turns_have_no_folded_detail() {
     FIRST_MESSAGE_AT,
     &wrapped_user_data("前のターンの本文", "人の発言です", FIRST_MESSAGE_AT),
   );
-  fixture.insert_message("ses_alpha", 2, "user", FIRST_MESSAGE_AT + 1, &plain_user_data("包みのない発言", FIRST_MESSAGE_AT + 1));
+  fixture.insert_message(
+    "ses_alpha",
+    2,
+    "user",
+    FIRST_MESSAGE_AT + 1,
+    &plain_user_data("包みのない発言", FIRST_MESSAGE_AT + 1),
+  );
 
   let page = fixture.reader().read(&query("takt-dash", &project_cwd));
 
   assert_eq!(texts(&page), vec!["人の発言です".to_owned(), "包みのない発言".to_owned()]);
   assert!(page.messages.iter().all(|message| message.speaker == ConversationSpeaker::User), "話者はユーザーのままです");
-  assert!(page.messages.iter().all(|message| message.detail.is_none()), "人の発言と包みの無い行に折りたたみはありません");
+  assert!(
+    page.messages.iter().all(|message| message.detail.is_none()),
+    "人の発言と包みの無い行に折りたたみはありません"
+  );
 }
 
 #[test]

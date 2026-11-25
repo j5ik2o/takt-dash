@@ -229,7 +229,12 @@ pub const BUSINESS_CONTEXT: &str = r#"Business context (not approval): {"assignm
 
 /// 人の発言ではないターンの包み。見出しのあとの空行、説明文、JSON の行、Business context、
 /// 応答形式の指示の並びを、実データと同じ形で組み立てる。
-fn non_speech_turn_data(description: Option<&str>, input: &serde_json::Value, business_context: bool, time: i64) -> String {
+fn non_speech_turn_data(
+  description: Option<&str>,
+  input: &serde_json::Value,
+  business_context: bool,
+  time: i64,
+) -> String {
   let mut text = String::from("\n## このターンの入力\n\n\n\n\n\n\n\n");
   if let Some(description) = description {
     text.push_str(description);
@@ -248,7 +253,12 @@ fn non_speech_turn_data(description: Option<&str>, input: &serde_json::Value, bu
 }
 
 /// イベントから始まったターンの user の `data`。`{"event":{…},"instruction":"…"}` の行を持つ。
-pub fn event_turn_data(description: Option<&str>, event: &serde_json::Value, business_context: bool, time: i64) -> String {
+pub fn event_turn_data(
+  description: Option<&str>,
+  event: &serde_json::Value,
+  business_context: bool,
+  time: i64,
+) -> String {
   let input = serde_json::json!({
     "event": event,
     "instruction": "To advance the assigned goals, compare the change conveyed by this event with the current state.",
