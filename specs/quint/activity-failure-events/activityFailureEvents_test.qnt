@@ -36,6 +36,16 @@ module fixedTest {
       .then(cycle).then(cycle)
       .then(all { assert(recordedAfterRecovery and safety), cycle })
 
+  // 記録先を一度も止めない経路は、復旧の witness に届かない。失敗を1回記録しただけでは、
+  // 記録に失敗した周期を持ち越して復旧後に記録したことの証拠になりません。
+  run plainFailureIsNotARecoveryWitnessTest =
+    init
+      .then(cycle).then(failTask).then(cycle).then(cycle)
+      .then(all {
+        assert(recordedFailures == 1 and heldBackFailures == 0 and not(recordedAfterRecovery) and safety),
+        cycle,
+      })
+
   // 起動の記録も、記録先が復旧するまで持ち越して1回だけ記録する。
   run startIsRetriedUntilTheStoreRecoversTest =
     init

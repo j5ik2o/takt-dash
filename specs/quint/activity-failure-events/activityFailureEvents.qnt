@@ -25,6 +25,9 @@ module activityFailureEvents {
   var recordedFailures: int
   // 基準が「失敗でない」から「失敗」へ進んだ回数。
   var absorbedFailures: int
+  // 失敗を検出したが記録できず、持ち越した回数。復旧の witness が、記録の失敗を経た
+  // 経路を通ったことの証拠になります。
+  var heldBackFailures: int
   // 検出したが記録に失敗し、まだ記録していない失敗があるか（観測用）。
   var detectedUnrecorded: bool
   var starts: int
@@ -39,6 +42,7 @@ module activityFailureEvents {
     realFailures' = 0,
     recordedFailures' = 0,
     absorbedFailures' = 0,
+    heldBackFailures' = 0,
     detectedUnrecorded' = false,
     starts' = 1,
     recordedStarts' = 0,
@@ -50,6 +54,7 @@ module activityFailureEvents {
     realFailures' = realFailures + 1,
     dbUp' = dbUp, base' = base, startPending' = startPending, startRecorded' = startRecorded,
     recordedFailures' = recordedFailures, absorbedFailures' = absorbedFailures,
+    heldBackFailures' = heldBackFailures,
     detectedUnrecorded' = detectedUnrecorded, starts' = starts, recordedStarts' = recordedStarts,
   }
 
@@ -59,7 +64,8 @@ module activityFailureEvents {
     task' = NotFailed,
     dbUp' = dbUp, base' = base, startPending' = startPending, startRecorded' = startRecorded,
     realFailures' = realFailures, recordedFailures' = recordedFailures,
-    absorbedFailures' = absorbedFailures, detectedUnrecorded' = detectedUnrecorded,
+    absorbedFailures' = absorbedFailures, heldBackFailures' = heldBackFailures,
+    detectedUnrecorded' = detectedUnrecorded,
     starts' = starts, recordedStarts' = recordedStarts,
   }
 
@@ -67,7 +73,8 @@ module activityFailureEvents {
     dbUp' = up,
     task' = task, base' = base, startPending' = startPending, startRecorded' = startRecorded,
     realFailures' = realFailures, recordedFailures' = recordedFailures,
-    absorbedFailures' = absorbedFailures, detectedUnrecorded' = detectedUnrecorded,
+    absorbedFailures' = absorbedFailures, heldBackFailures' = heldBackFailures,
+    detectedUnrecorded' = detectedUnrecorded,
     starts' = starts, recordedStarts' = recordedStarts,
   }
 
@@ -80,7 +87,8 @@ module activityFailureEvents {
     starts' = starts + 1,
     task' = task, dbUp' = dbUp,
     realFailures' = realFailures, recordedFailures' = recordedFailures,
-    absorbedFailures' = absorbedFailures, recordedStarts' = recordedStarts,
+    absorbedFailures' = absorbedFailures, heldBackFailures' = heldBackFailures,
+    recordedStarts' = recordedStarts,
   }
 
   // 読み取りに成功した周期（Poller::read_cycle_once_at）。
@@ -99,6 +107,8 @@ module activityFailureEvents {
       recordedFailures' = if (detected and recordOk) recordedFailures + 1 else recordedFailures,
       absorbedFailures' =
         if (recordOk and base == BaseNotFailed and task == Failed) absorbedFailures + 1 else absorbedFailures,
+      heldBackFailures' =
+        if (detected and not(recordOk)) heldBackFailures + 1 else heldBackFailures,
       detectedUnrecorded' =
         if (detected) not(recordOk) else if (recordOk and base == BaseNotFailed) false else detectedUnrecorded,
       task' = task, dbUp' = dbUp, realFailures' = realFailures, starts' = starts,
@@ -127,8 +137,10 @@ module activityFailureEvents {
   val safety = noOverRecord and baseAdvancesOnlyWhenRecorded and startAccounted
 
   // 進行の確認用。記録の失敗を経た失敗が、復旧後に1回だけ記録済みになる状態へ届くか。
+  // `heldBackFailures > 0` が、記録先を一度も止めない経路と区別する目印です。
   val recordedAfterRecovery =
     realFailures == 1 and recordedFailures == 1 and base == BaseFailed and not(detectedUnrecorded)
+      and heldBackFailures > 0
 
   // 再起動をまたいでも、失敗の記録が1回のまま、起動の記録が2回になる状態へ届くか。
   val restartedWithoutRecount =

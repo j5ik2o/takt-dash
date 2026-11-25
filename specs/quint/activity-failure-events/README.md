@@ -19,6 +19,8 @@
 
 進行は `--witnesses recordedAfterRecovery restartedWithoutRecount` と、筋書きを固定したテストで確かめます。`quint run` は時相の性質を検査しないため、「記録先が復旧すれば必ず1回記録される」ことの網羅的な確認ではありません。
 
+`recordedAfterRecovery` は `heldBackFailures > 0` を要求します。`heldBackFailures` は、失敗を検出したが記録先が落ちていて記録できず、持ち越した回数です。この項が無いと、記録先を一度も止めずに失敗を1回記録しただけの状態でも witness が成立し、witness の件数が復旧の経路を通った証拠になりません。記録先を止めない筋書きが witness に届かないことは、`plainFailureIsNotARecoveryWitnessTest` が固定します。
+
 ## 結果（quint 0.32.0）
 
 修正前は反例が出ます。
@@ -42,7 +44,7 @@ quint run activityFailureEvents.qnt --main current --invariant baseAdvancesOnlyW
 ```
 quint run activityFailureEvents.qnt --main fixed --invariant safety --max-samples 10000 --max-steps 30 --seed 151 --witnesses recordedAfterRecovery restartedWithoutRecount detectedThenRetried
 [ok] No violation found
-recordedAfterRecovery was witnessed in 680 trace(s) out of 10000 explored (6.80%)
+recordedAfterRecovery was witnessed in 22 trace(s) out of 10000 explored (0.22%)
 restartedWithoutRecount was witnessed in 98 trace(s) out of 10000 explored (0.98%)
 detectedThenRetried was witnessed in 863 trace(s) out of 10000 explored (8.63%)
 ```
@@ -51,7 +53,7 @@ detectedThenRetried was witnessed in 863 trace(s) out of 10000 explored (8.63%)
 
 ```
 quint test activityFailureEvents_test.qnt --main currentTest   # 1 passing（修正前に失敗も起動も0件のまま残る筋書き）
-quint test activityFailureEvents_test.qnt --main fixedTest     # 4 passing
+quint test activityFailureEvents_test.qnt --main fixedTest     # 5 passing
 ```
 
 ## 残る取りこぼし
