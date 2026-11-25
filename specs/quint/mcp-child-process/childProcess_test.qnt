@@ -325,4 +325,34 @@ module childProcess_test {
         and after::client.nextSpawnAt == after::NONE
         and after::safety
       )
+
+  // 13. 修正後: 道具エラー（isError）は子プロセスを破棄せず再利用可能に戻すが、書き込みの記録（record_write）は行わない。
+  run toolErrorReusesChildWithoutRecordingWriteTest =
+    after::init
+      .then(after::arrive(0, after::UnkeyedWrite))
+      .then(after::acquireLock(0))
+      .then(after::beginSpawn(0))
+      .then(after::completeSpawn(0))
+      .then(after::beginRequest(0))
+      .then(after::completeExchangeToolError(0))
+      .expect(
+        after::ops.get(0).phase == after::Failed
+        and not(after::ops.get(0).writeRecorded)
+        and after::client.slot == 0
+        and after::children.get(0).status == after::Alive
+        and not(after::children.get(0).dirty)
+        and after::toolErrorReusesCleanChild
+        and after::safety
+      )
+      .then(after::arrive(1, after::UnkeyedWrite))
+      .then(after::acquireLock(1))
+      .then(after::startAlreadyRunning(1))
+      .then(after::beginRequest(1))
+      .then(after::completeExchange(1))
+      .expect(
+        after::ops.get(1).phase == after::Done
+        and after::ops.get(1).writeRecorded
+        and after::nextChildId == 1
+        and after::safety
+      )
 }

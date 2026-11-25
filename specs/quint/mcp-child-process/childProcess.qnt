@@ -20,6 +20,8 @@ module childProcess {
   const WARMUP_RETRY: bool
   const DETACH_UNKEYED_WRITE: bool
 
+  // Closed は kill_on_drop / child.kill() により終了指令を出してクライアントの管理から外れた状態を表す
+  // （drop 後の OS 側プロセス回収 waitpid の非同期遅延はモデルの抽象化境界の外）。
   type ChildStatus =
     | Initializing
     | Alive
@@ -71,14 +73,17 @@ module childProcess {
     callFailureMissedBackoff: bool,
     spawnedDuringBackoff: bool,
     callSpawnFailuresSinceSuccess: int,
-    sawWarmUpFailure: bool,
+    sawWarmUpFailWithoutBackoff: bool,
     sawBackoffReject: bool,
     sawRecoveryAfterBackoff: bool,
     sawExchangeFailure: bool,
+    sawRecoveryAfterExchangeFailure: bool,
     sawCancelDuringSpawn: bool,
     sawCancelDuringExchange: bool,
+    sawRebuildAfterExchangeCancel: bool,
+    sawToolErrorReuse: bool,
     sawShutdownClose: bool,
-    sawShutdownWhenEmpty: bool,
+    sawShutdownAfterClose: bool,
   }
 
   pure val NONE: int = -1
@@ -181,6 +186,8 @@ module childProcess {
         not(nowActive)
         or cAfter.consecutiveFailures != cBefore.consecutiveFailures + 1
       )
+    val warmupOkNoBackoff =
+      kind == WarmUp and not(nowActive) and cAfter.nextSpawnAt == cBefore.nextSpawnAt
     {
       ...a,
       warmupStartedBackoff: a.warmupStartedBackoff or warmupBroke,
@@ -188,7 +195,7 @@ module childProcess {
       callSpawnFailuresSinceSuccess:
         if (kind == WarmUp) a.callSpawnFailuresSinceSuccess
         else a.callSpawnFailuresSinceSuccess + 1,
-      sawWarmUpFailure: a.sawWarmUpFailure or (kind == WarmUp),
+      sawWarmUpFailWithoutBackoff: a.sawWarmUpFailWithoutBackoff or warmupOkNoBackoff,
     }
   }
 
@@ -237,14 +244,17 @@ module childProcess {
       callFailureMissedBackoff: false,
       spawnedDuringBackoff: false,
       callSpawnFailuresSinceSuccess: 0,
-      sawWarmUpFailure: false,
+      sawWarmUpFailWithoutBackoff: false,
       sawBackoffReject: false,
       sawRecoveryAfterBackoff: false,
       sawExchangeFailure: false,
+      sawRecoveryAfterExchangeFailure: false,
       sawCancelDuringSpawn: false,
       sawCancelDuringExchange: false,
+      sawRebuildAfterExchangeCancel: false,
+      sawToolErrorReuse: false,
       sawShutdownClose: false,
-      sawShutdownWhenEmpty: false,
+      sawShutdownAfterClose: false,
     },
   }
 
@@ -433,8 +443,8 @@ module childProcess {
     },
   }
 
-  // request 完了: 応答の行を読み終え、子プロセスを self.process に戻す（client.rs:346-349）。
-  // 道具の isError は輸送エラーではないため、子プロセスを戻す点で同じ遷移に含まれる。
+  // request 正常完了: 応答の行を読み終えて道具も成功し、子プロセスを self.process に戻す（client.rs:238-239, 346-349）。
+  // 書き込みなら writes.rs（L121, L161, L182, L206）で lane.record_write() が呼ばれる。
   action completeExchange(id: int): bool = all {
     ops.keys().contains(id),
     canFinishExchange(client, ops.get(id), id),
@@ -450,10 +460,40 @@ module childProcess {
         heldChild: NONE,
         writeRecorded: isWriteKind(op.kind),
       }),
+      audit' = {
+        ...audit,
+        sawRecoveryAfterExchangeFailure:
+          audit.sawRecoveryAfterExchangeFailure or audit.sawExchangeFailure,
+        sawRebuildAfterExchangeCancel:
+          audit.sawRebuildAfterExchangeCancel or audit.sawCancelDuringExchange,
+      },
       nextChildId' = nextChildId,
       now' = now,
       shutdownCalls' = shutdownCalls,
-      audit' = audit,
+    },
+  }
+
+  // request の道具エラー（isError: true）: 輸送は成功したため子プロセスは破棄せず self.process に戻すが、
+  // CallError::Tool として失敗し、書き込みの record_write() は呼ばない（client.rs:238-239, 420-430; writes.rs:110-122）。
+  action completeExchangeToolError(id: int): bool = all {
+    ops.keys().contains(id),
+    canFinishExchange(client, ops.get(id), id),
+    val op = ops.get(id)
+    val cid = op.heldChild
+    val ch = children.get(cid)
+    all {
+      children' = children.set(cid, { ...ch, dirty: false }),
+      client' = { ...client, slot: cid, lockedBy: NONE },
+      ops' = ops.set(id, {
+        ...op,
+        phase: Failed,
+        heldChild: NONE,
+        writeRecorded: false,
+      }),
+      audit' = { ...audit, sawToolErrorReuse: true },
+      nextChildId' = nextChildId,
+      now' = now,
+      shutdownCalls' = shutdownCalls,
     },
   }
 
@@ -527,7 +567,12 @@ module childProcess {
     } else all {
       children' = children,
       client' = client,
-      audit' = { ...audit, sawShutdownWhenEmpty: true },
+      audit' = {
+        ...audit,
+        sawShutdownAfterClose:
+          audit.sawShutdownAfterClose
+          or children.keys().exists(cid => children.get(cid).status == Closed),
+      },
     },
     ops' = ops,
     nextChildId' = nextChildId,
@@ -560,6 +605,7 @@ module childProcess {
       failSpawnInit(id),
       beginRequest(id),
       completeExchange(id),
+      completeExchangeToolError(id),
       failExchange(id),
       cancelCaller(id),
     },
@@ -585,7 +631,8 @@ module childProcess {
       )
     )
 
-  // 1c. 同時に生きている子プロセスは高々 1 つ。
+  // 1c. クライアントが管理する未終了（Closed でない）の子プロセスは同時に高々 1 つ
+  //     （kill_on_drop による終了指令後の OS 側プロセス回収 waitpid の完了時刻までは扱わない）。
   val atMostOneLiveChild: bool =
     children.keys().filter(cid => children.get(cid).status != Closed).size() <= 1
 
@@ -646,12 +693,22 @@ module childProcess {
       (op.kind == KeyedWrite and op.callerCancelled) implies op.phase != Aborted
     })
 
-  // 6. ロックと所有の整合性。
+  // 5c. 書き込みの記録（record_write）は、成功完了した書き込み（Done）に限られる（isError や失敗・中断では記録しない）。
+  val writeRecordedOnlyOnSuccess: bool =
+    ops.keys().forall(oid => {
+      val op = ops.get(oid)
+      op.writeRecorded implies (op.phase == Done and op.sentToTakt and isWriteKind(op.kind))
+    })
+
+  // 6. ロックと所有の整合性（lockedBy とロック保持フェーズの双方向一致を含む）。
   val lockOwnershipConsistent: bool = all {
     ops.keys().filter(oid => isLockHoldingPhase(ops.get(oid).phase)).size() <= 1,
     client.lockedBy != NONE implies (
       ops.keys().contains(client.lockedBy)
       and isLockHoldingPhase(ops.get(client.lockedBy).phase)
+    ),
+    ops.keys().forall(oid =>
+      isLockHoldingPhase(ops.get(oid).phase) implies client.lockedBy == oid
     ),
     ops.keys().forall(oid =>
       ops.get(oid).heldChild != NONE implies client.lockedBy == oid
@@ -671,6 +728,7 @@ module childProcess {
     noSpawnDuringBackoff,
     unkeyedWriteSurvivesCallerCancel,
     keyedWriteSurvivesCallerCancel,
+    writeRecordedOnlyOnSuccess,
     lockOwnershipConsistent,
   }
 
@@ -680,7 +738,7 @@ module childProcess {
     ops.keys().exists(oid => ops.get(oid).kind == WarmUp and ops.get(oid).phase == Done)
 
   val warmUpFailedWithoutBackoff: bool =
-    audit.sawWarmUpFailure and client.nextSpawnAt == NONE
+    audit.sawWarmUpFailWithoutBackoff
 
   val callBackedOffAfterFailure: bool =
     audit.sawBackoffReject
@@ -689,12 +747,9 @@ module childProcess {
     audit.sawRecoveryAfterBackoff
 
   val cancelledReadDisposedAndRebuilt: bool =
-    audit.sawCancelDuringExchange
+    audit.sawRebuildAfterExchangeCancel
     and children.keys().exists(cid =>
       children.get(cid).cancelledWhileActive and children.get(cid).status == Closed
-    )
-    and ops.keys().exists(oid =>
-      ops.get(oid).kind == ReadCall and ops.get(oid).phase == Done
     )
 
   val cancelledDuringSpawnDisposed: bool =
@@ -704,10 +759,10 @@ module childProcess {
     )
 
   val exchangeFailedAndRecovered: bool =
-    audit.sawExchangeFailure
-    and ops.keys().exists(oid =>
-      ops.get(oid).kind != WarmUp and ops.get(oid).phase == Done
-    )
+    audit.sawRecoveryAfterExchangeFailure
+
+  val toolErrorReusesCleanChild: bool =
+    audit.sawToolErrorReuse
 
   val unkeyedWriteCompletesAfterCallerCancel: bool =
     ops.keys().exists(oid => {
@@ -725,7 +780,7 @@ module childProcess {
     audit.sawShutdownClose
 
   val shutdownSkippedWhenAlreadyClosed: bool =
-    audit.sawShutdownWhenEmpty
+    audit.sawShutdownAfterClose
 }
 
 // 現在の main（PR #379 適用後）の遷移。

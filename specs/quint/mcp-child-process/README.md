@@ -9,7 +9,7 @@
 | ファイル | 内容 |
 | --- | --- |
 | `childProcess.qnt` | 状態機械、不変条件、進行の条件（witness） |
-| `childProcess_test.qnt` | [PR #379](https://github.com/j5ik2o/takt-dash/pull/379) の筋書きを修正前・途中版・現在（修正後）でたどるテスト（13 件） |
+| `childProcess_test.qnt` | [PR #379](https://github.com/j5ik2o/takt-dash/pull/379) の筋書きを修正前・途中版・現在（修正後）でたどるテスト（14 件） |
 
 `childProcess.qnt` は遷移を 3 つの定数で切り替えます。
 
@@ -36,7 +36,7 @@
 | `startBlockedByBackoff` | `backend/src/mcp/client.rs` L272-L277（`next_spawn_at` 未満なら `TransportError::Backoff` を返して起動しない） | 一致。`warm_up` も抑制期間中は起動せず `Backoff` を返し、失敗回数を増やさない |
 | `failSpawnImmediate` / `beginSpawn` / `completeSpawn` / `failSpawnInit` | `backend/src/mcp/client.rs` L278-L294（`start` の `match self.spawn().await`）、L297-L333（`spawn`: L311 `kill_on_drop(true)`、L312 `command.spawn()`、L329-L331 `initialize`・`notifications/initialized`） | 一致。初期化完了まで `self.process` には格納せず、`spawn` 内のローカル変数 `process` が所有するため、失敗時も打ち切り時も `kill_on_drop(true)` で破棄される。成功時は L280-L282 で `consecutive_spawn_failures = 0`、`next_spawn_at = None` に戻す |
 | `beginRequest` | `backend/src/mcp/client.rs` L340-L345（`let Some(mut process) = self.process.take()` → `process.exchange`） | 一致。往復の間は `self.process` を `None` にして子プロセスを `request` のフレームが所有する |
-| `completeExchange` | `backend/src/mcp/client.rs` L346-L349（`Ok(result) => { self.process = Some(process); Ok(result) }`）、L239（`extract_tool_text` の `isError` は子プロセスを破棄しない） | 一致 |
+| `completeExchange` / `completeExchangeToolError` | `backend/src/mcp/client.rs` L346-L349（`Ok(result) => { self.process = Some(process); Ok(result) }`）、L239・L420-L430（`extract_tool_text` の `isError`）、`backend/src/grpc/writes.rs` L110-L122 | 一致。正常完了（`completeExchange`）と道具エラー（`completeExchangeToolError`）を分離し、どちらも子プロセスは破棄せず `self.process` へ戻すが、`isError` では `phase = Failed` かつ `writeRecorded = false` として `lane.record_write()` を呼ばない |
 | `failExchange` | `backend/src/mcp/client.rs` L350-L353（`Err(error) => Err(error)`、`process` を戻さず drop して `kill_on_drop` で終了） | 一致。通信失敗では `next_spawn_at` を設定しない |
 | `cancelCaller`（切り離しなし、`Spawning` / `Exchanging`） | `backend/src/mcp/client.rs` L311（`kill_on_drop(true)`）、L342（`self.process.take()`） | 一致。future の drop 時に所有中の `process` が drop され、1 回だけ終了する |
 | `shutdownClient` | `backend/src/mcp/client.rs` L248-L252（`if let Some(mut process) = self.process.take() { let _ = process.child.kill().await; }`） | 一致。`take()` により空なら何もしないため、二重終了しない。呼び出し元は `backend/src/mcp/registry.rs` L395-L411（`shutdown_all`） |
@@ -64,6 +64,7 @@
 - `prepare()` の入力検証失敗（`write_ledger.rs` L142 の `?` で `tokio::spawn` より前に返るため、takt へ送られない）。
 - `WriteSource::connect`（`resolve.rs` L258-L264）と道具呼び出し（`writes.rs` L112-L114）の間でロックを一度手放す細部（道具呼び出し側の `call_tool` が `client.rs` L235 で再度 `ensure_started()` を呼ぶため、途中で `shutdown` が挟まっても起動し直す）。
 - JSON-RPC の行分割・サーバー通知・`extract_tool_text` の解析詳細、および `McpClientRegistry` のレーン振り分け。
+- `kill_on_drop(true)` による終了指令後の OS 側プロセス回収（`waitpid`）の非同期遅延。モデル上の `Closed` は「`McpClient` が終了指令を出して管理から外した状態」を表し、OS 上での実際の回収完了時刻までは検証しません。
 
 更新するタイミング:
 
@@ -75,7 +76,7 @@
 
 - `noChildRemainsAfterCancel`：起動中・往復中に打ち切られた操作が持っていた子プロセスは必ず `Closed` になり、`client.slot` にも残らない。
 - `noOrphanAliveChild`：`Closed` でない子プロセスは、必ず `client.slot` か実行中の操作に所有されており、取り残されない。
-- `atMostOneLiveChild`：同時に生きている子プロセスは高々 1 つ。
+- `atMostOneLiveChild`：クライアントが管理する未終了（`Closed` でない）の子プロセスは同時に高々 1 つ（`kill_on_drop` 後の OS 側回収完了時刻は抽象化境界の外）。
 - `noDoubleClose`：どの子プロセスも閉じる回数（`closeCount`）は 1 回以下であり、`Closed` であることと `closeCount == 1` が同値（閉じた接続を二度閉じない）。
 - `closedChildNotReferenced`：`Closed` になった子プロセスは `client.slot` にも操作の `heldChild` にも残らない。
 - `noDirtyChildReused`：読みかけの応答（`dirty == true`）を持った子プロセスが、次の要求に使われない。
@@ -85,22 +86,24 @@
 - `noSpawnDuringBackoff`：抑制期間中（`now < nextSpawnAt`）は起動を試みない。
 - `unkeyedWriteSurvivesCallerCancel`：鍵なしの書き込みは、呼び出し側が打ち切っても中断（`Aborted`）されず最後まで進める。
 - `keyedWriteSurvivesCallerCancel`：鍵ありの書き込みも、呼び出し側の打ち切りで中断されない。
-- `lockOwnershipConsistent`：ロック保持中の操作は高々 1 件であり、`lockedBy` と `heldChild` の所有が一致する。
-- `safety`：上記 13 件の論理積。
+- `writeRecordedOnlyOnSuccess`：書き込みの記録（`record_write`）は成功完了（`Done`）した書き込みに限り、`isError`・通信失敗・中断では記録しない。
+- `lockOwnershipConsistent`：ロック保持中の操作は高々 1 件であり、`lockedBy` とロック保持フェーズが双方向に一致し、`heldChild` の所有も一致する。
+- `safety`：上記 14 件の論理積。
 
 ### 進行の条件（Witness）
 
 - `warmUpSucceeded`：温めが成功する。
-- `warmUpFailedWithoutBackoff`：温めが失敗しても `nextSpawnAt == NONE` のままである。
+- `warmUpFailedWithoutBackoff`：温めが失敗した時点で抑制が開始されていない（`nextSpawnAt` が変わらず抑制も無効）。
 - `callBackedOffAfterFailure`：呼び出し経路の起動失敗後に `Backoff` で拒否される。
 - `recoveredAfterBackoff`：抑制の満了後に起動が成功して回復する。
-- `cancelledReadDisposedAndRebuilt`：往復中の読み取りを打ち切って子プロセスを破棄したあと、次の読み取りが新しい子プロセスで成功する。
+- `cancelledReadDisposedAndRebuilt`：往復中の打ち切りで子プロセスを破棄した**後**に、別の要求が再起動して成功する。
 - `cancelledDuringSpawnDisposed`：起動（`initialize`）途中の打ち切りで子プロセスが破棄される。
-- `exchangeFailedAndRecovered`：往復の通信失敗で子プロセスを破棄したあと、次の呼び出しが回復する。
+- `exchangeFailedAndRecovered`：往復の通信失敗で子プロセスを破棄した**後**に、別の要求が回復して成功する。
+- `toolErrorReusesCleanChild`：道具エラー（`isError`）で書き込みを記録せずに子プロセスを再利用可能に戻す。
 - `unkeyedWriteCompletesAfterCallerCancel`：鍵なしの書き込みが、呼び出し側の打ち切り後も最後まで進み `writeRecorded == true` に到達する。
 - `keyedWriteCompletesAfterCallerCancel`：鍵ありの書き込みも、呼び出し側の打ち切り後に完了する。
 - `shutdownClosedLiveChild`：`shutdown` が生きた子プロセスを閉じる。
-- `shutdownSkippedWhenAlreadyClosed`：既に空（閉じた後など）の状態で `shutdown` が呼ばれても二度閉じずにスキップする。
+- `shutdownSkippedWhenAlreadyClosed`：既に閉じた子プロセスが存在し `slot` が空の状態で `shutdown` が呼ばれても二度閉じずにスキップする。
 
 ## 検査結果
 
@@ -115,7 +118,7 @@ quint test childProcess_test.qnt --main=childProcess_test
 ```
 
 - `quint typecheck`: `childProcess.qnt`・`childProcess_test.qnt` ともに成功。
-- `quint test`: 13 件すべて成功（修正前の 3 種の不具合と途中版の鍵なし書き込み中断が再現し、修正後の `current` ではすべて防げることを固定）。
+- `quint test`: 14 件すべて成功（修正前の 3 種の不具合、途中版の鍵なし書き込み中断、修正後の道具エラー再利用と記録分離を固定）。
 
 ### 修正前（`beforePr379`）と途中版（`withoutUnkeyedDetach`）：期待どおり反例あり
 
@@ -141,27 +144,28 @@ quint run childProcess.qnt --main=withoutUnkeyedDetach --invariant=unkeyedWriteS
 quint run childProcess.qnt --main=current --invariant=safety \
   --witnesses warmUpSucceeded warmUpFailedWithoutBackoff callBackedOffAfterFailure recoveredAfterBackoff \
     cancelledReadDisposedAndRebuilt cancelledDuringSpawnDisposed exchangeFailedAndRecovered \
-    unkeyedWriteCompletesAfterCallerCancel keyedWriteCompletesAfterCallerCancel \
+    toolErrorReusesCleanChild unkeyedWriteCompletesAfterCallerCancel keyedWriteCompletesAfterCallerCancel \
     shutdownClosedLiveChild shutdownSkippedWhenAlreadyClosed \
   --max-steps=35 --max-samples=50000 --seed=0x379
 ```
 
-- 50,000 サンプル、`max-steps=35`、`seed=0x379` で `safety` の反例なし（トレース長: 最短 19、最長 36、平均 25.99）。
-- すべての進行条件（witness）が 1 件以上のトレースで到達しました。
+- 50,000 サンプル、`max-steps=35`、`seed=0x379` で `safety` の反例なし（トレース長: 最短 19、最長 36、平均 26.06）。
+- すべての進行条件（witness 12 件）が 1 件以上のトレースで到達しました。
 
 | Witness | 到達したトレース |
 | --- | --- |
-| `warmUpSucceeded` | 1451 / 50000（2.90%） |
-| `warmUpFailedWithoutBackoff` | 5105 / 50000（10.21%） |
-| `callBackedOffAfterFailure` | 33164 / 50000（66.33%） |
-| `recoveredAfterBackoff` | 1755 / 50000（3.51%） |
-| `cancelledReadDisposedAndRebuilt` | 1 / 50000（0.00%） |
-| `cancelledDuringSpawnDisposed` | 2721 / 50000（5.44%） |
-| `exchangeFailedAndRecovered` | 4495 / 50000（8.99%） |
-| `unkeyedWriteCompletesAfterCallerCancel` | 4614 / 50000（9.23%） |
-| `keyedWriteCompletesAfterCallerCancel` | 4512 / 50000（9.02%） |
-| `shutdownClosedLiveChild` | 979 / 50000（1.96%） |
-| `shutdownSkippedWhenAlreadyClosed` | 49983 / 50000（99.97%） |
+| `warmUpSucceeded` | 1582 / 50000（3.16%） |
+| `warmUpFailedWithoutBackoff` | 5285 / 50000（10.57%） |
+| `callBackedOffAfterFailure` | 32558 / 50000（65.12%） |
+| `recoveredAfterBackoff` | 1720 / 50000（3.44%） |
+| `cancelledReadDisposedAndRebuilt` | 18 / 50000（0.04%） |
+| `cancelledDuringSpawnDisposed` | 2777 / 50000（5.55%） |
+| `exchangeFailedAndRecovered` | 533 / 50000（1.07%） |
+| `toolErrorReusesCleanChild` | 6699 / 50000（13.40%） |
+| `unkeyedWriteCompletesAfterCallerCancel` | 3657 / 50000（7.31%） |
+| `keyedWriteCompletesAfterCallerCancel` | 3656 / 50000（7.31%） |
+| `shutdownClosedLiveChild` | 1285 / 50000（2.57%） |
+| `shutdownSkippedWhenAlreadyClosed` | 3362 / 50000（6.72%） |
 
 ### 途中版（`withoutUnkeyedDetach`）：他の不変条件の確認
 
@@ -180,7 +184,7 @@ for inv in \
   noChildRemainsAfterCancel noOrphanAliveChild atMostOneLiveChild \
   noDoubleClose closedChildNotReferenced noDirtyChildReused idleSlotIsClean \
   warmUpFailureDoesNotStartBackoff callFailureStartsBackoff noSpawnDuringBackoff \
-  unkeyedWriteSurvivesCallerCancel keyedWriteSurvivesCallerCancel lockOwnershipConsistent; do
+  unkeyedWriteSurvivesCallerCancel keyedWriteSurvivesCallerCancel writeRecordedOnlyOnSuccess lockOwnershipConsistent; do
   quint run childProcess.qnt --main=current --invariant="$inv" --max-steps=35 --max-samples=10000 --seed=0x379
 done
 ```
@@ -199,6 +203,7 @@ done
 | `noSpawnDuringBackoff` | 反例なし |
 | `unkeyedWriteSurvivesCallerCancel` | 反例なし |
 | `keyedWriteSurvivesCallerCancel` | 反例なし |
+| `writeRecordedOnlyOnSuccess` | 反例なし |
 | `lockOwnershipConsistent` | 反例なし |
 
 ### 有界モデル検査（`quint verify`）
@@ -207,5 +212,5 @@ done
 quint verify childProcess.qnt --main=current --invariant=safety --max-steps=6
 ```
 
-- Apalache 0.56.1 により `safety`（18 個の検証条件）を 6 手まで網羅検査し、`NoError`（反例なし・デッドロックなし、103 秒）。
+- Apalache 0.56.1 により `safety`（20 個の検証条件）を 6 手まで網羅検査し、`NoError`（反例なし・デッドロックなし、138 秒）。
 - `quint verify` の出力先 `_apalache-out/` は `.gitignore` で除外しています。
