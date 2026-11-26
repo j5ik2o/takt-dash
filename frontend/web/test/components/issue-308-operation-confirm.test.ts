@@ -7,13 +7,13 @@
 // 押して、書き込み（fetch）が何回、どの内容で、どの接続状態で出たかを観測する。
 // 確認の種別の名前は実装が決める。テストは、2択の意図から開いたダイアログの状態を
 // そのまま使い、種別の名前を書かない。
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { act, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import { type DashboardState, type PendingDecision } from "../../src/proto/taktdash.ts";
+import { PendingDecisionType, type DashboardState, type PendingDecision } from "../../src/proto/taktdash.ts";
 import { createActionableDashboardState, NOW } from "../support/fixtures.ts";
 import { DecisionsContent } from "../../src/components/decisions-content.tsx";
 import {
@@ -36,6 +36,23 @@ const findDecision = (inquiryId: string): PendingDecision => {
 };
 
 const operation = (): PendingDecision => findDecision("inquiry-operation");
+const merge = (): PendingDecision => {
+  const found = decisions.find((decision) => decision.type === PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE);
+  assert.ok(found, "フィクスチャにマージ待ちがある");
+  return found;
+};
+const registration = (): PendingDecision => {
+  const found = decisions.find(
+    (decision) =>
+      decision.type === PendingDecisionType.PENDING_DECISION_TYPE_GOAL_REGISTRATION && decision.revision === 7,
+  );
+  assert.ok(found, "フィクスチャに revision 7 のゴール登録がある");
+  return found;
+};
+
+// 確認ダイアログが開いてから、確定を受け付けるまでの時間（docs/design/issue-308.md）。
+// 一覧のボタンを2回すばやく押したとき、2回目が、同じ座標に出た確定に当たっても送らない。
+const CONFIRM_DELAY_MS = 500;
 
 type Report = (typeof OPERATION_ANSWER_REPORT)[keyof typeof OPERATION_ANSWER_REPORT];
 
@@ -263,11 +280,14 @@ const installDomEnvironment = (): void => {
 // 送った書き込み。disconnected は、送った時点で画面が切断中だったか。
 type SentWrite = { url: string; body: Record<string, unknown>; disconnected: boolean };
 
-// 判断待ちのページを作業の依頼1件でマウントし、書き込みを fetch の差し替えで受ける。
+// 判断待ちのページを判断待ち1件（既定は作業の依頼）でマウントし、書き込みを fetch の差し替えで受ける。
 // 書き込みの応答は settle を呼ぶまで返さない（送信中を作る）。
-const mountOperationPage = async () => {
+// 時計（Date と setTimeout）は node:test の mock.timers で止め、wait で進める。確定を受け付けるまでの
+// 時間は、wait で進めた分だけ過ぎる。
+const mountOperationPage = async (decision: PendingDecision = operation()) => {
   installDomEnvironment();
-  const state: DashboardState = { ...createActionableDashboardState(), pendingDecisions: [operation()] };
+  mock.timers.enable({ apis: ["Date", "setTimeout"], now: NOW.getTime() });
+  const state: DashboardState = { ...createActionableDashboardState(), pendingDecisions: [decision] };
   const sent: SentWrite[] = [];
   const pending: (() => void)[] = [];
   let disconnected = false;
@@ -330,6 +350,11 @@ const mountOperationPage = async () => {
         document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       });
     },
+    wait: async (ms: number): Promise<void> => {
+      await act(async () => {
+        mock.timers.tick(ms);
+      });
+    },
     settle: async (): Promise<void> => {
       await act(async () => {
         for (const resolve of pending.splice(0)) {
@@ -342,6 +367,7 @@ const mountOperationPage = async () => {
         root.unmount();
       });
       container.remove();
+      mock.timers.reset();
     },
   };
 };
@@ -372,6 +398,7 @@ test("判断待ちのページで作業の依頼を確定すると、開いた2�
       await page.click(page.trigger(choice.trigger));
       assert.equal(page.sent.length, 0, `${choice.trigger} を押しただけでは送らない`);
       assert.ok(page.dialogButton("confirm"), "確認ダイアログに確定のボタンがある");
+      await page.wait(CONFIRM_DELAY_MS);
       await page.click(page.dialogButton("confirm"));
       // 送信中に確定をもう一度押しても、書き込みは増えない。
       await page.click(page.dialogButton("confirm"));
@@ -416,6 +443,7 @@ test("判断待ちのページで作業の依頼の確認を開いたまま切�
   try {
     await page.click(page.trigger("対応できない"));
     assert.ok(page.dialog(), "確認ダイアログが出る");
+    await page.wait(CONFIRM_DELAY_MS);
     await page.setDisconnected(true);
     assert.equal(page.dialogButton("confirm")?.disabled, true, "切断中は確定を押せない");
     assert.equal(page.dialogButton("cancel")?.disabled, false, "切断中もやめるは押せる");
@@ -428,6 +456,65 @@ test("判断待ちのページで作業の依頼の確認を開いたまま切�
     assert.equal(page.sent[0]?.body.report, OPERATION_ANSWER_REPORT.UNABLE);
   } finally {
     await page.unmount();
+  }
+});
+
+// 確認ダイアログを開く一覧のボタンと、確定で届く書き込み。マージとゴール登録の確認も同じ
+// ConfirmDialog を使うので、開いた直後の確定を受け付けない直しは、すべての確認に効く。
+const CONFIRM_FLOWS: { name: string; decision: () => PendingDecision; trigger: string; url: string }[] = [
+  { name: "作業の依頼（実施した）", decision: operation, trigger: "実施した", url: "/api/decisions/answer" },
+  { name: "作業の依頼（対応できない）", decision: operation, trigger: "対応できない", url: "/api/decisions/answer" },
+  { name: "マージ", decision: merge, trigger: "マージを承認", url: "/api/decisions/merge" },
+  { name: "ゴール登録の承認", decision: registration, trigger: "承認", url: "/api/decisions/goal-registration/approve" },
+  { name: "ゴール登録の却下", decision: registration, trigger: "却下", url: "/api/decisions/goal-registration/reject" },
+];
+
+// 一覧のボタンを2回すばやく押すと、1回目で確認ダイアログが開き、2回目のクリックが、同じ座標に
+// 出た確定のボタンに当たることがある（Devin Review、PR #404）。開いてから CONFIRM_DELAY_MS の間の
+// 確定は送らず、ダイアログを開いたままにする。過ぎた後の確定は1回だけ送る。
+test("判断待ちのページで確認を開いた直後の確定は送らず、開いてから 500ms 過ぎた確定は1回だけ送る", async () => {
+  for (const flow of CONFIRM_FLOWS) {
+    const page = await mountOperationPage(flow.decision());
+    try {
+      await page.click(page.trigger(flow.trigger));
+      assert.ok(page.dialog(), `${flow.name}: 押すと確認ダイアログが出る`);
+      // 二重クリックの2回目。開いたのと同じ時刻に確定へ当たる。
+      await page.click(page.dialogButton("confirm"));
+      assert.equal(page.sent.length, 0, `${flow.name}: 開いた直後の確定は送らない`);
+      assert.ok(page.dialog(), `${flow.name}: 開いた直後の確定ではダイアログを閉じない`);
+      assert.equal(page.dialogButton("cancel")?.disabled, false, `${flow.name}: やめるは押せる`);
+      await page.wait(CONFIRM_DELAY_MS - 1);
+      await page.click(page.dialogButton("confirm"));
+      assert.equal(page.sent.length, 0, `${flow.name}: 開いてから ${CONFIRM_DELAY_MS - 1}ms の確定も送らない`);
+      await page.wait(1);
+      await page.click(page.dialogButton("confirm"));
+      assert.equal(page.sent.length, 1, `${flow.name}: 開いてから ${CONFIRM_DELAY_MS}ms 過ぎた確定は送る`);
+      assert.equal(page.sent[0]?.url, flow.url, flow.name);
+    } finally {
+      await page.unmount();
+    }
+  }
+});
+
+// 待つ時間は、開くたびに数え直す。前に開いたダイアログで待った分は、次に開いたダイアログに持ち越さない。
+test("判断待ちのページで確認をやめて開き直すと、開き直した直後の確定は送らない", async () => {
+  for (const flow of CONFIRM_FLOWS) {
+    const page = await mountOperationPage(flow.decision());
+    try {
+      await page.click(page.trigger(flow.trigger));
+      await page.wait(CONFIRM_DELAY_MS * 2);
+      await page.click(page.dialogButton("cancel"));
+      assert.equal(page.dialog(), null, `${flow.name}: やめると閉じる`);
+      await page.click(page.trigger(flow.trigger));
+      assert.ok(page.dialog(), `${flow.name}: 開き直す`);
+      await page.click(page.dialogButton("confirm"));
+      assert.equal(page.sent.length, 0, `${flow.name}: 開き直した直後の確定は送らない`);
+      await page.wait(CONFIRM_DELAY_MS);
+      await page.click(page.dialogButton("confirm"));
+      assert.equal(page.sent.length, 1, `${flow.name}: 開き直してから待てば送る`);
+    } finally {
+      await page.unmount();
+    }
   }
 });
 
@@ -448,26 +535,37 @@ const OPERATIONS = [
   "press-unable",
   "double-press-completed",
   "double-press-unable",
+  // 2択を押し、時計を進めずに確定を押す。二重クリックの2回目が確定に当たったときに当たる。
+  "press-then-confirm-completed",
+  "press-then-confirm-unable",
   "cancel",
   "escape",
   "confirm",
   "double-confirm",
+  // 時計を進める。短い方は確定を受け付けるまでの時間より短く、長い方は長い。
+  "wait-short",
+  "wait-long",
   "disconnect",
   "reconnect",
   "settle",
 ] as const;
+const SHORT_WAIT_MS = 200;
+const LONG_WAIT_MS = CONFIRM_DELAY_MS + 100;
 type Operation = (typeof OPERATIONS)[number];
 
 // 性質: 判断待ちのページで、作業の依頼への任意の操作の列（開く・やめる・Escape・確定・
-// 二重押し・切断・再接続・結果の返り）に対して、
+// 二重押し・開いた直後の確定・時計を進める・切断・再接続・結果の返り）に対して、
 //   - 書き込みは、確定のボタンを押した操作でだけ出る（2択のボタンを押しただけでは出ない）
 //   - 1つのダイアログからは、何回確定を押しても書き込みは1回まで
-//   - 押せる確定を接続中に押せば、書き込みはちょうど1回出る
+//   - ダイアログが出てから CONFIRM_DELAY_MS たたない確定では、書き込みは出ない
+//   - 押せる確定を、接続中に、ダイアログが出てから（開いたまま2択を押し直したなら、その後からも）
+//     CONFIRM_DELAY_MS 過ぎて押せば、書き込みはちょうど1回出る
 //   - 切断中は書き込みを出さない
 //   - 送る report は、確定を押したときにダイアログに出ていた2択と同じ
 // が成り立つ。操作の列は種から作り、除外は付けない（押せないボタンを押す操作も、
-// 利用者が押せないだけで、列からは外さない）。
-test("性質: 作業の依頼への任意の操作の列で、書き込みは確定の回数を超えず、切断中は出ない", async () => {
+// 利用者が押せないだけで、列からは外さない）。開いたまま2択を押し直した後の待ちを数え直すかは
+// 実装に任せ、その間の確定は、送っても送らなくてもよい（送ったら1回だけ）。
+test("性質: 作業の依頼への任意の操作の列で、書き込みは確定の回数を超えず、開いた直後と切断中は出ない", async () => {
   const RUNS = 150;
   const MAX_LENGTH = 12;
   for (let seed = 1; seed <= RUNS; seed += 1) {
@@ -476,22 +574,71 @@ test("性質: 作業の依頼への任意の操作の列で、書き込みは確
     const operations: Operation[] = Array.from({ length }, () => OPERATIONS[Math.floor(next() * OPERATIONS.length)]!);
     const page = await mountOperationPage();
     const confirmedDialogs = new Set<Element>();
+    // テストの時計（mock.timers）。ダイアログが出た時刻と、開いたまま2択を押し直した時刻を覚える。
+    let now = 0;
+    let shownDialog: Element | null = null;
+    let shownAt = 0;
+    let repressedAt = 0;
+    const observeDialog = (): void => {
+      const current = page.dialog();
+      if (current !== shownDialog) {
+        shownDialog = current;
+        shownAt = now;
+        repressedAt = now;
+      }
+    };
+    const press = async (name: string): Promise<void> => {
+      const wasOpen = page.dialog() !== null;
+      await page.click(page.trigger(name));
+      if (wasOpen) {
+        repressedAt = now;
+      }
+      observeDialog();
+    };
     try {
       for (const [index, operation] of operations.entries()) {
         const where = `seed=${seed} step=${index} ops=${JSON.stringify(operations.slice(0, index + 1))}`;
         const before = page.sent.length;
-        let expectedSends: 0 | 1 = 0;
-        let expectedReport: Report | undefined;
+        // 確定を押す操作で、送るべき数と report。"either" は、送っても送らなくてもよい（送ったら1回）。
+        const expected: { sends: 0 | 1 | "either"; report: Report | undefined; dialog: Element | null } = {
+          sends: 0,
+          report: undefined,
+          dialog: null,
+        };
+        const pressConfirm = async (): Promise<void> => {
+          const dialog = page.dialog();
+          const confirm = page.dialogButton("confirm");
+          if (dialog !== null && confirm !== undefined && !confirm.disabled && !page.disconnected) {
+            if (!confirmedDialogs.has(dialog) && now - shownAt >= CONFIRM_DELAY_MS) {
+              expected.sends = now - repressedAt >= CONFIRM_DELAY_MS ? 1 : "either";
+              expected.dialog = dialog;
+              expected.report = (dialog.textContent ?? "").includes("対応できない")
+                ? OPERATION_ANSWER_REPORT.UNABLE
+                : OPERATION_ANSWER_REPORT.COMPLETED;
+            }
+          }
+          await page.click(confirm);
+        };
         switch (operation) {
           case "press-completed":
           case "press-unable":
           case "double-press-completed":
           case "double-press-unable": {
             const name = operation.endsWith("completed") ? "実施した" : "対応できない";
-            await page.click(page.trigger(name));
+            await press(name);
             if (operation.startsWith("double")) {
-              await page.click(page.trigger(name));
+              await press(name);
             }
+            break;
+          }
+          case "press-then-confirm-completed":
+          case "press-then-confirm-unable": {
+            const wasOpen = page.dialog() !== null;
+            await press(operation.endsWith("completed") ? "実施した" : "対応できない");
+            if (!wasOpen && page.dialog() !== null) {
+              assert.equal(now - shownAt, 0, `開いた直後に確定を押す ${where}`);
+            }
+            await pressConfirm();
             break;
           }
           case "cancel":
@@ -502,20 +649,17 @@ test("性質: 作業の依頼への任意の操作の列で、書き込みは確
             break;
           case "confirm":
           case "double-confirm": {
-            const dialog = page.dialog();
-            const confirm = page.dialogButton("confirm");
-            if (dialog !== null && confirm !== undefined && !confirm.disabled && !page.disconnected) {
-              assert.equal(confirmedDialogs.has(dialog), false, `確定できるダイアログはまだ送っていない ${where}`);
-              confirmedDialogs.add(dialog);
-              expectedSends = 1;
-              expectedReport = (dialog.textContent ?? "").includes("対応できない")
-                ? OPERATION_ANSWER_REPORT.UNABLE
-                : OPERATION_ANSWER_REPORT.COMPLETED;
-            }
-            await page.click(confirm);
+            await pressConfirm();
             if (operation === "double-confirm") {
               await page.click(page.dialogButton("confirm"));
             }
+            break;
+          }
+          case "wait-short":
+          case "wait-long": {
+            const ms = operation === "wait-short" ? SHORT_WAIT_MS : LONG_WAIT_MS;
+            await page.wait(ms);
+            now += ms;
             break;
           }
           case "disconnect":
@@ -528,12 +672,20 @@ test("性質: 作業の依頼への任意の操作の列で、書き込みは確
             await page.settle();
             break;
         }
+        observeDialog();
         const added = page.sent.slice(before);
-        assert.equal(added.length, expectedSends, `書き込みの数 ${where} sent=${JSON.stringify(added)}`);
+        if (expected.sends === "either") {
+          assert.ok(added.length <= 1, `書き込みは1回まで ${where} sent=${JSON.stringify(added)}`);
+        } else {
+          assert.equal(added.length, expected.sends, `書き込みの数 ${where} sent=${JSON.stringify(added)}`);
+        }
+        if (added.length > 0 && expected.dialog !== null) {
+          confirmedDialogs.add(expected.dialog);
+        }
         for (const write of added) {
           assert.equal(write.disconnected, false, `切断中は送らない ${where}`);
           assert.equal(write.url, "/api/decisions/answer", where);
-          assert.equal(write.body.report, expectedReport, `ダイアログに出ていた2択を送る ${where}`);
+          assert.equal(write.body.report, expected.report, `ダイアログに出ていた2択を送る ${where}`);
         }
       }
       assert.ok(page.sent.length <= confirmedDialogs.size, `書き込みは確定したダイアログの数を超えない seed=${seed}`);

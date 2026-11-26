@@ -14,7 +14,8 @@
 // merge なら「マージを承認」、report なら押した方の2択のボタンを表す。
 //
 // フォーカスは、トリガー（マージを承認）、ダイアログの見出し・確定・やめる・リンク（プルリクエスト）、
-// 項目の外の要素（elsewhere）、どこでもない（body）の 7 つで表す。
+// 項目の外の要素（elsewhere）、どこでもない（body）の 7 つで表す。リンクはマージの確認にだけあり、
+// 作業の依頼の確認には無い（対象の行はプロジェクト名だけ）。
 module offlineActions {
   const GUARD: bool
   const FOCUS_GUARD: bool
@@ -42,6 +43,8 @@ module offlineActions {
   var confirms: int
   // 押すと確認ダイアログを開く項目か。CONFIRM_REPORT = false では、作業の依頼は開かずに送る。
   val opensDialog: bool = kind == "merge" or CONFIRM_REPORT
+  // 確認ダイアログにリンク（プルリクエストを開く）があるか。マージの確認にだけある。
+  val hasLink: bool = kind == "merge"
 
   // コードの disabled={busy || disconnected} に当たる。修正前は busy だけ。
   def locked(c: bool, b: bool): bool = b or (GUARD and not(c))
@@ -147,14 +150,23 @@ module offlineActions {
     connected' = connected, busy' = busy, sent' = sent, stolen' = stolen,
   }
 
-  action focusInDialog = all {
+  // ダイアログの中で移れる先。リンクへ移れるのは、リンクのあるマージの確認だけ。
+  def focusableInDialog(t: Focus): bool =
+    t == "heading" or (t == "link" and hasLink) or (t == "confirm" and confirmEnabled) or (t == "cancel" and cancelEnabled)
+
+  // ダイアログの中で、フォーカスを target へ移す。
+  action focusInDialogTo(target: Focus): bool = all {
     kind' = kind, confirms' = confirms,
     dialog,
-    nondet target = DIALOG_FOCUS.filter(t =>
-      t == "heading" or t == "link" or (t == "confirm" and confirmEnabled) or (t == "cancel" and cancelEnabled)
-    ).oneOf()
+    DIALOG_FOCUS.contains(target),
+    focusableInDialog(target),
     focus' = target,
     connected' = connected, busy' = busy, dialog' = dialog, pendingRestore' = pendingRestore, sent' = sent, stolen' = stolen,
+  }
+
+  action focusInDialog = {
+    nondet target = DIALOG_FOCUS.oneOf()
+    focusInDialogTo(target)
   }
 
   // 確定。書き込みを送り、送信中は見出しへフォーカスを移す。
@@ -193,11 +205,12 @@ module offlineActions {
   val noSendWhileDisconnected: bool = sent.foldl(true, (ok, s) => ok and s.connected)
   // 書き込みは確定を押したときだけ出て、1回の確定で1回だけ出る（issue #308）。
   val sendOnlyOnConfirm: bool = sent.length() == confirms
-  // 無効なボタンにフォーカスが残らない。
+  // 無効なボタンにフォーカスが残らない。無いリンクにもフォーカスは無い。
   val focusNotOnDisabled: bool = all {
     focus == "trigger" implies triggerEnabled,
     focus == "confirm" implies confirmEnabled,
     focus == "cancel" implies cancelEnabled,
+    focus == "link" implies hasLink,
   }
   // ダイアログが開いている間、フォーカスはダイアログの中にある。
   val focusInsideOpenDialog: bool = dialog implies DIALOG_FOCUS.contains(focus)

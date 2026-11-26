@@ -86,22 +86,28 @@ module offlineActions_test {
         after::disconnect,
       })
 
-  // 修正後。リンクにあるフォーカスは、切断しても動かさない。
+  // 修正後。マージの確認のリンクにあるフォーカスは、切断しても動かさない。リンクはマージの確認に
+  // だけある。
   run linkFocusKeptOnDisconnectTest =
-    after::init
+    after::initWith("merge")
       .then(after::open)
-      .then(all {
-        after::focus' = "link",
-        after::connected' = after::connected, after::busy' = after::busy, after::dialog' = after::dialog,
-        after::pendingRestore' = after::pendingRestore, after::sent' = after::sent, after::stolen' = after::stolen,
-        after::kind' = after::kind, after::confirms' = after::confirms,
-      })
+      .then(after::focusInDialogTo("link"))
       .then(after::disconnect)
       .then(all {
         assert(after::focus == "link"),
         assert(after::safety),
         after::cancel,
       })
+
+  // 作業の依頼の確認にはリンクが無い（対象の行はプロジェクト名だけ）。リンクへは移れない。
+  run reportDialogHasNoLinkTest =
+    after::initWith("report")
+      .then(after::open)
+      .then(all {
+        assert(not(after::hasLink)),
+        after::focusInDialogTo("link"),
+      })
+      .fail()
 
   // 修正後。ダイアログの外で、フォーカスのあるトリガーが切断で無効になったら、body へ外す。
   run triggerFocusDroppedOnDisconnectTest =
