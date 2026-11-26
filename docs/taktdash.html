@@ -637,8 +637,7 @@ function tilesHtml() {
       ${longest && longest.stale ? `<div class="t-note warn">最も長いものは ${dur(longest.waitMin * 60)} 待っています。</div>` : ""}</div>
     <div class="tile"><div class="label">24時間に完了したタスク</div>
       <div class="num">${completed24h}<small>件</small></div>
-      <div class="t-note ${failedTotal ? "warn" : ""}">${failedTotal ? `失敗したタスクが ${failedTotal}件残っています。` : "失敗したタスクは残っていません。"}</div>
-      <div class="t-note">失敗・上限超過・PR作成失敗を合わせて数えています。</div></div>
+      <div class="t-note">保存済みの履歴を全プロジェクト分集計しています。</div></div>
     <div class="tile"><div class="label">24時間のトークン消費</div>
       <div class="num">${TOKENS_24H.reduce((s, t) => s + t.m, 0).toFixed(1)}<small>M トークン</small></div>
       <ul class="kv">${TOKENS_24H.map(t => `<li><span>${esc(t.model)}</span><b>${t.m.toFixed(1)}M</b></li>`).join("")}</ul></div>

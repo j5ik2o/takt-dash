@@ -92,8 +92,6 @@ export type OverviewView = {
   runningRuns: number;
   runLimit: RunLimit;
   completedTasks24h: number;
-  failedTaskCount: number;
-  abortedGoalCount: number;
   silentRunCount: number;
   unresponsiveServers: Server[];
   unresponsiveProjects: Project[];
@@ -222,21 +220,11 @@ export const serverStateLabel = (state: OverviewServerView["state"]): string => 
   }
 };
 
-// 失敗系の合計の表示名。failedTaskCount が数える「失敗」は、失敗・上限超過・PR 失敗の
+// 失敗系の合計の表示名。ここで言う「失敗」は、失敗・上限超過・PR 失敗の
 // 3状態の合計である。ゴールページの状態別の欄と同じ文言（taskStatusLabel の「失敗」、
-// 「上限超過」、「PR 失敗」）で内訳を示し、概要の合計をゴールページの欄の合計と
+// 「上限超過」、「PR 失敗」）で内訳を示し、プロジェクトのページの表示をゴールページの欄と
 // 照合できるようにする（issue #260）。
 export const FAILED_TASK_KINDS_LABEL = "失敗・上限超過・PR 失敗";
-
-const failedTaskCount = (goals: readonly Goal[]): number =>
-  goals.reduce(
-    (total, goal) =>
-      total +
-      (goal.taskCounts?.failed ?? 0) +
-      (goal.taskCounts?.exceeded ?? 0) +
-      (goal.taskCounts?.prFailed ?? 0),
-    0,
-  );
 
 const isUnresponsiveProject = (project: Project): boolean =>
   project.connectionState === CONNECTION_STATE.UNRESPONSIVE;
@@ -291,8 +279,6 @@ export function buildOverviewView(state: OverviewStateInput, now: Date, snapshot
   });
   const projectSummary = summarizeOverviewProjects(state.projects, runs);
   const silentRunCount = runs.filter((run) => run.state === "warn").length;
-  const failedTasks = failedTaskCount(state.goals);
-  const abortedGoals = state.goals.filter((goal) => goalSection(goal) === "aborted").length;
   const pendingCounts = summarizePendingDecisions(pendingDecisions);
   const readAt = state.readAt;
   return {
@@ -304,8 +290,6 @@ export function buildOverviewView(state: OverviewStateInput, now: Date, snapshot
     ...projectSummary,
     runs,
     thresholds,
-    failedTaskCount: failedTasks,
-    abortedGoalCount: abortedGoals,
     silentRunCount,
     unresponsiveServers,
     unresponsiveProjects,
@@ -314,9 +298,7 @@ export function buildOverviewView(state: OverviewStateInput, now: Date, snapshot
       pendingCounts.total > 0 ||
       unresponsiveServers.length > 0 ||
       unresponsiveProjects.length > 0 ||
-      silentRunCount > 0 ||
-      failedTasks > 0 ||
-      abortedGoals > 0,
+      silentRunCount > 0,
     pendingCounts,
     pendingDecisions,
   };
