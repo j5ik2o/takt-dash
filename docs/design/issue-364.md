@@ -21,15 +21,48 @@ Quint の仕様でも、修正前の遷移で 2 点とも反例が出ます（�
 
 ## 何をどう変えるか
 
-### 1. 停止：すべてを同時に閉じ始め、全体を `SHUTDOWN_DEADLINE`（20 秒）で打ち切る
+### 1. 停止：合図で周期を打ち切り、すべてを同時に閉じ始め、閉じる段と停止の全体に上限を設ける
 
-- `backend/src/mcp/http.rs`：1 件を閉じる上限を `pub(crate) const SESSION_CLOSE_BOUND: Duration`（`CLOSE_WAIT_FOR_ESTABLISH` ＋ `CLOSE_TIMEOUT`、15 秒）として出す。`HttpReadHandle` の中身は変えない。
+#### 上限の決め方（設計レビューの指摘 1 を受けて決めた）
+
+本番の backend は launchd（`~/Library/LaunchAgents/com.ideoplus.taktdash-backend.plist`）で動いており、plist に `ExitTimeOut` が無い。launchd の既定は、SIGTERM の 20 秒後に SIGKILL。SIGKILL されると後始末が何も走らず、閉じていないセッションは takt-mcp に残る。そこで、停止の全体を合図から 20 秒より前に終える（案 (a)）。plist は変えない（案 (b) は採らない。本番の設定に頼らず、backend だけで上限を守れるため）。
+
+レビューは「合図より前に始まった周期を待つのは最大 15 秒」としていたが、コードを読むと、周期の上限はもっと長い。`READ_TIMEOUT_SECONDS`（15 秒）は道具の呼び出し 1 回ごとの上限で、`read_snapshot` は道具を何回か順に呼ぶ。周期の全体には上限が無い。周期を待ったまま 20 秒に収めることはできないので、**停止の合図で周期を打ち切る**ことにした。
+
+| 上限 | 値 | どこで守るか |
+| --- | --- | --- |
+| 1 件を閉じる（確立の鍵の待ち ＋ DELETE） | 10 秒（`CLOSE_WAIT_FOR_ESTABLISH` を 10 秒から 5 秒に下げる ＋ `CLOSE_TIMEOUT` 5 秒） | `HttpSession::close` |
+| 閉じる段 | 15 秒（`SHUTDOWN_DEADLINE`） | `McpClientRegistry::shutdown_within` |
+| 停止の全体（合図から） | 18 秒（`STOP_DEADLINE`） | `main.rs` |
+| launchd の SIGKILL | 20 秒（`ExitTimeOut` の既定） | 外側（変えない） |
+
+並びは `const _: () = assert!(...)` で固定する（1 件 < 閉じる段 < 停止の全体 < launchd）。launchd の 20 秒は `LAUNCHD_EXIT_TIMEOUT` という定数に、plist の場所と「ExitTimeOut を足すならこの値も直す」という説明をつけて置く。
+
+`CLOSE_WAIT_FOR_ESTABLISH` を使うのは停止の時の `close` だけ（`Drop` の後始末は待たない）。確立は普段なら数ミリ秒で終わるので、5 秒で足りる。確立が 5 秒を超えるのは応答の遅いサーバーで、その時は確立の後にできたセッションが残りうる（今の 10 秒でも同じことが起きうる）。
+
+#### 変えるところ
+
+- `backend/src/mcp/http.rs`：`CLOSE_WAIT_FOR_ESTABLISH` を 5 秒にする。1 件を閉じる上限を `pub(crate) const SESSION_CLOSE_BOUND: Duration`（`CLOSE_WAIT_FOR_ESTABLISH` ＋ `CLOSE_TIMEOUT`、10 秒）として出す。
 - `backend/src/mcp/registry.rs`：
-  - `pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(20)` と、`const _: () = assert!(SESSION_CLOSE_BOUND.as_secs() < SHUTDOWN_DEADLINE.as_secs());` を置く。応答しないサーバーも、同時に閉じれば自分の上限（15 秒）で打ち切られ、全体の上限の前に終わる。
-  - `pub async fn shutdown_within(&self, deadline: Duration, reads: Vec<Arc<AsyncMutex<HttpReadHandle>>>)` を足す。1 回のロックで stdio のクライアントと HTTP セッションを map から取り出し、`tokio::task::JoinSet` に、クライアントごとの「鍵を取って kill」、セッションごとの `close`、読み取りハンドルごとの「鍵を取って `close`」を同時に入れる。`tokio::time::timeout(deadline, …)` で全部の終わりを待ち、時間切れなら残りの件数を `warn` に出して返る（`JoinSet` を捨てると残りのタスクは中断される）。
+  - `pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15)` と、`SESSION_CLOSE_BOUND < SHUTDOWN_DEADLINE` の `const` の検査を置く。応答しないサーバーも、同時に閉じれば自分の上限（10 秒）で打ち切られ、閉じる段の上限の前に終わる。
+  - `pub async fn shutdown_within(&self, deadline: Duration, reads: Vec<Arc<AsyncMutex<HttpReadHandle>>>)` を足す。1 回のロックで stdio のクライアントと HTTP セッションを map から取り出し、`tokio::task::JoinSet` に、クライアントごとの「鍵を取って kill」、セッションごとの `close`、読み取りハンドルごとの「鍵を取って `close`」を同時に入れる。`tokio::time::timeout(deadline, …)` で全部の終わりを待ち、時間切れなら残りの件数を `warn` に出して返る（`JoinSet` を捨てると、残りのタスクは中断される）。
   - `shutdown_all(&self)` は `shutdown_within(SHUTDOWN_DEADLINE, Vec::new())` を呼ぶだけにする（呼び出し元の `backend/tests/mcp_lanes_test.rs` はそのまま）。
-- `backend/src/poller.rs`：`Poller::shutdown` は、`reads` を取り出してハンドルを `shutdown_within(SHUTDOWN_DEADLINE, handles)` に渡す。読み取りハンドルを閉じる段も、同じ全体の上限に入る。
-- 打ち切ったもの：stdio の子プロセスは、鍵を持つ要求が終わるか、プロセスの終了で `kill_on_drop` により止まる（`McpClient` の今の作り）。HTTP セッションは、応答しないサーバーのもので、サーバーが再起動するまで残る（いまも同じ）。
+- `backend/src/poller.rs`：
+  - `run_until_stopped` は、周期（`read_cycle_once`）と停止の合図を `tokio::select!` で待つ。合図が先なら周期の future を捨て、ループを抜けて `shutdown` へ進む。
+  - `Poller::shutdown` は、`reads` を取り出してハンドルを `shutdown_within(SHUTDOWN_DEADLINE, handles)` に渡す。読み取りハンドルを閉じる段も、同じ上限に入る。
+  - `pub const STOP_DEADLINE: Duration = Duration::from_secs(18)` と `LAUNCHD_EXIT_TIMEOUT`（20 秒）を置き、`SHUTDOWN_DEADLINE < STOP_DEADLINE < LAUNCHD_EXIT_TIMEOUT` を `const` で検査する。
+- `backend/src/main.rs`：gRPC サーバーと定期読み取りの `join!` を、「停止の合図を待ってから `STOP_DEADLINE` 眠る」future と `select!` する。上限に達したら `warn` を出して `main` から返る（gRPC の穏やかな停止が、長い要求を待ち続けるときの外側の守り）。
+
+#### 周期を打ち切ってよい理由
+
+- 周期の中の読み取りは、プロジェクトごとに `tokio::spawn` したタスクで、future を捨ててもタスクは最後まで走るか、プロセスの終了で捨てられる。タスクが持つクライアントの鍵は、閉じる段では「鍵の埋まった子プロセス」として扱われ、上限で見捨てる（プロセスの終了で `kill_on_drop` により止まる）。
+- 周期の中で書くもの（出来事の記録）は 1 回ずつ同期の SQLite の呼び出しで、`await` の途中で止まっても、書きかけの行は残らない。メモリの状態（差分基準・接続状態）はプロセスの終了で捨てるもので、次の起動は記録から基準を作り直す（今の作り）。
+- 打ち切らなくても、launchd が 20 秒で SIGKILL すれば同じ位置かもっと悪い位置で止まる。`await` の境目で止めるほうが安全。
+- `gh` の子プロセス（`pull_request.rs`）も `kill_on_drop(true)` で、future を捨てれば止まる。
+
+#### 打ち切ったもの
+
+stdio の子プロセスは、鍵を持つ要求が終わるか、プロセスの終了で `kill_on_drop` により止まる（`McpClient` の今の作り）。HTTP セッションは、応答しないサーバーのもので、サーバーが再起動するまで残る（いまも同じ）。
 
 ### 2. 接続先：反映済みの接続先まで照合する
 
@@ -41,8 +74,8 @@ Quint の仕様でも、修正前の遷移で 2 点とも反例が出ます（�
 
 ### 変えないこと・範囲の外
 
-- 停止の合図より前に始まった定期読み取りの周期は、今のまま終わるまで待つ（`run_until_stopped` は待機の間だけ停止を見ている）。周期の中の読み取りはプロジェクトごとに `READ_TIMEOUT_SECONDS`（15 秒）で打ち切られる。周期を途中で捨てると出来事の記録の途中で止まりうるので、この issue では触れない。
-- gRPC サーバーの穏やかな停止（`serve_with_incoming_shutdown`）と `main.rs` は変えない。
+- gRPC サーバーの穏やかな停止（`serve_with_incoming_shutdown`）の中身は変えない。`main.rs` の `STOP_DEADLINE` が外から打ち切るだけにする。
+- launchd の plist（`ExitTimeOut`）は変えない。
 - 閉じる段の途中に届いた画面の要求が、置き場を作り直すこと（`HttpSession::close` の説明にある、今の挙動）は変えない。
 - 反映より先に新しい設定で解決した要求は、次の反映まで（定期読み取りの 1 周期まで）、その要求だけのセッションを使う（作って閉じる）。今は新しい要求が置き場を作り直していた。正しさは変わらず、往復が 1 件ごとに 3 回（initialize・initialized・DELETE）増えるだけ。どちらの要求が新しいかを決める世代を要求に持たせることはしない。
 - `http.rs` の確立・404・再試行、`CLOSE_TIMEOUT` と `CLOSE_WAIT_FOR_ESTABLISH` の値、proto、保存済みデータ、待ち受け（`0.0.0.0:3000`）と接続元の制限には触れない。
@@ -51,11 +84,12 @@ Quint の仕様でも、修正前の遷移で 2 点とも反例が出ます（�
 
 停止（`specs/quint/backend-shutdown-deadline/shutdownDeadline.qnt`）
 
-1. 閉じる段は、停止を始めてから `SHUTDOWN_DEADLINE` を超えない（`stopWithinDeadline`）。
-2. 応答するサーバーのセッションは、閉じる段を終えるまでに閉じる（`respondingSessionsClosed`）。応答しないサーバーが前にあっても待たされない。
-3. 停止を始めた時点で鍵の空いていた子プロセスは、閉じる段を終えるまでに kill する（`idleChildrenKilled`）。
-4. 見捨てるのは、全体の上限に達したときだけ（`abandonOnlyAtDeadline`）。
-5. 前提：1 件を閉じる上限は全体の上限より短い（`CLOSE_BOUND < SHUTDOWN_DEADLINE`。コードは `const` の `assert!`）。
+0. launchd が SIGKILL する前（合図から 20 秒未満）に、プロセスが終わる（`stopBeforeExitTimeout`）。周期の途中で合図を受けても同じ。
+1. 閉じる段は `SHUTDOWN_DEADLINE` を超えない（`closesWithinDeadline`）。
+2. 応答するサーバーのセッションは、プロセスが終わるまでに閉じる（`respondingSessionsClosed`）。応答しないサーバーが前にあっても、周期の途中でも待たされない。
+3. 合図の時点で鍵の空いていた子プロセスは、プロセスが終わるまでに kill する（`idleChildrenKilled`）。
+4. 見捨てるのは、上限に達したときだけ（`abandonOnlyAtDeadline`）。
+5. 前提：1 件を閉じる上限 < 閉じる段の上限 < 停止の全体の上限 < launchd の SIGKILL（`boundsAreOrderedTest`。コードは `const` の `assert!`）。
 
 接続先（`specs/quint/mcp-http-session-endpoint/sessionEndpoint.qnt`）
 
@@ -70,16 +104,17 @@ Quint の仕様でも、修正前の遷移で 2 点とも反例が出ます（�
 
 | 仕様 | モジュール | 結果（quint 0.32.0、`quint run` と `quint test`） |
 | --- | --- | --- |
-| `backend-shutdown-deadline/shutdownDeadline.qnt` | `current`（順に、上限なし） | `stopWithinDeadline` に 9 手で違反 |
-| | `deadlineOnly` | `respondingSessionsClosed` に 5 手、`idleChildrenKilled` に 6 手で違反 |
-| | `parallelOnly` | `stopWithinDeadline` に 9 手で違反（鍵を持つ道具の呼び出しを待つ） |
-| | `fixed` | `safety` の反例なし（50000 サンプル、max-steps 30）。witness 4 つとも到達 |
-| | `shutdownDeadline_test.qnt` | 6 件成功 |
+| `backend-shutdown-deadline/shutdownDeadline.qnt` | `current`（周期を待ち、順に、上限なし） | `stopBeforeExitTimeout` に 23 手、`closesWithinDeadline` に 42 手で違反 |
+| | `deadlineOnly` | `respondingSessionsClosed` に 21 手、`idleChildrenKilled` に 22 手で違反 |
+| | `parallelOnly` | `stopBeforeExitTimeout` に 23 手で違反（鍵を持つ道具の呼び出しを待つ） |
+| | `withoutCycleCancel`（設計の最初の版） | `respondingSessionsClosed` に 21 手、`idleChildrenKilled` に 20 手で違反（周期を待つうちに全体の上限に達する） |
+| | `fixed` | `safety` の反例なし（50000 サンプル、max-steps 60）。witness 5 つとも到達 |
+| | `shutdownDeadline_test.qnt` | 7 件成功 |
 | `mcp-http-session-endpoint/sessionEndpoint.qnt` | `current` | `slotMatchesReflected` に 9 手で違反 |
 | | `fixed` | `safety` の反例なし（50000 サンプル、max-steps 25）。witness 4 つとも到達 |
 | | `sessionEndpoint_test.qnt` | 6 件成功 |
 
-上限と同時に閉じることの片方だけでは足りないことを、`deadlineOnly` と `parallelOnly` の反例で示しています。
+同時に閉じること・上限・周期の打ち切りの 3 つがすべて要ることを、`deadlineOnly`・`parallelOnly`・`withoutCycleCancel` の反例で示しています。外側の上限（launchd の 20 秒）は `EXIT_TIMEOUT` として仕様に入れ、不変条件 0 で確かめます。
 
 ## PBT の性質（`proptest`、除外なし）
 
@@ -89,26 +124,41 @@ Quint の仕様でも、修正前の遷移で 2 点とも反例が出ます（�
    - 反映の後に、反映済みの接続先と違う要求（接続先が違う、トークンだけが違う、設定に無い）は、登録済みのどれとも共有しない置き場を受け取り、`http_sessions` の中身（置き場の同一性）を変えない。
    - 反映の前は、要求の接続先の置き場が登録される（今の挙動）。
    - 返った `HttpSession` の接続先は、要求の接続先（不変条件 8）。
-2. **停止の上限と同時に閉じること**：`backend/tests/http_read_test.rs`（mock の HTTP サーバーと stdio の mock を使う）。HTTP サーバーを 1〜3 台、それぞれ「DELETE に応答しない（新しい振る舞い `hang-delete`）」か「応答する」かを選び、ID の並びも選ぶ。stdio のクライアントを 0〜2 本起動し、それぞれ「テストが鍵を持ったまま」か「空いている」かを選ぶ。プロジェクトの読み取りハンドル（`reads`）も 0〜2 本、同じく選んだサーバーに向けて渡す。`shutdown_within(800ms, reads)` が次を満たす。
-   - 返るまでの時間が 800ms ＋ 余裕（500ms）以内（不変条件 1）。
+2. **閉じる段の上限（tokio の時間を止めて確かめる）**：`backend/src/mcp/registry.rs` のテスト（`#[tokio::test(start_paused = true)]`、実際の入出力を使わない）。stdio のクライアントを 0〜3 本（子プロセスは起動しない）、読み取りハンドルを 0〜3 本（セッションは確立しない）作り、それぞれ「テストが鍵を持ったまま」か「空いている」かを選ぶ。登録済みの HTTP セッション（確立しない）も 0〜2 件。`shutdown_within(deadline, reads)`（`deadline` は 1〜30 秒から選ぶ）が次を満たす。
+   - 鍵を持たれたものが 1 つでもあれば、止めた時計でちょうど `deadline` で返る。無ければ、時計を進めずに返る（不変条件 1、4）。
+   - 返ったあと、レジストリの stdio のクライアントと HTTP セッションの map は空。
+   - 空いていたクライアント・読み取りハンドルの鍵を、返ったあとにテストがすぐ取れる（閉じる処理が鍵を持ち続けていない）。
+3. **応答するサーバーを待たせないこと（実時間）**：`backend/tests/http_read_test.rs`（mock の HTTP サーバーと stdio の mock を使う）。HTTP サーバーを 1〜3 台、それぞれ「DELETE に応答しない（新しい振る舞い `hang-delete`）」か「応答する」かを選び、ID の並びも選ぶ。起動済みで鍵の空いた stdio のクライアントを 0〜2 本。プロジェクトの読み取りハンドルも 0〜2 本、選んだサーバーに向けて渡す。`shutdown_within(2 秒, reads)` が次を満たす。
    - 応答するサーバーの生きたセッションが 0（不変条件 2）。応答しないサーバーが ID の並びで前にあっても同じ。
-   - 鍵の空いていた子プロセスは止まっている（不変条件 3）。
-   - 鍵を持たれていた子プロセスは、テストが鍵を放してハンドルを捨てたあとに止まる（打ち切りでも残らない）。
-   - 実時間と子プロセスを使うので、ケース数は 8 に絞る（性質の除外ではなく回数の制限）。
+   - 起動済みの子プロセスは止まっている（不変条件 3）。
+   - 時間は「上限を大きく超えなかったか」だけを見る（2 秒 ＋ 余裕 2.5 秒未満。`hang-delete` は 1 件 5 秒待たせるので、順に閉じる作りに戻れば超える）。高負荷のホストでの不安定さ（[j5ik2o/takt-dash#261](https://github.com/j5ik2o/takt-dash/issues/261) と同じ型）を避けるため、ちょうどの時間は 2 で確かめる。
+   - 実時間と子プロセスを使うので、ケース数は 6 に絞る（性質の除外ではなく回数の制限）。
+4. **停止の全体の上限（tokio の時間を止めて確かめる）**：`main.rs` の打ち切りを、`poller.rs` の小さな関数 `run_until_stop_deadline(run, stop, deadline)`（`run` が先に終わればその結果、合図から `deadline` が過ぎれば `None`）に切り出し、`start_paused` で確かめる。`run` の長さ（0〜60 秒）、合図の時刻（0〜60 秒、または合図なし）、`deadline`（1〜30 秒）を選び、返る時刻が `min(run の終わり, 合図 ＋ deadline)` と等しいこと。
 
-あわせて、修正前に落ちる例のテストを先に書く：`a_stale_request_does_not_evict_the_session_of_the_new_endpoint`（registry.rs）と、`shutdown_does_not_wait_for_an_unresponsive_server_before_closing_the_others`（http_read_test.rs）。
+あわせて、修正前に落ちる例のテストを先に書く：
+- `a_stale_request_does_not_evict_the_session_of_the_new_endpoint`（registry.rs）
+- `shutdown_does_not_wait_for_an_unresponsive_server_before_closing_the_others`（http_read_test.rs）
+- `a_stop_signal_during_a_cycle_does_not_wait_for_the_cycle`（`poller_rebuild_tests.rs`。周期を `ReadBarrier` で止めたまま合図を送り、`run_until_stopped` が周期の再開を待たずに返ること）
 
 ## 壊しうる入力
 
 - 境界：反映の前（`configured == false`）、反映で 0 台になる、ID はそのままで URL だけ・トークンだけが変わる、同じ接続先を 2 つの ID が持つ。
 - 並び：応答しない相手が `BTreeMap` の順で前にある（修正前に後ろを待たせる）。
 - 並行：閉じる段と同時に画面の要求が来る（範囲の外。今の挙動のまま）。反映と要求の取り合い（レジストリの `std::sync::Mutex` の中で 1 つずつ進む）。
-- 時間：確立の途中のセッション（`CLOSE_WAIT_FOR_ESTABLISH` を待つ。既存の `closing_waits_for_an_establishment_in_flight_and_closes_its_session` が固定）、鍵を長く持つ道具の呼び出し。
+- 時間：確立の途中のセッション（`CLOSE_WAIT_FOR_ESTABLISH` を待つ。既存の `closing_waits_for_an_establishment_in_flight_and_closes_its_session` が固定）、鍵を長く持つ道具の呼び出し、合図の時点で周期の途中（読み取りのタスクが鍵を持っている）、合図が周期の始まりと同時。
 - 再開：停止は 1 回だけ。打ち切ったあとはプロセスが終わる。
 
 ## 上流・保存済みデータ・公開 API・守りの仕組みへの影響
 
 - 上流（takt-mcp）：送る要求の種類は変わらない。旧設定の要求で、セッションの作成と DELETE が 1 件ずつ増えることがある（上の「範囲の外」）。
 - 保存済みデータ・proto：変更なし。
-- 公開 API：`McpClientRegistry::shutdown_within` と `SHUTDOWN_DEADLINE` を足す（crate の中とテストだけが使う）。`shutdown_all` と `Poller::shutdown` の形は変えない。
+- 公開 API：`McpClientRegistry::shutdown_within`、`SHUTDOWN_DEADLINE`、`STOP_DEADLINE`、`LAUNCHD_EXIT_TIMEOUT`、`run_until_stop_deadline` を足す（crate の中、`main.rs`、テストだけが使う）。`shutdown_all` と `Poller::shutdown` の形は変えない。`run_until_stopped` は、合図で周期を打ち切るようになる。
+- 本番の運用：停止は合図から 18 秒以内に終わる（今は上限が無く、launchd が 20 秒で SIGKILL していた）。plist は変えない。
 - 守りの仕組み（CI・関門・ルールセット）：変更なし。テスト用の mock（`backend/tests/mock_mcp_http_server.mjs`）に `hang-delete` を足す。
+
+## 設計レビューの指摘の扱い（43c138d への指摘）
+
+| 指摘 | 扱い |
+| --- | --- |
+| 1（中）全体の上限と launchd の関係 | 直した。案 (a) を採り、停止の合図で周期を打ち切ること、1 件の上限を 10 秒に下げること、`main.rs` の `STOP_DEADLINE`（18 秒）を足した。指摘の前提「周期を待つのは最大 15 秒」は、15 秒が道具の呼び出し 1 回ごとの上限なので当たらず、周期を待ったまま 20 秒に収める案はとれなかった。Quint に外側の上限 `EXIT_TIMEOUT` と不変条件 `stopBeforeExitTimeout`、周期を待つ段（`Draining`）と `withoutCycleCancel` の版を足した |
+| 2（低）PBT の実時間 | 直した。上限ちょうどの時間は、tokio の時間を止めて確かめる（性質 2 と 4）。実時間が要る性質 3 は、上限を大きく超えなかったかだけを見る |
