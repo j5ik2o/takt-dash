@@ -28,7 +28,7 @@ module pollerEventRecording {
     store' = Connected,
     notified' = Connected,
     held' = false,
-    detected' = 0,
+    detected' = "type_error",
     recordedLost' = 0,
     recordedRestored' = 0,
   }
@@ -86,7 +86,7 @@ module pollerEventRecording {
     store' = Connected,
     notified' = Connected,
     held' = false,
-    detected' = 0,
+    detected' = "type_error",
     recordedLost' = 0,
     recordedRestored' = 0,
     mcpUp' = mcpUp, dbUp' = dbUp,
