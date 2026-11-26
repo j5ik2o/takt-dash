@@ -34,87 +34,109 @@ export type RelayStateStreamOptions = {
 /** ReadableStream の列の上限。不変条件 queueBounded はこの値を前提にする。 */
 export const RELAY_HIGH_WATER_MARK = 1;
 
-/** 中継の ReadableStream を作る。登録を断られたら undefined を返し、gRPC を開かない。 */
-export function relayStateStream(options: RelayStateStreamOptions): ReadableStream<Uint8Array> | undefined {
-  const { signal } = options;
-  let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-  let stream: WatchStream | undefined;
-  let finished = false;
-  let pending: DashboardState | undefined;
-  let admission: Admission | undefined;
+/**
+ * 1 本の接続の中継。後始末（finish）と間引き（offer・pull）を持つ。ReadableStream の
+ * start・pull・cancel と、gRPC の data・error・end と、登録簿の付け替えから呼ばれる。
+ */
+class StateRelay {
+  private controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+  private stream: WatchStream | undefined;
+  private finished = false;
+  private pending: DashboardState | undefined;
+  admission: Admission | undefined;
 
-  const finish = ({ cancelStream }: { cancelStream: boolean }) => {
-    if (finished) {
+  constructor(private readonly options: RelayStateStreamOptions) {}
+
+  readonly abort = (): void => this.finish({ cancelStream: true });
+
+  start(controller: ReadableStreamDefaultController<Uint8Array>): void {
+    this.controller = controller;
+    const { signal } = this.options;
+    if (this.finished || signal.aborted) {
+      this.abort();
       return;
     }
-    finished = true;
-    pending = undefined;
-    admission?.release();
-    signal.removeEventListener("abort", onAbort);
-    if (cancelStream) {
-      stream?.cancel();
-      stream?.destroy();
-    }
+    signal.addEventListener("abort", this.abort);
+    let opened: WatchStream;
     try {
-      controller?.close();
-    } catch {
-      // cancel の中や既に閉じている場合は何もしない。
+      opened = this.options.openStream();
+    } catch (error) {
+      // 登録と abort の聞き手を残さずに、例外を呼び出し元へ返す。
+      this.abort();
+      throw error;
     }
-  };
-  const onAbort = () => finish({ cancelStream: true });
+    this.stream = opened;
+    opened.on("data", (state: DashboardState) => this.offer(state));
+    opened.on("error", this.abort);
+    // backend が終えたストリームは閉じ直さない。
+    opened.on("end", () => this.finish({ cancelStream: false }));
+  }
 
-  const enqueue = (state: DashboardState) => {
-    try {
-      controller?.enqueue(options.encode(state));
-    } catch {
-      onAbort();
+  pull(): void {
+    if (this.finished || this.pending === undefined) {
+      return;
     }
-  };
+    const latest = this.pending;
+    this.pending = undefined;
+    this.enqueue(latest);
+  }
 
-  if (options.admit !== undefined) {
-    admission = options.admit(onAbort);
-    if (admission === undefined) {
-      return undefined;
+  private offer(state: DashboardState): void {
+    this.options.onState?.();
+    if (this.finished) {
+      return;
+    }
+    if ((this.controller?.desiredSize ?? 0) > 0) {
+      // 持ち分はこの状態より古い。列へ入れたあとに pull が古い版を送らないよう捨てる。
+      this.pending = undefined;
+      this.enqueue(state);
+    } else {
+      this.pending = state;
     }
   }
 
+  private enqueue(state: DashboardState): void {
+    try {
+      this.controller?.enqueue(this.options.encode(state));
+    } catch {
+      this.abort();
+    }
+  }
+
+  private finish({ cancelStream }: { cancelStream: boolean }): void {
+    if (this.finished) {
+      return;
+    }
+    this.finished = true;
+    this.pending = undefined;
+    this.admission?.release();
+    this.options.signal.removeEventListener("abort", this.abort);
+    if (cancelStream) {
+      this.stream?.cancel();
+      this.stream?.destroy();
+    }
+    try {
+      this.controller?.close();
+    } catch {
+      // cancel の中や既に閉じている場合は何もしない。
+    }
+  }
+}
+
+/** 中継の ReadableStream を作る。登録を断られたら undefined を返し、gRPC を開かない。 */
+export function relayStateStream(options: RelayStateStreamOptions): ReadableStream<Uint8Array> | undefined {
+  const relay = new StateRelay(options);
+  if (options.admit !== undefined) {
+    relay.admission = options.admit(relay.abort);
+    if (relay.admission === undefined) {
+      return undefined;
+    }
+  }
   return new ReadableStream<Uint8Array>(
     {
-      start(started) {
-        controller = started;
-        if (finished || signal.aborted) {
-          onAbort();
-          return;
-        }
-        signal.addEventListener("abort", onAbort);
-        const opened = options.openStream();
-        stream = opened;
-        opened.on("data", (state: DashboardState) => {
-          options.onState?.();
-          if (finished) {
-            return;
-          }
-          if ((started.desiredSize ?? 0) > 0) {
-            enqueue(state);
-          } else {
-            pending = state;
-          }
-        });
-        opened.on("error", onAbort);
-        // backend が終えたストリームは閉じ直さない。
-        opened.on("end", () => finish({ cancelStream: false }));
-      },
-      pull() {
-        if (finished || pending === undefined) {
-          return;
-        }
-        const latest = pending;
-        pending = undefined;
-        enqueue(latest);
-      },
-      cancel() {
-        onAbort();
-      },
+      start: (controller) => relay.start(controller),
+      pull: () => relay.pull(),
+      cancel: () => relay.abort(),
     },
     new CountQueuingStrategy({ highWaterMark: RELAY_HIGH_WATER_MARK }),
   );

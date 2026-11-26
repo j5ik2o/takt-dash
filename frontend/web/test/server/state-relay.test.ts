@@ -132,6 +132,46 @@ test("既に abort された要求は gRPC を開かず、登録も残さない"
   assert.equal(screens.size(), 0);
 });
 
+test("読み始めた直後に次の状態が来ても、持っていた古い版を新しい版の後に送らない", async () => {
+  const screens = createScreenStreams();
+  const relay = openRelay(screens, { screen: SCREEN_A, attempt: 1 });
+  const reader = relay.body!.getReader();
+  relay.stream!.emit("data", stateOf(1));
+  relay.stream!.emit("data", stateOf(2));
+  const first = reader.read();
+  relay.stream!.emit("data", stateOf(3));
+  assert.equal(decode((await first).value!), 1);
+  assert.equal(decode((await reader.read()).value!), 3);
+  assert.equal(await Promise.race([reader.read().then(() => "read"), flush().then(() => "blocked")]), "blocked");
+  relay.abort.abort();
+});
+
+test("gRPC を開くときに例外が出たら、登録と abort の聞き手を残さずに例外を返す", () => {
+  const screens = createScreenStreams();
+  const abort = new AbortController();
+  let removed = 0;
+  const signal = abort.signal;
+  const remove = signal.removeEventListener.bind(signal);
+  signal.removeEventListener = (...args: Parameters<AbortSignal["removeEventListener"]>) => {
+    removed += 1;
+    remove(...args);
+  };
+  assert.throws(
+    () =>
+      relayStateStream({
+        openStream: () => {
+          throw new Error("no backend");
+        },
+        signal,
+        admit: (close) => screens.admit({ screen: SCREEN_A, attempt: 1 }, close),
+        encode,
+      }),
+    /no backend/,
+  );
+  assert.equal(screens.size(), 0, "登録を残さない");
+  assert.equal(removed, 1, "abort の聞き手を外す");
+});
+
 test("backend の end のあとは gRPC を閉じ直さず、遅れた data も送らない", async () => {
   const screens = createScreenStreams();
   const relay = openRelay(screens, { screen: SCREEN_A, attempt: 1 });
@@ -232,6 +272,7 @@ const runRelayMachine = async (seed: number, steps: number): Promise<void> => {
   let step = 0;
   let op = "init";
   const where = () => `seed=${seed} step=${step} op=${op}`;
+  const outOfOrder: string[] = [];
 
   const closeModel = (conn: ModelConn, cancelsStream: boolean) => {
     if (conn.status !== "open") return;
@@ -250,7 +291,8 @@ const runRelayMachine = async (seed: number, steps: number): Promise<void> => {
       }
       const version = decode(result.value);
       const last = conn.delivered.at(-1) ?? 0;
-      assert.ok(version > last, `性質 9: 読んだ版は増える一方 ${last} -> ${version} ${where()}`);
+      // then の中で投げても試験は落ちないので、記録して手のあとに確かめる。
+      if (version <= last) outOfOrder.push(`性質 9: 読んだ版は増える一方 ${last} -> ${version} ${where()}`);
       conn.delivered.push(version);
     });
   };
@@ -324,6 +366,26 @@ const runRelayMachine = async (seed: number, steps: number): Promise<void> => {
       conn.done = true;
       await conn.reader!.cancel();
     }],
+    // 開いた直後（start が済む前）に backend が続けて送り、その間に読み始める並び。
+    ["openThenBurst", 2, async () => {
+      await openOp();
+      const conn = conns.at(-1)!;
+      if (conn.status !== "open") return;
+      const burst = Math.floor(rand() * 4);
+      for (let i = 0; i < burst; i += 1) {
+        conn.produced += 1;
+        conn.relay.stream!.emit("data", stateOf(conn.produced));
+        if (rand() < 0.3 && !conn.inflight) readOnce(conn);
+      }
+    }],
+    // 読んだ直後（pull が走る前）に次の状態が来る並び。間に待ちを挟まない。
+    ["readThenData", 3, () => {
+      const conn = pickOf(conns.filter((c) => c.reader !== undefined && !c.done && !c.inflight && c.relay.stream !== undefined));
+      if (conn === undefined) return;
+      readOnce(conn);
+      if (conn.status === "open") conn.produced += 1;
+      conn.relay.stream!.emit("data", stateOf(conn.status === "open" ? conn.produced : 999));
+    }],
     ["drain", 4, async () => {
       const conn = pickOf(conns.filter((c) => c.reader !== undefined && !c.done && !c.inflight));
       if (conn === undefined) return;
@@ -355,7 +417,9 @@ const runRelayMachine = async (seed: number, steps: number): Promise<void> => {
     const [name, , run] = pick();
     op = name;
     await run();
-    await flush();
+    // 手の間で microtask を流し切らない並びも作る（pull の前に次の状態が来る並び）。
+    if (rand() < 0.5) await flush();
+    assert.deepEqual(outOfOrder, [], where());
     for (const conn of conns) {
       const stream = conn.relay.stream;
       if (conn.status === "rejected") {
@@ -383,6 +447,8 @@ const runRelayMachine = async (seed: number, steps: number): Promise<void> => {
     // 性質 6: 登録簿は開いている接続の分だけ。
     assert.equal(screens.size(), registry.size, `性質 6 ${where()}`);
   }
+  await flush();
+  assert.deepEqual(outOfOrder, [], where());
   for (const conn of conns) {
     conn.relay.abort.abort();
   }

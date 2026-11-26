@@ -9,17 +9,18 @@
 | ファイル | 内容 |
 | --- | --- |
 | `stateStreamRelay.qnt` | 画面 2 つ・接続 5 本の状態機械、10 の安全不変条件（`safety`）、7 つの到達条件（witnesses） |
-| `stateStreamRelay_test.qnt` | issue #385 の筋書きを 5 構成でたどる 15 件のテスト |
+| `stateStreamRelay_test.qnt` | issue #385 の筋書きを 6 構成でたどる 17 件のテスト |
 
-遷移は 4 つの定数で切り替えます。
+遷移は 5 つの定数で切り替えます。
 
-| モジュール | `SUPERSEDE` | `REJECT_STALE` | `CONFLATE` | `FINISH_ONCE` | 表すもの |
-| --- | --- | --- | --- | --- | --- |
-| `current` | false | false | false | false | 修正前の main（`d740c80`） |
-| `noRejectStale` | true | false | true | true | 付け替えはするが、遅れて届いた古い試行を開いてしまう変異 |
-| `noConflate` | true | true | false | true | 付け替えだけで、詰まった接続の列へ積み続ける変異 |
-| `noFinishOnce` | true | true | true | false | `cancel` が後始末の守りを通らない変異 |
-| `fixed` | true | true | true | true | 修正案 |
+| モジュール | `SUPERSEDE` | `REJECT_STALE` | `CONFLATE` | `FINISH_ONCE` | `DROP_STALE_PENDING` | 表すもの |
+| --- | --- | --- | --- | --- | --- | --- |
+| `current` | false | false | false | false | false | 修正前の main（`d740c80`） |
+| `noRejectStale` | true | false | true | true | true | 付け替えはするが、遅れて届いた古い試行を開いてしまう変異 |
+| `noConflate` | true | true | false | true | true | 付け替えだけで、詰まった接続の列へ積み続ける変異 |
+| `noFinishOnce` | true | true | true | false | true | `cancel` が後始末の守りを通らない変異 |
+| `keepStalePending` | true | true | true | true | false | 列へ直接入れるときに古い持ち分を残し、あとの `pull` で古い版を送る変異（[PR #389](https://github.com/j5ik2o/takt-dash/pull/389) の Devin の指摘） |
+| `fixed` | true | true | true | true | true | 修正案 |
 
 ## モデルの範囲と前提
 
@@ -27,7 +28,7 @@
 - 経路（`pathUp`）は切れたら戻りません。戻った経路は、画面が開き直した新しい接続で表します（画面は半開きを見張りで検知すると古い接続を閉じて開き直す。issue #383）。
 - 経路が切れている接続には、画面が閉じたこと（FIN）も状態も届きません。`abortArrives` は経路が生きているときだけ、`nextPulls`（Next が列から読んで書く）も経路が生きているときだけ起きます。
 - OS が TCP をあきらめて閉じる（`tcpTimeout`）のは、経路が切れた接続でいつか起きる遷移として表しています。時間は扱いません。
-- `ReadableStream` の列の上限は既定の `highWaterMark = 1`（`HIGH_WATER_MARK`）です。Next 16.4.6 は書けないと `drain` を待ち、その間は列から読みません（`node_modules/next/dist/server/pipe-readable.js` の `createWriterFromResponse`）。
+- `ReadableStream` の列の上限は `highWaterMark = 1`（`HIGH_WATER_MARK`。実装は `CountQueuingStrategy` で明示）です。Next が列から読む遷移（`nextReads`）と、`ReadableStream` が `pull` を呼んで持ち分を列へ入れる遷移（`relayPulls`）を分けています。実物の `pull` は読みと同じ手の中で走るとは限らない（`start` が済む前、前の `pull` の約束が解ける前）ので、その間に backend の状態が来る並びも探します。Next 16.4.6 は書けないと `drain` を待ち、その間は列から読みません（`node_modules/next/dist/server/pipe-readable.js` の `createWriterFromResponse`）。
 - `nextCancels` は Next が応答の本体を `cancel` する遷移です。実物は、応答が閉じたとき（`res` の `close`）に `pipeTo` の打ち切りで呼ばれます。模型では、閉じたあとの接続と、画面が閉じた接続のどちらでも 1 回だけ起こせるようにして、実物より広く探します。
 - 画面の識別子（`screen`）を持たない接続（古い画面の JavaScript、curl）は模型に入れていません。実装では付け替えの対象にせず、修正前と同じに扱います（単体テストで確かめる）。
 - 同じ試行の番号の要求が 2 本届く場合（ブラウザの HTTP の再送）は模型に入れていません。実装は「後から届いたほうを残す」で、取り違えたら画面の見張りが開き直して戻ります（設計の「壊しうる入力」）。
@@ -70,7 +71,7 @@ quint test stateStreamRelay_test.qnt --main=stateStreamRelay_test
 ```
 
 - `quint typecheck`：2 ファイルともエラーなし。
-- `quint test`：15 件すべて成功。
+- `quint test`：17 件すべて成功。
 
 修正前と変異は `safety` に違反します（`--max-steps=30 --max-samples=10000 --seed=0x385`）。不変条件を 1 つずつ渡して違反したもの:
 
@@ -80,6 +81,7 @@ quint test stateStreamRelay_test.qnt --main=stateStreamRelay_test
 | `noRejectStale` | `liveNotClosedByRelay` |
 | `noConflate` | `queueBounded` |
 | `noFinishOnce` | `noDoubleRelease` |
+| `keepStalePending` | `deliveredInOrder`（並びが細いので `--max-samples=100000` で探す。約 14,000 本目で違反） |
 
 修正案は反例なし:
 
@@ -89,7 +91,7 @@ quint run stateStreamRelay.qnt --main=fixed --invariant=safety --max-steps=40 --
   witnessAbandonedHalfOpenSuperseded witnessLiveDelivers
 ```
 
-20,000 サンプルで反例なし。到達条件はすべて到達しました（`witnessSuperseded` 1,429 件、`witnessRejected` 963 件、`witnessSkipped` 15 件、`witnessTcpTimeout` 2,085 件、`witnessAbortThenCancel` 3,129 件、`witnessAbandonedHalfOpenSuperseded` 234 件、`witnessLiveDelivers` 9 件）。`witnessSkipped` と `witnessLiveDelivers` は薄いため、`conflateKeepsLatestTest` と `flowingDeliversEveryVersionTest` で決まった手順でも通します。
+20,000 サンプルで反例なし。到達条件はすべて到達しました（`witnessSuperseded` 1,464 件、`witnessRejected` 921 件、`witnessSkipped` 19 件、`witnessTcpTimeout` 2,109 件、`witnessAbortThenCancel` 3,292 件、`witnessAbandonedHalfOpenSuperseded` 303 件、`witnessLiveDelivers` 6 件）。`witnessSkipped` と `witnessLiveDelivers` は薄いため、`conflateKeepsLatestTest` と `flowingDeliversEveryVersionTest` で決まった手順でも通します。
 
 ## 仕様を直すとき
 

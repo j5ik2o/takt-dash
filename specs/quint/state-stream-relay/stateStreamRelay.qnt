@@ -14,6 +14,8 @@
 // - CONFLATE: Next が読めない間（desiredSize <= 0）は列へ積まず、最新の 1 件だけを持つ。
 // - FINISH_ONCE: ReadableStream の cancel も、abort・error・end と同じ 1 本の後始末を通し、
 //   同じ接続の資源を二度閉じない。
+// - DROP_STALE_PENDING: 列に空きがあって新しい状態を直接入れるとき、持っていた古い版を捨てる。
+//   Next が読んでから pull が走るまでの間に状態が来ても、古い版を新しい版の後に送らない。
 //
 // 時間は扱わない。経路が切れた接続を OS が閉じる（tcpTimeout）のは、いつか起きる遷移として表す。
 module stateStreamRelay {
@@ -21,6 +23,7 @@ module stateStreamRelay {
   const REJECT_STALE: bool
   const CONFLATE: bool
   const FINISH_ONCE: bool
+  const DROP_STALE_PENDING: bool
 
   // Unused: まだ作っていない枠。InFlight: 画面が開いたがサーバーに届いていない。
   // Open: route.ts が開いて backend を購読している。Closed: route.ts が後始末を済ませた（または開かなかった）。
@@ -119,23 +122,25 @@ module stateStreamRelay {
 
   // backend から版 v を受けたときの列と持ち分。
   pure def offer(c: Conn, v: int): Conn =
-    if (c.queue.length() < HIGH_WATER_MARK) { ...c, produced: v, queue: c.queue.append(v) }
+    if (c.queue.length() < HIGH_WATER_MARK) {
+      ...c,
+      produced: v,
+      queue: c.queue.append(v),
+      pending: if (DROP_STALE_PENDING) NONE else c.pending,
+      skipped: if (DROP_STALE_PENDING and c.pending != NONE) c.skipped + 1 else c.skipped,
+    }
     else if (CONFLATE) { ...c, produced: v, pending: v, skipped: if (c.pending != NONE) c.skipped + 1 else c.skipped }
     else { ...c, produced: v, queue: c.queue.append(v) }
 
-  // Next が列の先頭を読んで送る。読んで空いたら pull が持ち分を列へ入れる。
-  pure def pullOne(c: Conn): Conn = {
+  // Next が列の先頭を読んで送る。
+  pure def readOne(c: Conn): Conn = {
     val first = c.queue.head()
-    val rest = c.queue.tail()
-    val refill = c.phase == Open and c.pending != NONE
-    {
-      ...c,
-      lastDelivered: first,
-      outOfOrder: c.outOfOrder or first <= c.lastDelivered,
-      queue: if (refill) rest.append(c.pending) else rest,
-      pending: if (refill) NONE else c.pending,
-    }
+    { ...c, lastDelivered: first, outOfOrder: c.outOfOrder or first <= c.lastDelivered, queue: c.queue.tail() }
   }
+
+  // 列に空きができたあとで ReadableStream が pull を呼び、持ち分を列へ入れる。
+  // 実物の pull は読みと同じ手の中とは限らない（start が済む前、前の pull が終わる前）。
+  pure def refill(c: Conn): Conn = { ...c, queue: c.queue.append(c.pending), pending: NONE }
 
   // ===== 状態機械 =====
 
@@ -297,13 +302,28 @@ module stateStreamRelay {
   }
 
   // Next が列から読み、画面へ書く。経路が生きている間だけ（切れると送り先が詰まって読まない）。
-  action nextPulls(id: int): bool = {
+  action nextReads(id: int): bool = {
     val c = conns.get(id)
     all {
       c.phase == Open or c.phase == Closed,
       c.pathUp,
       c.queue.length() > 0,
-      conns' = conns.set(id, pullOne(c)),
+      conns' = conns.set(id, readOne(c)),
+      nextConn' = nextConn,
+      clients' = clients,
+      registry' = registry,
+      arrivals' = arrivals,
+    }
+  }
+
+  // ReadableStream が pull を呼ぶ（列に空きがあり、持ち分があるとき）。
+  action relayPulls(id: int): bool = {
+    val c = conns.get(id)
+    all {
+      c.phase == Open,
+      c.pending != NONE,
+      c.queue.length() < HIGH_WATER_MARK,
+      conns' = conns.set(id, refill(c)),
       nextConn' = nextConn,
       clients' = clients,
       registry' = registry,
@@ -325,7 +345,8 @@ module stateStreamRelay {
       tcpTimeout(id),
       nextCancels(id),
       backendEmits(id),
-      nextPulls(id),
+      nextReads(id),
+      relayPulls(id),
     }
   }
 
@@ -425,25 +446,30 @@ module stateStreamRelay {
 
 // 修正前の main。画面ごとの付け替えも、詰まったときの間引きも、cancel の守りもない。
 module current {
-  import stateStreamRelay(SUPERSEDE = false, REJECT_STALE = false, CONFLATE = false, FINISH_ONCE = false).*
+  import stateStreamRelay(SUPERSEDE = false, REJECT_STALE = false, CONFLATE = false, FINISH_ONCE = false, DROP_STALE_PENDING = false).*
 }
 
 // 付け替えはするが、遅れて届いた古い試行を開いてしまう変異。
 module noRejectStale {
-  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = false, CONFLATE = true, FINISH_ONCE = true).*
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = false, CONFLATE = true, FINISH_ONCE = true, DROP_STALE_PENDING = true).*
 }
 
 // 付け替えだけで、詰まったときに列へ積み続ける変異。
 module noConflate {
-  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = false, FINISH_ONCE = true).*
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = false, FINISH_ONCE = true, DROP_STALE_PENDING = true).*
 }
 
 // cancel が後始末の守りを通らない変異。
 module noFinishOnce {
-  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = false).*
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = false, DROP_STALE_PENDING = false).*
+}
+
+// 列へ直接入れるときに古い持ち分を残し、あとの pull で古い版を送ってしまう変異（PR #389 の Devin の指摘）。
+module keepStalePending {
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = true, DROP_STALE_PENDING = false).*
 }
 
 // 修正案。
 module fixed {
-  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = true).*
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = true, DROP_STALE_PENDING = true).*
 }

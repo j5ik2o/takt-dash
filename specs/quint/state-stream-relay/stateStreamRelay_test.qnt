@@ -2,11 +2,12 @@
 // issue #385 の筋書きを、修正前（current）・変異（noRejectStale、noConflate、noFinishOnce）・
 // 修正案（fixed）でたどる。接続の番号は開いた順に 0 から振られる。
 module stateStreamRelay_test {
-  import stateStreamRelay(SUPERSEDE = false, REJECT_STALE = false, CONFLATE = false, FINISH_ONCE = false) as before from "./stateStreamRelay"
-  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = false, CONFLATE = true, FINISH_ONCE = true) as noRejectStale from "./stateStreamRelay"
-  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = false, FINISH_ONCE = true) as noConflate from "./stateStreamRelay"
-  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = false) as noFinishOnce from "./stateStreamRelay"
-  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = true) as after from "./stateStreamRelay"
+  import stateStreamRelay(SUPERSEDE = false, REJECT_STALE = false, CONFLATE = false, FINISH_ONCE = false, DROP_STALE_PENDING = false) as before from "./stateStreamRelay"
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = false, CONFLATE = true, FINISH_ONCE = true, DROP_STALE_PENDING = true) as noRejectStale from "./stateStreamRelay"
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = false, FINISH_ONCE = true, DROP_STALE_PENDING = true) as noConflate from "./stateStreamRelay"
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = false, DROP_STALE_PENDING = false) as noFinishOnce from "./stateStreamRelay"
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = true, DROP_STALE_PENDING = false) as keepStalePending from "./stateStreamRelay"
+  import stateStreamRelay(SUPERSEDE = true, REJECT_STALE = true, CONFLATE = true, FINISH_ONCE = true, DROP_STALE_PENDING = true) as after from "./stateStreamRelay"
 
   // 修正前: 経路が切れて画面が開き直すと、古い接続がサーバーに開いたまま残り、backend の購読も 2 本になる。
   run halfOpenReconnectLeavesTwoBeforeFixTest =
@@ -105,9 +106,10 @@ module stateStreamRelay_test {
       .then(3.reps(_ => after::backendEmits(0)))
       .expect(after::conns.get(0).queue == [1] and after::conns.get(0).pending == 3
         and after::conns.get(0).skipped == 1 and after::safety)
-      .then(after::nextPulls(0))
+      .then(after::nextReads(0))
+      .then(after::relayPulls(0))
       .expect(after::conns.get(0).lastDelivered == 1 and after::conns.get(0).queue == [3] and after::safety)
-      .then(after::nextPulls(0))
+      .then(after::nextReads(0))
       .expect(after::conns.get(0).lastDelivered == 3 and after::conns.get(0).queue == [] and after::safety)
 
   // 修正案: 読める間は 1 件ずつ、すべての版を順に送る。
@@ -116,10 +118,35 @@ module stateStreamRelay_test {
       .then(after::connect(0))
       .then(after::arrive(0))
       .then(after::backendEmits(0))
-      .then(after::nextPulls(0))
+      .then(after::nextReads(0))
       .then(after::backendEmits(0))
-      .then(after::nextPulls(0))
+      .then(after::nextReads(0))
       .expect(after::conns.get(0).lastDelivered == 2 and after::conns.get(0).skipped == 0 and after::safety)
+
+  // 修正案: 読んでから pull が走るまでの間に新しい状態が来たら、持っていた古い版を捨てて新しい版を送る。
+  run newerBeforePullDropsStaleTest =
+    after::init
+      .then(after::connect(0))
+      .then(after::arrive(0))
+      .then(2.reps(_ => after::backendEmits(0)))
+      .then(after::nextReads(0))
+      .then(after::backendEmits(0))
+      .expect(after::conns.get(0).queue == [3] and after::conns.get(0).pending == after::NONE and after::safety)
+      .then(after::nextReads(0))
+      .expect(after::conns.get(0).lastDelivered == 3 and not(after::conns.get(0).outOfOrder) and after::safety)
+
+  // 変異: 古い持ち分を残すと、あとの pull で古い版を新しい版の後に送る（1 → 3 → 2）。
+  run newerBeforePullKeepsStaleMutantTest =
+    keepStalePending::init
+      .then(keepStalePending::connect(0))
+      .then(keepStalePending::arrive(0))
+      .then(2.reps(_ => keepStalePending::backendEmits(0)))
+      .then(keepStalePending::nextReads(0))
+      .then(keepStalePending::backendEmits(0))
+      .then(keepStalePending::nextReads(0))
+      .then(keepStalePending::relayPulls(0))
+      .then(keepStalePending::nextReads(0))
+      .expect(keepStalePending::conns.get(0).lastDelivered == 2 and not(keepStalePending::deliveredInOrder))
 
   // 変異: 間引かないと、詰まった接続の列が伸び続ける。
   run queueGrowsWithoutConflateTest =

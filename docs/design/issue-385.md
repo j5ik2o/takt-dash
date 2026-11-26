@@ -54,7 +54,7 @@ route.ts は Next の決まりで HTTP の関数しか書き出せないので�
   3. それ以外は gRPC の `watchState()` を開き、`relayStateStream` で `ReadableStream` を作って返す。`admit` の `close` には中継の後始末を渡す。
 - 後始末は 1 本（`finish`）。abort、gRPC の `error`・`end`、`ReadableStream` の `cancel`、付け替え（`close`）のどれから来ても同じ関数を通り、2 回目以降は何もしない。中で `release()`、abort の聞き手を外す、`stream.cancel()`・`stream.destroy()`、`controller.close()`（`end` のときは gRPC がもう終わっているので `cancel` しない）。
 - `ReadableStream` は `new CountQueuingStrategy({ highWaterMark: 1 })` を明示して作る（既定の値に頼らない）。不変条件 8 と PBT の性質 8 は、この値を前提にする。
-- 間引き：gRPC から状態が来たら、`controller.desiredSize > 0` なら符号化して `enqueue`。そうでなければ `pending` に最新の状態だけを持つ（前の `pending` は捨てる）。`ReadableStream` の `pull` で `pending` があれば符号化して `enqueue` し、空にする。後始末で `pending` を捨てる。
+- 間引き：gRPC から状態が来たら、`controller.desiredSize > 0` なら持ち分を捨ててから符号化して `enqueue`（持ち分はこの状態より古い。捨てないと、あとの `pull` が古い版を新しい版の後に送る）。そうでなければ `pending` に最新の状態だけを持つ（前の `pending` は捨てる）。`ReadableStream` の `pull` で `pending` があれば符号化して `enqueue` し、空にする。後始末で `pending` を捨てる。
 - 付け替えで閉じた接続には `controller.close()` で終わりを伝える。Next がまだ `drain` を待っているあいだ、Node の応答とソケットは OS が閉じるまで残るが、それ以上は書かない。gRPC と backend のタスクはその場で閉じる。
 
 ### 変えないこと・範囲の外
@@ -112,13 +112,13 @@ Quint の不変条件（`specs/quint/state-stream-relay/stateStreamRelay.qnt`）
 `specs/quint/state-stream-relay/` に仕様とテストを置きました（`README.md` に範囲・前提・結果）。
 
 - `stateStreamRelay.qnt`：画面 2 つ・接続 5 本。経路の切断、画面の開き直しとタブの閉じ、要求の到着と付け替え・断り、abort・backend の終了・OS の打ち切り・Next の cancel、backend からの状態と Next の読み、を遷移にした状態機械。不変条件 10（`safety`）、到達条件 7。
-- `stateStreamRelay_test.qnt`：筋書き 15 件。修正前の 3 つの現象（2 本残る、列が伸びる、二度閉じる）、修正案の付け替え・断り・間引き・後始末 1 本、変異 3 つの反例、タブを閉じた接続が OS を待つ残り。
+- `stateStreamRelay_test.qnt`：筋書き 17 件。修正前の 3 つの現象（2 本残る、列が伸びる、二度閉じる）、修正案の付け替え・断り・間引き・後始末 1 本、変異 3 つの反例、タブを閉じた接続が OS を待つ残り。
 
 検査結果（quint 0.32.0）：
 
 - `quint typecheck`：2 ファイルともエラーなし。
-- `quint test stateStreamRelay_test.qnt --main=stateStreamRelay_test`：15 件すべて成功。
-- 修正前（`current`）は `noDoubleRelease`・`atMostOneOpenPerScreen`・`closedOnNextArrival`・`staleNeverOpensBesideNewer`・`queueBounded` に違反。変異は、`noRejectStale` が `liveNotClosedByRelay`、`noConflate` が `queueBounded`、`noFinishOnce` が `noDoubleRelease` に違反（各 `--max-steps=30 --max-samples=10000 --seed=0x385`）。
+- `quint test stateStreamRelay_test.qnt --main=stateStreamRelay_test`：17 件すべて成功。
+- 修正前（`current`）は `noDoubleRelease`・`atMostOneOpenPerScreen`・`closedOnNextArrival`・`staleNeverOpensBesideNewer`・`queueBounded` に違反。変異は、`noRejectStale` が `liveNotClosedByRelay`、`noConflate` が `queueBounded`、`noFinishOnce` が `noDoubleRelease` に違反（各 `--max-steps=30 --max-samples=10000 --seed=0x385`）。`keepStalePending` は `deliveredInOrder` に違反（`--max-samples=100000`）。
 - 修正案（`fixed`）：`--invariant=safety --max-steps=40 --max-samples=20000 --seed=0x385` で反例なし。到達条件 7 つすべて到達。
 
 ## 壊しうる入力の一覧
@@ -165,3 +165,10 @@ Quint の不変条件（`specs/quint/state-stream-relay/stateStreamRelay.qnt`）
 | 2 | 低 | 直す | `ReadableStream` を `highWaterMark: 1` で明示して作ると書き、不変条件 8 と PBT の性質 8 がその値を前提にすると書いた |
 | 3 | 低 | 直す | `/api/state` を当てている所をすべて洗い出して「影響」に書いた。e2e の glob は、引数の有無のどちらにも当たる正規表現にする |
 | 4 | 低 | 直す | StrictMode の二重の mount で識別子が 2 つできる場合を「壊しうる入力」に書き、単体テストで確かめると書いた |
+
+## PR のレビューを受けて変えた点（[j5ik2o/takt-dash#389](https://github.com/j5ik2o/takt-dash/pull/389)）
+
+| 指摘 | 扱い | 変更内容 |
+| --- | --- | --- |
+| Devin：読み始めた直後に次の状態が来ると 1 → 3 → 2 の順で届く | 直す | 列へ直接入れるときに持ち分を捨てる。Quint で読み（`nextReads`）と `pull`（`relayPulls`）を別の遷移にし、変異 `keepStalePending` が `deliveredInOrder` を破ることを確かめた。PBT に、開いた直後に続けて状態が来る手と、読んだ直後に状態が来る手を足し、手の間で microtask を流し切らない並びも作った。`then` の中の確かめを手のあとに移した（`then` の中で投げても試験が落ちなかった） |
+| Cursor Bugbot：`openStream` がその場で例外を投げると、登録と abort の聞き手が残る | 直す | 例外を捕まえて後始末を通してから投げ直す。単体テストを足した |
