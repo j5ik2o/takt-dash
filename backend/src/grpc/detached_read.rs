@@ -6,25 +6,81 @@
 //! ことになる。次の要求はまた起動と初期化から始め、初期化が期限より長い負荷では、どの要求も
 //! 成功しない。そこで読み取りを別のタスクで行い、要求は結果を待つだけにする。
 //!
-//! タスクは鍵を待つ間だけ、要求がまだ待っているかを見る。要求が先に諦めたら、鍵を取らずに終える。
-//! 鍵を取った後は、要求が諦めても最後まで進める。Quint の仕様は
-//! `specs/quint/run-detail-deadline/` にある。
+//! 要求が諦めた後の扱い：
+//! - 鍵を待っている間なら、鍵を取らずに終える（設計レビューの指摘 1）。
+//! - 鍵を取った後なら、進行中の段（起動と初期化、または 1 回の道具の呼び出し）だけを終え、新しい
+//!   呼び出しは始めない（[`AwaitedCaller`]）。子プロセスは使える状態で残り、誰も待たない呼び出しで
+//!   レーンをふさがない。
+//!
+//! Quint の仕様は `specs/quint/run-detail-deadline/` にある（修正案は `DETACH = "call"`）。
 
-use std::future::Future;
+use std::{
+  future::Future,
+  pin::Pin,
+  sync::{Arc, Weak},
+};
 
-use tokio::sync::{oneshot, OwnedMutexGuard};
+use serde_json::Value;
+use tokio::sync::{oneshot, Mutex as AsyncMutex, OwnedMutexGuard};
 
-use crate::mcp::{ClientHandle, McpClient, ToolError, TransportError};
+use crate::mcp::{CallError, ToolCaller, ToolError, TransportError};
 
-/// 鍵を取ってから `read` を最後まで進めるタスクを起こし、その結果を待つ。
+/// 要求がまだ結果を待っている間だけ道具を呼ぶ呼び出し先。
 ///
-/// 返す future を捨てても（要求の打ち切り）、鍵を取った後のタスクは止まらない。
-/// 鍵を待つ間に捨てれば、 タスクは鍵を取らずに終える。
-pub(super) async fn detached<T, F, Fut>(handle: ClientHandle, read: F) -> Result<T, ToolError>
+/// 呼び出しのたびに、先に接続の開始（stdio の起動と初期化）を済ませ、そのあとで要求が待っているかを
+/// 見る。要求が諦めていれば、道具を送らずに [`TransportError::NotSent`] で返す。進行中の呼び出しは
+/// 要求が諦めても最後まで進める（途中で捨てると、読みかけの子プロセスを捨てることになる）。
+pub(super) struct AwaitedCaller<C: ToolCaller + Send + 'static> {
+  client: OwnedMutexGuard<C>,
+  waiter: Weak<()>,
+}
+
+impl<C: ToolCaller + Send + 'static> AwaitedCaller<C> {
+  fn awaited(&self) -> bool {
+    self.waiter.strong_count() > 0
+  }
+}
+
+impl<C: ToolCaller + Send + 'static> ToolCaller for AwaitedCaller<C> {
+  fn call_tool<'a>(
+    &'a mut self,
+    name: &'a str,
+    arguments: Value,
+  ) -> Pin<Box<dyn Future<Output = Result<String, CallError>> + Send + 'a>> {
+    Box::pin(async move {
+      self.client.ensure_started().await?;
+      if !self.awaited() {
+        return Err(CallError::Transport(TransportError::NotSent(
+          "要求が結果を待つのをやめたので、道具を呼びません".to_owned(),
+        )));
+      }
+      self.client.call_tool(name, arguments).await
+    })
+  }
+
+  fn connection_key(&self) -> String {
+    self.client.connection_key()
+  }
+
+  fn ensure_started<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + 'a>> {
+    self.client.ensure_started()
+  }
+}
+
+/// 鍵を取ってから `read` を進めるタスクを起こし、その結果を待つ。
+///
+/// 返す future を捨てても（要求の打ち切り）、タスクは止まらない。鍵を待つ間に捨てれば、タスクは
+/// 鍵を取らずに終える。鍵を取った後に捨てれば、`read` の中の進行中の段だけが終わり、新しい道具の
+/// 呼び出しは [`AwaitedCaller`] が断る。
+pub(super) async fn detached<C, T, F, Fut>(handle: Arc<AsyncMutex<C>>, read: F) -> Result<T, ToolError>
 where
+  C: ToolCaller + Send + 'static,
   T: Send + 'static,
-  F: FnOnce(OwnedMutexGuard<McpClient>) -> Fut + Send + 'static,
+  F: FnOnce(AwaitedCaller<C>) -> Fut + Send + 'static,
   Fut: Future<Output = Result<T, ToolError>> + Send + 'static, {
+  // 要求が待っている印。この future が捨てられると印も消え、タスクは要求が諦めたと分かる。
+  let waiting = Arc::new(());
+  let waiter = Arc::downgrade(&waiting);
   let (mut sender, receiver) = oneshot::channel();
   tokio::spawn(async move {
     let client = tokio::select! {
@@ -35,9 +91,11 @@ where
     if sender.is_closed() {
       return;
     }
-    let _ = sender.send(read(client).await);
+    let _ = sender.send(read(AwaitedCaller { client, waiter }).await);
   });
-  receiver.await.map_err(|_| {
+  let result = receiver.await;
+  drop(waiting);
+  result.map_err(|_| {
     ToolError::Transport(TransportError::Io("画面の読み取りのタスクが結果を返さずに終わりました".to_owned()))
   })?
 }
@@ -53,58 +111,62 @@ mod tests {
   };
 
   use proptest::prelude::*;
+  use serde_json::json;
   use tokio::sync::Mutex as AsyncMutex;
 
   use super::*;
-  use crate::mcp::McpClientConfig;
 
-  fn handle() -> ClientHandle {
-    // 子プロセスは起動しない（道具を呼ばない）ので、起動の設定は使われない。
-    Arc::new(AsyncMutex::new(McpClient::new(McpClientConfig {
-      command:         "never-started".to_owned(),
-      args:            Vec::new(),
-      env:             Default::default(),
-      cwd:             std::env::temp_dir(),
-      request_timeout: Duration::from_secs(15),
-      tool_timeouts:   Default::default(),
-    })))
+  /// 呼び出しのたびに `work` 秒かかる偽の呼び出し先。呼び出し先に届いた呼び出しを数える。
+  struct FakeCaller {
+    work:     Duration,
+    received: Arc<AtomicUsize>,
   }
 
-  /// 1 件の要求。`cancel` は要求を打ち切る時刻（ミリ秒）で、`None` は打ち切らない。
-  #[derive(Debug, Clone)]
-  struct Waiter {
-    cancel: Option<u64>,
+  impl ToolCaller for FakeCaller {
+    fn call_tool<'a>(
+      &'a mut self,
+      _name: &'a str,
+      _arguments: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<String, CallError>> + Send + 'a>> {
+      Box::pin(async move {
+        self.received.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.work).await;
+        Ok(String::new())
+      })
+    }
+
+    fn connection_key(&self) -> String {
+      "fake".to_owned()
+    }
   }
 
-  /// 要求ごとの記録。
-  #[derive(Default)]
-  struct Record {
-    started:  AtomicUsize,
-    finished: AtomicUsize,
-  }
-
-  /// 鍵の持ち主が `held` 秒後に鍵を放し、`waiters` が順に鍵を待つ。各読み取りは `work` 秒かかる。
-  /// 打ち切りは x.5 秒に置き、鍵の受け渡し（整数秒）と同時にならないようにする。
-  fn scenario() -> impl Strategy<Value = (u64, u64, Vec<Waiter>)> {
+  /// 鍵の持ち主が `held` 秒後に鍵を放し、要求（打ち切る時刻、ミリ秒。`None` は打ち切らない）が順に
+  /// 鍵を待つ。各要求の読み取りは道具を `calls` 回呼び、1 回に `work` 秒かかる。打ち切りは x.5
+  /// 秒に置き、 鍵の受け渡しと呼び出しの切れ目（整数秒）と同時にならないようにする。
+  fn scenario() -> impl Strategy<Value = (u64, u64, usize, Vec<Option<u64>>)> {
     (
       0u64..=60,
-      0u64..=60,
+      0u64..=20,
+      1usize..=4,
       prop::collection::vec(prop::option::of((0u64..=180).prop_map(|half| half * 1000 + 500)), 1..=4),
     )
-      .prop_map(|(held, work, cancels)| (held, work, cancels.into_iter().map(|cancel| Waiter { cancel }).collect()))
   }
 
-  /// 鍵は先着順に渡る。各要求が鍵を取る時刻（ミリ秒）と、読み取りを始めるかを求める。
-  fn expected_starts(held: u64, work: u64, waiters: &[Waiter]) -> Vec<bool> {
+  /// 鍵は先着順に渡る。要求ごとに、始める呼び出しの回数を求める。鍵を取る前に打ち切った要求は 0
+  /// 回。
+  /// 鍵を取った後は、打ち切りより前に始まる呼び出しだけを数える（進行中の呼び出しは最後まで進む）。
+  fn expected_calls(held: u64, work: u64, calls: usize, cancels: &[Option<u64>]) -> Vec<usize> {
     let mut free_at = held * 1000;
-    waiters
+    cancels
       .iter()
-      .map(|waiter| {
-        let starts = waiter.cancel.is_none_or(|cancel| cancel > free_at);
-        if starts {
-          free_at += work * 1000;
-        }
-        starts
+      .map(|cancel| {
+        let count = match cancel {
+          | Some(cancel) if *cancel < free_at => 0,
+          | Some(cancel) => (0..calls).take_while(|index| free_at + *index as u64 * work * 1000 < *cancel).count(),
+          | None => calls,
+        };
+        free_at += count as u64 * work * 1000;
+        count
       })
       .collect()
   }
@@ -112,34 +174,55 @@ mod tests {
   proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 
-    /// 設計の PBT 2：鍵を取る前に打ち切った要求の読み取りは始まらない。始まった読み取りは、打ち切られても
-    /// 最後まで進む。打ち切らない要求は結果を受け取る。鍵を待つタスクの数は、待っている要求の数以下。
+    /// 設計の PBT 2：鍵を取る前に打ち切った要求は道具を呼ばない。鍵を取った後に打ち切った要求は、
+    /// 打ち切りより前に始めた呼び出しだけを最後まで進め、新しい呼び出しは始めない。打ち切らない要求は
+    /// 結果を受け取る。鍵を待つタスクの数は、待っている要求の数以下。
     #[test]
-    fn detached_reads_finish_once_started_and_never_start_for_abandoned_waits((held, work, waiters) in scenario()) {
+    fn detached_reads_stop_calling_once_the_request_leaves((held, work, calls, cancels) in scenario()) {
       let runtime = tokio::runtime::Builder::new_current_thread().enable_time().start_paused(true).build().unwrap();
       runtime.block_on(async move {
-        let handle = handle();
+        let started: Vec<Arc<AtomicUsize>> = cancels.iter().map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let finished: Vec<Arc<AtomicUsize>> = cancels.iter().map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let acquired: Vec<Arc<AtomicUsize>> = cancels.iter().map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let received = Arc::new(AtomicUsize::new(0));
+        let handle =
+          Arc::new(AsyncMutex::new(FakeCaller { work: Duration::from_secs(work), received: received.clone() }));
         let holder = handle.clone().lock_owned().await;
         tokio::spawn(async move {
           tokio::time::sleep(Duration::from_secs(held)).await;
           drop(holder);
         });
-        let records: Vec<Arc<Record>> = waiters.iter().map(|_| Arc::new(Record::default())).collect();
         let running = Arc::new(AtomicUsize::new(0));
         let mut results = Vec::new();
-        for (index, waiter) in waiters.iter().enumerate() {
-          let record = records[index].clone();
-          let running = running.clone();
-          let read = detached(handle.clone(), move |client| async move {
-            let _client = client;
-            record.started.fetch_add(1, Ordering::SeqCst);
+        for (index, cancel) in cancels.iter().enumerate() {
+          let (started, finished, running) = (started[index].clone(), finished[index].clone(), running.clone());
+          let (acquired, received) = (acquired[index].clone(), received.clone());
+          let read = detached(handle.clone(), move |mut client| async move {
+            acquired.fetch_add(1, Ordering::SeqCst);
             running.fetch_add(1, Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_secs(work)).await;
+            let mut done = 0;
+            let outcome = loop {
+              if done == calls {
+                break Ok(done);
+              }
+              let before = received.load(Ordering::SeqCst);
+              let call = client.call_tool("takt_get_run", json!({})).await;
+              if received.load(Ordering::SeqCst) > before {
+                started.fetch_add(1, Ordering::SeqCst);
+              }
+              match call {
+                | Ok(_) => {
+                  finished.fetch_add(1, Ordering::SeqCst);
+                  done += 1;
+                },
+                | Err(error) => break Err(ToolError::from(error)),
+              }
+            };
             running.fetch_sub(1, Ordering::SeqCst);
-            record.finished.fetch_add(1, Ordering::SeqCst);
-            Ok(index)
+            drop(client);
+            outcome
           });
-          let cancel = waiter.cancel;
+          let cancel = *cancel;
           results.push(tokio::spawn(async move {
             match cancel {
               | Some(cancel) => tokio::time::timeout(Duration::from_millis(cancel), read).await.ok(),
@@ -149,7 +232,7 @@ mod tests {
           // 要求は並べた順に鍵を待ち始める。
           tokio::task::yield_now().await;
         }
-        let end = held * 1000 + work * 1000 * waiters.len() as u64 + 200_000;
+        let end = held * 1000 + work * 1000 * (calls * cancels.len()) as u64 + 200_000;
         let mut now = 0;
         while now < end {
           tokio::time::sleep(Duration::from_millis(250)).await;
@@ -157,16 +240,15 @@ mod tests {
           for _ in 0..8 {
             tokio::task::yield_now().await;
           }
-          // 鍵を待つタスク：取っ手を持つ数から、テスト自身の 1 つと、読み取り中のタスクを除く。
-          // 鍵の持ち主のタスクも取っ手を持つ（鍵を放すまで）。
+          // 鍵を待つタスク：取っ手を持つ数から、テスト自身の 1 つと、読み取り中のタスクと、鍵の持ち主の
+          // タスク（鍵を放すまで）を除く。
           let holder_alive = usize::from(now < held * 1000);
-          let waiting_tasks =
-            Arc::strong_count(&handle) - 1 - running.load(Ordering::SeqCst) - holder_alive;
-          let waiting_requests = waiters
+          let waiting_tasks = Arc::strong_count(&handle) - 1 - running.load(Ordering::SeqCst) - holder_alive;
+          let waiting_requests = cancels
             .iter()
             .enumerate()
-            .filter(|(index, waiter)| {
-              waiter.cancel.is_none_or(|cancel| cancel > now) && records[*index].started.load(Ordering::SeqCst) == 0
+            .filter(|(index, cancel)| {
+              cancel.is_none_or(|cancel| cancel > now) && acquired[*index].load(Ordering::SeqCst) == 0
             })
             .count();
           assert!(
@@ -174,17 +256,18 @@ mod tests {
             "時刻 {now} ms：鍵を待つタスク {waiting_tasks} は、待っている要求 {waiting_requests} 以下です"
           );
         }
-        let expected = expected_starts(held, work, &waiters);
-        for (index, waiter) in waiters.iter().enumerate() {
-          let started = records[index].started.load(Ordering::SeqCst);
-          let finished = records[index].finished.load(Ordering::SeqCst);
-          assert_eq!(started, usize::from(expected[index]), "要求 {index} の読み取りを始めた回数");
-          assert_eq!(finished, started, "要求 {index}：始めた読み取りは、打ち切られても最後まで進みます");
+        let expected = expected_calls(held, work, calls, &cancels);
+        for (index, cancel) in cancels.iter().enumerate() {
+          let started = started[index].load(Ordering::SeqCst);
+          let finished = finished[index].load(Ordering::SeqCst);
+          assert_eq!(started, expected[index], "要求 {index} が呼び出し先に送った呼び出しの回数");
+          assert_eq!(finished, started, "要求 {index}：送った呼び出しは、打ち切られても最後まで進みます");
           let result = results.remove(0).await.unwrap();
-          if waiter.cancel.is_none() {
-            assert_eq!(result.unwrap().unwrap(), index, "打ち切らない要求は結果を受け取ります");
+          if cancel.is_none() {
+            assert_eq!(result.unwrap().unwrap(), calls, "打ち切らない要求は結果を受け取ります");
           }
         }
+        assert_eq!(received.load(Ordering::SeqCst), expected.iter().sum::<usize>(), "呼び出し先に届いた呼び出しの数");
         assert_eq!(Arc::strong_count(&handle), 1, "終わった後に、鍵を待つタスクは残りません");
       });
     }

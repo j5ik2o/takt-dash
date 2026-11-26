@@ -152,7 +152,7 @@ impl ReadSource {
       | ReadSource::Stdio(handle) => {
         let (cwd, run_slug) = (cwd.to_path_buf(), run_slug.clone());
         detached(handle.clone(), move |mut client| async move {
-          ReadToolSet::new(&mut *client, cwd).read_remote_run(&run_slug).await
+          ReadToolSet::new(&mut client, cwd).read_remote_run(&run_slug).await
         })
         .await
       },
@@ -170,7 +170,7 @@ impl ReadSource {
       | ReadSource::Stdio(handle) => {
         let (cwd, run_slug) = (cwd.to_path_buf(), run_slug.clone());
         detached(handle.clone(), move |mut client| async move {
-          let mut toolset = ReadToolSet::new(&mut *client, cwd);
+          let mut toolset = ReadToolSet::new(&mut client, cwd);
           let mut remote = toolset.read_remote_run(&run_slug).await?;
           remote.instructions = toolset.read_remote_instructions(&run_slug).await?;
           if remote.task_text.is_empty() {
@@ -196,7 +196,7 @@ impl ReadSource {
       | ReadSource::Stdio(handle) => {
         let (cwd, run_slug, filename) = (cwd.to_path_buf(), run_slug.clone(), filename.clone());
         detached(handle.clone(), move |mut client| async move {
-          ReadToolSet::new(&mut *client, cwd).read_remote_report(&run_slug, &filename, max_bytes).await
+          ReadToolSet::new(&mut client, cwd).read_remote_report(&run_slug, &filename, max_bytes).await
         })
         .await
       },
@@ -216,7 +216,7 @@ impl ReadSource {
       | ReadSource::Stdio(handle) => {
         let (cwd, run_slug) = (cwd.to_path_buf(), run_slug.clone());
         detached(handle.clone(), move |mut client| async move {
-          ReadToolSet::new(&mut *client, cwd).read_remote_instruction(&run_slug, instruction_id, max_bytes).await
+          ReadToolSet::new(&mut client, cwd).read_remote_instruction(&run_slug, instruction_id, max_bytes).await
         })
         .await
       },
@@ -234,7 +234,7 @@ impl ReadSource {
       | ReadSource::Stdio(handle) => {
         let (cwd, goal_id) = (cwd.to_path_buf(), goal_id.clone());
         detached(handle.clone(), move |mut client| async move {
-          ReadToolSet::new(&mut *client, cwd).read_goal_detail(&goal_id).await
+          ReadToolSet::new(&mut client, cwd).read_goal_detail(&goal_id).await
         })
         .await
       },
@@ -255,7 +255,7 @@ impl ReadSource {
         let (cwd, project, task_name, goal_id) =
           (cwd.to_path_buf(), project.clone(), task_name.clone(), goal_id.cloned());
         detached(handle.clone(), move |mut client| async move {
-          ReadToolSet::new(&mut *client, cwd).read_task_detail(&project, &task_name, goal_id.as_ref()).await
+          ReadToolSet::new(&mut client, cwd).read_task_detail(&project, &task_name, goal_id.as_ref()).await
         })
         .await
       },

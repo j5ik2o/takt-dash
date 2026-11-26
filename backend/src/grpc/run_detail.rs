@@ -59,17 +59,27 @@ pub(super) async fn within_budget<T>(
   }
 }
 
-/// 回り道（takt_get_run）でも読めなかったときの状態。道具の時間切れは「応答なし」
-/// （DEADLINE_EXCEEDED）にし、それ以外は保存場所の読み取りの失敗 `local` の状態にする。
+/// 回り道（takt_get_run）でも読めなかったときの状態。
 ///
-/// 時間切れは run が無いことを意味しないため、保存場所の対応表に無い run（`NotListed`）を
+/// - 道具の時間切れは「応答なし」（DEADLINE_EXCEEDED）。
+/// - 時間切れ以外の輸送の失敗（起動・入出力・送れなかった要求・HTTP など）は UNAVAILABLE。HTTP の
+///   セッションの確立の時間切れも、書き込みの再送の判定のため `NotSent`
+///   に包まれて届くので、ここに入る。
+/// - takt-mcp が答えた失敗（道具のエラー、JSON-RPC のエラー、解析の失敗）は、保存場所の読み取りの
+///   失敗 `local` の状態。
+///
+/// 輸送の失敗は run が無いことを意味しないため、保存場所の対応表に無い run（`NotListed`）を
 /// NOT_FOUND（画面の 404）にしません。
 pub(super) fn remote_failure_status(local: RunReadFailure, remote: &ToolError) -> Status {
   match remote {
     | ToolError::Transport(TransportError::Timeout(seconds)) => Status::deadline_exceeded(format!(
       "takt-mcp から {seconds} 秒以内に run の詳細の応答がありませんでした（保存場所: {local}）。"
     )),
-    | _ => run_read_failure_status(local),
+    | ToolError::Transport(TransportError::Rpc { .. }) => run_read_failure_status(local),
+    | ToolError::Transport(error) => {
+      Status::unavailable(format!("takt-mcp から run の詳細を読めませんでした: {error}（保存場所: {local}）。"))
+    },
+    | ToolError::Tool(_) | ToolError::Parse(_) => run_read_failure_status(local),
   }
 }
 
@@ -333,12 +343,14 @@ mod tests {
       });
     }
 
-    /// 設計の PBT 3：回り道の道具の時間切れは必ず DEADLINE_EXCEEDED。それ以外は保存場所の失敗の状態。
+    /// 設計の PBT 3：回り道の道具の時間切れは必ず DEADLINE_EXCEEDED。時間切れ以外の輸送の失敗は
+    /// UNAVAILABLE で、NOT_FOUND にはならない。takt-mcp が答えた失敗は保存場所の失敗の状態。
     #[test]
-    fn a_remote_timeout_is_deadline_exceeded_and_other_failures_keep_the_local_status(
+    fn remote_failure_status_never_turns_a_transport_failure_into_not_found(
       local_kind in 0usize..2,
-      remote_kind in 0usize..5,
+      remote_kind in 0usize..12,
       seconds in any::<u64>(),
+      code in any::<i64>(),
       text in ".{0,16}",
     ) {
       let local = || match local_kind {
@@ -349,14 +361,21 @@ mod tests {
         | 0 => ToolError::Transport(TransportError::Timeout(seconds)),
         | 1 => ToolError::Transport(TransportError::Io(text.clone())),
         | 2 => ToolError::Transport(TransportError::ProcessExited),
-        | 3 => ToolError::Tool(ToolCallError { tool: "takt_get_run".to_owned(), message: text.clone() }),
+        | 3 => ToolError::Transport(TransportError::Spawn(text.clone())),
+        | 4 => ToolError::Transport(TransportError::NotSent(text.clone())),
+        | 5 => ToolError::Transport(TransportError::Backoff(seconds)),
+        | 6 => ToolError::Transport(TransportError::InvalidJson(text.clone())),
+        | 7 => ToolError::Transport(TransportError::Http(text.clone())),
+        | 8 => ToolError::Transport(TransportError::Protocol(text.clone())),
+        | 9 => ToolError::Transport(TransportError::Rpc { code, message: text.clone() }),
+        | 10 => ToolError::Tool(ToolCallError { tool: "takt_get_run".to_owned(), message: text.clone() }),
         | _ => ToolError::Parse(text.clone()),
       };
       let status = remote_failure_status(local(), &remote);
-      if remote_kind == 0 {
-        prop_assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
-      } else {
-        prop_assert_eq!(status.code(), run_read_failure_status(local()).code());
+      match remote_kind {
+        | 0 => prop_assert_eq!(status.code(), tonic::Code::DeadlineExceeded),
+        | 1..=8 => prop_assert_eq!(status.code(), tonic::Code::Unavailable),
+        | _ => prop_assert_eq!(status.code(), run_read_failure_status(local()).code()),
       }
     }
   }

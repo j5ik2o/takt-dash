@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc f60566f85c0fed8d6711d3ad28fbaf1943f8eb5e889f4de25d3c5201b58953b7 # shrinks to (held, work, waiters) = (0, 51, [Waiter { cancel: None }, Waiter { cancel: None }, Waiter { cancel: None }, Waiter { cancel: Some(500) }])
+cc 67371bba4a4f9f365f2acca6bfd17f3b8fbbba1431e8368fe5e24aa6dc884518 # shrinks to (held, work, calls, cancels) = (16, 1, 4, [None, Some(20500)])

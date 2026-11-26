@@ -120,7 +120,8 @@ export type CreateBackendClientOptions = {
   // 書き込みの要求に設定する期限（ミリ秒）。読み取りには適用しない。
   writeDeadlineMs?: number;
   /**
-   * unary RPC の deadline（ミリ秒）。省略時は既定の有限値を用いる。
+   * 読み取りの unary RPC の deadline（ミリ秒）。省略時は既定の有限値を用いる。GetRunDetail には
+   * 効かない（GetRunDetail は runDetailDeadlineMs を使う）。
    * 応答を返さない backend で無期限に待たないため、テストからは短い値を注入する。
    */
   deadlineMs?: number;

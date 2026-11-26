@@ -83,18 +83,6 @@ async fn wait_for_ready(spawn_log: &std::path::Path, within: Duration) -> bool {
   false
 }
 
-/// 道具の呼び出しの記録が `count` 件に達するまで待つ。
-async fn wait_for_calls(harness: &GrpcHarness, count: usize, within: Duration) -> bool {
-  let started = Instant::now();
-  while started.elapsed() < within {
-    if harness.recorded_calls().len() >= count {
-      return true;
-    }
-    tokio::time::sleep(Duration::from_millis(50)).await;
-  }
-  false
-}
-
 #[tokio::test]
 async fn a_run_detail_cancelled_during_initialize_leaves_the_child_ready_for_the_next_request() {
   // issue #180：初期化が Web の deadline
@@ -126,8 +114,9 @@ async fn a_run_detail_cancelled_during_initialize_leaves_the_child_ready_for_the
 
 #[tokio::test]
 async fn a_run_detail_cancelled_during_a_tool_call_keeps_the_child() {
-  // 呼び出しの途中で打ち切られても、読み取りは最後まで進み、子プロセスを捨てない。修正前は、
-  // 読みかけの子プロセスを捨てて、次の要求が起動し直す。
+  // 呼び出しの途中で打ち切られても、進行中の呼び出しは最後まで進み、子プロセスを捨てない。
+  // 誰も待たない残りの呼び出し（view instructions、view task）は送らない。修正前は、読みかけの
+  // 子プロセスを捨てて、次の要求が起動し直す。
   let harness = seeded_harness(remote_run_state());
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
@@ -140,10 +129,12 @@ async fn a_run_detail_cancelled_during_a_tool_call_keeps_the_child() {
   let cancelled = client.get_run_detail(request_with_deadline(Some(Duration::from_millis(500)))).await;
   assert!(cancelled.is_err(), "呼び出しの途中で deadline を過ぎた要求は失敗します: {cancelled:?}");
   harness.rewrite_state(remote_run_state());
-  // 打ち切られた要求の読み取り（takt_get_run の本体、view instructions、view task）は最後まで進む。
-  assert!(
-    wait_for_calls(&harness, calls_before + 3, Duration::from_secs(10)).await,
-    "打ち切られた要求の読み取りも最後まで進みます: {:?}",
+  // 進行中の呼び出し（1.5 秒）が終わるまで待つ。
+  tokio::time::sleep(Duration::from_secs(2)).await;
+  assert_eq!(
+    harness.recorded_calls().len(),
+    calls_before + 1,
+    "打ち切られた要求は、進行中の呼び出しのあとに新しい呼び出しを送りません: {:?}",
     harness.recorded_calls()
   );
   let detail = client

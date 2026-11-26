@@ -17,8 +17,10 @@
 //           起動し直す）。
 //   "init"：初期化だけを要求から切り離す（設計の途中で考えた案）。初期化は最後まで進むが、
 //           呼び出し中の打ち切りでは子プロセスを捨てる。
-//   "op"  ：修正案。op 全体（鍵の取得、起動と初期化、道具の呼び出し）を要求から切り離して最後まで
-//           走らせる。要求は結果を待つのをやめるだけ。
+//   "op"  ：op 全体（鍵の取得、起動と初期化、道具の呼び出し）を要求から切り離して最後まで走らせる
+//           （PR の最初の版）。要求が諦めた後も、残りの呼び出しを流す（Devin Review の指摘）。
+//   "call"：修正案。op を要求から切り離すが、要求が諦めた後は、進行中の段（初期化か、1 回の呼び出し）
+//           だけを終えて止める。子プロセスは使える状態で残り、誰も待たない呼び出しは始めない。
 // BUDGET は backend の総上限（0 は上限なし）。WEB_DEADLINE は Web の gRPC の deadline。
 // CHECK_WAITER は、DETACH = "op" で切り離したタスクが鍵を待つ間に、要求がまだ待っているかを
 // 確かめるか。確かめないと、要求が諦めた後もタスクは鍵の待ちに残り、鍵が空いてから、誰も
@@ -37,7 +39,11 @@ module runDetailDeadline {
 
   type OpPhase = OpNone | OpInit | OpCalling
 
-  type Outcome = { id: int, result: str, elapsed: int, foundReady: bool }
+  // duringInit：要求が終わったとき、その要求の op が初期化の途中だったか。
+  type Outcome = { id: int, result: str, elapsed: int, foundReady: bool, duringInit: bool }
+
+  // 要求の打ち切りで op を捨てない（切り離す）版か。
+  pure val DETACHED: bool = DETACH == "op" or DETACH == "call"
 
   var now: int
   // 子プロセスが初期化を終えて使える状態か。
@@ -64,6 +70,8 @@ module runDetailDeadline {
   var waitingTasks: int
   // 要求に諦められた後で、鍵を取って読み取りを始めたタスクの数。
   var abandonedOps: int
+  // 要求に諦められた op が、新しく始めた道具の呼び出しの数。
+  var orphanCalls: int
 
   // ---- 補助 ----
 
@@ -94,14 +102,18 @@ module runDetailDeadline {
     reqStartedAt' = reqStartedAt,
     reqFoundReady' = reqFoundReady,
     reqCount' = reqCount,
-    outcomes' = outcomes.append({ id: reqId, result: result, elapsed: now - reqStartedAt, foundReady: reqFoundReady }),
+    outcomes' = outcomes.append({
+      id: reqId, result: result, elapsed: now - reqStartedAt, foundReady: reqFoundReady,
+      duringInit: not(reqQueued) and opPhase == OpInit,
+    }),
+    orphanCalls' = orphanCalls,
     now' = now,
     spawns' = spawns,
     opEventAt' = opEventAt,
     opCallsLeft' = opCallsLeft,
     // 鍵を待っていた要求が終わると、そのタスクは鍵の待ちをやめる。ただし、切り離したタスクが
     // 要求を確かめない版では、タスクは鍵の待ちに残る。
-    waitingTasks' = if (reqQueued and not(DETACH == "op" and not(CHECK_WAITER))) waitingTasks - 1 else waitingTasks,
+    waitingTasks' = if (reqQueued and not(DETACHED and not(CHECK_WAITER))) waitingTasks - 1 else waitingTasks,
     abandonedOps' = abandonedOps,
     // 鍵を待っていた要求の終わりは、前の要求の op に触れない。
     if (reqQueued or opPhase == OpNone or result == "Ok") all {
@@ -109,7 +121,7 @@ module runDetailDeadline {
       opOrphan' = opOrphan,
       procReady' = procReady,
       killedByCancel' = killedByCancel,
-    } else if (DETACH == "op" or (DETACH == "init" and opPhase == OpInit)) all {
+    } else if (DETACHED or (DETACH == "init" and opPhase == OpInit)) all {
       opPhase' = opPhase,
       opOrphan' = true,
       procReady' = procReady,
@@ -132,6 +144,7 @@ module runDetailDeadline {
     reqCount' = reqCount + 1,
     reqStartedAt' = now,
     reqFoundReady' = (procReady and opPhase == OpNone and waitingTasks == 0),
+    orphanCalls' = orphanCalls,
     outcomes' = outcomes,
     now' = now,
     killedByCancel' = killedByCancel,
@@ -161,6 +174,7 @@ module runDetailDeadline {
     opPhase == OpNone,
     waitingTasks == 1,
     waitingTasks' = 0,
+    orphanCalls' = orphanCalls,
     abandonedOps' = abandonedOps,
     reqQueued' = false,
     reqActive' = reqActive,
@@ -181,6 +195,7 @@ module runDetailDeadline {
     waitingTasks > (if (reqActive and reqQueued) 1 else 0),
     waitingTasks' = waitingTasks - 1,
     abandonedOps' = abandonedOps + 1,
+    orphanCalls' = orphanCalls,
     if (procReady) all {
       opPhase' = OpCalling,
       opEventAt' = now + callD,
@@ -211,14 +226,16 @@ module runDetailDeadline {
     opPhase == OpInit,
     now == opEventAt,
     procReady' = true,
-    if (opOrphan and DETACH == "init") all {
+    if (opOrphan and (DETACH == "init" or DETACH == "call")) all {
       opPhase' = OpNone,
       opEventAt' = opEventAt,
       opOrphan' = false,
+      orphanCalls' = orphanCalls,
     } else all {
       opPhase' = OpCalling,
       opEventAt' = now + callD,
       opOrphan' = opOrphan,
+      orphanCalls' = if (opOrphan) orphanCalls + 1 else orphanCalls,
     },
     opCallsLeft' = opCallsLeft,
     spawns' = spawns,
@@ -238,7 +255,7 @@ module runDetailDeadline {
     abandonedOps' = abandonedOps,
     opPhase == OpCalling,
     now == opEventAt,
-    if (opCallsLeft > 1) all {
+    if (opCallsLeft > 1 and not(opOrphan and DETACH == "call")) all {
       opPhase' = OpCalling,
       opEventAt' = now + callD,
       opCallsLeft' = opCallsLeft - 1,
@@ -246,7 +263,9 @@ module runDetailDeadline {
       reqActive' = reqActive,
       reqQueued' = reqQueued,
       outcomes' = outcomes,
+      orphanCalls' = if (opOrphan) orphanCalls + 1 else orphanCalls,
     } else if (opOrphan) all {
+      orphanCalls' = orphanCalls,
       opPhase' = OpNone,
       opEventAt' = opEventAt,
       opCallsLeft' = 0,
@@ -261,7 +280,10 @@ module runDetailDeadline {
       opOrphan' = false,
       reqActive' = false,
       reqQueued' = false,
-      outcomes' = outcomes.append({ id: reqId, result: "Ok", elapsed: now - reqStartedAt, foundReady: reqFoundReady }),
+      orphanCalls' = orphanCalls,
+      outcomes' = outcomes.append({
+        id: reqId, result: "Ok", elapsed: now - reqStartedAt, foundReady: reqFoundReady, duringInit: false,
+      }),
     },
     procReady' = procReady,
     spawns' = spawns,
@@ -306,6 +328,7 @@ module runDetailDeadline {
       reqActive or opPhase != OpNone,
       waitingTasks' = waitingTasks,
       abandonedOps' = abandonedOps,
+      orphanCalls' = orphanCalls,
       nextAt > now,
       now' = nextAt,
       procReady' = procReady,
@@ -327,6 +350,7 @@ module runDetailDeadline {
   action stutter: bool = all {
     waitingTasks' = waitingTasks,
     abandonedOps' = abandonedOps,
+    orphanCalls' = orphanCalls,
     not(reqActive),
     opPhase == OpNone,
     reqCount == MAX_REQUESTS,
@@ -364,6 +388,7 @@ module runDetailDeadline {
     outcomes' = [],
     waitingTasks' = 0,
     abandonedOps' = 0,
+    orphanCalls' = 0,
   }
 
   action step: bool = {
@@ -414,16 +439,20 @@ module runDetailDeadline {
   // 7. 要求に諦められた後で、鍵の待ちから読み取りを始めるタスクは無い。
   val noReadsForAbandonedWaits: bool = abandonedOps == 0
 
+  // 8. 要求に諦められた op は、新しい道具の呼び出しを始めない（Devin Review の指摘。進行中の段だけを
+  //    終えて止める）。
+  val noCallsAfterAbandon: bool = orphanCalls == 0
+
   val safety: bool =
     backendAnswersFirst and readyReadsWithinCallTimeoutsSucceed and noKillByCancel and spawnsOnce
-      and requestsAreBounded and waitingTasksBoundedByWaiters and noReadsForAbandonedWaits
+      and requestsAreBounded and waitingTasksBoundedByWaiters and noReadsForAbandonedWaits and noCallsAfterAbandon
 
   // ---- 到達の確認（quint run で違反として見つかれば、その筋書きに到達できる） ----
 
-  // 初期化を待つ間に総上限で返った要求のあとで、別の要求が成功する。
+  // 初期化の途中で総上限で返った要求のあとで、別の要求が子プロセスを起動し直さずに成功する。
   val recoveryAfterInitTimeoutUnreachable: bool = not(
-    outcomes.indices().exists(i => outcomes.indices().exists(j =>
-      i < j and outcomes[i].result == "BackendDeadline" and not(outcomes[i].foundReady)
+    spawns == 1 and outcomes.indices().exists(i => outcomes.indices().exists(j =>
+      i < j and outcomes[i].result == "BackendDeadline" and outcomes[i].duringInit
         and outcomes[j].result == "Ok"
     ))
   )
@@ -449,7 +478,12 @@ module detachInitOnly {
 
 // 切り離しだけで、期限を直さない版。
 module detachOnly {
-  import runDetailDeadline(WEB_DEADLINE = 30, BUDGET = 0, DETACH = "op", CHECK_WAITER = true).*
+  import runDetailDeadline(WEB_DEADLINE = 30, BUDGET = 0, DETACH = "call", CHECK_WAITER = true).*
+}
+
+// 期限を直し、op 全体を最後まで走らせる版（PR の最初の版。Devin Review の指摘）。
+module runToEnd {
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "op", CHECK_WAITER = true).*
 }
 
 // 期限を直し、読み取り全体を切り離したが、鍵の待ちで要求を確かめない版（設計の最初の版）。
@@ -457,7 +491,8 @@ module withoutWaiterCheck {
   import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "op", CHECK_WAITER = false).*
 }
 
-// 修正案：Web 50 秒、backend の総上限 45 秒、op 全体を要求から切り離す。
+// 修正案：Web 50 秒、backend の総上限 45 秒、op を要求から切り離し、要求が諦めたら進行中の段だけを
+// 終えて止める。
 module fixed {
-  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "op", CHECK_WAITER = true).*
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "call", CHECK_WAITER = true).*
 }
