@@ -861,3 +861,108 @@ test("revalidate の同一性が変わると、古い接続を閉じて1つだ�
   await unmount();
   assert.equal(second.closed, true, "アンマウントで新しい接続も閉じられる");
 });
+
+// ===== 復帰時の鮮度確認の結線（issue #383） =====
+//
+// OS のスリープや裏のタブではタイマーが遅れる。表へ戻った（visibilitychange が visible）、
+// フォーカスが戻った、ネットワークが戻った、の各イベントで openStateStream の checkStale を
+// 呼び、最後の受信から壁時計で 40 秒以上経っていれば、利用者が操作する前に切断として扱う。
+
+const setVisibility = (state: DocumentVisibilityState): void => {
+  Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+};
+
+const wakeEvents: Array<[string, () => void]> = [
+  ["visibilitychange（visible）", () => {
+    setVisibility("visible");
+    document.dispatchEvent(new window.Event("visibilitychange"));
+  }],
+  ["focus", () => window.dispatchEvent(new window.Event("focus"))],
+  ["online", () => window.dispatchEvent(new window.Event("online"))],
+];
+
+for (const [name, fire] of wakeEvents) {
+  test(`復帰の ${name} で、40 秒以上無音の接続を切断として扱い、前の内容を保ったまま開き直す`, async (t) => {
+    const { holder, Probe } = createProbe();
+    const { unmount } = await mountLive(
+      { initialSnapshotLoaded: true, initialState: createDashboardState() },
+      [createElement(Probe, { key: "probe" })],
+    );
+    try {
+      const first = FakeEventSource.instances[0]!;
+      await fireMessage(first, wireState());
+      assert.equal(holder.current?.disconnected, false);
+      const pending = holder.current?.state.pendingDecisions.length;
+
+      const base = Date.now();
+      t.mock.method(Date, "now", () => base + 39_000);
+      await act(async () => fire());
+      assert.equal(holder.current?.disconnected, false, "期限前の復帰では切らない");
+      assert.equal(first.closed, false);
+
+      t.mock.method(Date, "now", () => base + 40_000);
+      await act(async () => fire());
+      assert.equal(holder.current?.disconnected, true, "期限を過ぎた復帰で切断として扱う");
+      assert.equal(first.closed, true, "半開きの接続を閉じる");
+      assert.equal(holder.current?.snapshotLoaded, true, "読めた内容は残す");
+      assert.equal(holder.current?.state.pendingDecisions.length, pending, "判断待ちの内容も残す");
+
+      await waitForConnections(2);
+      await fireMessage(FakeEventSource.instances[1]!, wireState());
+      assert.equal(holder.current?.disconnected, false, "開き直した接続の受信で戻る");
+      assert.equal(FakeEventSource.instances.length, 2, "開き直しは 1 本だけ");
+    } finally {
+      await unmount();
+    }
+  });
+}
+
+test("裏へ回った visibilitychange（hidden）では鮮度を確かめない", async (t) => {
+  const { holder, Probe } = createProbe();
+  const { unmount } = await mountLive(
+    { initialSnapshotLoaded: true, initialState: createDashboardState() },
+    [createElement(Probe, { key: "probe" })],
+  );
+  try {
+    await fireMessage(FakeEventSource.instances[0]!, wireState());
+    const base = Date.now();
+    t.mock.method(Date, "now", () => base + 60_000);
+    setVisibility("hidden");
+    await act(async () => {
+      document.dispatchEvent(new window.Event("visibilitychange"));
+    });
+    assert.equal(holder.current?.disconnected, false);
+    assert.equal(FakeEventSource.instances[0]!.closed, false);
+  } finally {
+    setVisibility("visible");
+    await unmount();
+  }
+});
+
+test("アンマウントで復帰イベントの購読を外す", async (t) => {
+  const added = new Map<string, unknown>();
+  const removed = new Map<string, unknown>();
+  installDomEnvironment();
+  for (const target of [window, document] as EventTarget[]) {
+    const add = target.addEventListener.bind(target);
+    const remove = target.removeEventListener.bind(target);
+    t.mock.method(target, "addEventListener", (type: string, listener: EventListener, opts?: unknown) => {
+      added.set(type, listener);
+      add(type, listener, opts as AddEventListenerOptions);
+    });
+    t.mock.method(target, "removeEventListener", (type: string, listener: EventListener, opts?: unknown) => {
+      removed.set(type, listener);
+      remove(type, listener, opts as EventListenerOptions);
+    });
+  }
+  const { Probe } = createProbe();
+  const { unmount } = await mountLive(
+    { initialSnapshotLoaded: true, initialState: createDashboardState() },
+    [createElement(Probe, { key: "probe" })],
+  );
+  await unmount();
+  for (const type of ["visibilitychange", "focus", "online"]) {
+    assert.ok(added.has(type), `${type} を購読する`);
+    assert.equal(removed.get(type), added.get(type), `${type} の購読を同じ関数で外す`);
+  }
+});
