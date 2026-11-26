@@ -490,6 +490,18 @@ test("不正なペイロードは見張りも連続失敗の回数も更新し�
   assert.equal(rig.errors, 1, "接続開始から 40 秒で切断する");
 });
 
+test("再接続した後の不正なペイロードは連続失敗の回数を戻さず、次の待機は 2 秒のまま", () => {
+  const rig = openWatched();
+  rig.Ctor.instances[0]!.onerror?.({});
+  assert.equal(rig.reconnect.latest().delayMs, 1000);
+  rig.reconnect.runLatest();
+  const second = rig.Ctor.instances[1]!;
+  assert.throws(() => second.onmessage?.({ data: INVALID_STATE }), DomainPrimitiveError);
+  second.onerror?.({});
+  assert.equal(rig.reconnect.latest().delayMs, 2000, "不正な受信は成功として数えない");
+  rig.stream.close();
+});
+
 test("見張りで切った後に古い接続から遅れて届いた受信とエラーは無視し、切断のまま再接続も増やさない", () => {
   const rig = openWatched();
   const first = rig.Ctor.instances[0]!;
@@ -881,6 +893,12 @@ const runStateMachine = (seed: number, steps: number): void => {
       if (timer !== undefined) fireTimer(timer);
     }],
     ["checkStale", 3, () => evaluate(() => stream.checkStale())],
+    // 取り消した予約がタイマーの都合で遅れて発火しても、何も起こさない。
+    ["cancelledTimer", 2, () => {
+      const cancelled = timers.filter((t) => t.cancelled && !t.fired);
+      const timer = cancelled[int(0, cancelled.length - 1)];
+      if (timer !== undefined) ignored(() => timer.run());
+    }],
     ["close", 1, () => {
       if (rand() < 0.3) {
         stream.close();

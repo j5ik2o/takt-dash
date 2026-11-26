@@ -881,33 +881,45 @@ const wakeEvents: Array<[string, () => void]> = [
   ["online", () => window.dispatchEvent(new window.Event("online"))],
 ];
 
+// Date.now の差し替えはテストごとに 1 回だけ登録し、読む時刻を pinned で切り替える。
+// pinned が undefined の間は実時間を返し、waitForConnections の期限も実時間で進む。
+const pinWallClock = (t: { mock: { method: typeof import("node:test").mock.method } }) => {
+  const realNow = Date.now.bind(Date);
+  const clock: { pinned?: number; realNow: () => number } = { realNow };
+  t.mock.method(Date, "now", () => clock.pinned ?? realNow());
+  return clock;
+};
+
 for (const [name, fire] of wakeEvents) {
   test(`復帰の ${name} で、40 秒以上無音の接続を切断として扱い、前の内容を保ったまま開き直す`, async (t) => {
     const { holder, Probe } = createProbe();
+    const clock = pinWallClock(t);
     const { unmount } = await mountLive(
       { initialSnapshotLoaded: true, initialState: createDashboardState() },
       [createElement(Probe, { key: "probe" })],
     );
     try {
       const first = FakeEventSource.instances[0]!;
+      // 受信の時刻を固定し、その時刻から 39 秒後と 40 秒後で復帰イベントを判定させる。
+      const receivedAt = clock.realNow();
+      clock.pinned = receivedAt;
       await fireMessage(first, wireState());
       assert.equal(holder.current?.disconnected, false);
       const pending = holder.current?.state.pendingDecisions.length;
 
-      // 実時間に合わせて進む時計にずらす。止めると waitForConnections の期限も止まる。
-      const realNow = Date.now.bind(Date);
-      t.mock.method(Date, "now", () => realNow() + 39_000);
+      clock.pinned = receivedAt + 39_999;
       await act(async () => fire());
       assert.equal(holder.current?.disconnected, false, "期限前の復帰では切らない");
       assert.equal(first.closed, false);
 
-      t.mock.method(Date, "now", () => realNow() + 40_000);
+      clock.pinned = receivedAt + 40_000;
       await act(async () => fire());
       assert.equal(holder.current?.disconnected, true, "期限を過ぎた復帰で切断として扱う");
       assert.equal(first.closed, true, "半開きの接続を閉じる");
       assert.equal(holder.current?.snapshotLoaded, true, "読めた内容は残す");
       assert.equal(holder.current?.state.pendingDecisions.length, pending, "判断待ちの内容も残す");
 
+      clock.pinned = undefined;
       await waitForConnections(2);
       await fireMessage(FakeEventSource.instances[1]!, wireState());
       assert.equal(holder.current?.disconnected, false, "開き直した接続の受信で戻る");
@@ -920,14 +932,16 @@ for (const [name, fire] of wakeEvents) {
 
 test("裏へ回った visibilitychange（hidden）では鮮度を確かめない", async (t) => {
   const { holder, Probe } = createProbe();
+  const clock = pinWallClock(t);
   const { unmount } = await mountLive(
     { initialSnapshotLoaded: true, initialState: createDashboardState() },
     [createElement(Probe, { key: "probe" })],
   );
   try {
+    const receivedAt = clock.realNow();
+    clock.pinned = receivedAt;
     await fireMessage(FakeEventSource.instances[0]!, wireState());
-    const realNow = Date.now.bind(Date);
-    t.mock.method(Date, "now", () => realNow() + 60_000);
+    clock.pinned = receivedAt + 60_000;
     setVisibility("hidden");
     await act(async () => {
       document.dispatchEvent(new window.Event("visibilitychange"));

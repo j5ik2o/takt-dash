@@ -64,6 +64,9 @@ test("半開きで無音になった接続を 40 秒で切断として扱い、�
     () => (window as unknown as { __stateStreamDelivered: { messages: number } }).__stateStreamDelivered.messages > 0,
   );
 
+  // 時計を止めてから 40 秒進める。止めずに進めると、テスト側が遅れた間に再接続の 1 秒が
+  // 過ぎて新しい接続が受信し、切断中の画面を観測できないことがある。
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1));
   await page.evaluate(() => (window as unknown as { __halfOpenStateStream: () => void }).__halfOpenStateStream());
   await page.clock.fastForward(40_000);
 
@@ -74,6 +77,7 @@ test("半開きで無音になった接続を 40 秒で切断として扱い、�
 
   // 再接続の予約（1 秒）を進めると、新しい接続が開き、最初の受信で操作が戻る。
   await page.clock.fastForward(1_000);
+  await page.clock.resume();
   await expect(trigger).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByText("再接続するまで操作できません。")).toHaveCount(0);
 });
