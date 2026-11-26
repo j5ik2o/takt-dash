@@ -220,8 +220,7 @@ const toGoal = (raw: unknown): DashboardGoal => {
     serverId: toServerId(value.serverId),
     project: toProjectName(value.project),
     name: String(value.name ?? ""),
-    // 印は true のときだけ立てる。欠落（古い backend）や true 以外の値は、切っていないとみなす。
-    nameTruncated: value.nameTruncated === true,
+    nameTruncated: value.nameTruncated === true, // 欠落（古い backend）と true 以外は false
     status: enumFromWire("GoalStatus", value.status),
     executionStatus: enumFromWire("ExecutionStatus", value.executionStatus),
     taskCounts: toTaskCounts(value.taskCounts),
