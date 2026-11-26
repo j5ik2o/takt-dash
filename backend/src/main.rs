@@ -2,7 +2,8 @@
 //!
 //! 設定を読んで gRPC サーバーと定期読み取りを一緒に起動し、SIGTERM/SIGINT の終了シグナルで
 //! 両方を停止します。gRPC サーバーは設定の listen か `--listen` の待ち受けアドレスで待ち受けます。
-//! 停止は、終了シグナルから [`STOP_DEADLINE`] で打ち切り、launchd が SIGKILL する前に終えます。
+//! 停止は、終了シグナルから [`STOP_DEADLINE`] で打ち切り、ランタイムの後始末も
+//! [`RUNTIME_SHUTDOWN_TIMEOUT`] で打ち切って、launchd が SIGKILL する前に終えます。
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
@@ -12,7 +13,7 @@ use takt_dash_backend::{
   conversation::{ConversationPaths, ConversationReader},
   grpc::{serve_with_listener, ServiceDeps, TaktDashServiceImpl},
   mcp::McpClientRegistry,
-  poller::{run_until_stop_deadline, run_until_stopped, Poller, STOP_DEADLINE},
+  poller::{run_until_stop_deadline, run_until_stopped, Poller, RUNTIME_SHUTDOWN_TIMEOUT, STOP_DEADLINE},
   store::StateStore,
 };
 
@@ -50,9 +51,17 @@ fn parse_arguments() -> Result<Arguments, String> {
   Ok(Arguments { config_path, sqlite_path, listen })
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
   tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+  let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+  let result = runtime.block_on(run());
+  // ランタイムを捨てるときは、始まった `spawn_blocking`（run ログの読み取りなど）の終わりを
+  // 待ちます。待つ時間にも上限を設け、停止の全体を launchd の SIGKILL より前に終えます。
+  runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+  result
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
   let arguments = parse_arguments().map_err(|error| format!("引数を解釈できませんでした: {error}"))?;
   let config = load_config(&arguments.config_path)?;
   let sqlite_path = arguments.sqlite_path.unwrap_or_else(|| config.sqlite_path.clone());

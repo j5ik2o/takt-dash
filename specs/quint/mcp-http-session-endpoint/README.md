@@ -9,7 +9,7 @@ backend のレジストリが常駐 HTTP サーバーごとに持つセッショ
 | ファイル | 内容 |
 | --- | --- |
 | `sessionEndpoint.qnt` | 状態機械、不変条件、進行の条件 |
-| `sessionEndpoint_test.qnt` | issue の筋書きを修正前と修正案でたどるテスト（6 件） |
+| `sessionEndpoint_test.qnt` | issue の筋書きを修正前と修正案でたどるテストと、到達条件が意図した筋書きだけを数えることのテスト（10 件） |
 
 `sessionEndpoint.qnt` は遷移を 1 つの定数で切り替えます。
 
@@ -47,10 +47,10 @@ backend のレジストリが常駐 HTTP サーバーごとに持つセッショ
 
 進行の条件（到達できること。`--witnesses` で数えます）
 
-- `staleRequestServed`：旧設定の要求が、反映のあとに置き場を得て終わる（拒まずに処理する）。
+- `staleRequestServed`：旧設定の要求が、反映のあとに（反映済みの接続先と違う接続先のまま）置き場を得て終わる（拒まずに処理する）。置き場を求めた時点の不一致を要求に記録して数えるので、設定を変える前に終わった要求は数えない。
 - `slotShared`：2 つの要求が同じ slot のセッションを共有している。
 - `slotMovedToNewEndpoint`：接続先の変更が反映され、新しい接続先の slot ができる。
-- `oldSlotClosedOnReflect`：反映で旧接続先の slot を手放し、閉じる。
+- `oldSlotClosedOnReflect`：反映で旧接続先の slot を手放し、そのセッションを閉じる。反映が手放したセッションを記録して数えるので、旧設定の要求だけのセッションを閉じても数えない。
 
 ## 結果
 
@@ -63,7 +63,7 @@ quint run sessionEndpoint.qnt --main=current --invariant=slotMatchesReflected \
   --max-steps=15 --max-samples=10000 --seed=0x364
 ```
 
-9 手で `slotMatchesReflected` に違反します。接続先 1 で解決済みの要求が、接続先 2（または設定から外れる前の 2）の反映のあとに置き場を求め、接続先 1 の置き場を作って slot を置き換えます（筋書きテストの `staleRequestReregistersOldEndpointBeforeFixTest`）。
+8 手で `slotMatchesReflected` に違反します。接続先 1 で解決済みの要求が、接続先 2（または設定から外れる前の 2）の反映のあとに置き場を求め、接続先 1 の置き場を作って slot を置き換えます（筋書きテストの `staleRequestReregistersOldEndpointBeforeFixTest`）。
 
 ほかの 3 つの不変条件は、修正前でも反例なしです（max-steps 25、50000 サンプル、seed 0x364）。修正前の問題は、セッションが残り続けることではなく、slot が新しい接続先を指さなくなることです。追い出された置き場は持ち主が消えると閉じます。
 
@@ -79,10 +79,10 @@ quint run sessionEndpoint.qnt --main=fixed --invariant=safety \
 
 | 条件 | 到達した trace |
 | --- | --- |
-| `staleRequestServed` | 26020 / 50000（52.04%） |
+| `staleRequestServed` | 18893 / 50000（37.79%） |
 | `slotShared` | 24691 / 50000（49.38%） |
 | `slotMovedToNewEndpoint` | 15553 / 50000（31.11%） |
-| `oldSlotClosedOnReflect` | 17168 / 50000（34.34%） |
+| `oldSlotClosedOnReflect` | 15097 / 50000（30.19%） |
 
 ### 筋書きテスト
 
@@ -90,4 +90,4 @@ quint run sessionEndpoint.qnt --main=fixed --invariant=safety \
 quint test sessionEndpoint_test.qnt --main=sessionEndpoint_test
 ```
 
-6 件すべて成功。`newConfigRequestBeforeReflectionIsEphemeralTest` は、修正案の代わりに払うもの（反映より先に新しい設定で解決した要求は、次の反映までその要求だけのセッションを使う）を固定します。
+10 件すべて成功。`newConfigRequestBeforeReflectionIsEphemeralTest` は、修正案の代わりに払うもの（反映より先に新しい設定で解決した要求は、次の反映までその要求だけのセッションを使う）を固定します。

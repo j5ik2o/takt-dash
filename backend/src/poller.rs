@@ -45,6 +45,10 @@ pub const CYCLE_GRACE: Duration = Duration::from_secs(2);
 /// 定期読み取りの停止をこの時間で打ち切ります。
 pub const STOP_DEADLINE: Duration = Duration::from_secs(18);
 
+/// 停止の全体の上限のあと、tokio のランタイムを捨てるときに、始まった `spawn_blocking` の終わりを
+/// 待つ上限。`main` が `Runtime::shutdown_timeout` に渡します。
+pub const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// launchd が SIGTERM のあと SIGKILL するまでの時間（plist の `ExitTimeOut` の既定）。本番の
 /// backend は `~/Library/LaunchAgents/com.ideoplus.taktdash-backend.plist` で動き、plist に
 /// `ExitTimeOut` がありません。plist に足すなら、この値も合わせて直します。
@@ -52,7 +56,7 @@ pub const LAUNCHD_EXIT_TIMEOUT: Duration = Duration::from_secs(20);
 
 const _: () = assert!(
   CYCLE_GRACE.as_secs() + SHUTDOWN_DEADLINE.as_secs() < STOP_DEADLINE.as_secs()
-    && STOP_DEADLINE.as_secs() < LAUNCHD_EXIT_TIMEOUT.as_secs(),
+    && STOP_DEADLINE.as_secs() + RUNTIME_SHUTDOWN_TIMEOUT.as_secs() < LAUNCHD_EXIT_TIMEOUT.as_secs(),
   "周期を待つ上限と閉じる段の上限は停止の全体の上限に収め、それを launchd の SIGKILL より前に終えます"
 );
 
@@ -100,6 +104,34 @@ pub struct Poller {
   /// PR の状態確認に使う gh の実行ファイルのパス。本番は PATH 上の `gh`、テストは偽の gh を
   /// 指します（[`Poller::with_gh_program`]）。
   gh_program:      PathBuf,
+}
+
+/// サイクルがプロジェクトごとに起動した読み取りタスク。
+///
+/// 停止のときにサイクルの future を捨てたら、タスクも中断します。[`tokio::task::JoinHandle`] を
+/// 捨てるだけではタスクは走り続け、読み取りハンドルやクライアントの鍵を持ったままになります。
+/// すると停止の段が鍵を取れず、応答するサーバーのセッションも閉じられません。
+struct ReadTask<T>(tokio::task::JoinHandle<T>);
+
+impl<T: Send + 'static> ReadTask<T> {
+  fn spawn(task: impl std::future::Future<Output = T> + Send + 'static) -> Self {
+    ReadTask(tokio::spawn(task))
+  }
+}
+
+impl<T> std::future::Future for ReadTask<T> {
+  type Output = Result<T, tokio::task::JoinError>;
+
+  fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    std::pin::Pin::new(&mut self.0).poll(cx)
+  }
+}
+
+impl<T> Drop for ReadTask<T> {
+  fn drop(&mut self) {
+    // 終わったタスクへの中断は何もしません。
+    self.0.abort();
+  }
 }
 
 /// 1 プロジェクトの読み取りハンドルと、そのハンドルを作った接続先。接続先が変わったら
@@ -251,7 +283,7 @@ impl Poller {
         // 読み取りが HTTP 接続先のプロジェクトは、常駐サーバーのハンドルから読みます。
         // 書き込みの通し番号は書き込み先（`write_server`）のものを使います。
         let run_logs = self.run_logs.handle_for(&project.name, &cwd);
-        let task = tokio::spawn(async move {
+        let task = ReadTask::spawn(async move {
           let read_at = Utc::now();
           let mut handle = handle.lock().await;
           let mut tools = ReadToolSet::new(&mut *handle, cwd);
@@ -267,7 +299,7 @@ impl Poller {
           let run_logs = self.run_logs.handle_for(&project.name, &read.cwd);
           let cwd = read.cwd;
           let handle = read.client;
-          let task = tokio::spawn(async move {
+          let task = ReadTask::spawn(async move {
             let read_at = Utc::now();
             let mut client = handle.lock().await;
             let mut tools = ReadToolSet::new(&mut *client, cwd);

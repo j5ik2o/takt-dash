@@ -750,3 +750,50 @@ async fn a_stop_signal_during_a_short_cycle_lets_it_record_before_stopping() {
   assert_eq!(created_goal_counts(&harness, &[ADDED_A]), vec![1], "再起動で同じ出来事を二重に記録しません");
   restarted.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_cancelled_cycle_stops_its_http_read_so_the_session_is_closed() {
+  // 停止の合図のあと CYCLE_GRACE で周期を打ち切ると、周期が起動した HTTP の読み取りタスクも
+  // 中断する。読み取りハンドルの鍵が空き、停止の段が応答するサーバーのセッションを DELETE
+  // で閉じる。 タスクを中断しないと、遅い道具の呼び出しが終わるまで鍵が空かず、停止がそれを待つ。
+  let harness = harness();
+  let http_state = harness.project_dir().join("http-state.json");
+  std::fs::write(
+    &http_state,
+    json!({"goals": [goal(GOAL, "active")], "delayMs": {"takt_list_goals": 10_000}}).to_string(),
+  )
+  .unwrap();
+  let http = common::HttpMockServer::start(&http_state, None);
+  let mut config: Value = serde_json::from_str(&std::fs::read_to_string(harness.config_path()).unwrap()).unwrap();
+  config["mcpServers"]["mac-mini"] = json!({
+    "type": "http",
+    "url": http.url(),
+    "headers": { "Authorization": format!("Bearer {}", http.token()) },
+  });
+  std::fs::write(harness.config_path(), config.to_string()).unwrap();
+  let mut poller = poller(&harness);
+  let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+  let control = async {
+    // 読み取りが遅い道具の呼び出しに入るまで待ちます。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !http.recorded_calls().iter().any(|call| call["name"] == "takt_list_goals") {
+      assert!(tokio::time::Instant::now() < deadline, "読み取りが道具を呼びます");
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(http.live_session_count(), 1, "読み取りのセッションが生きています");
+    let stopped_at = tokio::time::Instant::now();
+    stop_tx.send(true).unwrap();
+    stopped_at
+  };
+  let ((), stopped_at) =
+    timeout(Duration::from_secs(30), async { tokio::join!(super::run_until_stopped(&mut poller, stop_rx), control) })
+      .await
+      .expect("run_until_stopped は戻ります");
+  let elapsed = stopped_at.elapsed();
+
+  assert!(
+    elapsed < super::CYCLE_GRACE + Duration::from_secs(3),
+    "遅い道具の呼び出しの終わりを待たずに止まります（{elapsed:?}）"
+  );
+  assert_eq!(http.live_session_count(), 0, "読み取りのセッションを閉じます: {:?}", http.session_events());
+}

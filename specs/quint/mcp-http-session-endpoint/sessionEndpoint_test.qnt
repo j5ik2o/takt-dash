@@ -57,6 +57,41 @@ module sessionEndpoint_test {
       .then(after::resolve(2)).then(after::acquire(2))
       .expect(after::slot.endpoint == 2 and after::safety)
 
+  // 到達条件 staleRequestServed は、設定を変える前に終わった要求を「旧設定の要求」に数えない。
+  run requestFinishedBeforeTheEditIsNotStaleTest =
+    after::init
+      .then(after::reflect)
+      .then(after::resolve(0)).then(after::acquire(0)).then(after::finish(0))
+      .then(after::editConfig(2)).then(after::reflect)
+      .expect(not(after::staleRequestServed) and after::safety)
+
+  // 到達条件 staleRequestServed は、反映のあとに旧接続先のまま置き場を得て終わった要求を数える。
+  run staleRequestServedCountsAcquisitionAfterReflectTest =
+    after::init
+      .then(after::reflect)
+      .then(after::resolve(0))
+      .then(after::editConfig(2)).then(after::reflect)
+      .then(after::acquire(0)).then(after::finish(0))
+      .expect(after::staleRequestServed and after::safety)
+
+  // 到達条件 oldSlotClosedOnReflect は、旧設定の要求だけのセッションを閉じても数えない
+  // （反映の時点で slot が無ければ、反映は何も手放していない）。
+  run ephemeralCloseIsNotASlotReleaseTest =
+    after::init
+      .then(after::reflect)
+      .then(after::resolve(0))
+      .then(after::editConfig(2)).then(after::reflect)
+      .then(after::acquire(0)).then(after::finish(0))
+      .expect(not(after::oldSlotClosedOnReflect) and after::safety)
+
+  // 到達条件 oldSlotClosedOnReflect は、反映が手放した slot のセッションが閉じたことを数える。
+  run reflectReleasesTheOldSlotTest =
+    after::init
+      .then(after::reflect)
+      .then(after::resolve(0)).then(after::acquire(0)).then(after::finish(0))
+      .then(after::editConfig(2)).then(after::reflect)
+      .expect(after::oldSlotClosedOnReflect and after::slot.sid == after::NONE and after::safety)
+
   // 修正案：設定から消えたサーバーは、これまでどおり登録し直さない。
   run removedServerIsNotReregisteredTest =
     after::init

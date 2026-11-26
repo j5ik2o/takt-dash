@@ -25,12 +25,16 @@
 // CANCEL_CYCLE = false は修正前の遷移。周期の途中なら、周期が終わるのを待ってから閉じる。
 // true は、周期を CYCLE_GRACE だけ待ち、それでも終わらなければ打ち切って閉じ始める。ふだんの短い
 // 周期は最後まで走らせ、その周期の出来事を記録してから止まる。
+// ABORT_CYCLE_TASKS = false は、周期を打ち切っても、周期がプロジェクトごとに起動した読み取りの
+// タスクは走り続ける遷移（タスクは読み取りハンドルやクライアントの鍵を持ったまま）。true は、
+// 周期を打ち切ったらタスクも中断し、鍵を放す遷移。
 module shutdownDeadline {
   const PARALLEL: bool
   const DEADLINE: bool
   const CANCEL_CYCLE: bool
   // 合図のあと周期を待つ上限（CANCEL_CYCLE = true のときだけ使う）。修正案は 2 秒。
   const CYCLE_GRACE: int
+  const ABORT_CYCLE_TASKS: bool
 
   pure val CLOSE_BOUND: int = 10       // 確立の待ち 5 秒 ＋ DELETE 5 秒
   pure val OP_BOUND: int = 30          // 道具の呼び出しの上限の例
@@ -54,7 +58,8 @@ module shutdownDeadline {
 
   // responsive は HTTP のサーバーが応答するか。busy は stdio の鍵を要求が持っているか。
   // wasBusy は停止を始めた時点で鍵が埋まっていたか（不変条件のために残す）。
-  type Item = { status: Status, elapsed: int, responsive: bool, busy: bool, wasBusy: bool }
+  // cycleHeld は、合図の時点で途中の周期の読み取りタスクが、この相手の鍵を持っているか。
+  type Item = { status: Status, elapsed: int, responsive: bool, busy: bool, wasBusy: bool, cycleHeld: bool }
 
   type Phase =
     | Running    // 停止の合図の前
@@ -82,7 +87,10 @@ module shutdownDeadline {
 
   // 1 単位より短く終わる処理が残っているか。残っている間は時間を進めません。
   pure def canCompleteNow(i: int, it: Item): bool =
-    it.status == Closing and (if (isHttp(i)) it.responsive else not(it.busy))
+    it.status == Closing and not(it.cycleHeld) and (if (isHttp(i)) it.responsive else not(it.busy))
+
+  // 周期の読み取りタスクが終わる（または中断される）と、持っていた鍵を放す。
+  pure def releaseCycleHeld(its: int -> Item): int -> Item = ITEMS.mapBy(i => { ...its.get(i), cycleHeld: false })
 
   // 順に閉じる遷移で、閉じている途中が無ければ、番号の最も小さい待ちを閉じ始める。
   pure def startNext(its: int -> Item): int -> Item = {
@@ -102,7 +110,8 @@ module shutdownDeadline {
   // 道具の呼び出しは、合図の前から続いているものとして、合図からの時間で数えます。
   pure def tickItem(i: int, it: Item): Item =
     if (isHttp(i)) {
-      if (it.status != Closing) it
+      // 周期の読み取りタスクが鍵を持っている間は、閉じる処理は鍵を待ち、DELETE をまだ送りません。
+      if (it.status != Closing or it.cycleHeld) it
       else if (it.elapsed + 1 >= CLOSE_BOUND) { ...it, status: GaveUp, elapsed: it.elapsed + 1 }
       else { ...it, elapsed: it.elapsed + 1 }
     } else {
@@ -122,6 +131,7 @@ module shutdownDeadline {
     nondet responsive = HTTP_ITEMS.powerset().oneOf()
     nondet busy = STDIO_ITEMS.powerset().oneOf()
     nondet cycle = 0.to(CYCLE_BOUND).oneOf()
+    nondet held = ITEMS.powerset().oneOf()
     all {
       phase' = Running,
       sinceSignal' = 0,
@@ -132,6 +142,7 @@ module shutdownDeadline {
       items' = ITEMS.mapBy(i => {
         status: Waiting, elapsed: 0,
         responsive: responsive.contains(i), busy: busy.contains(i), wasBusy: busy.contains(i),
+        cycleHeld: cycle > 0 and held.contains(i),
       }),
     }
   }
@@ -165,7 +176,7 @@ module shutdownDeadline {
     cycleElapsed < cycleLength,
     phase' = Stopping,
     cycleCancelled' = true,
-    items' = startClosing(items),
+    items' = startClosing(if (ABORT_CYCLE_TASKS) releaseCycleHeld(items) else items),
     sinceSignal' = sinceSignal, clock' = 0, cycleElapsed' = cycleElapsed, cycleLength' = cycleLength,
   }
 
@@ -190,7 +201,11 @@ module shutdownDeadline {
 
   // 時間が 1 単位進む。待っている周期は cycleLength で終わる。上限に達したら、残りを見捨てて終える。
   action tick = {
-    val tickedItems = ITEMS.mapBy(i => tickItem(i, items.get(i)))
+    // 周期の読み取りタスクは、中断されない限り cycleLength まで走り、終われば鍵を放す。
+    val tasksRunning = cycleElapsed < cycleLength and not(cycleCancelled and ABORT_CYCLE_TASKS)
+    val nextCycleElapsed = if (tasksRunning) cycleElapsed + 1 else cycleElapsed
+    val stepped = ITEMS.mapBy(i => tickItem(i, items.get(i)))
+    val tickedItems = if (tasksRunning and nextCycleElapsed >= cycleLength) releaseCycleHeld(stepped) else stepped
     // 閉じる段の前（周期を待っている間）は、閉じ始めません。
     val ticked = if (phase == Stopping) startNext(tickedItems) else tickedItems
     val nextClock = if (phase == Stopping) clock + 1 else clock
@@ -203,7 +218,7 @@ module shutdownDeadline {
       phase == Stopping implies ITEMS.exists(i => not(finished(items.get(i)))),
       sinceSignal' = sinceSignal + 1,
       clock' = nextClock,
-      cycleElapsed' = if (phase == Draining) cycleElapsed + 1 else cycleElapsed,
+      cycleElapsed' = nextCycleElapsed,
       cycleLength' = cycleLength, cycleCancelled' = cycleCancelled,
       if (overDeadline) all {
         items' = abandonRest(ticked),
@@ -271,32 +286,41 @@ module shutdownDeadline {
     phase == Exited and cycleLength > 0 and cycleLength <= SHORT_CYCLE and not(cycleCancelled)
   // 長い周期を打ち切って閉じて終える。
   val longCycleCancelled: bool = phase == Exited and cycleCancelled and respondingSessionsClosed
+  // 周期の読み取りタスクが鍵を持っていた応答する相手を、周期を打ち切ったあとで閉じる。
+  val cycleHeldSessionClosedAfterCancel: bool =
+    phase == Exited and cycleCancelled and cycleLength > SHUTDOWN_DEADLINE + CYCLE_GRACE
+      and HTTP_ITEMS.exists(i => items.get(i).responsive and items.get(i).status == Closed)
 }
 
 module current {
-  import shutdownDeadline(PARALLEL = false, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2).*
+  import shutdownDeadline(PARALLEL = false, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false).*
 }
 
 // 上限だけを入れた遷移。
 module deadlineOnly {
-  import shutdownDeadline(PARALLEL = false, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2).*
+  import shutdownDeadline(PARALLEL = false, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false).*
 }
 
 // 同時に閉じるだけの遷移。
 module parallelOnly {
-  import shutdownDeadline(PARALLEL = true, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2).*
+  import shutdownDeadline(PARALLEL = true, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false).*
 }
 
 // 同時に閉じて上限で打ち切るが、周期の途中なら周期を待つ遷移（設計の最初の版）。
 module withoutCycleCancel {
-  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2).*
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false).*
 }
 
 // 合図で周期をすぐ打ち切る遷移（設計の 2 番目の版）。
 module immediateCancel {
-  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 0).*
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 0, ABORT_CYCLE_TASKS = true).*
+}
+
+// 2 秒待って周期を打ち切るが、周期の読み取りタスクを中断しない遷移（PR の最初の版）。
+module withoutTaskAbort {
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false).*
 }
 
 module fixed {
-  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 2).*
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = true).*
 }

@@ -1,13 +1,13 @@
 // -*- mode: Bluespec; -*-
 // issue #364 の 1 点目の筋書きを、修正前・片方だけの版・修正案でたどる。
 module shutdownDeadline_test {
-  import shutdownDeadline(PARALLEL = false, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2) as before from "./shutdownDeadline"
-  import shutdownDeadline(PARALLEL = false, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2) as deadlineOnly from "./shutdownDeadline"
-  import shutdownDeadline(PARALLEL = true, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2) as parallelOnly from "./shutdownDeadline"
-  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2) as noCancel from "./shutdownDeadline"
-  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 2) as after from "./shutdownDeadline"
+  import shutdownDeadline(PARALLEL = false, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false) as before from "./shutdownDeadline"
+  import shutdownDeadline(PARALLEL = false, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false) as deadlineOnly from "./shutdownDeadline"
+  import shutdownDeadline(PARALLEL = true, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false) as parallelOnly from "./shutdownDeadline"
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false) as noCancel from "./shutdownDeadline"
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = true) as after from "./shutdownDeadline"
 
-  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 0) as immediate from "./shutdownDeadline"
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 0, ABORT_CYCLE_TASKS = true) as immediate from "./shutdownDeadline"
 
   // 上限の並び：1 件を閉じる上限 < 閉じる段の上限、周期を待つ上限 ＋ 閉じる段の上限 < 停止の全体の上限
   // < launchd が SIGKILL するまで。ふだんの周期は、周期を待つ上限に収まる。
@@ -22,7 +22,7 @@ module shutdownDeadline_test {
     all {
       after::phase' = after::Running, after::sinceSignal' = 0, after::clock' = 0,
       after::cycleLength' = 1, after::cycleElapsed' = 0, after::cycleCancelled' = false,
-      after::items' = after::ITEMS.mapBy(i => { status: after::Waiting, elapsed: 0, responsive: true, busy: false, wasBusy: false }),
+      after::items' = after::ITEMS.mapBy(i => { status: after::Waiting, elapsed: 0, responsive: true, busy: false, wasBusy: false, cycleHeld: false }),
     }
       .then(after::signal)
       .then(after::tick)
@@ -38,7 +38,7 @@ module shutdownDeadline_test {
     all {
       immediate::phase' = immediate::Running, immediate::sinceSignal' = 0, immediate::clock' = 0,
       immediate::cycleLength' = 1, immediate::cycleElapsed' = 0, immediate::cycleCancelled' = false,
-      immediate::items' = immediate::ITEMS.mapBy(i => { status: immediate::Waiting, elapsed: 0, responsive: true, busy: false, wasBusy: false }),
+      immediate::items' = immediate::ITEMS.mapBy(i => { status: immediate::Waiting, elapsed: 0, responsive: true, busy: false, wasBusy: false, cycleHeld: false }),
     }
       .then(immediate::signal)
       .then(immediate::cancelCycle)
@@ -49,7 +49,7 @@ module shutdownDeadline_test {
     all {
       before::phase' = before::Running, before::sinceSignal' = 0, before::clock' = 0,
       before::cycleLength' = 0, before::cycleElapsed' = 0, before::cycleCancelled' = false,
-      before::items' = before::ITEMS.mapBy(i => { status: before::Waiting, elapsed: 0, responsive: false, busy: false, wasBusy: false }),
+      before::items' = before::ITEMS.mapBy(i => { status: before::Waiting, elapsed: 0, responsive: false, busy: false, wasBusy: false, cycleHeld: false }),
     }
       .then(before::signal)
       .then(20.reps(_ => before::tick))
@@ -60,7 +60,7 @@ module shutdownDeadline_test {
     all {
       deadlineOnly::phase' = deadlineOnly::Running, deadlineOnly::sinceSignal' = 0, deadlineOnly::clock' = 0,
       deadlineOnly::cycleLength' = 0, deadlineOnly::cycleElapsed' = 0, deadlineOnly::cycleCancelled' = false,
-      deadlineOnly::items' = deadlineOnly::ITEMS.mapBy(i => { status: deadlineOnly::Waiting, elapsed: 0, responsive: i == 2, busy: false, wasBusy: false }),
+      deadlineOnly::items' = deadlineOnly::ITEMS.mapBy(i => { status: deadlineOnly::Waiting, elapsed: 0, responsive: i == 2, busy: false, wasBusy: false, cycleHeld: false }),
     }
       .then(deadlineOnly::signal)
       .then(15.reps(_ => deadlineOnly::tick))
@@ -73,7 +73,7 @@ module shutdownDeadline_test {
     all {
       parallelOnly::phase' = parallelOnly::Running, parallelOnly::sinceSignal' = 0, parallelOnly::clock' = 0,
       parallelOnly::cycleLength' = 0, parallelOnly::cycleElapsed' = 0, parallelOnly::cycleCancelled' = false,
-      parallelOnly::items' = parallelOnly::ITEMS.mapBy(i => { status: parallelOnly::Waiting, elapsed: 0, responsive: true, busy: i == 3, wasBusy: i == 3 }),
+      parallelOnly::items' = parallelOnly::ITEMS.mapBy(i => { status: parallelOnly::Waiting, elapsed: 0, responsive: true, busy: i == 3, wasBusy: i == 3, cycleHeld: false }),
     }
       .then(parallelOnly::signal)
       .then(parallelOnly::complete(0)).then(parallelOnly::complete(1)).then(parallelOnly::complete(2))
@@ -86,7 +86,7 @@ module shutdownDeadline_test {
     all {
       noCancel::phase' = noCancel::Running, noCancel::sinceSignal' = 0, noCancel::clock' = 0,
       noCancel::cycleLength' = 25, noCancel::cycleElapsed' = 0, noCancel::cycleCancelled' = false,
-      noCancel::items' = noCancel::ITEMS.mapBy(i => { status: noCancel::Waiting, elapsed: 0, responsive: true, busy: false, wasBusy: false }),
+      noCancel::items' = noCancel::ITEMS.mapBy(i => { status: noCancel::Waiting, elapsed: 0, responsive: true, busy: false, wasBusy: false, cycleHeld: false }),
     }
       .then(noCancel::signal)
       .expect(noCancel::phase == noCancel::Draining)
@@ -95,13 +95,47 @@ module shutdownDeadline_test {
         and noCancel::stopBeforeExitTimeout
         and not(noCancel::respondingSessionsClosed))
 
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 2, ABORT_CYCLE_TASKS = false) as noAbort from "./shutdownDeadline"
+
+  // 周期の読み取りタスクを中断しない：周期を打ち切っても、タスクが読み取りハンドルの鍵を持ったまま
+  // 走り続けるので、応答するサーバーのセッションも閉じられず、上限で見捨てる。
+  run cycleTaskKeepsTheLockWithoutAbortTest =
+    all {
+      noAbort::phase' = noAbort::Running, noAbort::sinceSignal' = 0, noAbort::clock' = 0,
+      noAbort::cycleLength' = 25, noAbort::cycleElapsed' = 0, noAbort::cycleCancelled' = false,
+      noAbort::items' = noAbort::ITEMS.mapBy(i => { status: noAbort::Waiting, elapsed: 0, responsive: true, busy: false, wasBusy: false, cycleHeld: i == 0 }),
+    }
+      .then(noAbort::signal)
+      .then(2.reps(_ => noAbort::tick))
+      .then(noAbort::cancelCycle)
+      .then(noAbort::complete(1)).then(noAbort::complete(2)).then(noAbort::complete(3)).then(noAbort::complete(4))
+      .then(15.reps(_ => noAbort::tick))
+      .expect(noAbort::phase == noAbort::Exited
+        and noAbort::items.get(0).status == noAbort::Abandoned
+        and not(noAbort::respondingSessionsClosed))
+
+  // 修正案：周期を打ち切ると読み取りタスクも中断し、鍵が空いたセッションをすぐ閉じる。
+  run abortedCycleTaskReleasesTheLockTest =
+    all {
+      after::phase' = after::Running, after::sinceSignal' = 0, after::clock' = 0,
+      after::cycleLength' = 25, after::cycleElapsed' = 0, after::cycleCancelled' = false,
+      after::items' = after::ITEMS.mapBy(i => { status: after::Waiting, elapsed: 0, responsive: true, busy: false, wasBusy: false, cycleHeld: i == 0 }),
+    }
+      .then(after::signal)
+      .then(2.reps(_ => after::tick))
+      .then(after::cancelCycle)
+      .then(after::complete(0)).then(after::complete(1)).then(after::complete(2)).then(after::complete(3)).then(after::complete(4))
+      .then(after::finishStop)
+      .expect(after::phase == after::Exited and after::sinceSignal == after::CYCLE_GRACE
+        and after::stoppedWithEverythingClosed and after::safety)
+
   // 修正案：長い周期の途中なら、2 秒待って周期を打ち切り、閉じ始める。応答するサーバーと鍵の空いた
   // 子プロセスはすぐ閉じ、応答しないサーバーは 10 秒で打ち切り、鍵を持たれた子プロセスは 15 秒で見捨てる。
   run parallelWithDeadlineClosesWhatCanBeClosedTest =
     all {
       after::phase' = after::Running, after::sinceSignal' = 0, after::clock' = 0,
       after::cycleLength' = 25, after::cycleElapsed' = 0, after::cycleCancelled' = false,
-      after::items' = after::ITEMS.mapBy(i => { status: after::Waiting, elapsed: 0, responsive: i == 2, busy: i == 3, wasBusy: i == 3 }),
+      after::items' = after::ITEMS.mapBy(i => { status: after::Waiting, elapsed: 0, responsive: i == 2, busy: i == 3, wasBusy: i == 3, cycleHeld: false }),
     }
       .then(after::signal)
       .then(2.reps(_ => after::tick))
@@ -122,7 +156,7 @@ module shutdownDeadline_test {
     all {
       after::phase' = after::Running, after::sinceSignal' = 0, after::clock' = 0,
       after::cycleLength' = 0, after::cycleElapsed' = 0, after::cycleCancelled' = false,
-      after::items' = after::ITEMS.mapBy(i => { status: after::Waiting, elapsed: 0, responsive: i == 2, busy: i == 3, wasBusy: i == 3 }),
+      after::items' = after::ITEMS.mapBy(i => { status: after::Waiting, elapsed: 0, responsive: i == 2, busy: i == 3, wasBusy: i == 3, cycleHeld: false }),
     }
       .then(after::signal)
       .then(after::complete(2)).then(after::complete(4))

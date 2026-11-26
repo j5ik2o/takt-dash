@@ -173,3 +173,9 @@ stdio の子プロセスは、鍵を持つ要求が終わるか、プロセス�
 - 合図で周期をすぐ打ち切る案を、2 秒だけ待ってから打ち切る案に替えた。すぐ打ち切ると、ふだんの短い周期で見つけた出来事も記録せずに止まり、次の起動は基準化から始まるので、その出来事を記録する機会がなくなる。Quint に `CYCLE_GRACE` と `immediateCancel` の版、不変条件 `shortCyclesComplete` を足した。
 - `CLOSE_WAIT_FOR_ESTABLISH` を 5 秒に下げた影響：使うのは `HttpSession::close`（停止のとき）だけで、設定の反映で置き場を外すとき（`Drop`）は確立を待たない。確立はレジストリと別のタスクで最後まで走り、終わってから最後の持ち主が消えた時点で DELETE を送るので、確立に 5 秒以上かかってもセッションは残らない。停止のときに確立が 5 秒を超えると、確立のあとのセッションは、確立のタスクが終わる前にプロセスが終われば残る（10 秒のときも同じことが 10 秒で起きていた）。
 - 停止の上限をちょうどの時間で確かめるため、dev-dependencies の `tokio` に `test-util`（`start_paused`）を足した。
+
+## レビューボットの指摘で変えたこと（[PR #390](https://github.com/j5ik2o/takt-dash/pull/390)）
+
+- 周期を打ち切っても、周期がプロジェクトごとに起動した読み取りタスク（`tokio::spawn`）は走り続け、読み取りハンドルやクライアントの鍵を持ったままだった。閉じる段が鍵を取れず、応答するサーバーのセッションも閉じられなかった（Devin Review と CodeRabbit の指摘）。`poller.rs` に `ReadTask`（捨てたら `abort` する `JoinHandle` の包み）を足し、周期の future を捨てたらタスクも中断する。Quint に `ABORT_CYCLE_TASKS`・`cycleHeld`・`withoutTaskAbort` の版を足した（反例あり。修正案は反例なし）。テスト `a_cancelled_cycle_stops_its_http_read_so_the_session_is_closed`（中断を外すと 10 秒待って落ちる）。
+- `STOP_DEADLINE` で打ち切っても、tokio のランタイムを捨てるときに始まった `spawn_blocking` の終わりを待つ（Devin Review の指摘）。`main.rs` でランタイムを自分で作り、`shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT)`（1 秒）で捨てる。`STOP_DEADLINE + RUNTIME_SHUTDOWN_TIMEOUT < LAUNCHD_EXIT_TIMEOUT` を `const` で検査する。
+- 接続先の仕様の到達条件 `staleRequestServed` と `oldSlotClosedOnReflect` が、意図しない筋書きも数えていた（CodeRabbit と Devin Review の指摘）。置き場を求めた時点の不一致と、反映が手放したセッションを記録して数えるように直し、意図しない筋書きを数えないことのテストを足した。

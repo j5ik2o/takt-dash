@@ -30,7 +30,8 @@ module sessionEndpoint {
     | Holding    // 置き場（セッション）を持って、takt-mcp へ要求を送っている
     | Done       // 要求が終わり、置き場を手放した
 
-  type Request = { phase: Phase, endpoint: int, sid: int }
+  // staleAtAcquire は、置き場を求めた時点で、要求の接続先が反映済みの接続先と違ったか。
+  type Request = { phase: Phase, endpoint: int, sid: int, staleAtAcquire: bool }
 
   // セッション。endpoint はどの接続先に作ったか。live は takt-mcp にまだ残っているか。
   type Session = { endpoint: int, live: bool }
@@ -44,6 +45,8 @@ module sessionEndpoint {
   var requests: int -> Request
   var nextSid: int
   var edits: int
+  // 反映（reflect）が slot から手放したセッション。
+  var releasedByReflect: Set[int]
 
   pure val EMPTY_SLOT: Slot = { endpoint: NONE, sid: NONE }
 
@@ -86,6 +89,7 @@ module sessionEndpoint {
     requests' = Map(),
     nextSid' = 0,
     edits' = 0,
+    releasedByReflect' = Set(),
   }
 
   // 設定ファイルの接続先を書き換える（URL・トークンの変更、HTTP から外す）。
@@ -95,6 +99,7 @@ module sessionEndpoint {
     file' = endpoint,
     edits' = edits + 1,
     reflected' = reflected, slot' = slot, sessions' = sessions, requests' = requests, nextSid' = nextSid,
+    releasedByReflect' = releasedByReflect,
   }
 
   // 定期読み取りが設定ファイルをレジストリへ反映する。接続先が変わった slot は手放す。
@@ -104,6 +109,8 @@ module sessionEndpoint {
       reflected' = file,
       slot' = nextSlot,
       sessions' = closeUnowned(sessions, nextSlot, requests),
+      releasedByReflect' =
+        if (slot.sid != NONE and nextSlot.sid == NONE) releasedByReflect.union(Set(slot.sid)) else releasedByReflect,
       file' = file, requests' = requests, nextSid' = nextSid, edits' = edits,
     }
   }
@@ -112,13 +119,14 @@ module sessionEndpoint {
   action resolve(id: int): bool = all {
     not(requests.keys().contains(id)),
     file != REMOVED,
-    requests' = requests.put(id, { phase: Resolved, endpoint: file, sid: NONE }),
+    requests' = requests.put(id, { phase: Resolved, endpoint: file, sid: NONE, staleAtAcquire: false }),
     file' = file, reflected' = reflected, slot' = slot, sessions' = sessions, nextSid' = nextSid, edits' = edits,
+    releasedByReflect' = releasedByReflect,
   }
 
   // 要求がレジストリに置き場を求める（http_session）。
   action acquire(id: int): bool = {
-    val r = requests.get(id)
+    val r = { ...requests.get(id), staleAtAcquire: reflected != UNCONFIGURED and reflected != requests.get(id).endpoint }
     all {
       requests.keys().contains(id),
       r.phase == Resolved,
@@ -142,7 +150,7 @@ module sessionEndpoint {
           nextSid' = nextSid + 1,
         }
       },
-      file' = file, reflected' = reflected, edits' = edits,
+      file' = file, reflected' = reflected, edits' = edits, releasedByReflect' = releasedByReflect,
     }
   }
 
@@ -156,6 +164,7 @@ module sessionEndpoint {
       requests' = nextRequests,
       sessions' = closeUnowned(sessions, slot, nextRequests),
       file' = file, reflected' = reflected, slot' = slot, nextSid' = nextSid, edits' = edits,
+      releasedByReflect' = releasedByReflect,
     }
   }
 
@@ -198,10 +207,10 @@ module sessionEndpoint {
 
   // ---- 進行の条件（--witnesses） ----
 
-  // 旧設定の要求が、反映のあとに置き場を得て終わる（拒まずに処理する）。
+  // 旧設定の要求が、反映のあとに（反映済みの接続先と違う接続先のまま）置き場を得て終わる
+  // （拒まずに処理する）。
   val staleRequestServed: bool =
-    reflected != UNCONFIGURED
-      and requests.keys().exists(i => requests.get(i).phase == Done and requests.get(i).endpoint != reflected)
+    requests.keys().exists(i => requests.get(i).phase == Done and requests.get(i).staleAtAcquire)
   // 2 つの要求が同じ slot のセッションを共有している。
   val slotShared: bool =
     slot.sid != NONE
@@ -210,10 +219,8 @@ module sessionEndpoint {
           and requests.get(i).sid == slot.sid and requests.get(j).sid == slot.sid))
   // 接続先の変更が反映され、新しい接続先の slot ができる。
   val slotMovedToNewEndpoint: bool = slot.sid != NONE and slot.endpoint != 1 and reflected == slot.endpoint
-  // 反映で旧接続先の slot を手放し、閉じる。
-  val oldSlotClosedOnReflect: bool =
-    sessions.keys().exists(sid => sessions.get(sid).endpoint == 1 and not(sessions.get(sid).live))
-      and reflected != UNCONFIGURED and reflected != 1
+  // 反映で旧接続先の slot を手放し、そのセッションを閉じる。
+  val oldSlotClosedOnReflect: bool = releasedByReflect.exists(sid => not(sessions.get(sid).live))
 }
 
 module current {

@@ -555,7 +555,11 @@ const server = createServer((request, response) => {
         jsonBody(response, 200, { jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "cwd は絶対パスの文字列で指定してください" } });
         return;
       }
-      jsonBody(response, 200, { jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) });
+      // 状態の delayMs（mock_mcp_server.mjs と同じ形式）で、道具ごとに応答を遅らせる。
+      const delayMs = loadState().delayMs?.[name] ?? 0;
+      setTimeout(() => {
+        jsonBody(response, 200, { jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) });
+      }, delayMs);
       return;
     }
     if (message.id !== undefined) {
