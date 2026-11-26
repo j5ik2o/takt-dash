@@ -264,6 +264,10 @@ fn representative_cases_match_python_and_the_expected_entries() {
     ("tasks:\n  - 'run_slug': run-a\n    \"worktree_path\" : /wt\n", vec![entry(Some("run-a"), None, Some("/wt"))]),
     ("tasks:\n  - name: a\n  - run_slug: run-b\n", vec![entry(None, None, None), entry(Some("run-b"), None, None)]),
     ("tasks:\n", vec![]),
+    ("tasks:\n  -\n    run_slug: run-a\n  -\n    run_slug: run-b\n    worktree_path: /wt\n", vec![
+      entry(Some("run-a"), None, None),
+      entry(Some("run-b"), None, Some("/wt")),
+    ]),
   ];
   let mut oracle = Oracle::start();
   for (text, expected) in cases {

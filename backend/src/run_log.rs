@@ -772,7 +772,8 @@ const BLOCK_SCALAR_INDICATORS: [&str; 6] = [">", ">-", ">+", "|", "|-", "|+"];
 /// と同じ手順で読む。手順を変えるときは 両方を直す（`run_log_tasks_yaml_tests.rs`
 /// が、同じ入力で両方の結果を比べる）。
 ///
-/// - 最初の `- ` 行の字下げを項目の境界の基準にし、同じ字下げの `- ` 行だけを項目の先頭にする。
+/// - 最初の `- ` 行（または `-` だけの行）の字下げを項目の境界の基準にし、同じ字下げのその行だけを
+///   項目の先頭にする。
 /// - 項目の中で、基準より深い行を同じ項目のキーとして読む。
 /// - キーと値の前後の空白と引用符を外す。空、`~`、`null` の値は無いものとして扱う。
 /// - 値がブロックスカラーの印なら、値を空にし、キーの桁より深い行を本文として読み飛ばす。
@@ -801,7 +802,8 @@ fn parse_task_entries(text: &str) -> Result<Vec<TaskEntry>, String> {
     if stripped.is_empty() || stripped.starts_with('#') || stripped == "tasks:" {
       continue;
     }
-    let (body, key_column) = match stripped.strip_prefix("- ") {
+    let item = stripped.strip_prefix("- ").or((stripped == "-").then_some(""));
+    let (body, key_column) = match item {
       | Some(body) if entry_indent.is_none_or(|base| base == indent) => {
         entries.extend(current.take());
         entry_indent.get_or_insert(indent);

@@ -82,7 +82,7 @@ def parse_tasks_yaml(path) -> list:
     続く行は同じエントリの別キーとして読む。`retry_note: >-` などのブロックスカラーの
     本文は、キーの桁より深いインデントの行として読み飛ばし、エントリの境界にもキーにも
     しない。ブロックスカラーの値は読まずに空にする。エントリの境界は、先頭のエントリと
-    同じインデントの `- ` 行だけに限る。読み取りに失敗したときは ContextError にする。
+    同じインデントの `- ` 行と `-` だけの行に限る。読み取りに失敗したときは ContextError にする。
 
     backend/src/run_log.rs の parse_task_entries は、この手順を移したもの。手順を
     変えるときは両方を直す（run_log_tasks_yaml_tests.rs が、同じ入力で結果を比べる）。
@@ -105,7 +105,8 @@ def parse_tasks_yaml(path) -> list:
         if not stripped or stripped.startswith("#") or stripped == "tasks:":
             continue
         indent = _indent_of(line)
-        if stripped.startswith("- ") and (entry_indent is None or indent == entry_indent):
+        is_item = stripped == "-" or stripped.startswith("- ")
+        if is_item and (entry_indent is None or indent == entry_indent):
             if current is not None:
                 entries.append(current)
             if entry_indent is None:
