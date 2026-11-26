@@ -23,15 +23,19 @@
 // 停止の全体（合図から）を STOP_DEADLINE で打ち切る。打ち切ったものは見捨てる（stdio の子プロセスは、
 // プロセスの終了で kill_on_drop により止まる）。
 // CANCEL_CYCLE = false は修正前の遷移。周期の途中なら、周期が終わるのを待ってから閉じる。
-// true は、停止の合図で周期を打ち切り、すぐ閉じ始める。
+// true は、周期を CYCLE_GRACE だけ待ち、それでも終わらなければ打ち切って閉じ始める。ふだんの短い
+// 周期は最後まで走らせ、その周期の出来事を記録してから止まる。
 module shutdownDeadline {
   const PARALLEL: bool
   const DEADLINE: bool
   const CANCEL_CYCLE: bool
+  // 合図のあと周期を待つ上限（CANCEL_CYCLE = true のときだけ使う）。修正案は 2 秒。
+  const CYCLE_GRACE: int
 
   pure val CLOSE_BOUND: int = 10       // 確立の待ち 5 秒 ＋ DELETE 5 秒
   pure val OP_BOUND: int = 30          // 道具の呼び出しの上限の例
   pure val CYCLE_BOUND: int = 30       // 周期の全体が続きうる長さの例
+  pure val SHORT_CYCLE: int = 2        // ふだんの周期の長さの上限の見込み
   pure val SHUTDOWN_DEADLINE: int = 15 // 閉じる段の上限
   pure val STOP_DEADLINE: int = 18     // 停止の全体（合図から）の上限
   pure val EXIT_TIMEOUT: int = 20      // launchd が SIGKILL するまで（ExitTimeOut の既定）
@@ -66,6 +70,8 @@ module shutdownDeadline {
   // 合図から周期を待った時間。
   var cycleLength: int
   var cycleElapsed: int
+  // 待っていた周期を、待つ上限（CYCLE_GRACE）で打ち切ったか。
+  var cycleCancelled: bool
   var items: int -> Item
 
   // ---- 純粋な計算 ----
@@ -121,6 +127,7 @@ module shutdownDeadline {
       sinceSignal' = 0,
       clock' = 0,
       cycleLength' = cycle,
+      cycleCancelled' = false,
       cycleElapsed' = 0,
       items' = ITEMS.mapBy(i => {
         status: Waiting, elapsed: 0,
@@ -132,12 +139,12 @@ module shutdownDeadline {
   // 停止の合図を受ける。周期の途中で、周期を打ち切らない遷移なら、周期の終わりを待つ。
   action signal = all {
     phase == Running,
-    if (cycleLength > 0 and not(CANCEL_CYCLE)) all {
+    if (cycleLength > 0) all {
       phase' = Draining, items' = items,
     } else all {
       phase' = Stopping, items' = startClosing(items),
     },
-    sinceSignal' = 0, clock' = 0, cycleElapsed' = cycleElapsed, cycleLength' = cycleLength,
+    sinceSignal' = 0, clock' = 0, cycleElapsed' = cycleElapsed, cycleLength' = cycleLength, cycleCancelled' = cycleCancelled,
   }
 
   // 待っていた周期が終わり、閉じる段に入る。
@@ -145,9 +152,21 @@ module shutdownDeadline {
     phase == Draining,
     cycleElapsed == cycleLength,
     phase' = Stopping,
-    cycleLength' = cycleLength,
+    cycleLength' = cycleLength, cycleCancelled' = cycleCancelled,
     items' = startClosing(items),
     sinceSignal' = sinceSignal, clock' = 0, cycleElapsed' = cycleElapsed,
+  }
+
+  // 周期を待つ上限に達し、周期を打ち切って閉じる段に入る。
+  action cancelCycle = all {
+    CANCEL_CYCLE,
+    phase == Draining,
+    cycleElapsed == CYCLE_GRACE,
+    cycleElapsed < cycleLength,
+    phase' = Stopping,
+    cycleCancelled' = true,
+    items' = startClosing(items),
+    sinceSignal' = sinceSignal, clock' = 0, cycleElapsed' = cycleElapsed, cycleLength' = cycleLength,
   }
 
   // 応答するサーバーの DELETE が返る、または鍵の空いた子プロセスを kill する。
@@ -156,7 +175,7 @@ module shutdownDeadline {
     canCompleteNow(i, items.get(i)),
     items' = startNext(items.set(i, { ...items.get(i), status: Closed })),
     phase' = phase, sinceSignal' = sinceSignal, clock' = clock,
-    cycleLength' = cycleLength, cycleElapsed' = cycleElapsed,
+    cycleLength' = cycleLength, cycleCancelled' = cycleCancelled, cycleElapsed' = cycleElapsed,
   }
 
   // 子プロセスの鍵を持つ要求が、上限より前に道具の呼び出しを終える。
@@ -166,7 +185,7 @@ module shutdownDeadline {
     items.get(i).busy,
     items' = items.set(i, { ...items.get(i), busy: false }),
     phase' = phase, sinceSignal' = sinceSignal, clock' = clock,
-    cycleLength' = cycleLength, cycleElapsed' = cycleElapsed,
+    cycleLength' = cycleLength, cycleCancelled' = cycleCancelled, cycleElapsed' = cycleElapsed,
   }
 
   // 時間が 1 単位進む。待っている周期は cycleLength で終わる。上限に達したら、残りを見捨てて終える。
@@ -179,13 +198,13 @@ module shutdownDeadline {
       DEADLINE and (sinceSignal + 1 >= STOP_DEADLINE or (phase == Stopping and nextClock >= SHUTDOWN_DEADLINE))
     all {
       phase == Draining or phase == Stopping,
-      phase == Draining implies cycleElapsed < cycleLength,
+      phase == Draining implies (cycleElapsed < cycleLength and (not(CANCEL_CYCLE) or cycleElapsed < CYCLE_GRACE)),
       phase == Stopping implies not(ITEMS.exists(i => canCompleteNow(i, items.get(i)))),
       phase == Stopping implies ITEMS.exists(i => not(finished(items.get(i)))),
       sinceSignal' = sinceSignal + 1,
       clock' = nextClock,
       cycleElapsed' = if (phase == Draining) cycleElapsed + 1 else cycleElapsed,
-      cycleLength' = cycleLength,
+      cycleLength' = cycleLength, cycleCancelled' = cycleCancelled,
       if (overDeadline) all {
         items' = abandonRest(ticked),
         phase' = Exited,
@@ -202,12 +221,12 @@ module shutdownDeadline {
     ITEMS.forall(i => finished(items.get(i))),
     phase' = Exited,
     sinceSignal' = sinceSignal, clock' = clock, items' = items,
-    cycleLength' = cycleLength, cycleElapsed' = cycleElapsed,
+    cycleLength' = cycleLength, cycleCancelled' = cycleCancelled, cycleElapsed' = cycleElapsed,
   }
 
   action step = {
     nondet i = ITEMS.oneOf()
-    any { signal, cycleEnds, complete(i), operationEnds(i), tick, finishStop }
+    any { signal, cycleEnds, cancelCycle, complete(i), operationEnds(i), tick, finishStop }
   }
 
   // ---- 不変条件 ----
@@ -231,9 +250,12 @@ module shutdownDeadline {
     ITEMS.exists(i => items.get(i).status == Abandoned)
       implies (DEADLINE and (clock == SHUTDOWN_DEADLINE or sinceSignal == STOP_DEADLINE))
 
+  // ふだんの短い周期（SHORT_CYCLE 以下）は打ち切らない（その周期の出来事は記録してから止まる）。
+  val shortCyclesComplete: bool = cycleCancelled implies cycleLength > SHORT_CYCLE
+
   val safety: bool =
     stopBeforeExitTimeout and closesWithinDeadline and respondingSessionsClosed and idleChildrenKilled
-      and abandonOnlyAtDeadline
+      and abandonOnlyAtDeadline and shortCyclesComplete
 
   // ---- 進行の条件（--witnesses） ----
 
@@ -244,27 +266,37 @@ module shutdownDeadline {
     phase == Exited and STDIO_ITEMS.exists(i => items.get(i).wasBusy and items.get(i).status == Closed)
   // 周期の途中で合図を受け、応答する相手をすべて閉じて終える。
   val stoppedDuringACycle: bool = phase == Exited and cycleLength > 0 and respondingSessionsClosed
+  // 短い周期を最後まで走らせてから閉じて終える。
+  val shortCycleCompletedBeforeStop: bool =
+    phase == Exited and cycleLength > 0 and cycleLength <= SHORT_CYCLE and not(cycleCancelled)
+  // 長い周期を打ち切って閉じて終える。
+  val longCycleCancelled: bool = phase == Exited and cycleCancelled and respondingSessionsClosed
 }
 
 module current {
-  import shutdownDeadline(PARALLEL = false, DEADLINE = false, CANCEL_CYCLE = false).*
+  import shutdownDeadline(PARALLEL = false, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2).*
 }
 
 // 上限だけを入れた遷移。
 module deadlineOnly {
-  import shutdownDeadline(PARALLEL = false, DEADLINE = true, CANCEL_CYCLE = false).*
+  import shutdownDeadline(PARALLEL = false, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2).*
 }
 
 // 同時に閉じるだけの遷移。
 module parallelOnly {
-  import shutdownDeadline(PARALLEL = true, DEADLINE = false, CANCEL_CYCLE = false).*
+  import shutdownDeadline(PARALLEL = true, DEADLINE = false, CANCEL_CYCLE = false, CYCLE_GRACE = 2).*
 }
 
 // 同時に閉じて上限で打ち切るが、周期の途中なら周期を待つ遷移（設計の最初の版）。
 module withoutCycleCancel {
-  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = false).*
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = false, CYCLE_GRACE = 2).*
+}
+
+// 合図で周期をすぐ打ち切る遷移（設計の 2 番目の版）。
+module immediateCancel {
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 0).*
 }
 
 module fixed {
-  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true).*
+  import shutdownDeadline(PARALLEL = true, DEADLINE = true, CANCEL_CYCLE = true, CYCLE_GRACE = 2).*
 }

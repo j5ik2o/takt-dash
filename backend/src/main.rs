@@ -2,6 +2,7 @@
 //!
 //! 設定を読んで gRPC サーバーと定期読み取りを一緒に起動し、SIGTERM/SIGINT の終了シグナルで
 //! 両方を停止します。gRPC サーバーは設定の listen か `--listen` の待ち受けアドレスで待ち受けます。
+//! 停止は、終了シグナルから [`STOP_DEADLINE`] で打ち切り、launchd が SIGKILL する前に終えます。
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
@@ -11,7 +12,7 @@ use takt_dash_backend::{
   conversation::{ConversationPaths, ConversationReader},
   grpc::{serve_with_listener, ServiceDeps, TaktDashServiceImpl},
   mcp::McpClientRegistry,
-  poller::{run_until_stopped, Poller},
+  poller::{run_until_stop_deadline, run_until_stopped, Poller, STOP_DEADLINE},
   store::StateStore,
 };
 
@@ -97,7 +98,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let poll = async move {
     run_until_stopped(&mut poller, poller_stop).await;
   };
-  let (server_result, ()) = tokio::join!(server, poll);
-  server_result?;
+  match run_until_stop_deadline(async { tokio::join!(server, poll) }, stop_rx, STOP_DEADLINE).await {
+    | Some((server_result, ())) => server_result?,
+    | None => tracing::warn!(
+      deadline_secs = STOP_DEADLINE.as_secs(),
+      "終了シグナルから停止の上限までに gRPC サーバーと定期読み取りが止まらないため、打ち切って終了します。"
+    ),
+  }
   Ok(())
 }

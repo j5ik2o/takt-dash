@@ -16,7 +16,8 @@
 // --behavior で `deny`（常に 401）・`drop-session`（常に 404）・`fail-initialized`
 // （notifications/initialized だけ 500）・`drop-session-then-refuse-initialize`（tools/call は
 // 404、2 回目以降の initialize は 500）・`garble-initialize`（initialize の本文が壊れている）・
-// `slow-initialize`（initialize と notifications/initialized を --delay-ms だけ遅らせる）などを
+// `slow-initialize`（initialize と notifications/initialized を --delay-ms だけ遅らせる）・`hang-delete`
+// （DELETE に応答しない）などを
 // 起こせる。
 //
 // 追加の検証用オプション:
@@ -414,6 +415,10 @@ const server = createServer((request, response) => {
     request.resume();
     if (sessionId === undefined) {
       response.writeHead(400).end();
+      return;
+    }
+    if (behavior === "hang-delete") {
+      // DELETE に応答せず、セッションも破棄しない。応答しないサーバーを閉じる段で待つ状態を再現する。
       return;
     }
     if (!sessions.delete(sessionId)) {

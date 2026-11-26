@@ -11,17 +11,18 @@ backend の停止が、停止の合図から launchd が SIGKILL する前に終
 | ファイル | 内容 |
 | --- | --- |
 | `shutdownDeadline.qnt` | 状態機械、不変条件、進行の条件 |
-| `shutdownDeadline_test.qnt` | issue の筋書きを修正前・片方だけの版・修正案でたどるテスト（7 件） |
+| `shutdownDeadline_test.qnt` | issue の筋書きを修正前・途中の版・修正案でたどるテスト（9 件） |
 
-`shutdownDeadline.qnt` は遷移を 3 つの定数で切り替えます。
+`shutdownDeadline.qnt` は遷移を 4 つの定数で切り替えます。
 
-| モジュール | `PARALLEL` | `DEADLINE` | `CANCEL_CYCLE` | 表すもの |
-| --- | --- | --- | --- | --- |
-| `current` | false | false | false | 修正前。周期の途中なら周期を待ち、`shutdown_all` と `Poller::shutdown` が 1 件ずつ順に閉じ、上限が無い |
-| `deadlineOnly` | false | true | false | 上限だけを入れた版 |
-| `parallelOnly` | true | false | false | 同時に閉じるだけの版 |
-| `withoutCycleCancel` | true | true | false | 同時に閉じて上限で打ち切るが、周期の途中なら周期を待つ版（設計の最初の版） |
-| `fixed` | true | true | true | 修正案。停止の合図で周期を打ち切り、すべてを同時に閉じ始め、閉じる段を `SHUTDOWN_DEADLINE`、停止の全体を `STOP_DEADLINE` で打ち切る |
+| モジュール | `PARALLEL` | `DEADLINE` | `CANCEL_CYCLE` | `CYCLE_GRACE` | 表すもの |
+| --- | --- | --- | --- | --- | --- |
+| `current` | false | false | false | － | 修正前。周期の途中なら周期を待ち、`shutdown_all` と `Poller::shutdown` が 1 件ずつ順に閉じ、上限が無い |
+| `deadlineOnly` | false | true | false | － | 上限だけを入れた版 |
+| `parallelOnly` | true | false | false | － | 同時に閉じるだけの版 |
+| `withoutCycleCancel` | true | true | false | － | 同時に閉じて上限で打ち切るが、周期の途中なら周期を待つ版（設計の最初の版） |
+| `immediateCancel` | true | true | true | 0 | 合図で周期をすぐ打ち切る版（設計の 2 番目の版） |
+| `fixed` | true | true | true | 2 | 修正案。合図のあと周期を 2 秒だけ待ち、終わらなければ打ち切り、すべてを同時に閉じ始め、閉じる段を `SHUTDOWN_DEADLINE`、停止の全体を `STOP_DEADLINE` で打ち切る |
 
 ## 仕様とコードの対応
 
@@ -29,7 +30,8 @@ backend の停止が、停止の合図から launchd が SIGKILL する前に終
 | --- | --- |
 | `signal` | SIGTERM・SIGINT（`main.rs`）→ 停止の watch |
 | `Draining` と `cycleLength` | `poller.rs` の `run_until_stopped` が、合図の前に始めた `read_cycle_once` を待つこと。周期は道具を何回か呼び、上限は 1 回ごと（`READ_TIMEOUT_SECONDS`）なので、周期の全体の長さに上限は無い。モデルでは `CYCLE_BOUND`（30 秒）まで |
-| `CANCEL_CYCLE` | 修正案の `run_until_stopped` は、周期と停止の合図を `select!` で待ち、合図で周期の future を捨てる |
+| `CANCEL_CYCLE` と `CYCLE_GRACE` | 修正案の `run_until_stopped`（`cycle_until_grace`）は、周期と停止の合図を `select!` で待ち、合図のあと周期を `CYCLE_GRACE`（2 秒）だけ待って、終わらなければ周期の future を捨てる |
+| `SHORT_CYCLE` | ふだんの周期の長さの見込み（2 秒）。これより短い周期は打ち切らず、その周期の出来事を記録してから止まる |
 | `HTTP_ITEMS` | レジストリの常駐サーバーごとの `HttpSession`（`registry.rs` の `http_sessions`）と、定期読み取りのプロジェクトごとの `HttpReadHandle`（`poller.rs` の `reads`） |
 | `CLOSE_BOUND` | `http.rs` の `SESSION_CLOSE_BOUND` ＝ `CLOSE_WAIT_FOR_ESTABLISH`（修正案で 5 秒）＋ `CLOSE_TIMEOUT`（5 秒） |
 | `STDIO_ITEMS` と `busy` | レジストリの stdio のクライアント。閉じる前に `client.lock().await` で鍵を取る。要求が道具を呼んでいる間は鍵が空かない |
@@ -45,7 +47,7 @@ backend の停止が、停止の合図から launchd が SIGKILL する前に終
 
 - HTTP セッションは 3 件、stdio の子プロセスは 2 件です。各サーバーが応答するか、各子プロセスの鍵が埋まっているか、合図の時点で周期の途中か（途中なら残りの長さ）は、初期状態で選びます。
 - 修正前の順は番号の順（実装は stdio を先、HTTP をあと）です。応答しない相手が先にあると、後ろの相手を待たせます。
-- 次のものは含めていません。gRPC サーバーの穏やかな停止の中身（`STOP_DEADLINE` が外から打ち切ります）、閉じる段の途中に届いた要求が置き場を作り直すこと、打ち切った周期の中の個々の処理（周期は記録の途中で止まりうるが、その時点で止まることは SIGKILL と同じかそれより安全です。記録は 1 回ずつ SQLite に書くので、途中まで書いたものが壊れることはありません）。
+- 次のものは含めていません。gRPC サーバーの穏やかな停止の中身（`STOP_DEADLINE` が外から打ち切ります）、閉じる段の途中に届いた要求が置き場を作り直すこと、打ち切った周期の中の個々の処理。周期は `await` の境目で止まります。出来事の記録と、その直後のメモリの更新の間に `await` は無いので、記録が半端に残ることはありません（`backend/src/poller_rebuild_tests.rs` の `a_stop_signal_during_a_long_cycle_cancels_it_and_a_restart_records_each_event_once` が確かめます）。
 
 ## 条件
 
@@ -56,9 +58,10 @@ backend の停止が、停止の合図から launchd が SIGKILL する前に終
 - `respondingSessionsClosed`：応答するサーバーのセッションは、プロセスが終わるまでに閉じる。
 - `idleChildrenKilled`：合図の時点で鍵の空いていた子プロセスは、プロセスが終わるまでに kill する。
 - `abandonOnlyAtDeadline`：見捨てるのは、上限に達したときだけ。
-- `safety`：上の 5 つをすべて満たす。
+- `shortCyclesComplete`：ふだんの短い周期（`SHORT_CYCLE` 以下）は打ち切らない。
+- `safety`：上の 6 つをすべて満たす。
 
-前提（筋書きテストの `boundsAreOrderedTest` で確かめます）：`CLOSE_BOUND < SHUTDOWN_DEADLINE < STOP_DEADLINE < EXIT_TIMEOUT`。コードでは `const _: () = assert!(...)` で確かめます。
+前提（筋書きテストの `boundsAreOrderedTest` で確かめます）：`CLOSE_BOUND < SHUTDOWN_DEADLINE`、`CYCLE_GRACE + SHUTDOWN_DEADLINE < STOP_DEADLINE < EXIT_TIMEOUT`、`SHORT_CYCLE <= CYCLE_GRACE`。コードでは `const _: () = assert!(...)`（`backend/src/mcp/registry.rs` と `backend/src/poller.rs`）で確かめます。
 
 進行の条件（到達できること。`--witnesses` で数えます）
 
@@ -67,6 +70,8 @@ backend の停止が、停止の合図から launchd が SIGKILL する前に終
 - `busyChildAbandoned`：鍵の空かない子プロセスを上限で見捨てる。
 - `busyChildKilledAfterOperation`：鍵を持つ要求が終わったあとで、その子プロセスを kill する。
 - `stoppedDuringACycle`：周期の途中で合図を受け、応答する相手をすべて閉じて終える。
+- `shortCycleCompletedBeforeStop`：短い周期を最後まで走らせてから閉じて終える。
+- `longCycleCancelled`：長い周期を打ち切り、応答する相手をすべて閉じて終える。
 
 ## 結果
 
@@ -83,35 +88,40 @@ quint run shutdownDeadline.qnt --main=parallelOnly --invariant=stopBeforeExitTim
   --max-steps=60 --max-samples=10000 --seed=0x364
 quint run shutdownDeadline.qnt --main=withoutCycleCancel --invariant=respondingSessionsClosed \
   --max-steps=60 --max-samples=10000 --seed=0x364
+quint run shutdownDeadline.qnt --main=immediateCancel --invariant=shortCyclesComplete \
+  --max-steps=60 --max-samples=10000 --seed=0x364
 ```
 
 | モジュール | 違反する不変条件（手数） | 筋書き |
 | --- | --- | --- |
-| `current` | `stopBeforeExitTimeout`（23）、`closesWithinDeadline`（42） | 周期と、応答しない相手を 1 件ずつ待ち、SIGKILL を超える（`sequentialClosesExceedTheExitTimeoutBeforeFixTest`） |
-| `deadlineOnly` | `respondingSessionsClosed`（21）、`idleChildrenKilled`（22） | 応答しない相手を順に待つうちに上限に達し、後ろの応答する相手を見捨てる（`deadlineAloneAbandonsARespondingServerTest`） |
-| `parallelOnly` | `stopBeforeExitTimeout`（23）、`closesWithinDeadline`（27） | 鍵を持つ道具の呼び出しを待ち、SIGKILL を超える（`parallelAloneWaitsForABusyChildTest`） |
-| `withoutCycleCancel` | `respondingSessionsClosed`（21）、`idleChildrenKilled`（20） | 周期を待つうちに停止の全体の上限に達し、閉じ始める前にすべて見捨てる（`waitingForACycleAbandonsEverythingTest`） |
+| `current` | `stopBeforeExitTimeout`（22）、`closesWithinDeadline`（42） | 周期と、応答しない相手を 1 件ずつ待ち、SIGKILL を超える（`sequentialClosesExceedTheExitTimeoutBeforeFixTest`） |
+| `deadlineOnly` | `respondingSessionsClosed`（20）、`idleChildrenKilled`（20） | 応答しない相手を順に待つうちに上限に達し、後ろの応答する相手を見捨てる（`deadlineAloneAbandonsARespondingServerTest`） |
+| `parallelOnly` | `stopBeforeExitTimeout`（22）、`closesWithinDeadline`（24） | 鍵を持つ道具の呼び出しを待ち、SIGKILL を超える（`parallelAloneWaitsForABusyChildTest`） |
+| `withoutCycleCancel` | `respondingSessionsClosed`（20）、`idleChildrenKilled`（19） | 周期を待つうちに停止の全体の上限に達し、閉じ始める前にすべて見捨てる（`waitingForACycleAbandonsEverythingTest`） |
+| `immediateCancel` | `shortCyclesComplete`（2） | ふだんの短い周期も打ち切り、その周期の出来事を記録せずに止まる（`immediateCancelDropsAShortCycleTest`） |
 
-同じ条件（10000 サンプル、max-steps 60、seed 0x364）で、表に無い組み合わせは反例なしです。同時に閉じること、上限、周期の打ち切りの 3 つがすべて要ります。
+同じ条件（10000 サンプル、max-steps 60、seed 0x364）で、6 つの不変条件のうち表に無い組み合わせは反例なしです。同時に閉じること、上限、長い周期の打ち切り、短い周期を待つことの 4 つがすべて要ります。
 
 ### 修正案の遷移：反例なし
 
 ```sh
 quint run shutdownDeadline.qnt --main=fixed --invariant=safety \
   --witnesses stoppedWithEverythingClosed unresponsiveServerGaveUp busyChildAbandoned \
-    busyChildKilledAfterOperation stoppedDuringACycle \
+    busyChildKilledAfterOperation stoppedDuringACycle shortCycleCompletedBeforeStop longCycleCancelled \
   --max-steps=60 --max-samples=50000 --seed=0x364
 ```
 
-50000 サンプル、max-steps 60、seed 0x364 で `safety` の反例なし。trace の長さは最短 8、最長 24、平均 16.57 です。どの trace もプロセスが終わって（`Exited`）止まります。
+50000 サンプル、max-steps 60、seed 0x364 で `safety` の反例なし。trace の長さは最短 8、最長 27、平均 19.34 です。どの trace もプロセスが終わって（`Exited`）止まります。
 
 | 条件 | 到達した trace |
 | --- | --- |
-| `stoppedWithEverythingClosed` | 6029 / 50000（12.06%） |
-| `unresponsiveServerGaveUp` | 43699 / 50000（87.40%） |
-| `busyChildAbandoned` | 2962 / 50000（5.92%） |
-| `busyChildKilledAfterOperation` | 35728 / 50000（71.46%） |
-| `stoppedDuringACycle` | 48404 / 50000（96.81%） |
+| `stoppedWithEverythingClosed` | 6168 / 50000（12.34%） |
+| `unresponsiveServerGaveUp` | 43651 / 50000（87.30%） |
+| `busyChildAbandoned` | 2192 / 50000（4.38%） |
+| `busyChildKilledAfterOperation` | 36254 / 50000（72.51%） |
+| `stoppedDuringACycle` | 48367 / 50000（96.73%） |
+| `shortCycleCompletedBeforeStop` | 3270 / 50000（6.54%） |
+| `longCycleCancelled` | 45097 / 50000（90.19%） |
 
 ### 筋書きテスト
 
@@ -119,4 +129,4 @@ quint run shutdownDeadline.qnt --main=fixed --invariant=safety \
 quint test shutdownDeadline_test.qnt --main=shutdownDeadline_test
 ```
 
-7 件すべて成功。
+9 件すべて成功。

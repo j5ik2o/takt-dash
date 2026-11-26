@@ -45,8 +45,13 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// セッションを閉じるときに、進行中の確立が終わるのを待つ上限。確立が終わる前に閉じると、
 /// あとから保存されたセッションが残るため、確立を待ってから閉じます。応答しないサーバーで
-/// backend の停止が長引かないよう、この時間で打ち切ります。
-const CLOSE_WAIT_FOR_ESTABLISH: Duration = Duration::from_secs(10);
+/// backend の停止が長引かないよう、この時間で打ち切ります。確立は普段なら数ミリ秒で終わります。
+const CLOSE_WAIT_FOR_ESTABLISH: Duration = Duration::from_secs(5);
+
+/// [`HttpSession::close`] 1 回にかかる時間の上限（確立の待ちと DELETE）。backend の停止の
+/// 上限（[`crate::mcp::SHUTDOWN_DEADLINE`]）は、これより長くします。
+pub(crate) const SESSION_CLOSE_BOUND: Duration =
+  Duration::from_secs(CLOSE_WAIT_FOR_ESTABLISH.as_secs() + CLOSE_TIMEOUT.as_secs());
 
 type HttpClient = Client<HttpConnector, Full<Bytes>>;
 
@@ -107,6 +112,12 @@ impl HttpSession {
   #[cfg(test)]
   pub(crate) fn shares_with(&self, other: &HttpSession) -> bool {
     Arc::ptr_eq(&self.inner, &other.inner)
+  }
+
+  /// この置き場の接続先。レジストリが要求の接続先の置き場を返したことをテストで確かめるために使います。
+  #[cfg(test)]
+  pub(crate) fn server(&self) -> &HttpMcpServer {
+    &self.inner.server
   }
 
   /// この置き場の持ち主の数。レジストリが置き場を手放したことをテストで確かめるために使います。
