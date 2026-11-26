@@ -1,6 +1,6 @@
 # takt-dash
 
-taktDash は、takt manager 群の状態を集約する読み取り用のダッシュボードです。
+taktDash は、takt manager 群の状態の集約と、判断待ちの操作を行うダッシュボードです。
 バックエンド（Rust / gRPC）とフロントエンド（Next.js）で構成します。
 
 ## 必要なもの
@@ -58,7 +58,7 @@ scripts/deploy-backend.sh --label <backend のジョブのラベル> --skip-buil
 takt-mcp の HTTP サーバーの接続先（`type: "http"`）のどちらかです。HTTP 接続先に向けた
 プロジェクトの読み取り（定期読み取りと画面の詳細）は、常駐サーバーへ `tools/call` を送ります。
 HTTP サーバーは `127.0.0.1` のみで待ち受け、`Authorization: Bearer <token>` の完全一致を要求します。
-書き込み操作（回答・マージ・承認・却下）は stdio の子プロセスが担います。
+書き込み操作（回答・マージ・承認・却下）は、`writeServer` が指す接続先が担います。接続先は stdio の子プロセスと HTTP サーバーのどちらでもよいです。
 
 `taktdash.config.json` の `mcpServers` に、ホストごとの HTTP 接続先を登録します。値は環境依存です。
 `taktdash.config.json` は `.gitignore` の対象で、リポジトリには実トークンを入れません。
@@ -77,9 +77,9 @@ HTTP サーバーは `127.0.0.1` のみで待ち受け、`Authorization: Bearer 
 
 URL のホストは `127.0.0.1` に限ります。`Authorization` は `Bearer ` で始まる必要があります。
 
-読み取りを HTTP へ向けたプロジェクトでも、書き込みは stdio の takt-mcp へ向けます。プロジェクトの
-`server` が読み取り接続先、`writeServer` が書き込み接続先です。`writeServer` は stdio（`command`）の
-エントリである必要があり、省略した場合は `server` と同じ id を使います。
+プロジェクトの `server` が読み取り接続先、`writeServer` が書き込み接続先です。`writeServer` は
+stdio（`command`）のエントリでも HTTP（`type: "http"`）のエントリでもよく、省略した場合は
+`server` と同じ id を使います。下の例は、読み取りを HTTP、書き込みを stdio に向けた構成です。
 
 ```json
 {
