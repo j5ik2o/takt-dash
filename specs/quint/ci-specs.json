@@ -1,0 +1,178 @@
+{
+  "specs": [
+    {
+      "dir": "activity-failure-events",
+      "spec": "activityFailureEvents.qnt",
+      "test": "activityFailureEvents_test.qnt",
+      "test_modules": ["currentTest", "fixedTest"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 30,
+          "max_samples": 10000
+        }
+      ]
+    },
+    {
+      "dir": "backend-shutdown-deadline",
+      "spec": "shutdownDeadline.qnt",
+      "test": "shutdownDeadline_test.qnt",
+      "test_modules": ["shutdownDeadline_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 60,
+          "max_samples": 50000
+        }
+      ]
+    },
+    {
+      "dir": "decision-offline-actions",
+      "spec": "offlineActions.qnt",
+      "test": "offlineActions_test.qnt",
+      "test_modules": ["offlineActions_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 30,
+          "max_samples": 20000
+        }
+      ]
+    },
+    {
+      "dir": "decision-pending-check",
+      "spec": "pendingCheck.qnt",
+      "test": "pendingCheck_test.qnt",
+      "test_modules": ["pendingCheck_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "writesMatchPendingList and appliedRevisionIsCurrent",
+          "max_steps": 20,
+          "max_samples": 50000
+        }
+      ]
+    },
+    {
+      "dir": "decision-write-retry",
+      "spec": "writeRetry.qnt",
+      "test": "writeRetry_test.qnt",
+      "test_modules": ["writeRetry_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 20,
+          "max_samples": 50000
+        }
+      ]
+    },
+    {
+      "dir": "mcp-child-process",
+      "spec": "childProcess.qnt",
+      "test": "childProcess_test.qnt",
+      "test_modules": ["childProcess_test"],
+      "runs": [
+        {
+          "main": "current",
+          "invariant": "safety",
+          "max_steps": 35,
+          "max_samples": 50000
+        }
+      ]
+    },
+    {
+      "dir": "mcp-http-session",
+      "spec": "httpSession.qnt",
+      "test": "httpSession_test.qnt",
+      "test_modules": ["httpSession_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 30,
+          "max_samples": 50000
+        }
+      ]
+    },
+    {
+      "dir": "mcp-http-session-endpoint",
+      "spec": "sessionEndpoint.qnt",
+      "test": "sessionEndpoint_test.qnt",
+      "test_modules": ["sessionEndpoint_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 25,
+          "max_samples": 50000
+        }
+      ]
+    },
+    {
+      "dir": "poller-event-recording",
+      "spec": "pollerEventRecording.qnt",
+      "test": "pollerEventRecording_test.qnt",
+      "test_modules": ["currentTest", "fixedTest"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 30,
+          "max_samples": 10000
+        }
+      ]
+    },
+    {
+      "dir": "run-detail-deadline",
+      "spec": "runDetailDeadline.qnt",
+      "test": "runDetailDeadline_test.qnt",
+      "test_modules": ["runDetailDeadline_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 60,
+          "max_samples": 100000
+        }
+      ]
+    },
+    {
+      "dir": "state-stream-relay",
+      "spec": "stateStreamRelay.qnt",
+      "test": "stateStreamRelay_test.qnt",
+      "test_modules": ["stateStreamRelay_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 40,
+          "max_samples": 20000
+        }
+      ]
+    },
+    {
+      "dir": "state-stream-watchdog",
+      "spec": "stateStreamWatchdog.qnt",
+      "test": "stateStreamWatchdog_test.qnt",
+      "test_modules": ["stateStreamWatchdog_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 40,
+          "max_samples": 20000
+        },
+        {
+          "main": "fixedOpenSession",
+          "invariant": "safety",
+          "max_steps": 60,
+          "max_samples": 20000
+        }
+      ]
+    }
+  ]
+}
