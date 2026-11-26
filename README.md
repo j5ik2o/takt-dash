@@ -197,8 +197,8 @@ TAKT は、同じ PR やブランチを対象にした run どうしを、実行
 
 ### run の前に TAKT の版を確かめる
 
-`.takt/config.yaml` は、フォークにしかないキー（`task_finish_hook`）を使います。
-mise で入れた npm の takt（0.77.0）はこのキーを知らず、`takt list` でも設定エラーで止まります。
+`.takt/config.yaml` には、フォークにしかないキー（`task_finish_hook`）を書きます（いまは外してあります。戻す条件は `.takt/README.md`）。
+mise で入れた npm の takt（0.77.0）はこのキーを知らず、キーがあると `takt list` でも設定エラーで止まります。
 そこで、根の `mise.toml` で `PATH` の先頭を共有 TAKT（`~/local/takt-custom/bin`）にしています。
 共有 TAKT の切替の手順は、フォーク（`j5ik2o/takt` の `integration/takt-mcp`）の `docs/shared-takt-switch.md` にあります。
 
@@ -216,11 +216,13 @@ run の前に、run を流すのと同じシェルで次を流します。`NG:` 
 
 ```sh
 TAKT_REPO=~/Sources/github.com/j5ik2o/takt
-git -C "$TAKT_REPO" fetch origin integration/takt-mcp
 check=$(mktemp)
-git -C "$TAKT_REPO" show origin/integration/takt-mcp:scripts/check-takt-runtime.sh > "$check"
-sh "$check" --key task_finish_hook --repo "$TAKT_REPO" --contains b1acb58ac
+git -C "$TAKT_REPO" fetch origin integration/takt-mcp &&
+  git -C "$TAKT_REPO" show origin/integration/takt-mcp:scripts/check-takt-runtime.sh > "$check" &&
+  sh "$check" --key task_finish_hook --repo "$TAKT_REPO" --contains b1acb58ac
 ```
+
+3 行を `&&` でつないでいるので、スクリプトを取り出せなかったときも 0 以外で終わります（空のファイルを流して 0 で通ることはありません）。
 
 - スクリプトは、`PATH` の `takt` が共有 TAKT を指すこと、その版が `task_finish_hook` を受け付けること、
   配置した版が `b1acb58ac`（終了フックを呼ぶ処理）を含むことを確かめます。キーがあるだけで
