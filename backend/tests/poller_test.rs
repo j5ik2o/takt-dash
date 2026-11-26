@@ -91,6 +91,27 @@ fn read_pid_file(path: &Path) -> u32 {
   std::fs::read_to_string(path).expect("PID ファイルを読めます").trim().parse().expect("PID を数値として読めます")
 }
 
+/// mock の起動の記録（`--spawn-log`）に、読み取りと書き込みのレーンの2本の子プロセスが
+/// initialize に応答したと残るまで待つ。
+///
+/// 書き込みレーンの子プロセスは、最初のサイクルが裏で温める。停止は温めの終わりを待つため、
+/// 温めの途中で停止を送ると、停止応答の期限に起動の待機が入る。この待機は準備で、判定では
+/// ない。上限は、起動の許可の待ちと初期化の期限（60 秒）を見込んだ、止まったときの打ち切りです。
+async fn wait_until_both_lanes_initialized(spawn_log: &Path) {
+  let initialized = || {
+    std::fs::read_to_string(spawn_log)
+      .map(|log| log.lines().filter(|line| line.starts_with("ready ")).count())
+      .unwrap_or(0)
+  };
+  tokio::time::timeout(Duration::from_secs(90), async {
+    while initialized() < 2 {
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect("読み取りと書き込みのレーンの子プロセスが初期化を終えます");
+}
+
 /// 指定した PID のプロセスが存在するか。終了済みなら偽です。
 fn process_is_running(pid: u32) -> bool {
   matches!(
@@ -2486,8 +2507,16 @@ async fn stop_request_during_the_wait_returns_promptly() {
   // 期限には起動済みの子プロセスでの周期と待機だけを含める。
   // 準備完了の待機と停止応答の待機は別の期限に分け、片方の遅れが他方の合否を曖昧にしない。
   let harness = Harness::new(state_with_goal("g1"));
+  let spawn_log = harness._directory.path().join("spawn.log");
+  let spawn_log_for_config = spawn_log.clone();
+  harness.rewrite_config(|value| {
+    let args = value["mcpServers"]["mac-mini"]["args"].as_array_mut().expect("起動引数があります");
+    args.push(json!("--spawn-log"));
+    args.push(json!(spawn_log_for_config.display().to_string()));
+  });
   let mut poller = harness.poller();
   poller.read_cycle_once().await.expect("子プロセスを起動する 1 サイクル目を実行できます");
+  wait_until_both_lanes_initialized(&spawn_log).await;
   let warmed_up_at = harness.store.slot("takt-dash").and_then(|slot| slot.last_read_at);
   // ここから先の呼び出しだけを数え、run_until_stopped が回した周期の数を後で確かめる。
   harness.clear_calls();
@@ -2534,23 +2563,34 @@ async fn stop_request_shuts_down_the_mcp_child_process() {
   let harness = Harness::new(state_with_goal("g1"));
   let pid_path = harness._directory.path().join("mock.pid");
   let pid_for_config = pid_path.clone();
+  let spawn_log = harness._directory.path().join("spawn.log");
+  let spawn_log_for_config = spawn_log.clone();
   harness.rewrite_config(|value| {
     let args = value["mcpServers"]["mac-mini"]["args"].as_array_mut().expect("起動引数があります");
     args.push(json!("--pid-file"));
     args.push(json!(pid_for_config.display().to_string()));
+    args.push(json!("--spawn-log"));
+    args.push(json!(spawn_log_for_config.display().to_string()));
   });
 
   let mut poller = harness.poller();
+  // 子プロセスの起動時間は並列に動くほかのテストの負荷で揺れるため、先に1周期読んで起動しておき、
+  // 準備完了と停止応答の期限には起動済みの子プロセスでの周期と停止だけを含める。
+  poller.read_cycle_once().await.expect("子プロセスを起動する 1 サイクル目を実行できます");
+  wait_until_both_lanes_initialized(&spawn_log).await;
+  let warmed_up_at = harness.store.slot("takt-dash").and_then(|slot| slot.last_read_at);
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
   let store = harness.store.clone();
   let run = run_until_stopped(&mut poller, stop_rx);
   tokio::pin!(run);
 
-  // 子プロセスの起動（PID ファイル）と最初のサイクル完了を観測する。準備が整わないまま
-  // 停止を送ったり、停止応答の期限に準備の待機を含めたりしない。
+  // 子プロセスの起動（PID ファイル）と、run_until_stopped の最初のサイクル完了を観測する。
+  // 準備が整わないまま停止を送ったり、停止応答の期限に準備の待機を含めたりしない。
   let ready_deadline = Duration::from_secs(10);
   let wait_ready = async {
-    while !(store.slot("takt-dash").is_some_and(|slot| slot.is_connected()) && pid_path.exists()) {
+    while !(store.slot("takt-dash").is_some_and(|slot| slot.is_connected() && slot.last_read_at != warmed_up_at)
+      && pid_path.exists())
+    {
       tokio::time::sleep(Duration::from_millis(10)).await;
     }
   };
