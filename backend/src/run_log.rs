@@ -763,83 +763,132 @@ struct RawMeta {
   task:              Option<String>,
 }
 
+/// ブロックスカラーの印。値がこれなら、本文を読まずに値を空にする。
+const BLOCK_SCALAR_INDICATORS: [&str; 6] = [">", ">-", ">+", "|", "|-", "|+"];
+
+/// `tasks.yaml` の `tasks` の項目を、run の場所の解決に使うキーだけ読む。
+///
+/// `tools/project-status/task_context.py` の `parse_tasks_yaml`
+/// と同じ手順で読む。手順を変えるときは 両方を直す（`run_log_tasks_yaml_tests.rs`
+/// が、同じ入力で両方の結果を比べる）。
+///
+/// - 最初の `- ` 行（または `-` だけの行）の字下げを項目の境界の基準にし、同じ字下げのその行だけを
+///   項目の先頭にする。
+/// - 項目の中で、基準より深い行を同じ項目のキーとして読む。
+/// - キーと値の前後の空白と引用符を外す。空、`~`、`null` の値は無いものとして扱う。
+/// - 値がブロックスカラーの印なら、値を空にし、キーの桁より深い行を本文として読み飛ばす。
+///
+/// `tasks:` の行が無いときは、空のファイルや壊れたファイルを一覧に無い run と区別するため
+/// `Err` を返す。
 fn parse_task_entries(text: &str) -> Result<Vec<TaskEntry>, String> {
   let mut entries = Vec::new();
   let mut current: Option<TaskEntry> = None;
+  let mut entry_indent: Option<usize> = None;
+  let mut block_indent: Option<usize> = None;
   let mut saw_tasks = false;
 
-  for line in text.lines() {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-      continue;
-    }
-    if trimmed == "tasks:" {
+  for line in python_lines(text) {
+    let stripped = python_strip(line);
+    if stripped == "tasks:" {
       saw_tasks = true;
-      continue;
     }
-    if let Some(content) = list_item_content(line) {
-      if let Some(entry) = current.take() {
-        entries.push(entry);
-      }
-      let mut entry = TaskEntry::default();
-      if let Some((key, value)) = split_field(content) {
-        apply_field(&mut entry, key, value);
-      }
-      current = Some(entry);
-      continue;
-    }
-    if let Some(content) = item_field_content(line) {
-      let Some(entry) = current.as_mut() else {
+    let indent = indent_of(line);
+    if let Some(block) = block_indent {
+      if stripped.is_empty() || indent > block {
         continue;
-      };
-      if let Some((key, value)) = split_field(content) {
-        apply_field(entry, key, value);
       }
+      block_indent = None;
     }
+    if stripped.is_empty() || stripped.starts_with('#') || stripped == "tasks:" {
+      continue;
+    }
+    let item = stripped.strip_prefix("- ").or((stripped == "-").then_some(""));
+    let (body, key_column) = match item {
+      | Some(body) if entry_indent.is_none_or(|base| base == indent) => {
+        entries.extend(current.take());
+        entry_indent.get_or_insert(indent);
+        current = Some(TaskEntry::default());
+        (body, indent + 2 + indent_of(body))
+      },
+      | _ if current.is_some() && entry_indent.is_some_and(|base| indent > base) => (stripped, indent),
+      | _ => continue,
+    };
+    let Some(entry) = current.as_mut() else {
+      continue;
+    };
+    let Some((key, value)) = body.split_once(':') else {
+      continue;
+    };
+    let key = python_strip(key).trim_matches(['\'', '"']);
+    let value = if BLOCK_SCALAR_INDICATORS.contains(&python_strip(value)) {
+      block_indent = Some(key_column);
+      ""
+    } else {
+      clean_value(value)
+    };
+    apply_field(entry, key, value);
   }
-  if let Some(entry) = current {
-    entries.push(entry);
-  }
+  entries.extend(current);
   if !saw_tasks {
     return Err("tasks の一覧がありません".to_owned());
   }
   Ok(entries)
 }
 
-fn list_item_content(line: &str) -> Option<&str> {
-  let rest = line.strip_prefix("  -")?;
-  if rest.is_empty() {
-    return Some("");
+/// Python の `str.splitlines` と同じ区切りで行に分ける。
+fn python_lines(text: &str) -> Vec<&str> {
+  let mut lines = Vec::new();
+  let mut start = 0;
+  let mut chars = text.char_indices().peekable();
+  while let Some((index, character)) = chars.next() {
+    if !matches!(
+      character,
+      '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{1c}' | '\u{1d}' | '\u{1e}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    ) {
+      continue;
+    }
+    lines.push(&text[start..index]);
+    start = index + character.len_utf8();
+    if character == '\r' && chars.peek().is_some_and(|(_, next)| *next == '\n') {
+      chars.next();
+      start += 1;
+    }
   }
-  rest.strip_prefix(' ')
+  if start < text.len() {
+    lines.push(&text[start..]);
+  }
+  lines
 }
 
-fn item_field_content(line: &str) -> Option<&str> {
-  let rest = line.strip_prefix("    ")?;
-  if rest.starts_with(' ') {
-    return None;
-  }
-  Some(rest)
+/// Python の `str.strip` と同じ空白（`char::is_whitespace` と `\x1c`〜`\x1f`）を前後から除く。
+fn python_strip(text: &str) -> &str {
+  text.trim_matches(|character: char| character.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&character))
 }
 
-fn split_field(content: &str) -> Option<(&str, &str)> {
-  let (key, value) = content.split_once(':')?;
-  let key = key.trim_end();
-  if key.is_empty() || key.contains(char::is_whitespace) {
-    return None;
+/// 行の先頭の半角空白の数。
+fn indent_of(line: &str) -> usize {
+  line.len() - line.trim_start_matches(' ').len()
+}
+
+/// 値の前後の空白を除き、前後が同じ引用符なら外す。空、`~`、`null` は空にする。
+fn clean_value(raw: &str) -> &str {
+  let text = python_strip(raw);
+  if matches!(text, "~" | "null" | "Null" | "NULL") {
+    return "";
   }
-  let value = value.trim();
-  if value.is_empty() || value.starts_with('>') || value.starts_with('|') {
-    return None;
+  let mut characters = text.chars();
+  match (characters.next(), characters.next_back()) {
+    | (Some(first), Some(last)) if first == last && matches!(first, '\'' | '"') => characters.as_str(),
+    | _ => text,
   }
-  Some((key, value))
 }
 
 fn apply_field(entry: &mut TaskEntry, key: &str, value: &str) {
+  let value = (!value.is_empty()).then(|| value.to_owned());
   match key {
-    | "run_slug" => entry.run_slug = Some(value.to_owned()),
-    | "source_run_slug" => entry.source_run_slug = Some(value.to_owned()),
-    | "worktree_path" => entry.worktree_path = Some(PathBuf::from(value)),
+    | "run_slug" => entry.run_slug = value,
+    | "source_run_slug" => entry.source_run_slug = value,
+    | "worktree_path" => entry.worktree_path = value.map(PathBuf::from),
     | _ => {},
   }
 }
@@ -949,3 +998,7 @@ fn lexical_normalize(path: &Path) -> PathBuf {
   }
   normalized
 }
+
+#[cfg(test)]
+#[path = "run_log_tasks_yaml_tests.rs"]
+mod tasks_yaml_tests;

@@ -80,9 +80,12 @@ def parse_tasks_yaml(path) -> list:
 
     PyYAML に依存しない最小の読み取り。タスクの各エントリは `- key: value` で始まり、
     続く行は同じエントリの別キーとして読む。`retry_note: >-` などのブロックスカラーの
-    本文は、キーの行より深いインデントの行として読み飛ばし、エントリの境界にもキーにも
-    しない。エントリの境界は、先頭のエントリと同じインデントの `- ` 行だけに限る。
-    読み取りに失敗したときは ContextError にする。
+    本文は、キーの桁より深いインデントの行として読み飛ばし、エントリの境界にもキーにも
+    しない。ブロックスカラーの値は読まずに空にする。エントリの境界は、先頭のエントリと
+    同じインデントの `- ` 行と `-` だけの行に限る。読み取りに失敗したときは ContextError にする。
+
+    backend/src/run_log.rs の parse_task_entries は、この手順を移したもの。手順を
+    変えるときは両方を直す（run_log_tasks_yaml_tests.rs が、同じ入力で結果を比べる）。
     """
     try:
         text = Path(path).read_text(encoding="utf-8")
@@ -102,23 +105,28 @@ def parse_tasks_yaml(path) -> list:
         if not stripped or stripped.startswith("#") or stripped == "tasks:":
             continue
         indent = _indent_of(line)
-        if stripped.startswith("- ") and (entry_indent is None or indent == entry_indent):
+        is_item = stripped == "-" or stripped.startswith("- ")
+        if is_item and (entry_indent is None or indent == entry_indent):
             if current is not None:
                 entries.append(current)
             if entry_indent is None:
                 entry_indent = indent
             current = {}
             body = stripped[2:]
+            key_column = indent + 2 + _indent_of(body)
         elif current is not None and entry_indent is not None and indent > entry_indent:
             body = stripped
+            key_column = indent
         else:
             continue
         if ":" not in body:
             continue
         key, _, value = body.partition(":")
-        current[_clean_key(key)] = _clean_value(value)
         if value.strip() in BLOCK_SCALAR_INDICATORS:
-            block_indent = indent
+            current[_clean_key(key)] = ""
+            block_indent = key_column
+        else:
+            current[_clean_key(key)] = _clean_value(value)
     if current is not None:
         entries.append(current)
     return entries

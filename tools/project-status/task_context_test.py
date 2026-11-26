@@ -23,6 +23,8 @@
      0 件のエラーは探した候補を、複数件のエラーは一致した場所を含む。
   9. ブロックスカラー（`>-` / `|-` など）の本文にある `- TR-00x:` 行ではエントリを
      分割せず、エントリの先頭と同じインデントの `- ` 行だけを境界にする。
+     先頭のキーがブロックスカラーでも、本文の後に続く同じエントリのキーは読む。
+     ブロックスカラーの印（`>-` など）は値にせず、空にする。`-` だけの行も項目の先頭にする。
   10. tasks.yaml を読めないとき（OSError・不正な UTF-8）は ContextError にする。
   11. issue 参照の抽出は、番号の直後の句読点（ピリオド・読点・閉じ括弧）を許し、
       数字が続くピリオド（小数・バージョン表記）は issue 番号として扱わない。
@@ -350,6 +352,50 @@ def test_entry_start_indent_keeps_second_entry() -> None:
         assert slugs == [SLUG, OTHER_SLUG], f"エントリの並びが違います: {slugs}"
 
 
+def test_block_scalar_first_key_keeps_following_keys() -> None:
+    with Workspace() as workspace:
+        path = workspace.write(
+            ".takt/tasks.yaml",
+            "tasks:\n"
+            "  - retry_note: >-\n"
+            "      run_slug: bogus\n"
+            f"    run_slug: {SLUG}\n"
+            "    base_branch: main\n",
+        )
+        module = load_module()
+        entries = module.parse_tasks_yaml(path)
+        assert len(entries) == 1, f"エントリの境界が違います: {entries}"
+        assert entries[0].get("run_slug") == SLUG, f"本文の後のキーを読み飛ばしました: {entries}"
+        assert entries[0].get("base_branch") == "main", entries
+
+
+def test_block_scalar_value_is_empty() -> None:
+    with Workspace() as workspace:
+        path = workspace.write(
+            ".takt/tasks.yaml",
+            "tasks:\n"
+            "  - run_slug: >-\n"
+            f"      {SLUG}\n"
+            "    base_branch: |\n"
+            "      main\n",
+        )
+        module = load_module()
+        entries = module.parse_tasks_yaml(path)
+        assert entries == [{"run_slug": "", "base_branch": ""}], f"ブロックスカラーの印を値にしました: {entries}"
+
+
+def test_hyphen_only_line_starts_entry() -> None:
+    with Workspace() as workspace:
+        path = workspace.write(
+            ".takt/tasks.yaml",
+            f"tasks:\n  -\n    run_slug: {SLUG}\n  -\n    run_slug: {OTHER_SLUG}\n",
+        )
+        module = load_module()
+        entries = module.parse_tasks_yaml(path)
+        slugs = [entry.get("run_slug") for entry in entries]
+        assert slugs == [SLUG, OTHER_SLUG], f"`-` だけの行で項目を分けていません: {entries}"
+
+
 def test_unreadable_tasks_yaml_is_context_error() -> None:
     with Workspace() as workspace:
         path = workspace.root / ".takt" / "tasks.yaml"
@@ -416,6 +462,9 @@ def main() -> int:
         test_duplicate_entries_error_lists_locations,
         test_block_scalar_body_does_not_split_entry,
         test_entry_start_indent_keeps_second_entry,
+        test_block_scalar_first_key_keeps_following_keys,
+        test_block_scalar_value_is_empty,
+        test_hyphen_only_line_starts_entry,
         test_unreadable_tasks_yaml_is_context_error,
         test_missing_tasks_yaml_read_is_context_error,
         test_issue_reference_allows_trailing_punctuation,

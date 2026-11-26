@@ -1193,3 +1193,41 @@ fn read_instruction_content_truncates_the_body_at_a_character_boundary_like_a_re
     "無い ID の指示書は Missing です"
   );
 }
+
+#[test]
+fn resolves_quoted_run_slug_and_worktree_path() {
+  let fixture = Fixture::new();
+  for (quote, slug) in [("\"", "run-dq"), ("'", "run-sq")] {
+    let worktree = fixture.worktree(&format!("wt-{slug}"));
+    let run_dir = fixture.create_run(&worktree, slug);
+    fixture.write_meta(&run_dir);
+    fixture.write_tasks_raw(&format!(
+      "tasks:\n  - run_slug: {quote}{slug}{quote}\n    worktree_path: {quote}{}{quote}\n",
+      worktree.display()
+    ));
+
+    let found = expect_found(fixture.reader().resolve(&run_slug(slug)));
+
+    assert_eq!(
+      found,
+      canonical(&run_dir),
+      "引用符 {quote} を外した run_slug と worktree_path で解決する必要があります"
+    );
+  }
+}
+
+#[test]
+fn resolves_entries_written_without_indentation() {
+  let fixture = Fixture::new();
+  let worktree = fixture.worktree("wt-z");
+  let run_dir = fixture.create_run(&worktree, "run-z");
+  fixture.write_meta(&run_dir);
+  fixture.write_tasks_raw(&format!(
+    "tasks:\n- run_slug: run-other\n- run_slug: run-z\n  worktree_path: {}\n",
+    worktree.display()
+  ));
+
+  let found = expect_found(fixture.reader().resolve(&run_slug("run-z")));
+
+  assert_eq!(found, canonical(&run_dir), "字下げ 0 の項目も、先頭の項目の字下げを基準に読む必要があります");
+}
