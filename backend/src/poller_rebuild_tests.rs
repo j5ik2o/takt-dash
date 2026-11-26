@@ -797,3 +797,64 @@ async fn a_cancelled_cycle_stops_its_http_read_so_the_session_is_closed() {
   );
   assert_eq!(http.live_session_count(), 0, "読み取りのセッションを閉じます: {:?}", http.session_events());
 }
+
+/// 起動設定（command、args、env、cwd）を変えずに server ID だけを変える（issue #27）。
+#[tokio::test]
+async fn issue27_switch_read_and_write() {
+  issue27(true).await;
+}
+
+#[tokio::test]
+async fn issue27_switch_read_only() {
+  issue27(false).await;
+}
+
+async fn issue27(switch_write: bool) {
+  let harness = harness();
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active")]}));
+  let mut poller = poller(&harness);
+  assert_eq!(poller.read_cycle_once().await.unwrap().projects_read, 1);
+  let old_read = harness.registry.take_for_read("mac-mini", "takt-dash", "mac-mini").expect("旧 poller があります");
+  let old_client = old_read.client.clone();
+  drop(old_read);
+
+  let mut config: Value = serde_json::from_str(&std::fs::read_to_string(harness.config_path()).unwrap()).unwrap();
+  config["mcpServers"]["mini-two"] = config["mcpServers"]["mac-mini"].clone();
+  config["servers"]["mini-two"] = config["servers"]["mac-mini"].clone();
+  config["projects"][0]["server"] = json!("mini-two");
+  if switch_write {
+    config["projects"][0]["writeServer"] = json!("mini-two");
+  }
+  std::fs::write(harness.config_path(), config.to_string()).unwrap();
+  let loaded = load_config(harness.config_path()).unwrap();
+  let (McpServer::Stdio(a), McpServer::Stdio(b)) = (&loaded.servers["mac-mini"], &loaded.servers["mini-two"]) else {
+    panic!("stdio です");
+  };
+  let cwd = &loaded.projects[0].cwd;
+  assert_eq!(client_config(a, cwd), client_config(b, cwd), "起動設定は同一です");
+
+  // 切り替え周期の読み取りは失敗させる。
+  harness.rewrite_state(json!({"isError": ["takt_list_goals"]}));
+  let report = poller.read_cycle_once().await.unwrap();
+  assert_eq!(report.projects_failed, 1);
+  let view = harness.store.project_views().remove(0);
+  assert_eq!(view.server_id, "mini-two");
+  assert!(view.snapshot.is_none(), "読み取りに失敗しても旧 snapshot を残しません");
+  assert!(view.last_read_at.is_none());
+  assert!(view.goals.is_empty());
+  assert_eq!(
+    harness.registry.take_for_read("mac-mini", "takt-dash", "mac-mini").is_none(),
+    switch_write,
+    "書き込み先にも使わなくなった旧クライアントは外れます"
+  );
+  let new_read = harness.registry.take_for_read("mini-two", "takt-dash", "mini-two").expect("新 poller があります");
+  assert!(!Arc::ptr_eq(&old_client, &new_read.client), "旧クライアントを再利用しません");
+  drop(new_read);
+
+  // 回復した最初の成功は基準化だけで、旧基準との差分を出来事にしません。
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active"), goal(ADDED_A, "active")]}));
+  let recovered = poller.read_cycle_once().await.unwrap();
+  assert_eq!(recovered.projects_read, 1);
+  assert_eq!(recovered.events_recorded, 0, "旧 server の差分基準を使いません");
+  poller.shutdown().await;
+}
