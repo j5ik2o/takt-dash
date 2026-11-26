@@ -87,7 +87,7 @@ module pollerEventRecording {
     notified' = Connected,
     held' = false,
     detected' = 0,
-    recordedLost' = recordedLost,
+    recordedLost' = 0,
     recordedRestored' = 0,
     mcpUp' = mcpUp, dbUp' = dbUp,
   }
