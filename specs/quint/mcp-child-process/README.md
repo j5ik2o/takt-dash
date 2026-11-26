@@ -10,6 +10,7 @@
 | --- | --- |
 | `childProcess.qnt` | 状態機械、不変条件、進行の条件（witness） |
 | `childProcess_test.qnt` | [PR #379](https://github.com/j5ik2o/takt-dash/pull/379) の筋書きを修正前・途中版・現在（修正後）でたどるテスト（15 件） |
+| `check_mutations.py` | `childProcess.qnt` の守りを 1 つずつ外した写しを一時ディレクトリに作り、対応する不変条件が違反を出すかを確かめる（元のファイルは書き換えない） |
 
 `childProcess.qnt` は遷移を 3 つの定数で切り替えます。
 
@@ -38,6 +39,7 @@
 | `beginRequest` | `backend/src/mcp/client.rs` L340-L345（`let Some(mut process) = self.process.take()` → `process.exchange`） | 一致。往復の間は `self.process` を `None` にして子プロセスを `request` のフレームが所有する |
 | `completeExchange` / `completeExchangeToolError` | `backend/src/mcp/client.rs` L346-L349（`Ok(result) => { self.process = Some(process); Ok(result) }`）、L239・L420-L430（`extract_tool_text` の `isError`）、`backend/src/grpc/writes.rs` L110-L122 | 一致。正常完了（`completeExchange`）と道具エラー（`completeExchangeToolError`）を分離し、どちらも子プロセスは破棄せず `self.process` へ戻すが、`isError` では `phase = Failed` かつ `writeRecorded = false` として `lane.record_write()` を呼ばない |
 | `failExchange` | `backend/src/mcp/client.rs` L350-L353（`Err(error) => Err(error)`、`process` を戻さず drop して `kill_on_drop` で終了） | 一致。通信失敗では `next_spawn_at` を設定しない |
+| `lockHolderHasNextStep` / `lockHolderCanProgress` | `backend/src/mcp/client.rs` L268-L355（`start`・`spawn`・`request` の各分岐）、`backend/src/mcp/registry.rs` L402（`shutdown_all` の `client.lock().await`） | 一致。ロックを持つ操作の各段（`Starting`・`Spawning`・`ReadyToCall`・`Exchanging`）に、コードの分岐に当たる遷移が必ずある。`shutdown` はロックを取ってから `take()` するため、ロックを持つ操作の子プロセスを横から閉じない |
 | `cancelCaller`（切り離しなし、`Spawning` / `Exchanging`） | `backend/src/mcp/client.rs` L311（`kill_on_drop(true)`）、L342（`self.process.take()`） | 一致。future の drop 時に所有中の `process` が drop され、1 回だけ終了する |
 | `shutdownClient` | `backend/src/mcp/client.rs` L248-L252（`if let Some(mut process) = self.process.take() { let _ = process.child.kill().await; }`） | 一致。`take()` により空なら何もしないため、二重終了しない。呼び出し元は `backend/src/mcp/registry.rs` L395-L411（`shutdown_all`） |
 
@@ -87,8 +89,16 @@
 - `unkeyedWriteSurvivesCallerCancel`：鍵なしの書き込みは、呼び出し側が打ち切っても中断（`Aborted`）されず最後まで進める。
 - `keyedWriteSurvivesCallerCancel`：鍵ありの書き込みも、呼び出し側の打ち切りで中断されない。
 - `writeRecordedOnlyOnSuccess`：書き込みの記録（`record_write`）は成功完了（`Done`）した書き込みに限り、`isError`・通信失敗・中断では記録しない。
+- `sentWriteCanFinish`：takt へ送った書き込みが決着していなければ、往復中（`Exchanging`）で、子プロセスとロックを持ち、往復を終える遷移が取れる。`unkeyedWriteSurvivesCallerCancel`・`keyedWriteSurvivesCallerCancel` が「中断されない」を、この条件が「止まらずに決着まで進める」を受け持つ。
 - `lockOwnershipConsistent`：ロック保持中の操作は高々 1 件であり、`lockedBy` とロック保持フェーズが双方向に一致し、`heldChild` の所有も一致する。
-- `safety`：上記 14 件の論理積。
+- `lockHolderCanProgress`：ロックを持つ操作には、次に取れる遷移がいつも残っている（ロックを持ったまま止まらない）。
+- `safety`：上記 16 件の論理積。
+
+次の 3 件は、モデルのガードや定数をそのまま映すため、モデルの中で新しい事実を見つける条件ではありません。守りを外したときに違反が出ることで、ガードがコードの守りと対応していることを確かめます（「守りを外した変異」の節）。
+
+- `noSpawnDuringBackoff`：`canAttemptSpawn` のガード（`client.rs` L272-L277）を外すと違反する。
+- `unkeyedWriteSurvivesCallerCancel`：`DETACH_UNKEYED_WRITE`（`write_ledger.rs` L141-L146 の `tokio::spawn`）を外すと違反する。
+- `keyedWriteSurvivesCallerCancel`：`isDetached` の鍵ありの枝（`write_ledger.rs` L173-L181 の `tokio::spawn`）を外すと違反する。
 
 ### 進行の条件（Witness）
 
@@ -107,7 +117,7 @@
 
 ## 検査結果
 
-quint 0.32.0 で実行しました。**現在のコード（`current`）に仕様違反・不具合は見つかりませんでした。**
+quint 0.32.0（`quint verify` は Apalache 0.56.1）で実行しました。**現在のコード（`current`）に仕様違反・不具合は見つかりませんでした。**
 
 ### 型検査と筋書きテスト
 
@@ -149,7 +159,7 @@ quint run childProcess.qnt --main=current --invariant=safety \
   --max-steps=35 --max-samples=50000 --seed=0x379
 ```
 
-- 50,000 サンプル、`max-steps=35`、`seed=0x379` で `safety` の反例なし（トレース長: 最短 20、最長 36、平均 27.09）。
+- 50,000 サンプル、`max-steps=35`、`seed=0x379` で `safety`（16 件）の反例なし（トレース長: 最短 20、最長 36、平均 27.09）。`max-steps` より短いトレースは、5 件の操作がすべて決着し、論理時刻と `shutdown` の回数が上限に達した終端です。
 - すべての進行条件（witness 12 件）が 1 件以上のトレースで到達しました。
 
 | Witness | 到達したトレース |
@@ -170,12 +180,13 @@ quint run childProcess.qnt --main=current --invariant=safety \
 ### 途中版（`withoutUnkeyedDetach`）：他の不変条件の確認
 
 ```sh
-for inv in noChildRemainsAfterCancel noDoubleClose noDirtyChildReused warmUpFailureDoesNotStartBackoff callFailureStartsBackoff; do
+for inv in noChildRemainsAfterCancel noDoubleClose noDirtyChildReused warmUpFailureDoesNotStartBackoff callFailureStartsBackoff \
+  sentWriteCanFinish lockHolderCanProgress; do
   quint run childProcess.qnt --main=withoutUnkeyedDetach --invariant="$inv" --max-steps=25 --max-samples=10000 --seed=0x379
 done
 ```
 
-上記 5 件はいずれも 10,000 サンプル、`max-steps=25`、`seed=0x379` で反例なし。一方、`unkeyedWriteSurvivesCallerCancel` は反例が出るため、[PR #379](https://github.com/j5ik2o/takt-dash/pull/379) の 2 コミット目（鍵なし書き込みの `tokio::spawn` 切り離し）が必要だったことが仕様上も裏付けられます。
+上記 7 件はいずれも 10,000 サンプル、`max-steps=25`、`seed=0x379` で反例なし。一方、`unkeyedWriteSurvivesCallerCancel` は反例が出るため、[PR #379](https://github.com/j5ik2o/takt-dash/pull/379) の 2 コミット目（鍵なし書き込みの `tokio::spawn` 切り離し）が必要だったことが仕様上も裏付けられます。
 
 ### 現在のコード（`current`）：不変条件ごとの `quint run`
 
@@ -184,7 +195,8 @@ for inv in \
   noChildRemainsAfterCancel noOrphanAliveChild atMostOneLiveChild \
   noDoubleClose closedChildNotReferenced noDirtyChildReused idleSlotIsClean \
   warmUpFailureDoesNotStartBackoff callFailureStartsBackoff noSpawnDuringBackoff \
-  unkeyedWriteSurvivesCallerCancel keyedWriteSurvivesCallerCancel writeRecordedOnlyOnSuccess lockOwnershipConsistent; do
+  unkeyedWriteSurvivesCallerCancel keyedWriteSurvivesCallerCancel writeRecordedOnlyOnSuccess sentWriteCanFinish \
+  lockOwnershipConsistent lockHolderCanProgress; do
   quint run childProcess.qnt --main=current --invariant="$inv" --max-steps=35 --max-samples=10000 --seed=0x379
 done
 ```
@@ -204,7 +216,9 @@ done
 | `unkeyedWriteSurvivesCallerCancel` | 反例なし |
 | `keyedWriteSurvivesCallerCancel` | 反例なし |
 | `writeRecordedOnlyOnSuccess` | 反例なし |
+| `sentWriteCanFinish` | 反例なし |
 | `lockOwnershipConsistent` | 反例なし |
+| `lockHolderCanProgress` | 反例なし |
 
 ### 有界モデル検査（`quint verify`）
 
@@ -212,5 +226,35 @@ done
 quint verify childProcess.qnt --main=current --invariant=safety --max-steps=6
 ```
 
-- Apalache 0.56.1 により `safety`（20 個の検証条件）を 6 手まで網羅検査し、`NoError`（反例なし・デッドロックなし、105 秒）。
+- Apalache 0.56.1 により `safety`（22 個の検証条件）を 6 手まで網羅検査し、`NoError`（反例なし・デッドロックなし、148 秒）。
 - `quint verify` の出力先 `_apalache-out/` は `.gitignore` で除外しています。
+
+### 守りを外した変異（`check_mutations.py`）
+
+```sh
+python3 check_mutations.py
+```
+
+`childProcess.qnt` の守りを 1 つずつ外した写しで、`--main=current --max-steps=35 --max-samples=10000 --seed=0x379` の `quint run` を流しました。19 件すべてで、期待した不変条件が違反しました。変異のない写しは先に `safety` を満たすことを確かめています。`safety` の 16 件は、どれも少なくとも 1 つの変異で違反します。
+
+| 変異 | 外した守り | 期待する違反 | 結果 |
+| --- | --- | --- | --- |
+| `spawn-cancel-no-kill` | initialize 中の打ち切りで spawn() のローカル process を終了しない（kill_on_drop なし, client.rs:311） | `noChildRemainsAfterCancel` | 違反あり |
+| `init-failure-no-kill` | initialize の失敗で process を終了しない（client.rs:329-331 の ? で drop されない） | `noOrphanAliveChild` | 違反あり |
+| `exchange-failure-keeps-child` | 往復の失敗で process を self.process に戻す（client.rs:350-353 で捨てない） | `noDirtyChildReused` | 違反あり |
+| `exchange-failure-closed-but-kept` | 往復の失敗で子プロセスを終了させたのに、self.process に戻す | `closedChildNotReferenced` | 違反あり |
+| `exchange-success-not-returned` | 往復の成功で process を self.process に戻さない（client.rs:347 なし） | `noOrphanAliveChild` | 違反あり |
+| `exchange-success-stays-dirty` | 応答を読み終えずに戻す（読みかけのまま self.process へ戻す） | `idleSlotIsClean` | 違反あり |
+| `shutdown-without-take` | shutdown が take() せず、process を self.process に残したまま kill する（client.rs:249） | `noDoubleClose` | 違反あり |
+| `shutdown-without-lock` | shutdown がクライアントのロックを取らない（registry.rs:402 の client.lock().await なし） | `lockHolderCanProgress` | 違反あり |
+| `spawn-while-running` | start が既存の process を確かめずに起動する（client.rs:269-271 なし） | `atMostOneLiveChild` | 違反あり |
+| `spawn-ignores-backoff` | start が next_spawn_at を確かめずに起動する（client.rs:272-277 なし） | `noSpawnDuringBackoff` | 違反あり |
+| `warm-up-backs-off` | 温めの起動失敗でも抑制を始める（warm_up が OnSpawnFailure::BackOff を使う, client.rs:226） | `warmUpFailureDoesNotStartBackoff` | 違反あり |
+| `read-call-retries` | 読み取りの経路の起動失敗で抑制を始めない（ensure_started が Retry を使う, client.rs:265） | `callFailureStartsBackoff` | 違反あり |
+| `success-keeps-failure-count` | 起動の成功で連続失敗の回数と next_spawn_at を戻さない（client.rs:280-281 なし） | `callFailureStartsBackoff` | 違反あり |
+| `request-borrows-child` | request が take() せず self.process を借りたまま往復する（client.rs:342） | `noChildRemainsAfterCancel` | 違反あり |
+| `unkeyed-write-not-spawned` | 鍵なしの書き込みを tokio::spawn せず呼び出しのタスクで待つ（write_ledger.rs:141-146） | `unkeyedWriteSurvivesCallerCancel` | 違反あり |
+| `keyed-write-not-spawned` | 鍵ありの書き込みを tokio::spawn せず呼び出しのタスクで待つ（write_ledger.rs:173-181） | `keyedWriteSurvivesCallerCancel` | 違反あり |
+| `detached-write-loses-child` | 切り離した書き込みの打ち切りで、往復中の process を手放す | `sentWriteCanFinish` | 違反あり |
+| `tool-error-records-write` | 道具エラー（isError）でも record_write() を呼ぶ（writes.rs:110-122 の ? なし） | `writeRecordedOnlyOnSuccess` | 違反あり |
+| `cancel-keeps-lock` | 打ち切りでクライアントのロックを手放さない（MutexGuard が drop されない） | `lockOwnershipConsistent` | 違反あり |

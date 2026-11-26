@@ -225,6 +225,19 @@ module childProcess {
   pure def canCancelCaller(op: OpState): bool =
     not(op.callerCancelled) and isActivePhase(op.phase)
 
+  // ロックを持つ操作に、次に取れる遷移が残っているか（取り残されて止まらないか）。
+  pure def lockHolderHasNextStep(c: ClientState, op: OpState, id: int, t: int): bool =
+    match op.phase {
+      | Starting =>
+        canStartAlreadyRunning(c, op, id)
+        or canStartBlockedByBackoff(c, op, id, t)
+        or canAttemptSpawn(c, op, id, t)
+      | Spawning => canFinishSpawn(c, op, id)
+      | ReadyToCall => canBeginRequest(c, op, id)
+      | Exchanging => canFinishExchange(c, op, id)
+      | _ => true
+    }
+
   // --- 初期状態 ---
 
   action init: bool = all {
@@ -723,6 +736,23 @@ module childProcess {
     ),
   }
 
+  // 5d. takt へ送った書き込みは、決着するまで往復を終えられる状態にある
+  //     （打ち切りで子プロセスやロックを失って止まらない。5・5b とあわせて「最後まで進む」を表す）。
+  val sentWriteCanFinish: bool =
+    ops.keys().forall(oid => {
+      val op = ops.get(oid)
+      (isWriteKind(op.kind) and op.sentToTakt and isActivePhase(op.phase)) implies (
+        op.phase == Exchanging and canFinishExchange(client, op, oid)
+      )
+    })
+
+  // 6b. ロックを持つ操作には、次に取れる遷移がいつも残っている（ロックを持ったまま止まらない）。
+  val lockHolderCanProgress: bool =
+    ops.keys().forall(oid => {
+      val op = ops.get(oid)
+      isLockHoldingPhase(op.phase) implies lockHolderHasNextStep(client, op, oid, now)
+    })
+
   val safety: bool = all {
     noChildRemainsAfterCancel,
     noOrphanAliveChild,
@@ -737,7 +767,9 @@ module childProcess {
     unkeyedWriteSurvivesCallerCancel,
     keyedWriteSurvivesCallerCancel,
     writeRecordedOnlyOnSuccess,
+    sentWriteCanFinish,
     lockOwnershipConsistent,
+    lockHolderCanProgress,
   }
 
   // --- 進行の条件（到達できること。--witnesses で数える） ---
