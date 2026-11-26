@@ -12,43 +12,70 @@ const FORWARDED_SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"];
 function writeStampedLine(sink, text) {
   const stamper = createLineStamper();
   return new Promise((resolve) => {
-    sink.write(stamper(Buffer.from(text, "utf8")), () => resolve());
+    try {
+      sink.write(stamper(Buffer.from(text, "utf8")), (error) => {
+        resolve(error ? false : true);
+      });
+    } catch {
+      resolve(false);
+    }
   });
 }
 
 function forward(source, sink) {
   const stamper = createLineStamper();
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     let pendingCount = 0;
     let ended = false;
     let settled = false;
+    let failure = null;
     const maybeFinish = () => {
-      if (!settled && ended && pendingCount === 0) {
+      if (!settled && ended && (failure !== null || pendingCount === 0)) {
         settled = true;
-        resolve();
+        resolve(failure);
       }
     };
-    const fail = (error) => {
-      if (!settled) {
-        settled = true;
-        reject(error);
+    const noteFailure = (error) => {
+      if (failure === null) {
+        failure = error instanceof Error ? error : new Error(String(error));
       }
+      // 書き込みが失敗した流れは転送をやめ、子の出力を捨て読みにする。
+      // drain は待たずに再開し、子が出力で止まらないようにする。
+      try {
+        source.resume();
+      } catch {
+        // 再開できなくても、失敗は値として返す。
+      }
+      maybeFinish();
     };
+    if (typeof sink.on === "function") {
+      sink.on("error", noteFailure);
+    }
     source.on("data", (chunk) => {
+      if (failure !== null) {
+        return;
+      }
       const out = stamper(chunk);
       if (out.length === 0) {
         return;
       }
       pendingCount += 1;
-      const ok = sink.write(out, (error) => {
-        if (error) {
-          fail(error);
-          return;
-        }
+      let ok;
+      try {
+        ok = sink.write(out, (error) => {
+          pendingCount -= 1;
+          if (error) {
+            noteFailure(error);
+            return;
+          }
+          maybeFinish();
+        });
+      } catch (error) {
         pendingCount -= 1;
-        maybeFinish();
-      });
-      if (!ok) {
+        noteFailure(error);
+        return;
+      }
+      if (!ok && failure === null) {
         source.pause();
         sink.once("drain", () => {
           source.resume();
@@ -59,8 +86,50 @@ function forward(source, sink) {
       ended = true;
       maybeFinish();
     });
-    source.on("error", fail);
+    source.on("error", (error) => {
+      ended = true;
+      noteFailure(error);
+    });
   });
+}
+
+function createForwardEntries(child) {
+  const entries = [];
+  if (child.stdout) {
+    entries.push({
+      name: "stdout",
+      sink: process.stdout,
+      result: forward(child.stdout, process.stdout),
+    });
+  }
+  if (child.stderr) {
+    entries.push({
+      name: "stderr",
+      sink: process.stderr,
+      result: forward(child.stderr, process.stderr),
+    });
+  }
+  return entries;
+}
+
+async function reportForwardFailure(forwardEntries, forwardResults) {
+  const firstFailureIndex = forwardResults.findIndex((value) => value !== null);
+  if (firstFailureIndex === -1) {
+    return;
+  }
+  const failure = forwardResults[firstFailureIndex];
+  const reportEntry = forwardEntries.find(
+    (_, index) => forwardResults[index] === null,
+  );
+  if (reportEntry === undefined) {
+    return;
+  }
+  const message = failure instanceof Error ? failure.message : String(failure);
+  // 失敗していないもう一方の流れへ 1 行だけ書く。それも失敗したら何もしない。
+  await writeStampedLine(
+    reportEntry.sink,
+    `with-timestamps: 書き込みに失敗しました: ${message}\n`,
+  );
 }
 
 async function main() {
@@ -103,21 +172,15 @@ async function main() {
     });
   });
 
-  const forwardPromises = [];
-  if (child.stdout) {
-    forwardPromises.push(forward(child.stdout, process.stdout));
-  }
-  if (child.stderr) {
-    forwardPromises.push(forward(child.stderr, process.stderr));
-  }
-  // 出力が無いまま起こせなかった場合でも forward が終わるよう、error でも進める。
-  const forwardsDone = Promise.all(forwardPromises).catch(() => {});
+  const forwardEntries = createForwardEntries(child);
+  // forward は失敗を reject せず値として返すため、ここで失敗が捨てられることはない。
+  const forwardsDone = Promise.all(forwardEntries.map((entry) => entry.result));
 
   const result = await Promise.race([
     closePromise,
     errorPromise.then(() => closePromise),
   ]);
-  await forwardsDone;
+  const forwardResults = await forwardsDone;
 
   if (spawnError !== null) {
     const message =
@@ -129,6 +192,8 @@ async function main() {
     process.exitCode = 127;
     return;
   }
+
+  await reportForwardFailure(forwardEntries, forwardResults);
 
   const { code, signal } = result;
   if (signal !== null && signal !== undefined) {
