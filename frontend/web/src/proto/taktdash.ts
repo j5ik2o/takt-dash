@@ -672,7 +672,7 @@ export interface Goal {
   pullRequest:
     | PullRequest
     | undefined;
-  /** マージ待ちになった時刻 */
+  /** awaiting_merge のゴールでは人のマージ待ちになった時刻（仕上げタスクが未着手・実行中のあいだは無い）。それ以外のゴールでは awaiting_merge 通知の時刻 */
   awaitingMergeAt?:
     | Date
     | undefined;

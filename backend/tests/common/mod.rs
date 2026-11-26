@@ -162,6 +162,7 @@ pub fn task(name: &str, status: TaskStatus) -> TaskEntry {
     goal_id: None,
     status,
     started_at: None,
+    completed_at: None,
     run_slug: None,
     source_run_slug: None,
     current_step: None,

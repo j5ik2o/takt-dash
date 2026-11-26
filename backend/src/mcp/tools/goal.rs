@@ -43,27 +43,41 @@ pub(super) fn prev_inquiries(
 
 /// ゴールのマージ待ちの起点時刻を解像する。
 ///
-/// 通知から取れた起点が最も優先です。通知が無い `awaiting_merge` のゴールは、前回 snapshot の
-/// 同じゴールの起点を引き継ぎ、前回が無い（初回観測）または前回に起点が無い場合は、その読み
-/// 取りの観測時刻を起点にします。初回観測でも起点を一度確定して以降の読み取りで保持するため、
-/// 待ち時間が読み取りごとに現在時刻へリセットされて滞留しなくなることを避けます。
-/// `awaiting_merge` でないゴールは起点を持ちません。
+/// `awaiting_merge` でないゴールは、通知から取れた起点をそのまま持ちます（無ければ `None`）。
+/// `awaiting_merge` でも、そのゴールの仕上げタスクが未着手・実行中のあいだは、まだ人がマージを
+/// 待っていないので起点を持ちません（#90）。takt は awaiting_merge 通知を仕上げタスクの投入より
+/// 前に記録するため、通知だけで起点を決めると、仕上げタスクが長く走ったときに stale が早まります。
+///
+/// 仕上げタスクが終わった後は、通知の起点・そのゴールの仕上げタスクの `completed_at`・前回 snapshot
+/// の同じゴールの起点のうち最も遅いものを起点にします。前回の起点を候補に入れるので、仕上げタスクが
+/// 一覧から外れても起点は前へ戻らず、上流の値が同じなら読み取りのたびに変わりません。候補が無い
+/// 初回観測では、その読み取りの観測時刻で起点を一度確定し、以降の読み取りで保持します（待ち時間が
+/// 読み取りごとに現在時刻へリセットされて滞留しなくなることを避けます）。`completed_at`
+/// の無い終わった 仕上げタスクがあり、前回の起点も無いときは、
+/// 終わった時刻が分からないため観測時刻も候補に入れます。
 pub(super) fn resolve_awaiting_merge_at(
   goal: &GoalEntry,
   notification_start: Option<DateTime<Utc>>,
+  tasks: &[TaskEntry],
   prev: Option<&ProjectSnapshot>,
   observed_at: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
-  if let Some(recorded_at) = notification_start {
-    return Some(recorded_at);
-  }
   if goal.status != GoalStatus::AwaitingMerge {
+    return notification_start;
+  }
+  if tasks.iter().any(|task| task.is_active_merge_task_of(&goal.goal_id)) {
     return None;
   }
+  let merge_tasks: Vec<&TaskEntry> =
+    tasks.iter().filter(|task| task.merge_task && task.goal_id.as_ref() == Some(&goal.goal_id)).collect();
   let previous_start = prev
     .and_then(|snapshot| snapshot.goals.iter().find(|entry| entry.goal_id == goal.goal_id))
     .and_then(|entry| entry.awaiting_merge_at);
-  Some(previous_start.unwrap_or(observed_at))
+  let finished_at_unknown = merge_tasks.iter().any(|task| task.completed_at.is_none());
+  let observed = (finished_at_unknown && previous_start.is_none()).then_some(observed_at);
+  let candidates =
+    merge_tasks.iter().map(|task| task.completed_at).chain([notification_start, previous_start, observed]);
+  Some(candidates.flatten().max().unwrap_or(observed_at))
 }
 
 /// takt_get_goal が指定 path の項目を持たないときに返す道具エラーか。
@@ -131,6 +145,7 @@ pub(super) fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
 pub(super) fn parse_task(value: &Value) -> Result<TaskEntry, ToolError> {
   let status = parse_task_status(value.get("status"))?;
   let started_at = parse_time(value.get("startedAt"))?;
+  let completed_at = parse_time(value.get("completedAt"))?;
   let name = domain_value("タスク名", TaskName::try_from(string_field(value, "name")?.as_str()))?;
   let goal_id = match optional_string(value, "goalId") {
     | Some(text) if text.is_empty() => None,
@@ -147,6 +162,7 @@ pub(super) fn parse_task(value: &Value) -> Result<TaskEntry, ToolError> {
     goal_id,
     status,
     started_at,
+    completed_at,
     run_slug,
     source_run_slug: optional_string(value, "sourceRunSlug"),
     current_step: optional_string(value, "currentStep"),
@@ -334,4 +350,237 @@ pub(super) fn parse_notification(goal_id: &GoalId, value: &Value) -> Result<Noti
     body: optional_string(value, "body").unwrap_or_default(),
     recorded_at,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  //! マージ待ちの起点の規則を、生成した入力で確かめる（設計: docs/design/issue-90.md の「PBT
+  //! の性質」）。
+
+  use chrono::{DateTime, Duration, TimeZone, Utc};
+  use proptest::{collection::vec, option, prelude::*};
+
+  use super::resolve_awaiting_merge_at;
+  use crate::{
+    domain::{GoalId, TaskName},
+    model::{ExecutionStatus, GoalEntry, GoalStatus, ProjectSnapshot, TaskEntry, TaskStatus},
+  };
+
+  fn at(minutes: i64) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 11, 13, 0, 0, 0).single().expect("基準の時刻は有効です") + Duration::minutes(minutes)
+  }
+
+  fn goal_id(value: &str) -> GoalId {
+    GoalId::try_from(value).expect("テストのゴール ID は有効です")
+  }
+
+  fn goal(status: GoalStatus) -> GoalEntry {
+    GoalEntry {
+      goal_id: goal_id("g1"),
+      status,
+      execution_status: ExecutionStatus::Active,
+      objective: String::new(),
+      integration_branch: String::new(),
+      pull_request_number: None,
+      pull_request_url: None,
+      awaiting_merge_at: None,
+      paused_reason: None,
+    }
+  }
+
+  fn previous(start: Option<DateTime<Utc>>) -> ProjectSnapshot {
+    ProjectSnapshot {
+      goals: vec![GoalEntry { awaiting_merge_at: start, ..goal(GoalStatus::AwaitingMerge) }],
+      ..ProjectSnapshot::empty()
+    }
+  }
+
+  fn time() -> impl Strategy<Value = DateTime<Utc>> {
+    (0_i64..1_000).prop_map(at)
+  }
+
+  fn goal_status() -> impl Strategy<Value = GoalStatus> {
+    prop_oneof![Just(GoalStatus::Created), Just(GoalStatus::AwaitingMerge), Just(GoalStatus::Completed)]
+  }
+
+  fn task_status() -> impl Strategy<Value = TaskStatus> {
+    prop_oneof![
+      Just(TaskStatus::Pending),
+      Just(TaskStatus::Running),
+      Just(TaskStatus::Completed),
+      Just(TaskStatus::Failed),
+      Just(TaskStatus::Exceeded),
+      Just(TaskStatus::PrFailed),
+    ]
+  }
+
+  /// 対象ゴール（g1）・別ゴール（g2）・ゴール無しのタスク。仕上げかどうかと終了時刻も生成する。
+  fn task() -> impl Strategy<Value = TaskEntry> {
+    (
+      prop_oneof![Just(Some("g1")), Just(Some("g2")), Just(None)],
+      task_status(),
+      any::<bool>(),
+      option::of(time()),
+      0_u32..1_000,
+    )
+      .prop_map(|(goal, status, merge_task, completed_at, number)| TaskEntry {
+        name: TaskName::try_from(format!("t{number}").as_str()).expect("テストのタスク名は有効です"),
+        goal_id: goal.map(goal_id),
+        status,
+        started_at: None,
+        completed_at,
+        run_slug: None,
+        source_run_slug: None,
+        current_step: None,
+        merge_task,
+      })
+  }
+
+  /// 対象ゴールに関わらないタスク（別ゴール・ゴール無し・仕上げでない）。
+  fn unrelated_task() -> impl Strategy<Value = TaskEntry> {
+    (task(), any::<bool>()).prop_map(|(mut task, other_goal)| {
+      if task.goal_id.as_ref() == Some(&goal_id("g1")) {
+        if other_goal {
+          task.goal_id = Some(goal_id("g2"));
+        } else {
+          task.merge_task = false;
+        }
+      }
+      task
+    })
+  }
+
+  fn blank_task() -> TaskEntry {
+    TaskEntry {
+      name:            TaskName::try_from("merge").expect("テストのタスク名は有効です"),
+      goal_id:         None,
+      status:          TaskStatus::Pending,
+      started_at:      None,
+      completed_at:    None,
+      run_slug:        None,
+      source_run_slug: None,
+      current_step:    None,
+      merge_task:      false,
+    }
+  }
+
+  /// pending/running を終わりの状態（completed）に置き換える。
+  fn finished(mut task: TaskEntry) -> TaskEntry {
+    if matches!(task.status, TaskStatus::Pending | TaskStatus::Running) {
+      task.status = TaskStatus::Completed;
+    }
+    task
+  }
+
+  #[derive(Debug, Clone)]
+  struct Case {
+    status:       GoalStatus,
+    notification: Option<DateTime<Utc>>,
+    tasks:        Vec<TaskEntry>,
+    prev:         Option<Option<DateTime<Utc>>>,
+    observed_at:  DateTime<Utc>,
+  }
+
+  impl Case {
+    fn resolve(&self) -> Option<DateTime<Utc>> {
+      let prev = self.prev.map(previous);
+      resolve_awaiting_merge_at(&goal(self.status), self.notification, &self.tasks, prev.as_ref(), self.observed_at)
+    }
+
+    fn goal_merge_tasks(&self) -> impl Iterator<Item = &TaskEntry> {
+      self.tasks.iter().filter(|task| task.merge_task && task.goal_id.as_ref() == Some(&goal_id("g1")))
+    }
+
+    fn merge_task_active(&self) -> bool {
+      self.goal_merge_tasks().any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
+    }
+
+    fn previous_start(&self) -> Option<DateTime<Utc>> {
+      self.prev.flatten()
+    }
+  }
+
+  fn case() -> impl Strategy<Value = Case> {
+    (goal_status(), option::of(time()), vec(task(), 0..=5), option::of(option::of(time())), time()).prop_map(
+      |(status, notification, tasks, prev, observed_at)| Case { status, notification, tasks, prev, observed_at },
+    )
+  }
+
+  proptest! {
+    /// 性質1：awaiting_merge で、対象ゴールの仕上げタスクに pending/running があれば起点を持たない。
+    #[test]
+    fn no_start_while_a_merge_task_is_active(
+      case in case(),
+      active in prop_oneof![Just(TaskStatus::Pending), Just(TaskStatus::Running)],
+      position in any::<prop::sample::Index>(),
+    ) {
+      let mut tasks = case.tasks.clone();
+      let mut merge = blank_task();
+      merge.goal_id = Some(goal_id("g1"));
+      merge.merge_task = true;
+      merge.status = active;
+      tasks.insert(position.index(tasks.len() + 1), merge);
+      let case = Case { status: GoalStatus::AwaitingMerge, tasks, ..case };
+      prop_assert!(case.merge_task_active());
+      prop_assert_eq!(case.resolve(), None);
+    }
+
+    /// 性質2：awaiting_merge で仕上げタスクが終わっていれば、起点は通知・どの completed_at・前回の起点よりも前にならない。
+    #[test]
+    fn start_is_not_before_any_known_wait_start(case in case()) {
+      let tasks = case.tasks.iter().cloned().map(finished).collect();
+      let case = Case { status: GoalStatus::AwaitingMerge, tasks, ..case };
+      let start = case.resolve();
+      prop_assert!(start.is_some());
+      let start = start.unwrap();
+      let known = case.goal_merge_tasks().map(|task| task.completed_at).chain([case.notification, case.previous_start()]);
+      for bound in known.flatten() {
+        prop_assert!(start >= bound, "起点 {start} が {bound} より前です");
+      }
+    }
+
+    /// 性質3：1回目の結果を前回の起点にして、観測時刻だけを後へずらして解き直しても、同じ値になる。
+    #[test]
+    fn start_does_not_reset_on_later_reads(case in case(), later in 1_i64..10_000) {
+      let first = case.resolve();
+      let again = Case { prev: Some(first), observed_at: case.observed_at + Duration::minutes(later), ..case.clone() };
+      prop_assert_eq!(again.resolve(), first);
+    }
+
+    /// 性質4：対象ゴール以外のタスクと仕上げでないタスクを足しても、結果は変わらない。
+    #[test]
+    fn unrelated_tasks_do_not_change_the_start(case in case(), extra in vec(unrelated_task(), 1..=5)) {
+      let mut tasks = case.tasks.clone();
+      tasks.extend(extra);
+      let widened = Case { tasks, ..case.clone() };
+      prop_assert_eq!(widened.resolve(), case.resolve());
+    }
+
+    /// 性質5：結果は、通知・completed_at・前回の起点・観測時刻のどれかと一致する。候補が無ければ観測時刻。
+    #[test]
+    fn start_comes_from_a_candidate_or_the_observation(case in case()) {
+      let Some(start) = case.resolve() else {
+        return Ok(());
+      };
+      let mut candidates: Vec<DateTime<Utc>> =
+        case.goal_merge_tasks().filter_map(|task| task.completed_at).collect();
+      candidates.extend(case.notification);
+      candidates.extend(case.previous_start());
+      if candidates.is_empty() && case.status == GoalStatus::AwaitingMerge {
+        prop_assert_eq!(start, case.observed_at);
+      } else {
+        prop_assert!(candidates.contains(&start) || start == case.observed_at);
+      }
+    }
+
+    /// 性質6：awaiting_merge でないゴールの結果は、通知の起点と一致する（修正前と同じ）。
+    #[test]
+    fn non_awaiting_goal_keeps_the_notification_start(
+      case in case(),
+      status in prop_oneof![Just(GoalStatus::Created), Just(GoalStatus::Completed)],
+    ) {
+      let case = Case { status, ..case };
+      prop_assert_eq!(case.resolve(), case.notification);
+    }
+  }
 }

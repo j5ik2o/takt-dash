@@ -17,7 +17,7 @@ use crate::{
   domain::{GoalId, ProjectName, PullRequestState, RunSlug, ServerId},
   model::{
     ConnectionState, ConnectionTransition, GoalStatus, PendingDecision, PendingDecisionFilter, PendingDecisionType,
-    ProjectSnapshot, ProjectView, RegistrationProposalEntry, RunEntry, TaskEntry, TaskStatus,
+    ProjectSnapshot, ProjectView, RegistrationProposalEntry, RunEntry, TaskEntry,
   },
 };
 
@@ -539,7 +539,5 @@ pub fn is_human_merge_wait(status: GoalStatus, goal_id: &GoalId, merge_tasks: &[
   if status != GoalStatus::AwaitingMerge {
     return false;
   }
-  let goal_merge_tasks: Vec<&TaskEntry> =
-    merge_tasks.iter().copied().filter(|task| task.goal_id.as_ref() == Some(goal_id)).collect();
-  !goal_merge_tasks.iter().any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
+  !merge_tasks.iter().any(|task| task.is_active_merge_task_of(goal_id))
 }

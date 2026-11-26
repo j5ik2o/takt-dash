@@ -53,6 +53,7 @@ fn task(started_at: Option<&str>) -> TaskEntry {
     goal_id:         None,
     status:          TaskStatus::Running,
     started_at:      started_at.map(time),
+    completed_at:    None,
     run_slug:        Some(run_slug("r1")),
     source_run_slug: None,
     current_step:    None,

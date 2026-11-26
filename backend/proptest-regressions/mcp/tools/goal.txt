@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 15551c2f9e9ef8ce31cc67022e22c104c983d3fe10a6d44b7ce38c99dd2c66eb # shrinks to case = Case { status: Created, notification: None, tasks: [], prev: None, observed_at: 2026-11-13T00:00:00Z }, active = Pending, position = Index(0)
+cc a0483509481010ecf369e70680c8438b7dd1ff04b2d8bdd3fe4867de14adae4c # shrinks to case = Case { status: Created, notification: Some(2026-11-13T00:00:00Z), tasks: [], prev: Some(Some(2026-11-13T00:01:00Z)), observed_at: 2026-11-13T00:00:00Z }

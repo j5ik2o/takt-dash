@@ -113,6 +113,20 @@
       ]
     },
     {
+      "dir": "merge-wait-start",
+      "spec": "mergeWaitStart.qnt",
+      "test": "mergeWaitStart_test.qnt",
+      "test_modules": ["currentTest", "fixedTest"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 30,
+          "max_samples": 50000
+        }
+      ]
+    },
+    {
       "dir": "poller-event-recording",
       "spec": "pollerEventRecording.qnt",
       "test": "pollerEventRecording_test.qnt",
