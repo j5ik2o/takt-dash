@@ -159,7 +159,9 @@ pub struct GoalEntry {
   pub integration_branch:  String,
   pub pull_request_number: Option<PullRequestNumber>,
   pub pull_request_url:    Option<String>,
-  /// takt_get_goal の通知（path=notifications）から得た、awaiting_merge の種類の通知の記録時刻。
+  /// 人のマージ待ちの起点。awaiting_merge 通知の記録時刻と、仕上げタスクの終了時刻と、前回の起点の
+  /// うち最も遅いもの（`resolve_awaiting_merge_at`）。awaiting_merge でも、仕上げタスクが
+  /// 未着手・実行中のあいだは持ちません。
   pub awaiting_merge_at:   Option<DateTime<Utc>>,
   /// 一時停止の理由。実行状態が paused で理由が報告されたときだけ持ちます。
   pub paused_reason:       Option<String>,
@@ -172,12 +174,24 @@ pub struct TaskEntry {
   pub goal_id:         Option<GoalId>,
   pub status:          TaskStatus,
   pub started_at:      Option<DateTime<Utc>>,
+  /// takt_list_tasks の completedAt。終わりの状態へ移った時刻です。
+  pub completed_at:    Option<DateTime<Utc>>,
   pub run_slug:        Option<RunSlug>,
   /// takt_list_tasks の sourceRunSlug。完了タスクが元 run を指すときに持ちます。
   pub source_run_slug: Option<String>,
   pub current_step:    Option<String>,
   /// ゴールの仕上げタスクかどうか。
   pub merge_task:      bool,
+}
+
+impl TaskEntry {
+  /// `goal_id` のゴールの仕上げタスクで、未着手か実行中か。
+  /// 人のマージ待ちとマージ待ちの起点の判定に使います。
+  pub fn is_active_merge_task_of(&self, goal_id: &GoalId) -> bool {
+    self.merge_task
+      && self.goal_id.as_ref() == Some(goal_id)
+      && matches!(self.status, TaskStatus::Pending | TaskStatus::Running)
+  }
 }
 
 /// takt_get_goal から得たゴールの詳細。

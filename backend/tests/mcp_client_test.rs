@@ -438,7 +438,7 @@ async fn awaiting_merge_at_comes_from_the_awaiting_merge_notification_recorded_a
     directory.path(),
     json!({
       "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "目標", "integrationBranch": "takt/g1" } ],
-      "tasks": [ { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true } ],
+      "tasks": [ { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true, "completedAt": "2026-11-13T08:50:00Z" } ],
       "notifications": { "g1": [
         { "id": "n-progress", "kind": "progress", "body": "進捗", "recordedAt": "2026-11-13T08:00:00Z" },
         { "id": "n-merge-old", "kind": "awaiting_merge", "body": "古い", "recordedAt": "2026-11-13T08:30:00Z" },
@@ -546,6 +546,119 @@ async fn awaiting_merge_goal_new_to_awaiting_merge_gets_a_first_observed_start()
     snapshot.goals[0].awaiting_merge_at.is_some(),
     "通知のない新しい人のマージ待ちは初回観測の時刻を起点にします"
   );
+  client.shutdown().await;
+}
+
+/// awaiting_merge のゴール g1 と、awaiting_merge 通知（08:00、仕上げタスクより前）と、`tasks`
+/// を持つ状態。
+fn merge_wait_state(tasks: Value) -> Value {
+  json!({
+    "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "目標", "integrationBranch": "takt/g1" } ],
+    "tasks": tasks,
+    "notifications": { "g1": [ { "id": "n-merge", "kind": "awaiting_merge", "body": "マージ待ち", "recordedAt": "2026-11-13T08:00:00Z" } ] }
+  })
+}
+
+#[tokio::test]
+async fn awaiting_merge_goal_has_no_wait_start_while_its_merge_task_runs() {
+  // 仕上げタスクが running のあいだは、まだ人がマージを待っていないので起点を持たない（#90）。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    merge_wait_state(json!([ { "name": "merge", "goalId": "g1", "status": "running", "mergeTask": true } ])),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
+
+  assert_eq!(snapshot.goals[0].awaiting_merge_at, None, "仕上げタスクの実行中は起点を持ちません");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn awaiting_merge_wait_starts_when_the_merge_task_completed_not_at_the_earlier_notification() {
+  // awaiting_merge 通知は仕上げタスクの投入より前に記録される。起点は仕上げタスクの completedAt
+  // にする（#90）。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    merge_wait_state(json!([
+      { "name": "merge-1", "goalId": "g1", "status": "failed", "mergeTask": true, "completedAt": "2026-11-13T08:40:00Z" },
+      { "name": "merge-2", "goalId": "g1", "status": "completed", "mergeTask": true, "completedAt": "2026-11-13T09:30:00Z" },
+      { "name": "other", "goalId": "g2", "status": "completed", "mergeTask": true, "completedAt": "2026-11-13T10:00:00Z" }
+    ])),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+
+  let first = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
+  let second = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&first), &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
+
+  assert_eq!(
+    first.goals[0].awaiting_merge_at,
+    Some(time("2026-11-13T09:30:00Z")),
+    "最も遅い completedAt を起点にします"
+  );
+  assert_eq!(
+    second.goals[0].awaiting_merge_at, first.goals[0].awaiting_merge_at,
+    "読み取りを重ねても起点は変わりません"
+  );
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn merge_task_finished_without_completed_at_starts_the_wait_at_first_observation_and_keeps_it() {
+  // completedAt の無い終わった仕上げタスクは、終わった時刻が分からない。通知（08:00）ではなく、
+  // 最初に観測した時刻を起点にし、次の読み取りで現在時刻へ戻さない（既存の滞留防止）。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(
+    directory.path(),
+    merge_wait_state(json!([ { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true } ])),
+  );
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let before = chrono::Utc::now();
+
+  let first = tool_set(&mut client, directory.path())
+    .read_snapshot(None, &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
+  tokio::time::sleep(Duration::from_millis(20)).await;
+  let second = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&first), &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
+
+  let start = first.goals[0].awaiting_merge_at.expect("起点を確定します");
+  assert!(start >= before, "通知の時刻ではなく観測時刻を起点にします: {start}");
+  assert_eq!(second.goals[0].awaiting_merge_at, Some(start), "次の読み取りでも起点は変わりません");
+  client.shutdown().await;
+}
+
+#[tokio::test]
+async fn wait_start_does_not_fall_back_to_the_notification_after_the_merge_task_is_cleaned_up() {
+  // 起点を completedAt
+  // で確定したあと、仕上げタスクが一覧から外れても、通知の時刻へ戻らない（#90）。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), merge_wait_state(json!([])));
+  let mut client = mock_client(mock_config(directory.path(), &state, None));
+  let mut previous_goal = goal("g1", GoalStatus::AwaitingMerge, ExecutionStatus::Active);
+  previous_goal.awaiting_merge_at = Some(time("2026-11-13T09:30:00Z"));
+  let prev = ProjectSnapshot { goals: vec![previous_goal], ..ProjectSnapshot::empty() };
+
+  let snapshot = tool_set(&mut client, directory.path())
+    .read_snapshot(Some(&prev), &run_logs(directory.path()))
+    .await
+    .expect("状態を読み取れます");
+
+  assert_eq!(snapshot.goals[0].awaiting_merge_at, Some(time("2026-11-13T09:30:00Z")), "前回の起点より前へ戻りません");
   client.shutdown().await;
 }
 

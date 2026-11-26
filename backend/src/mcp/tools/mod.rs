@@ -162,9 +162,10 @@ impl<'a> ToolSetCore<'a> {
   /// コア読み取り（ゴール・タスク）の失敗と、補助読み取りのその他の輸送エラー・解析エラーは
   /// 全体の失敗として伝播します。
   ///
-  /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知から得るため、通知を読んだ後に
-  /// ゴールへ起点時刻を反映します。通知が無いゴールは前回 snapshot の同じゴールの起点を
-  /// 引き継ぎ、前回が無い初回観測でもその読み取りの観測時刻を起点として確定します。
+  /// ゴールのマージ待ちの起点時刻は takt_get_goal の通知と仕上げタスクの終了時刻から得るため、
+  /// タスクと通知を読んだ後にゴールへ起点時刻を反映します（規則は `resolve_awaiting_merge_at`）。
+  /// 仕上げタスクが未着手・実行中のゴールは起点を持たず、候補が無い初回観測ではその読み取りの
+  /// 観測時刻を起点として確定します。
   pub async fn read_snapshot(
     &mut self,
     prev: Option<&ProjectSnapshot>,
@@ -177,7 +178,7 @@ impl<'a> ToolSetCore<'a> {
     let (notifications, awaiting_merge_at, notifications_read) = self.list_notifications(&goals, prev).await?;
     for goal in &mut goals {
       goal.awaiting_merge_at =
-        resolve_awaiting_merge_at(goal, awaiting_merge_at.get(&goal.goal_id).copied(), prev, observed_at);
+        resolve_awaiting_merge_at(goal, awaiting_merge_at.get(&goal.goal_id).copied(), &tasks, prev, observed_at);
     }
     let runs = self.get_running_runs(&tasks, prev, runs).await?;
     let known = prev.map(|snapshot| snapshot.proposals.as_slice()).unwrap_or_default();

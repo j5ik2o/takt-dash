@@ -1224,7 +1224,7 @@ async fn merge_wait_uses_notification_recorded_at_and_becomes_stale_through_the_
   let past = (chrono::Utc::now() - chrono::Duration::minutes(300)).to_rfc3339();
   let harness = Harness::new(json!({
     "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1", "pullRequest": { "number": 5, "url": "https://example.test/pr/5" } } ],
-    "tasks": [ { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true } ],
+    "tasks": [ { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true, "completedAt": past } ],
     "notifications": { "g1": [ { "id": "n-merge", "kind": "awaiting_merge", "body": "マージ待ち", "recordedAt": past } ] }
   }));
   let mut poller = harness.poller();
@@ -2451,7 +2451,7 @@ async fn pending_decision_stale_threshold_crossing_notifies_once_on_the_same_pol
   // 片方の種別だけを比較する実装でも検出できる。
   let harness = Harness::new(json!({
     "goals": [ { "id": "g1", "status": "awaiting_merge", "executionStatus": "active", "objective": "ゴール g1", "integrationBranch": "takt/g1", "pullRequest": { "number": 5, "url": "https://example.test/pr/5" } } ],
-    "tasks": [ { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true } ],
+    "tasks": [ { "name": "merge", "goalId": "g1", "status": "completed", "mergeTask": true, "completedAt": "2026-11-13T10:50:00Z" } ],
     "standaloneInquiries": [ { "id": "s1", "status": "pending", "kind": "question", "body": "どうしますか", "createdAt": "2026-11-13T10:00:00Z" } ],
     "notifications": { "g1": [ { "id": "n-merge", "kind": "awaiting_merge", "body": "マージ待ち", "recordedAt": "2026-11-13T11:00:00Z" } ] }
   }));
