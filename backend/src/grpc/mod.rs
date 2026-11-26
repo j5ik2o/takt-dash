@@ -14,6 +14,7 @@
 //! に置きます。
 
 pub mod assembly;
+mod detached_read;
 mod lanes;
 pub mod mapping;
 mod resolve;
@@ -50,7 +51,7 @@ use crate::{
   mcp::{McpClientRegistry, ToolError, TransportError},
   model::{self},
   run_log::{ContentRead, InitialRead, Instruction},
-  run_progress::{read_run, read_run_instructions, RunLogHandle, RunLogHandles, RunReadFailure},
+  run_progress::{RunLogHandle, RunLogHandles, RunReadFailure},
   store::StateStore,
   takt_dash::v1::{
     self, get_run_content_request, AnswerInquiryRequest, AnswerInquiryResponse, ApproveGoalMergeRequest,
@@ -77,6 +78,12 @@ const WATCH_CHANNEL_CAPACITY: usize = 16;
 const WATCH_RESEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 /// 画面の要求時の読み取りで常駐 HTTP サーバーへ送る 1 呼び出しの期限。
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// GetRunDetail の総上限（issue #59・#180）。保存場所から読めない run の回り道は takt_get_run を
+/// 3 回まで順に呼ぶ（run 本体、view instructions、view task）ので、1 回の期限の 3 倍にします。
+/// Web の deadline（`frontend/web/src/grpc/client.ts` の `RUN_DETAIL_DEADLINE_MS`、50 秒）は
+/// これより長くし、backend の DEADLINE_EXCEEDED が Web の打ち切りより先に届くようにします。
+pub const RUN_DETAIL_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+const _: () = assert!(3 * READ_TIMEOUT.as_secs() <= RUN_DETAIL_BUDGET.as_secs());
 /// run 詳細が、読み位置を持たない本体ログを初めて読むときに読む末尾の大きさ（1 MiB）。
 ///
 /// 実行中の run の詳細を2秒以内に返すため、大きな本体ログの全体を読みません。代わりに、この大きさを
@@ -118,21 +125,23 @@ impl Drop for RpcTimingGuard {
 
 /// 読み取り系 API のサービス。
 pub struct TaktDashServiceImpl {
-  store:        Arc<StateStore>,
-  activity:     Arc<ActivityStore>,
-  config_path:  PathBuf,
-  conversation: Arc<ConversationReader>,
-  changes:      broadcast::Sender<()>,
-  shutdown:     watch::Receiver<bool>,
-  registry:     McpClientRegistry,
-  clock:        Clock,
+  store:             Arc<StateStore>,
+  activity:          Arc<ActivityStore>,
+  config_path:       PathBuf,
+  conversation:      Arc<ConversationReader>,
+  changes:           broadcast::Sender<()>,
+  shutdown:          watch::Receiver<bool>,
+  registry:          McpClientRegistry,
+  clock:             Clock,
   /// プロジェクトごとの run の集計と、その集計を作ったときの cwd。GetRunDetail が要求をまたいで
   /// 持ち、同じ run の本体ログを前回の続きから読むために使います。読み位置を持たない本体ログは
   /// 末尾の [`DETAIL_INITIAL_TAIL_BYTES`] だけを読みます。lock は取っ手の受け渡しの間だけ持ち、
   /// 読み取りの間は持ちません。
-  run_logs:     Mutex<RunLogHandles<ProjectName>>,
+  run_logs:          Mutex<RunLogHandles<ProjectName>>,
   /// 書き込み要求の鍵ごとの記録。同じ操作の再試行と同時の重複を、takt へ送り直さずに扱います。
-  write_ledger: WriteLedger,
+  write_ledger:      WriteLedger,
+  /// GetRunDetail の総上限。既定は [`RUN_DETAIL_BUDGET`]。テストは短い値を入れます。
+  run_detail_budget: std::time::Duration,
 }
 
 /// サービスの現在時刻を返す関数。テストは固定時計を注入します。
@@ -185,7 +194,14 @@ impl TaktDashServiceImpl {
       clock,
       run_logs: Mutex::new(RunLogHandles::with_initial_read(InitialRead::Tail(DETAIL_INITIAL_TAIL_BYTES))),
       write_ledger: WriteLedger::default(),
+      run_detail_budget: RUN_DETAIL_BUDGET,
     }
+  }
+
+  /// GetRunDetail の総上限を差し替える。テストが短い上限で打ち切りを確かめるために使います。
+  pub fn with_run_detail_budget(mut self, budget: std::time::Duration) -> Self {
+    self.run_detail_budget = budget;
+    self
   }
 
   /// プロジェクトの run の集計の取っ手を返す。cwd が変わったときの作り直しは [`RunLogHandles`]
@@ -420,94 +436,9 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
   ) -> Result<Response<GetRunDetailResponse>, Status> {
     let _timing = RpcTimingGuard::start("GetRunDetail", &self.activity);
     let run_slug = parse_run_slug(request.into_inner().run_slug)?;
-    let target = self.resolve_run_target(&run_slug)?;
-    let stored_run = target.view.runs.iter().find(|run| run.run_slug == run_slug.as_str()).cloned();
-    // 完了した run は実行中一覧から消えるため、状態ストアのタスクからゴールとタスク名を補います。
-    // 再開した run は、タスクの sourceRunSlug が元 run の runSlug と一致します。
-    let stored_task = target
-      .view
-      .tasks
-      .iter()
-      .find(|task| task.run_slug.as_ref() == Some(&run_slug))
-      .or_else(|| target.view.tasks.iter().find(|task| task.source_run_slug.as_deref() == Some(run_slug.as_str())))
-      .cloned();
-    let run_logs = self.run_log_handle(&target.resolved.project, &target.resolved.cwd)?;
-    let read = read_run(&run_logs, run_slug.clone()).await;
-    // 指示書も run の保存場所から読みます。保存場所を読めない run は takt_get_run から
-    // 読む経路へ回るため、失敗はここで確定させず、保存場所から読めた場合にだけ返します。
-    let instructions = read_run_instructions(target.resolved.cwd.clone(), run_slug.clone()).await;
-    let goal_id = stored_run
-      .as_ref()
-      .and_then(|run| run.goal_id.clone())
-      .or_else(|| stored_task.as_ref().and_then(|task| task.goal_id.clone()));
-    let task_name = stored_run
-      .as_ref()
-      .map(|run| run.task_name.clone())
-      .or_else(|| stored_task.as_ref().map(|task| task.name.clone()))
-      .map(|task_name| task_name.as_str().to_owned())
-      .unwrap_or_default();
-    let mut response = GetRunDetailResponse {
-      run_slug: run_slug.as_str().to_owned(),
-      session_id: stored_run.as_ref().map(|run| run.session_id.clone()).unwrap_or_default(),
-      server_id: target.resolved.server_id.as_str().to_owned(),
-      project: target.view.name.clone(),
-      goal_id: goal_id.map(|goal_id| goal_id.as_str().to_owned()).unwrap_or_default(),
-      task_name,
-      summary: stored_run.as_ref().map(|run| run.summary.clone()).unwrap_or_default(),
-      instructions: instructions.as_ref().map(|list| list.iter().map(run_instruction).collect()).unwrap_or_default(),
-      server_connected: target.view.connected,
-      server_last_read_at: optional_timestamp(target.view.last_read_at),
-      ..Default::default()
-    };
-    match read {
-      | Ok(view) => {
-        instructions.map_err(run_read_failure_status)?;
-        tracing::info!(
-          run_slug = %run_slug.as_str(),
-          body_log_bytes_read = view.body_log_bytes_read,
-          "run 詳細のために本体ログを読みました。"
-        );
-        let last_log_at = run_detail::fill_from_run_log(&mut response, &view, stored_task.as_ref());
-        response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
-      },
-      // 掃除済みの worktree など、run の保存場所が残っていない run はエラーにせず、状態ストアの値と
-      // ログが残っていないことを返します。
-      | Err(RunReadFailure::Missing) => {
-        let started_at = stored_run
-          .as_ref()
-          .and_then(|run| run.started_at)
-          .or_else(|| stored_task.as_ref().and_then(|task| task.started_at));
-        let last_log_at = stored_run.as_ref().and_then(|run| run.last_log_at);
-        response.logs_removed = true;
-        response.status =
-          stored_run.as_ref().map_or(v1::RunStatus::Unspecified as i32, |run| run_status(run.status) as i32);
-        response.started_at = optional_timestamp(started_at);
-        response.current_step = stored_run.as_ref().and_then(|run| run.current_step.clone());
-        response.current_iteration = stored_run.as_ref().and_then(|run| run.current_iteration);
-        response.current_step_started_at =
-          optional_timestamp(stored_run.as_ref().and_then(|run| run.current_step_started_at));
-        response.last_log_at = optional_timestamp(last_log_at);
-        response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
-      },
-      // 保存場所の対応表に無い run と、対応表を読めない run（SSH 越しに扱うリモートのサーバーの
-      // プロジェクトなど）は takt_get_run から読みます。takt_get_run でも読めなければ、保存場所の
-      // 読み取りの失敗を返します。
-      | Err(failure @ (RunReadFailure::NotListed | RunReadFailure::Unreadable(_))) => {
-        let mut source = self.read_source(&target.resolved);
-        let last_log_at = run_detail::fill_from_takt_get_run(
-          &mut response,
-          &mut source,
-          &target.resolved.cwd,
-          &run_slug,
-          stored_task.as_ref(),
-          failure,
-        )
-        .await?;
-        response.log_silent = self.store.is_log_silent_at(last_log_at, self.now());
-      },
-      | Err(failure) => return Err(run_read_failure_status(failure)),
-    }
-    Ok(Response::new(response))
+    run_detail::within_budget(self.run_detail_budget, &run_slug, self.read_run_detail(run_slug.clone()))
+      .await
+      .map(Response::new)
   }
 
   async fn get_run_updates(

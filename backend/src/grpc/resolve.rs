@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use tonic::Status;
 
-use super::{TaktDashServiceImpl, READ_TIMEOUT};
+use super::{detached_read::detached, TaktDashServiceImpl, READ_TIMEOUT};
 use crate::{
   config::{load_config, Config, McpConnection},
   domain::{
@@ -132,6 +132,9 @@ impl TaktDashServiceImpl {
 ///
 /// HTTP 接続先は常駐サーバーのハンドルから読み、stdio 接続先は画面読み取りレーンの
 /// 子プロセスから読みます。どちらの接続でも、読み取りの道具のまとまりは同じです。
+///
+/// stdio の読み取りは [`detached`] で要求の打ち切りから切り離します。要求が打ち切られても、
+/// 鍵を取った読み取りは最後まで進み、子プロセスを捨てません（issue #180）。
 pub(super) enum ReadSource {
   Http(Box<HttpReadHandle>),
   Stdio(ClientHandle),
@@ -147,8 +150,11 @@ impl ReadSource {
     match self {
       | ReadSource::Http(handle) => handle.read_remote_run(cwd, run_slug).await,
       | ReadSource::Stdio(handle) => {
-        let mut client = handle.lock().await;
-        ReadToolSet::new(&mut *client, cwd.to_path_buf()).read_remote_run(run_slug).await
+        let (cwd, run_slug) = (cwd.to_path_buf(), run_slug.clone());
+        detached(handle.clone(), move |mut client| async move {
+          ReadToolSet::new(&mut *client, cwd).read_remote_run(&run_slug).await
+        })
+        .await
       },
     }
   }
@@ -162,14 +168,17 @@ impl ReadSource {
     match self {
       | ReadSource::Http(handle) => handle.read_remote_run_detail(cwd, run_slug).await,
       | ReadSource::Stdio(handle) => {
-        let mut client = handle.lock().await;
-        let mut toolset = ReadToolSet::new(&mut *client, cwd.to_path_buf());
-        let mut remote = toolset.read_remote_run(run_slug).await?;
-        remote.instructions = toolset.read_remote_instructions(run_slug).await?;
-        if remote.task_text.is_empty() {
-          remote.task_text = toolset.read_remote_task_text(run_slug).await?;
-        }
-        Ok(remote)
+        let (cwd, run_slug) = (cwd.to_path_buf(), run_slug.clone());
+        detached(handle.clone(), move |mut client| async move {
+          let mut toolset = ReadToolSet::new(&mut *client, cwd);
+          let mut remote = toolset.read_remote_run(&run_slug).await?;
+          remote.instructions = toolset.read_remote_instructions(&run_slug).await?;
+          if remote.task_text.is_empty() {
+            remote.task_text = toolset.read_remote_task_text(&run_slug).await?;
+          }
+          Ok(remote)
+        })
+        .await
       },
     }
   }
@@ -185,8 +194,11 @@ impl ReadSource {
     match self {
       | ReadSource::Http(handle) => handle.read_remote_report(cwd, run_slug, filename, max_bytes).await,
       | ReadSource::Stdio(handle) => {
-        let mut client = handle.lock().await;
-        ReadToolSet::new(&mut *client, cwd.to_path_buf()).read_remote_report(run_slug, filename, max_bytes).await
+        let (cwd, run_slug, filename) = (cwd.to_path_buf(), run_slug.clone(), filename.clone());
+        detached(handle.clone(), move |mut client| async move {
+          ReadToolSet::new(&mut *client, cwd).read_remote_report(&run_slug, &filename, max_bytes).await
+        })
+        .await
       },
     }
   }
@@ -202,10 +214,11 @@ impl ReadSource {
     match self {
       | ReadSource::Http(handle) => handle.read_remote_instruction(cwd, run_slug, instruction_id, max_bytes).await,
       | ReadSource::Stdio(handle) => {
-        let mut client = handle.lock().await;
-        ReadToolSet::new(&mut *client, cwd.to_path_buf())
-          .read_remote_instruction(run_slug, instruction_id, max_bytes)
-          .await
+        let (cwd, run_slug) = (cwd.to_path_buf(), run_slug.clone());
+        detached(handle.clone(), move |mut client| async move {
+          ReadToolSet::new(&mut *client, cwd).read_remote_instruction(&run_slug, instruction_id, max_bytes).await
+        })
+        .await
       },
     }
   }
@@ -219,8 +232,11 @@ impl ReadSource {
     match self {
       | ReadSource::Http(handle) => handle.read_goal_detail(cwd, goal_id).await,
       | ReadSource::Stdio(handle) => {
-        let mut client = handle.lock().await;
-        ReadToolSet::new(&mut *client, cwd.to_path_buf()).read_goal_detail(goal_id).await
+        let (cwd, goal_id) = (cwd.to_path_buf(), goal_id.clone());
+        detached(handle.clone(), move |mut client| async move {
+          ReadToolSet::new(&mut *client, cwd).read_goal_detail(&goal_id).await
+        })
+        .await
       },
     }
   }
@@ -236,8 +252,12 @@ impl ReadSource {
     match self {
       | ReadSource::Http(handle) => handle.read_task_detail(cwd, project, task_name, goal_id).await,
       | ReadSource::Stdio(handle) => {
-        let mut client = handle.lock().await;
-        ReadToolSet::new(&mut *client, cwd.to_path_buf()).read_task_detail(project, task_name, goal_id).await
+        let (cwd, project, task_name, goal_id) =
+          (cwd.to_path_buf(), project.clone(), task_name.clone(), goal_id.cloned());
+        detached(handle.clone(), move |mut client| async move {
+          ReadToolSet::new(&mut *client, cwd).read_task_detail(&project, &task_name, goal_id.as_ref()).await
+        })
+        .await
       },
     }
   }

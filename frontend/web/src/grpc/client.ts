@@ -124,6 +124,10 @@ export type CreateBackendClientOptions = {
    * 応答を返さない backend で無期限に待たないため、テストからは短い値を注入する。
    */
   deadlineMs?: number;
+  /**
+   * GetRunDetail の deadline（ミリ秒）。省略時は RUN_DETAIL_DEADLINE_MS。テストからは短い値を注入する。
+   */
+  runDetailDeadlineMs?: number;
 };
 
 type CallOptionsFactory = () => grpc.CallOptions;
@@ -144,6 +148,11 @@ type WriteOperations = Pick<
 
 // unary RPC に付ける既定の deadline。backend 側の取得上限より長く、かつ有限にする。
 const DEFAULT_UNARY_DEADLINE_MS = 30_000;
+
+// GetRunDetail の deadline（issue #59・#180）。保存場所から読めない run の回り道は takt-mcp を
+// 順に何回も呼ぶので、backend はこの RPC だけ総上限（backend/src/grpc/mod.rs の RUN_DETAIL_BUDGET、
+// 45 秒）を持つ。それより 5 秒長くし、backend の DEADLINE_EXCEEDED（説明つき）が先に届くようにする。
+export const RUN_DETAIL_DEADLINE_MS = 50_000;
 
 // run を対象にする RPC の結果から「run が見つからない」を作る。
 const expectRun = <Response extends { runSlug: string }>(
@@ -211,7 +220,11 @@ function createReadOperations(client: TaktDashServiceClient, readOptions: CallOp
 }
 
 // runSlug で1件の run を引く読み取り。NOT_FOUND と runSlug の不一致を、run か本文の「見つからない」エラーへ写す。
-function createRunOperations(client: TaktDashServiceClient, readOptions: CallOptionsFactory): RunOperations {
+function createRunOperations(
+  client: TaktDashServiceClient,
+  readOptions: CallOptionsFactory,
+  runDetailOptions: CallOptionsFactory,
+): RunOperations {
   return {
     getRunDetail: (runSlug, timing) =>
       expectRun(runSlug, () =>
@@ -220,7 +233,7 @@ function createRunOperations(client: TaktDashServiceClient, readOptions: CallOpt
             (request, metadata, callOptions, callback) =>
               client.getRunDetail(request, metadata, callOptions, callback),
             { runSlug },
-            readOptions(),
+            runDetailOptions(),
           ),
         ),
       ),
@@ -330,13 +343,15 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
   const address = resolveBackendAddress(env);
   const deadlineMs = options.deadlineMs ?? DEFAULT_UNARY_DEADLINE_MS;
   const readOptions = (): grpc.CallOptions => ({ deadline: Date.now() + deadlineMs });
+  const runDetailDeadlineMs = options.runDetailDeadlineMs ?? RUN_DETAIL_DEADLINE_MS;
+  const runDetailOptions = (): grpc.CallOptions => ({ deadline: Date.now() + runDetailDeadlineMs });
   const client = new TaktDashServiceClient(address, grpc.credentials.createInsecure());
   const writeDeadlineMs = options.writeDeadlineMs ?? DEFAULT_WRITE_DEADLINE_MS;
   const writeOptions = (): grpc.CallOptions => ({ deadline: Date.now() + writeDeadlineMs });
 
   return {
     ...createReadOperations(client, readOptions),
-    ...createRunOperations(client, readOptions),
+    ...createRunOperations(client, readOptions, runDetailOptions),
     ...createDetailOperations(client, readOptions),
     watchState: () => client.watchState({} satisfies WatchStateRequest),
     ...createWriteOperations(client, writeOptions),

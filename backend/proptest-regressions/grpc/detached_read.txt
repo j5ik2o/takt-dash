@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f60566f85c0fed8d6711d3ad28fbaf1943f8eb5e889f4de25d3c5201b58953b7 # shrinks to (held, work, waiters) = (0, 51, [Waiter { cancel: None }, Waiter { cancel: None }, Waiter { cancel: None }, Waiter { cancel: Some(500) }])
