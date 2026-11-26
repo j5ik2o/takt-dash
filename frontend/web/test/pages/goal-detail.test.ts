@@ -58,10 +58,9 @@ test("ゴール詳細は空の対象外・受け入れ条件・制約も、空�
   assert.match(html, /制約はありません/);
 });
 
-test("ゴール詳細は開始ブランチ・統合ブランチ・ゴールブランチを表示する", () => {
+test("ゴール詳細は統合ブランチ・ゴールブランチを表示し、proto に無い開始ブランチの行は出さない", () => {
   const html = renderDetail();
-  assert.match(html, /開始ブランチ/);
-  assert.match(html, /未取得/);
+  assert.doesNotMatch(html, /開始ブランチ/);
   assert.match(html, /統合ブランチ/);
   assert.match(html, /main/);
   assert.match(html, /ゴールブランチ/);

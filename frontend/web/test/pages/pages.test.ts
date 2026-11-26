@@ -286,8 +286,8 @@ test("判断待ちページは種別ごとの操作要素を一覧に描画す�
   assert.match(html, /<input[^>]*type="text"/);
   assert.match(html, /実施した/);
   assert.match(html, /対応できない/);
-  assert.match(html, /マージを承認/);
-  assert.match(html, /却下/);
+  assert.match(html, /マージする/);
+  assert.match(html, /ゴール登録を却下する/);
 });
 
 test("アクティビティページは出来事を新しい順に並べ、7日分の集計とサーバー別の当日件数を描画する", () => {

@@ -66,9 +66,11 @@ test("run 詳細ページはレポートと指示書の本文を最初の描画�
   try {
     const html = await withServerEnv(server.address, () => renderViaPage("run-aaa"));
     assert.match(html, /review\.md（1200 バイト）/);
-    assert.match(html, /deliveredNextStep/);
+    assert.match(html, /配信済み（次のステップ）/);
     assert.equal((html.match(/<details\b/g) ?? []).length, 2, "レポート1件と指示書1件にそれぞれ本文を開く操作がある");
-    assert.deepEqual(calls, ["GetRunDetail"], "最初の描画では GetRunContent を呼ばない");
+    // サーバーの表示名を引くための GetOverview は呼んでよい（issue #315 D16。本番では layout と共有する）。
+    assert.ok(calls.includes("GetRunDetail"), "run 詳細を読む");
+    assert.ok(!calls.includes("GetRunContent"), "最初の描画では GetRunContent を呼ばない");
   } finally {
     await server.shutdown();
   }

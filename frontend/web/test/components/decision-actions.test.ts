@@ -87,9 +87,9 @@ test("判断待ち一覧は種別ごとの操作要素を描画する", () => {
   assert.match(html, /<button[^>]*>回答する<\/button>/);
   assert.match(html, /<button[^>]*>実施した<\/button>/);
   assert.match(html, /<button[^>]*>対応できない<\/button>/);
-  assert.match(html, /<button[^>]*>マージを承認<\/button>/);
-  assert.match(html, /<button[^>]*>承認<\/button>/);
-  assert.match(html, /<button[^>]*>却下<\/button>/);
+  assert.match(html, /<button[^>]*>マージする<\/button>/);
+  assert.match(html, /<button[^>]*>ゴール登録を承認する<\/button>/);
+  assert.match(html, /<button[^>]*>ゴール登録を却下する<\/button>/);
 });
 
 test("判断待ち一覧はまだ読めていないサーバーがあるとき0件でも「判断待ちはありません」と断定しない", () => {
@@ -165,8 +165,8 @@ test("ゴール登録の承認待ちを問い合わせと区別して表示し�
 
   assert.match(list, /ゴール登録の承認待ち/);
   assert.doesNotMatch(list, /問い合わせ（/);
-  assert.match(list, /<button[^>]*>承認<\/button>/);
-  assert.match(list, /<button[^>]*>却下<\/button>/);
+  assert.match(list, /<button[^>]*>ゴール登録を承認する<\/button>/);
+  assert.match(list, /<button[^>]*>ゴール登録を却下する<\/button>/);
 
   const foot = html.slice(html.indexOf('class="foot-notes"'));
   assert.match(foot, /ゴール登録の承認待ち/);
@@ -176,7 +176,7 @@ test("ゴール登録の承認待ちを問い合わせと区別して表示し�
 test("マージ承認は閉じた状態では操作ボタンだけを描画し、確認時だけダイアログを描画する", () => {
   const closed = renderActions(merge(), null);
   assert.doesNotMatch(closed, /role="dialog"/);
-  assert.match(closed, /<button[^>]*>マージを承認<\/button>/);
+  assert.match(closed, /<button[^>]*>マージする<\/button>/);
 
   const opened = renderActions(merge(), "merge");
   const openedDialog = opened.slice(opened.indexOf('role="dialog"'));
@@ -225,18 +225,18 @@ test("確認ダイアログの見出し・本文・確定ボタン名はダイ�
   const approveDialog = dialogOf(renderActions(registration(), "approve-registration"));
   assert.match(approveDialog, /<h2[^>]*>ゴール登録の承認<\/h2>/);
   assert.match(approveDialog, /revision 7 のゴール登録を承認します。/);
-  assert.match(approveDialog, /<button[^>]*>承認<\/button>/);
+  assert.match(approveDialog, /<button[^>]*>ゴール登録を承認する<\/button>/);
   assert.doesNotMatch(approveDialog, /却下/);
 
   const rejectDialog = dialogOf(renderActions(registration(), "reject-registration"));
   assert.match(rejectDialog, /<h2[^>]*>ゴール登録の却下<\/h2>/);
   assert.match(rejectDialog, /revision 7 のゴール登録を却下します。/);
-  assert.match(rejectDialog, /<button[^>]*>却下<\/button>/);
+  assert.match(rejectDialog, /<button[^>]*>ゴール登録を却下する<\/button>/);
   assert.doesNotMatch(rejectDialog, /承認/);
 
   const mergeDialog = dialogOf(renderActions(merge(), "merge"));
-  assert.match(mergeDialog, /<h2[^>]*>マージの承認<\/h2>/);
-  assert.match(mergeDialog, /プルリクエスト #418 のマージを承認します。/);
+  assert.match(mergeDialog, /<h2[^>]*>プルリクエストのマージ<\/h2>/);
+  assert.match(mergeDialog, /プルリクエスト #418 をマージします。/);
   assert.match(mergeDialog, /<button[^>]*>マージする<\/button>/);
   assert.doesNotMatch(mergeDialog, /revision/);
 });
@@ -250,7 +250,7 @@ test("送信中は確認ダイアログのボタンを無効化する", () => {
 test("確認ダイアログは見出しを accessible name に使い、確定ボタン名と重複しない", () => {
   const html = renderActions(merge(), "merge");
   assert.match(html, /role="dialog"[^>]*aria-labelledby="[^"]+"/);
-  assert.match(html, /<h2[^>]*tabindex="-1"[^>]*>マージの承認<\/h2>/);
+  assert.match(html, /<h2[^>]*tabindex="-1"[^>]*>プルリクエストのマージ<\/h2>/);
   assert.match(html, /<button[^>]*>マージする<\/button>/);
 
   const heading = html.match(/<h2[^>]*>([^<]*)<\/h2>/);
@@ -548,16 +548,16 @@ const describedButton = (html: string, actionName: string) => {
 };
 
 test("一覧の操作ボタンは操作の文言だけを読み上げ名にし、対象の識別子は説明から補う", () => {
-  const mergeButton = describedButton(renderDecisions(stateWith([merge()])), "マージを承認");
-  assert.equal(mergeButton.label, "マージを承認");
+  const mergeButton = describedButton(renderDecisions(stateWith([merge()])), "マージする");
+  assert.equal(mergeButton.label, "マージする");
   assert.match(mergeButton.description, /corporate-site/);
   assert.match(mergeButton.description, /PR #418/);
 
   const registrationHtml = renderDecisions(stateWith([registration()]));
-  const approveButton = describedButton(registrationHtml, "承認");
+  const approveButton = describedButton(registrationHtml, "ゴール登録を承認する");
   assert.match(approveButton.description, /takt/);
   assert.match(approveButton.description, /revision 7/);
-  const rejectButton = describedButton(registrationHtml, "却下");
+  const rejectButton = describedButton(registrationHtml, "ゴール登録を却下する");
   assert.match(rejectButton.description, /takt/);
   assert.match(rejectButton.description, /revision 7/);
 
@@ -586,8 +586,8 @@ test("一覧の操作ボタンは操作の文言だけを読み上げ名にし�
 test("操作ボタンの読み上げ名は対象の識別子を埋め込まず、複数の対象が並んでも説明で区別できる", () => {
   const html = renderDecisions(createActionableDashboardState());
 
-  // 同じ「承認」「却下」が複数並んでも、aria-label は操作の文言のまま。
-  const approveNames = [...html.matchAll(/<button\b[^>]*\baria-label="承認"/g)];
+  // 同じ「ゴール登録を承認する」「ゴール登録を却下する」が複数並んでも、aria-label は操作の文言のまま。
+  const approveNames = [...html.matchAll(/<button\b[^>]*\baria-label="ゴール登録を承認する"/g)];
   assert.equal(approveNames.length, 1, "操作文言そのものを name にし、対象の括弧書きを name に含めない");
 
   // 操作ボタンの aria-label に対象の括弧書きを残さない。入力欄は対象付きラベルを保つ別契約なので対象外。
@@ -686,11 +686,11 @@ test("操作結果は key 付きで追加され、同じ key は置換、別 key
   const renderResults = (results: ReturnType<typeof upsertDecisionResult>): string =>
     renderToStaticMarkup(createElement(DecisionResults, { results }));
 
-  const success = upsertDecisionResult([], toDecisionResult(merge(), { ok: true, message: "マージを承認しました。" }));
+  const success = upsertDecisionResult([], toDecisionResult(merge(), { ok: true, message: "PR #418 のマージを依頼しました。" }));
   const successHtml = renderResults(success);
   assert.match(successHtml, /role="status"/);
   assert.doesNotMatch(successHtml, /role="alert"/);
-  assert.match(successHtml, /マージを承認しました。/);
+  assert.match(successHtml, /PR #418 のマージを依頼しました。/);
 
   const failure = upsertDecisionResult(success, toDecisionResult(merge(), { ok: false, message: "操作に失敗しました。" }));
   assert.equal(failure.length, 1);
@@ -755,7 +755,7 @@ test("マージの確認ダイアログは開いた後に PR が変わっても�
   assert.equal(link?.getAttribute("href"), "https://example.test/pr/418");
 });
 
-test("プルリクエストを開ける URL が無いマージ待ちは、マージの承認を出さず理由を表示する", () => {
+test("プルリクエストを開ける URL が無いマージ待ちは、マージの操作を出さず理由を表示する", () => {
   const unopenable = [
     "",
     "javascript:alert(1)",
@@ -772,7 +772,7 @@ test("プルリクエストを開ける URL が無いマージ待ちは、マー
     const decision: PendingDecision = { ...merge(), pullRequest: { number: 418, url } };
     const html = renderActions(decision, null);
     assert.doesNotMatch(html, /<button/, `URL が ${JSON.stringify(url)} のとき操作ボタンを出さない`);
-    assert.match(html, /プルリクエストの URL が無いため、マージを承認できません。/);
+    assert.match(html, /プルリクエストの URL が無いため、マージできません。/);
     assert.equal(openDecisionDialog(decision, "merge"), undefined);
 
     const list = renderDecisions(stateWith([decision]));
@@ -791,12 +791,12 @@ test("判断待ち一覧のマージ待ちは、対象を新しいタブで開�
   assert.equal(link.getAttribute("rel"), "noopener noreferrer");
 });
 
-test("ゴール登録の確認ダイアログは対象の一覧もリンクも出さない", () => {
+test("ゴール登録の確認ダイアログは対象の一覧を出し、リンクは出さない", () => {
   const dialog = new JSDOM(renderActions(registration(), "approve-registration")).window.document.querySelector(
     '[role="dialog"]',
   );
   assert.ok(dialog, "確認ダイアログがある");
-  assert.equal(dialog.querySelector("dl"), null);
+  assert.ok(dialog.querySelector("dl"), "プロジェクトと登録案の一覧を出す（issue #315 D5）");
   assert.equal(dialog.querySelector("a"), null);
 });
 
@@ -808,7 +808,7 @@ test("プルリクエストの URL の判定は、古いブラウザに無い UR
     assert.equal(pullRequestLinkUrl("https://example.test/pr/418"), "https://example.test/pr/418");
     assert.equal(pullRequestLinkUrl("HTTP://example.test/pr/418"), "HTTP://example.test/pr/418");
     assert.equal(pullRequestLinkUrl("not a url"), undefined);
-    assert.match(renderDecisions(stateWith([merge()])), /マージを承認/);
+    assert.match(renderDecisions(stateWith([merge()])), /マージする/);
   } finally {
     Object.defineProperty(URL, "canParse", original);
   }
