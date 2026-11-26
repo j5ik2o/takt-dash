@@ -277,6 +277,48 @@ async fn a_write_takt_never_acknowledges_reports_an_unknown_outcome_and_is_not_r
 }
 
 #[tokio::test]
+async fn a_write_whose_reply_has_no_text_reports_an_unknown_outcome_and_is_not_resent() {
+  // takt は呼び出しを受け取って応答するが、応答に本文が無い（issue #395）。takt が断ったのでは
+  // ないので、書き込みは適用済みかもしれない。
+  let harness = harness_with(json!({ "noText": ["takt_answer_goal_question"] }));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client.answer_inquiry(answer("はい", Some("answer-1"))).await.expect_err("応答に本文がありません");
+  assert_eq!(status.code(), Code::DeadlineExceeded, "本文の無い応答は結果不明です: {status:?}");
+  assert!(status.message().contains("結果は不明"), "結果が不明であることを伝えます: {}", status.message());
+  assert_eq!(call_count(&harness, "takt_answer_goal_question"), 1, "takt は呼び出しを受け取っています");
+
+  harness.rewrite_state(json!({}));
+  let retried =
+    client.answer_inquiry(answer("はい", Some("answer-1"))).await.expect_err("結果不明の操作は送り直しません");
+  assert_eq!(retried.code(), Code::DeadlineExceeded);
+  assert!(retried.message().contains("再送していません"), "再送しなかったことを伝えます: {}", retried.message());
+  assert_eq!(call_count(&harness, "takt_answer_goal_question"), 1, "同じ鍵の再試行で書き込みを重ねません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn a_registration_approval_whose_reply_has_no_text_is_not_resent() {
+  // ゴール登録の承認は、登録案の食い違いを見分ける境界（registration_write_failure）を通る。
+  let harness = harness_with(json!({ "noText": ["takt_approve_goal_registration"] }));
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client.approve_goal_registration(approval(Some("approve-1"))).await.expect_err("応答に本文がありません");
+  assert_eq!(status.code(), Code::DeadlineExceeded, "本文の無い応答は結果不明です: {status:?}");
+
+  harness.rewrite_state(json!({}));
+  let retried =
+    client.approve_goal_registration(approval(Some("approve-1"))).await.expect_err("結果不明の操作は送り直しません");
+  assert_eq!(retried.code(), Code::DeadlineExceeded);
+  assert_eq!(call_count(&harness, "takt_approve_goal_registration"), 1, "同じ鍵の再試行で書き込みを重ねません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn a_write_that_was_never_sent_can_be_retried_with_the_same_key() {
   // 常駐 HTTP サーバーが最初のセッションの確立に応答しない。backend の期限（15 秒）で時間切れに
   // なるが、書き込みの道具は一度も送られていない。

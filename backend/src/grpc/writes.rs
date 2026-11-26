@@ -297,7 +297,7 @@ impl RegistrationTarget {
 /// 食い違い（issue #319）と同じ FAILED_PRECONDITION で返します。
 pub(super) fn registration_write_failure(error: ToolError) -> WriteFailure {
   match error {
-    | ToolError::Tool(error) if is_stale_registration(&error.message) => {
+    | ToolError::Tool(error) if error.refused && is_stale_registration(&error.message) => {
       log_detail("takt-mcp がゴール登録案の食い違いで書き込みを断りました。", &error);
       WriteFailure::Failed(Status::failed_precondition(with_takt_reason(
         "ゴール登録案は、作り直されたか、すでに承認・却下されています。画面を読み込み直してから、もう一度操作してください。"

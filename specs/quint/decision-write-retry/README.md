@@ -1,8 +1,8 @@
-# 判断待ちの書き込みの再試行（issue #305）
+# 判断待ちの書き込みの再試行（issue #305、#395）
 
-判断待ちの書き込み（回答、マージの承認、ゴール登録の承認と却下）で、takt 側では書き込みが済んでいるのに応答を失ったとき、同じ操作の再試行と同時の重複が書き込みを重ねないことを、Quint の仕様で確かめた記録です。
+判断待ちの書き込み（回答、マージの承認、ゴール登録の承認と却下）で、takt 側では書き込みが済んでいるのに応答を失ったとき、同じ操作の再試行と同時の重複が書き込みを重ねないことを、Quint の仕様で確かめた記録です。issue #395 で、takt が isError ではない本文の無い応答を返す遷移を足しました（設計は `docs/design/issue-395.md`）。
 
-仕様とコードは機械的にはつながっていません。コードの挙動は `backend/tests/write_retry_test.rs`、`backend/src/grpc/write_ledger_tests.rs`、`frontend/web/test/api/decisions-write-retry.test.ts`、`frontend/web/test/state/decision-retry.test.ts` が確かめます。
+仕様とコードは機械的にはつながっていません。コードの挙動は `backend/tests/write_retry_test.rs`、`backend/src/grpc/write_ledger_tests.rs`、`backend/src/grpc/failure_tests.rs`、`frontend/web/test/api/decisions-write-retry.test.ts`、`frontend/web/test/state/decision-retry.test.ts` が確かめます。
 
 ## ファイル
 
@@ -11,13 +11,14 @@
 | `writeRetry.qnt` | 状態機械、不変条件、進行の条件 |
 | `writeRetry_test.qnt` | issue の筋書きを修正前と修正案でたどるテスト |
 
-`writeRetry.qnt` は遷移を 2 つの定数で切り替えます。
+`writeRetry.qnt` は遷移を 3 つの定数で切り替えます。
 
-| モジュール | `DEDUP` | `EXPIRY` | 表すもの |
-| --- | --- | --- | --- |
-| `current` | false | false | 修正前。backend は届いた要求を毎回 takt へ送る |
-| `fixed` | true | false | 修正案。要求は鍵を持ち、backend は鍵ごとの台帳を引く |
-| `fixedWithExpiry` | true | true | 修正案で、台帳が決着した記録を忘れることを許したもの |
+| モジュール | `DEDUP` | `EXPIRY` | `EMPTY_REPLY_UNKNOWN` | 表すもの |
+| --- | --- | --- | --- | --- |
+| `current` | false | false | false | #305 の修正前。backend は届いた要求を毎回 takt へ送る |
+| `fixed` | true | false | true | 修正案。要求は鍵を持ち、backend は鍵ごとの台帳を引く。本文の無い応答は結果不明 |
+| `fixedWithExpiry` | true | true | true | 修正案で、台帳が決着した記録を忘れることを許したもの |
+| `emptyReplyAsRejected` | true | false | false | #395 の修正前。台帳はあるが、本文の無い応答を適用されなかった失敗として扱う |
 
 ## モデルの範囲
 
@@ -25,6 +26,7 @@
 - 同じ鍵の試行は、同じ論理操作の再試行か同時送信を表します。修正前の backend は鍵を見ません。
 - 期限切れは 2 種類あります。`callerTimeout` は Web や CLI が backend を待つのをやめること、`taktTimeout` は backend が takt を待つのをやめることです。
 - takt は、backend が待つのをやめたあとでも書き込みを適用できます（`Orphaned` からの `taktApply`）。
+- takt は、isError ではない本文の無い応答を返すことがあります（`taktEmptyReply`）。takt は断っていないので、適用の前（`Writing`）と後（`Unacked`）のどちらでも起こります。backend の `ToolCallError { refused: false }` に当たります。
 - 書き込みゲートによる直列化、プロジェクトごとの違い、鍵と要求の内容の食い違いは含めていません。
 
 ## 条件
@@ -45,7 +47,7 @@
 
 ## 結果
 
-quint 0.32.0 で実行しました。実行したのは `quint typecheck`、`quint run`、`quint test` だけです。
+quint 0.32.0 で実行しました。実行したのは `quint typecheck`、`quint run`、`quint test` だけです。数字は #395 で遷移を足したあとに取り直したものです。
 
 ### 修正前の遷移：反例あり
 
@@ -73,15 +75,26 @@ quint run writeRetry.qnt --main=fixed --invariant=safety \
 
 50000 サンプル、max-steps 20、seed 0x305 で `safety` の反例なし。`noDuplicateAfterLostResponse` も同じ条件で反例なし。不変条件は修正前の検査と同じものです。
 
-trace の長さは最短 10、最長 19、平均 15.42 です。20 に届かない trace は、4 回の試行がすべて終わって進める遷移が無くなったものです。
+trace の長さは最短 10、最長 19、平均 14.76 です。20 に届かない trace は、4 回の試行がすべて終わって進める遷移が無くなったものです。
 
 進行の条件は次の数の trace で到達しました。
 
 | 条件 | 到達した trace |
 | --- | --- |
-| `retryLearnsSuccess` | 5797 / 50000（11.59%） |
-| `otherOperationProceeds` | 32053 / 50000（64.11%） |
-| `rejectedOperationCanBeRetried` | 389 / 50000（0.78%） |
+| `retryLearnsSuccess` | 3088 / 50000（6.18%） |
+| `otherOperationProceeds` | 23786 / 50000（47.57%） |
+| `rejectedOperationCanBeRetried` | 159 / 50000（0.32%） |
+
+### #395 の修正前の遷移：反例あり
+
+```sh
+quint run writeRetry.qnt --main=emptyReplyAsRejected --invariant=rejectedMeansNotWritten \
+  --max-steps=20 --max-samples=50000 --seed=0x395
+quint run writeRetry.qnt --main=emptyReplyAsRejected --invariant=noDuplicateWrite \
+  --max-steps=20 --max-samples=50000 --seed=0x395
+```
+
+どちらも 14 手で違反します。takt が書き込みを適用したあとに本文の無い応答を返すと、backend は「失敗した」と伝えて台帳の記録を消します（`rejectedMeansNotWritten` の違反）。同じ鍵のやり直しが takt へ送られ、書き込みが 2 回になります（`noDuplicateWrite` の違反）。
 
 ### 修正案の限界：台帳が記録を忘れると反例あり
 
@@ -100,4 +113,4 @@ quint run writeRetry.qnt --main=fixedWithExpiry --invariant=noDuplicateWrite \
 quint test writeRetry_test.qnt --main=writeRetry_test
 ```
 
-5 件すべて成功。`lostResponseRetryDuplicatesBeforeFixTest` は、修正前の遷移で書き込みが 2 回になることを固定します。
+7 件すべて成功。`lostResponseRetryDuplicatesBeforeFixTest` は、#305 の修正前の遷移で書き込みが 2 回になることを固定します。`emptyReplyRetryDuplicatesBeforeFixTest` は #395 の修正前に本文の無い応答のあとで書き込みが 2 回になることを、`emptyReplyIsNotResentAfterFixTest` は修正案で結果不明として残り送り直さないことを固定します。
