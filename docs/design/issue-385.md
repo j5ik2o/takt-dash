@@ -73,7 +73,7 @@ Quint の不変条件（`specs/quint/state-stream-relay/stateStreamRelay.qnt`）
 1. **同じ接続の資源を二度閉じない**（`noDoubleRelease`）。
 2. **画面ごとに、サーバーで開いている接続は 1 本まで**（`atMostOneOpenPerScreen`）。
 3. **見捨てられた接続は、画面が開き直した接続がサーバーに届いた時点で閉じる**（`closedOnNextArrival`）。届かないまま（タブを閉じた）なら、OS が TCP をあきらめた時点で閉じる。
-4. **新しい試行が開いている間は、遅れて届いた古い試行を開かない**（`staleNeverOpensBesideNewer`）。
+4. **新しい試行が開いている間は、遅れて届いた古い試行を開かない**（`staleNeverOpensBesideNewer`、`staleArrivalRejected`）。
 5. **動いている接続（画面がいま使っている接続）を閉じない**（`liveNotClosedByRelay`）。閉じてよいのは backend の終了と、経路が切れて OS が閉じた場合だけ。
 6. **閉じた接続の登録が残らない**（`registryPointsToOpen`）。
 7. **backend の購読は、開いている接続の分だけ**（`backendTaskOnlyWhileOpen`）。
@@ -97,7 +97,7 @@ Quint の不変条件（`specs/quint/state-stream-relay/stateStreamRelay.qnt`）
   4. 断られた接続は gRPC を開かない（不変条件 4）。
   5. その画面で最も大きい番号の接続（同じ番号なら後に開いたもの）は、自分の `error`・`end`・abort・`cancel` 以外では閉じない（不変条件 5）。
   6. 登録簿は、閉じていない接続だけを指す（不変条件 6）。
-  7. 閉じた接続は gRPC を閉じている（不変条件 7）。
+  7. 閉じた接続は gRPC を閉じている。本文は、残りを読み切ると終わり、待っている読みも終わる（不変条件 7）。
   8. 読まない接続の内部の列は 1 件、持ち分は 1 件を超えない（不変条件 8。`highWaterMark: 1` を前提に、`desiredSize >= 0` で確かめる）。
   9. 読んだ版は増える一方（不変条件 9）。
   10. 開いている接続で読み続ければ、最後に読む版は gRPC から最後に来た版（不変条件 10）。
@@ -111,14 +111,14 @@ Quint の不変条件（`specs/quint/state-stream-relay/stateStreamRelay.qnt`）
 
 `specs/quint/state-stream-relay/` に仕様とテストを置きました（`README.md` に範囲・前提・結果）。
 
-- `stateStreamRelay.qnt`：画面 2 つ・接続 5 本。経路の切断、画面の開き直しとタブの閉じ、要求の到着と付け替え・断り、abort・backend の終了・OS の打ち切り・Next の cancel、backend からの状態と Next の読み、を遷移にした状態機械。不変条件 10（`safety`）、到達条件 7。
-- `stateStreamRelay_test.qnt`：筋書き 17 件。修正前の 3 つの現象（2 本残る、列が伸びる、二度閉じる）、修正案の付け替え・断り・間引き・後始末 1 本、変異 3 つの反例、タブを閉じた接続が OS を待つ残り。
+- `stateStreamRelay.qnt`：画面 2 つ・接続 5 本。経路の切断、画面の開き直しとタブの閉じ、要求の到着と付け替え・断り、abort・backend の終了・OS の打ち切り・Next の cancel、backend からの状態と Next の読み、を遷移にした状態機械。不変条件 11（`safety`）、到達条件 7。
+- `stateStreamRelay_test.qnt`：筋書き 19 件。修正前の 3 つの現象（2 本残る、列が伸びる、二度閉じる）、修正案の付け替え・断り・間引き・後始末 1 本、変異 3 つの反例、タブを閉じた接続が OS を待つ残り。
 
 検査結果（quint 0.32.0）：
 
 - `quint typecheck`：2 ファイルともエラーなし。
-- `quint test stateStreamRelay_test.qnt --main=stateStreamRelay_test`：17 件すべて成功。
-- 修正前（`current`）は `noDoubleRelease`・`atMostOneOpenPerScreen`・`closedOnNextArrival`・`staleNeverOpensBesideNewer`・`queueBounded` に違反。変異は、`noRejectStale` が `liveNotClosedByRelay`、`noConflate` が `queueBounded`、`noFinishOnce` が `noDoubleRelease` に違反（各 `--max-steps=30 --max-samples=10000 --seed=0x385`）。`keepStalePending` は `deliveredInOrder` に違反（`--max-samples=100000`）。
+- `quint test stateStreamRelay_test.qnt --main=stateStreamRelay_test`：19 件すべて成功。
+- 修正前（`current`）は `noDoubleRelease`・`atMostOneOpenPerScreen`・`closedOnNextArrival`・`staleNeverOpensBesideNewer`・`queueBounded` に違反。変異は、`noRejectStale` が `staleArrivalRejected`・`liveNotClosedByRelay`、`noConflate` が `queueBounded`、`noFinishOnce` が `noDoubleRelease` に違反（各 `--max-steps=30 --max-samples=10000 --seed=0x385`）。`keepStalePending` は `deliveredInOrder` に違反（`--max-samples=100000`）。
 - 修正案（`fixed`）：`--invariant=safety --max-steps=40 --max-samples=20000 --seed=0x385` で反例なし。到達条件 7 つすべて到達。
 
 ## 壊しうる入力の一覧
@@ -172,3 +172,8 @@ Quint の不変条件（`specs/quint/state-stream-relay/stateStreamRelay.qnt`）
 | --- | --- | --- |
 | Devin：読み始めた直後に次の状態が来ると 1 → 3 → 2 の順で届く | 直す | 列へ直接入れるときに持ち分を捨てる。Quint で読み（`nextReads`）と `pull`（`relayPulls`）を別の遷移にし、変異 `keepStalePending` が `deliveredInOrder` を破ることを確かめた。PBT に、開いた直後に続けて状態が来る手と、読んだ直後に状態が来る手を足し、手の間で microtask を流し切らない並びも作った。`then` の中の確かめを手のあとに移した（`then` の中で投げても試験が落ちなかった） |
 | Cursor Bugbot：`openStream` がその場で例外を投げると、登録と abort の聞き手が残る | 直す | 例外を捕まえて後始末を通してから投げ直す。単体テストを足した |
+| CodeRabbit：Next は HEAD を GET で代わりに処理するので、HEAD が配信中の接続を付け替え、読まれない購読を残す | 直す | 本文を持たない `HEAD` を書き出した。単体テストを足した |
+| CodeRabbit：abort 済みの要求は登録の前に除く | 採らない | 試行 2 が届くのは、画面が試行 1 を閉じたあと（`disconnect` で閉じてから開き直す）。試行 2 まで abort 済みなら試行 1 も見捨てられているので、閉じるのが正しい。Quint の `liveNotClosedByRelay` は、画面がいま使っている接続を閉じないことを確かめている |
+| CodeRabbit：間引きの route テストの 300 ms 待ちは 5 件の到着を保証しない | 直す | 中継より先に data を数える聞き手を付け、5 件を受けてから読む |
+| CodeRabbit：PBT が、付け替えた接続の本文が実際に終わることを見ていない | 直す | 性質 7 に「閉じた接続は残りを読み切ると本文が終わり、待っている読みも終わる」を足した。後始末で `controller.close()` を外す変異で落ちることを確かめた |
+| CodeRabbit：Quint の断りの不変条件が、いま使っている接続がまだ届いていない間の取り違えを見逃す | 直す | 届いた時点の事実（`newerOpenAtArrival`）を記録し、不変条件 `staleArrivalRejected` を足した。3 回開いて試行 2・1 の順に届く筋書きを足した |

@@ -98,6 +98,27 @@ module stateStreamRelay_test {
       .expect(noRejectStale::conns.get(1).reason == noRejectStale::Superseded
         and not(noRejectStale::liveNotClosedByRelay))
 
+  // 変異: 画面が 3 回開き、試行 2 が届いたあとで試行 1 が遅れて届くと、試行 1 が試行 2 を閉じる。
+  // いま使っている接続（試行 3）はまだ届いていないので、liveNotClosedByRelay では捕まらない。
+  run lateStaleReplacesNewerBeforeLiveArrivesTest =
+    noRejectStale::init
+      .then(3.reps(_ => noRejectStale::connect(0)))
+      .then(noRejectStale::arrive(1))
+      .then(noRejectStale::arrive(0))
+      .expect(noRejectStale::conns.get(1).reason == noRejectStale::Superseded
+        and noRejectStale::liveNotClosedByRelay and noRejectStale::atMostOneOpenPerScreen
+        and not(noRejectStale::staleArrivalRejected))
+
+  // 修正案: 同じ並びで、遅れて届いた試行 1 を断り、試行 2 を開いたままにする。
+  run lateStaleRejectedBeforeLiveArrivesTest =
+    after::init
+      .then(3.reps(_ => after::connect(0)))
+      .then(after::arrive(1))
+      .then(after::arrive(0))
+      .expect(after::conns.get(0).reason == after::Rejected and after::conns.get(1).phase == after::Open and after::safety)
+      .then(after::arrive(2))
+      .expect(after::conns.get(1).reason == after::Superseded and after::conns.get(2).phase == after::Open and after::safety)
+
   // 修正案: Next が読めない間は最新の 1 件だけを持ち、読めたら最新を送る。途中の版は送らない。
   run conflateKeepsLatestTest =
     after::init

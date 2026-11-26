@@ -8,8 +8,8 @@
 
 | ファイル | 内容 |
 | --- | --- |
-| `stateStreamRelay.qnt` | 画面 2 つ・接続 5 本の状態機械、10 の安全不変条件（`safety`）、7 つの到達条件（witnesses） |
-| `stateStreamRelay_test.qnt` | issue #385 の筋書きを 6 構成でたどる 17 件のテスト |
+| `stateStreamRelay.qnt` | 画面 2 つ・接続 5 本の状態機械、11 の安全不変条件（`safety`）、7 つの到達条件（witnesses） |
+| `stateStreamRelay_test.qnt` | issue #385 の筋書きを 6 構成でたどる 19 件のテスト |
 
 遷移は 5 つの定数で切り替えます。
 
@@ -41,13 +41,14 @@
 - `atMostOneOpenPerScreen`：画面ごとに、サーバーで開いている接続は 1 本まで。
 - `closedOnNextArrival`：同じ画面の次の接続がサーバーに届いて開いたら、それより前に届いた接続は閉じている。見捨てられた接続は、画面が開き直した接続が届いた時点で閉じる。
 - `staleNeverOpensBesideNewer`：同じ画面のもっと新しい試行がサーバーで開いている間は、遅れて届いた古い試行を開かない。
+- `staleArrivalRejected`：サーバーに届いた時点で同じ画面のもっと大きい番号の接続が開いていた要求は、開かずに断る（届いた時点の事実を `newerOpenAtArrival` に記録して確かめる。いま使っている接続がまだ届いていない間の取り違えも捕まえる。[PR #389](https://github.com/j5ik2o/takt-dash/pull/389) の CodeRabbit の指摘で足した）。
 - `liveNotClosedByRelay`：画面がいま使っている接続を、サーバーの都合（付け替え、断り、abort、cancel）で閉じない。閉じてよいのは backend の終了と、経路が切れて OS が閉じた場合だけ。
 - `registryPointsToOpen`：画面ごとの登録は、開いている同じ画面の接続だけを指す（閉じた接続の登録が残らない）。
 - `backendTaskOnlyWhileOpen`：backend の購読は、開いている接続の分だけ生きている。
 - `queueBounded`：`ReadableStream` の列は `highWaterMark` を超えて積まない。
 - `deliveredInOrder`：古い版を新しい版の後に送らない。
 - `latestNeverDropped`：開いている接続では、backend から受けた最新の版を捨てない（送ったか、列にあるか、持っている）。
-- `safety`：上の 10 をすべて満たす。
+- `safety`：上の 11 をすべて満たす。
 
 進行の条件（`--witnesses` で数える）
 
@@ -71,14 +72,14 @@ quint test stateStreamRelay_test.qnt --main=stateStreamRelay_test
 ```
 
 - `quint typecheck`：2 ファイルともエラーなし。
-- `quint test`：17 件すべて成功。
+- `quint test`：19 件すべて成功。
 
 修正前と変異は `safety` に違反します（`--max-steps=30 --max-samples=10000 --seed=0x385`）。不変条件を 1 つずつ渡して違反したもの:
 
 | モジュール | 違反する不変条件 |
 | --- | --- |
-| `current` | `noDoubleRelease`、`atMostOneOpenPerScreen`、`closedOnNextArrival`、`staleNeverOpensBesideNewer`、`queueBounded` |
-| `noRejectStale` | `liveNotClosedByRelay` |
+| `current` | `noDoubleRelease`、`atMostOneOpenPerScreen`、`closedOnNextArrival`、`staleNeverOpensBesideNewer`、`staleArrivalRejected`、`queueBounded` |
+| `noRejectStale` | `staleArrivalRejected`、`liveNotClosedByRelay` |
 | `noConflate` | `queueBounded` |
 | `noFinishOnce` | `noDoubleRelease` |
 | `keepStalePending` | `deliveredInOrder`（並びが細いので `--max-samples=100000` で探す。約 14,000 本目で違反） |

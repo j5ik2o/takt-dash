@@ -35,3 +35,9 @@ export async function GET(request: NextRequest): Promise<Response> {
   }
   return new Response(body, { headers: SSE_HEADERS });
 }
+
+// Next は HEAD が無いと GET で代わりに処理する。HEAD で配信中の接続を付け替えたり、読まれない
+// 本文のために backend を購読したりしないよう、本文を持たない応答を返す（PR #389 のレビュー）。
+export function HEAD(): Response {
+  return new Response(null, { headers: SSE_HEADERS });
+}

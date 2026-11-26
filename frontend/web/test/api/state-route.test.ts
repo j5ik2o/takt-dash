@@ -9,7 +9,7 @@ import { NextRequest } from "next/server";
 import { createDashboardState, NOW } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
 import { closeBackendClient, getBackendClient } from "../../src/grpc/client.ts";
-import { GET } from "../../app/api/state/route.ts";
+import { GET, HEAD } from "../../app/api/state/route.ts";
 
 const readEvents = async (stream: ReadableStream<Uint8Array>, count: number): Promise<string[]> => {
   const decoder = new TextDecoder();
@@ -307,11 +307,24 @@ test("Next が読めない間は最新の状態 1 件だけを持ち、読めた
     readAt: new Date(NOW.getTime() + offset * 1_000),
   }));
   const server = await startTaktDashServer({ watch: states, holdWatchOpen: true });
+  let received = 0;
   try {
     await withServerEnv(server.address, async () => {
+      // 中継より先に data を数える聞き手を付け、5 件を受けたことを確かめてから読む。
+      const client = getBackendClient();
+      const original = client.watchState.bind(client);
+      client.watchState = () => {
+        const stream = original();
+        stream.on("data", () => {
+          received += 1;
+        });
+        return stream;
+      };
       const response = await GET(new NextRequest(stateUrl(freshScreen(SCREEN_A), 1)));
-      // 読まずに待ち、backend の 5 件をすべて受けさせる。
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await waitUntil(() => received === states.length);
+      assert.equal(received, states.length, "backend の 5 件を受けてから読む");
+      // 同じ data を、数える聞き手のあとに中継の聞き手が受ける。待ちを 1 回流してから読む。
+      await new Promise((resolve) => setImmediate(resolve));
       const reader = response.body!.getReader();
       const first = await reader.read();
       assert.match(decodeEvent(first.value), /2026-11-13T07:30:00/);
@@ -354,4 +367,26 @@ test("Next の cancel のあとに abort が来ても、gRPC のストリーム�
     await server.shutdown();
   }
   assert.equal(cancels, 1);
+});
+
+test("HEAD は本文を持たず、登録も backend の購読もしない", async () => {
+  const calls: string[] = [];
+  const server = await startTaktDashServer({ watch: [createDashboardState()], holdWatchOpen: true, calls });
+  const screen = freshScreen(SCREEN_A);
+  try {
+    await withServerEnv(server.address, async () => {
+      const live = await GET(new NextRequest(stateUrl(screen, 1)));
+      const reader = live.body!.getReader();
+      assert.equal((await reader.read()).done, false);
+      const head = HEAD();
+      assert.equal(head.status, 200);
+      assert.equal(head.body, null);
+      assert.match(head.headers.get("content-type") ?? "", /text\/event-stream/);
+      assert.equal(await readWithin(reader, 100), "timeout", "HEAD は配信中の接続を閉じない");
+      await reader.cancel();
+    });
+  } finally {
+    await server.shutdown();
+  }
+  assert.equal(calls.filter((call) => call === "WatchState").length, 1, "HEAD は backend を購読しない");
 });

@@ -397,6 +397,8 @@ const runRelayMachine = async (seed: number, steps: number): Promise<void> => {
       }
       // 性質 8: Next が読まない間に何件来ても、列の 1 件と持ち分の 1 件の 2 件まで。
       assert.ok(conn.delivered.length - before <= 2, `性質 8: 詰まった間に積むのは 2 件まで ${where()}`);
+      // 性質 7: 閉じた接続は、残りを読み切ると本文が終わる（付け替え・error・end・abort）。
+      if (conn.status === "closed") assert.ok(conn.done, `性質 7: 閉じた接続の本文は終わる ${where()}`);
       // 性質 10: 開いている接続を読み切れば、最後に読んだのは最新の版。
       if (conn.status === "open" && conn.produced > 0) {
         assert.equal(conn.delivered.at(-1), conn.produced, `性質 10: 最新の版を捨てない ${where()}`);
@@ -418,9 +420,12 @@ const runRelayMachine = async (seed: number, steps: number): Promise<void> => {
     op = name;
     await run();
     // 手の間で microtask を流し切らない並びも作る（pull の前に次の状態が来る並び）。
-    if (rand() < 0.5) await flush();
+    const flushed = rand() < 0.5;
+    if (flushed) await flush();
     assert.deepEqual(outOfOrder, [], where());
     for (const conn of conns) {
+      // 性質 7: 閉じた接続で待っている読みは、待ちを流せば終わる。
+      if (flushed && conn.status === "closed") assert.equal(conn.inflight, false, `性質 7: 閉じた接続の読みは待ち続けない ${where()}`);
       const stream = conn.relay.stream;
       if (conn.status === "rejected") {
         // 性質 4: 断った接続は gRPC を開かない。

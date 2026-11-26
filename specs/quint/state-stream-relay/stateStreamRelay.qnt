@@ -43,6 +43,8 @@ module stateStreamRelay {
     arrived: bool,
     // サーバーへ届いた順番（届いていなければ NONE）。
     arrivedAt: int,
+    // サーバーへ届いた時点で、同じ画面のもっと大きい番号の接続が開いていたか。
+    newerOpenAtArrival: bool,
     // 資源（backend の購読と ReadableStream）を閉じた回数。
     releases: int,
     reason: CloseReason,
@@ -81,7 +83,7 @@ module stateStreamRelay {
   pure val HIGH_WATER_MARK: int = 1
 
   pure val UNUSED_CONN: Conn = {
-    screen: NONE, attempt: 0, phase: Unused, pathUp: true, abandoned: false, arrived: false, arrivedAt: NONE,
+    screen: NONE, attempt: 0, phase: Unused, pathUp: true, abandoned: false, arrived: false, arrivedAt: NONE, newerOpenAtArrival: false,
     releases: 0, reason: NotClosed, backendTask: false, cancelCalled: false,
     produced: 0, queue: [], pending: NONE, lastDelivered: 0, outOfOrder: false, skipped: 0,
   }
@@ -214,10 +216,11 @@ module stateStreamRelay {
 
   // 要求がサーバーに届き、route.ts の GET が走る。
   action arrive(id: int): bool = {
-    val c = conns.get(id)
-    val holder = registry.get(c.screen)
+    val holder = registry.get(conns.get(id).screen)
+    // 届いた時点の事実を記録する（registry ではなく接続そのものから求める）。
+    val c = { ...conns.get(id), newerOpenAtArrival: newerOpenOf(conns.get(id)) }
     all {
-      c.phase == InFlight,
+      conns.get(id).phase == InFlight,
       c.pathUp,
       if (isStale(conns, registry, c)) all {
         // 開かない。backend を購読しないので、閉じる資源もない。
@@ -352,6 +355,13 @@ module stateStreamRelay {
 
   // ===== 不変条件 =====
 
+  // 同じ画面のもっと大きい番号の接続が、いまサーバーで開いているか。
+  def newerOpenOf(c: Conn): bool =
+    CONN_IDS.exists(other => {
+      val d = conns.get(other)
+      d.screen == c.screen and d.phase == Open and d.attempt > c.attempt
+    })
+
   def openConnsOf(s: int): Set[int] =
     CONN_IDS.filter(id => conns.get(id).screen == s and conns.get(id).phase == Open)
 
@@ -381,6 +391,10 @@ module stateStreamRelay {
         not(d.screen == c.screen and d.phase == Open and d.attempt > c.attempt)
       })
     })
+
+  // 届いた時点で同じ画面のもっと大きい番号が開いていた要求は、開かずに断る。
+  val staleArrivalRejected: bool =
+    CONN_IDS.forall(id => conns.get(id).newerOpenAtArrival implies conns.get(id).reason == Rejected)
 
   // 動いている接続（画面がいま使っている接続）を、サーバーの都合で閉じない。
   // 閉じてよいのは backend の終了と、経路が切れて OS が閉じた場合だけ。
@@ -421,6 +435,7 @@ module stateStreamRelay {
     atMostOneOpenPerScreen,
     closedOnNextArrival,
     staleNeverOpensBesideNewer,
+    staleArrivalRejected,
     liveNotClosedByRelay,
     registryPointsToOpen,
     backendTaskOnlyWhileOpen,
