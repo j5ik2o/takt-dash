@@ -368,7 +368,7 @@ mod tests {
         | 7 => ToolError::Transport(TransportError::Http(text.clone())),
         | 8 => ToolError::Transport(TransportError::Protocol(text.clone())),
         | 9 => ToolError::Transport(TransportError::Rpc { code, message: text.clone() }),
-        | 10 => ToolError::Tool(ToolCallError { tool: "takt_get_run".to_owned(), message: text.clone() }),
+        | 10 => ToolError::Tool(ToolCallError { tool: "takt_get_run".to_owned(), message: text.clone(), refused: true }),
         | _ => ToolError::Parse(text.clone()),
       };
       let status = remote_failure_status(local(), &remote);

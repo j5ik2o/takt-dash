@@ -25,6 +25,23 @@ pub fn connection_key(connection: &crate::config::McpConnection) -> String {
   }
 }
 
+/// エラーへ入れる takt-mcp の応答の本文の文字数の上限。
+pub(crate) const RESPONSE_EXCERPT_CHARS: usize = 200;
+
+/// `text` の先頭 `max_chars` 文字を返す。切ったときは、省いた文字数を末尾に書きます。
+/// 文字の境界で切るので、多バイト文字の途中で切れません。
+pub(crate) fn excerpt(text: &str, max_chars: usize) -> String {
+  match text.char_indices().nth(max_chars) {
+    | Some((cut, _)) => format!("{}…（ほか {} 文字）", &text[..cut], text[cut..].chars().count()),
+    | None => text.to_owned(),
+  }
+}
+
+/// takt-mcp の応答の本文を、エラーへ入れる長さに切る。
+pub(crate) fn response_excerpt(text: &str) -> String {
+  excerpt(text, RESPONSE_EXCERPT_CHARS)
+}
+
 pub use client::{CallError, McpClient, McpClientConfig, ToolCallError, ToolCaller, TransportError};
 pub use http::{HttpReadHandle, HttpSession};
 pub use metrics::{ToolCallMetrics, ToolCallOutcome, ToolCallStat};

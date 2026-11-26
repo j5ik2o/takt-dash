@@ -1030,6 +1030,7 @@ mod tests {
       call_outcome(&Err(CallError::Tool(ToolCallError {
         tool:    "takt_list_goals".to_owned(),
         message: "失敗しました".to_owned(),
+        refused: true,
       }))),
       ToolCallOutcome::Failed
     );

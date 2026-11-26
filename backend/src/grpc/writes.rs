@@ -9,7 +9,14 @@ use std::future::Future;
 
 use tonic::Status;
 
-use super::{answer_payload, lanes::WriteLane, write_failure, write_ledger::WriteFailure, TaktDashServiceImpl};
+use super::{
+  answer_payload,
+  failure::{log_detail, with_takt_reason},
+  lanes::WriteLane,
+  write_failure,
+  write_ledger::WriteFailure,
+  TaktDashServiceImpl,
+};
 use crate::{
   domain::{
     ConversationId, GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RegistrationRevision, ServerId,
@@ -288,12 +295,14 @@ impl RegistrationTarget {
 /// takt-mcp が「登録案が変わった」「会話が登録案の持ち主でない」と断ったときは、状態ストアの
 /// 承認待ちが takt より古かったことを表します。書き込みは適用されていないので、一覧との
 /// 食い違い（issue #319）と同じ FAILED_PRECONDITION で返します。
-fn registration_write_failure(error: ToolError) -> WriteFailure {
+pub(super) fn registration_write_failure(error: ToolError) -> WriteFailure {
   match error {
     | ToolError::Tool(error) if is_stale_registration(&error.message) => {
-      WriteFailure::Failed(Status::failed_precondition(format!(
-        "ゴール登録案は、作り直されたか、すでに承認・却下されています。画面を読み込み直してから、もう一度操作してください（{}）。",
-        error.message.trim()
+      log_detail("takt-mcp がゴール登録案の食い違いで書き込みを断りました。", &error);
+      WriteFailure::Failed(Status::failed_precondition(with_takt_reason(
+        "ゴール登録案は、作り直されたか、すでに承認・却下されています。画面を読み込み直してから、もう一度操作してください。"
+          .to_owned(),
+        &error.message,
       )))
     },
     | error => write_failure(error),
