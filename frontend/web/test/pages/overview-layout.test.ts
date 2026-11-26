@@ -266,18 +266,32 @@ const TRUNCATED_PREVIEW =
   "taktDash の関門と道具の穴4件を解消する。対象は issue #132（https://github.com/j5ik2o/takt-dash/issues/132 、proto-check が index 依存で、proto を変更するタスクは machine_gate を通過できない）、issue #98（https://";
 
 // main の #153 は旧サーバーカードの run 行で、切り詰められた preview のゴール名に省略記号を付けていた。
-// 新しい run の表でもゴールの列がこの表示を保つことを、描画した表のセルで確かめる。
-test("run の表のゴールの列は、切り詰められた preview のゴール名に省略記号を付け、完結した名前には付けない", () => {
+// 新しい run の表でもゴールの列がこの表示を保つことを、描画した表のセルで確かめる。切り詰めの判定は
+// 推定ではなく、backend が takt の応答の印から載せる nameTruncated による（issue #230）。
+test("run の表のゴールの列は、切り詰めの印のあるゴール名に省略記号を付け、印の無い名前には付けない", () => {
   const base = createDashboardState();
   const truncated = DashboardState.create({
     ...base,
+    goals: base.goals.map((goal) =>
+      goal.goalId === "goal-1" ? { ...goal, name: TRUNCATED_PREVIEW, nameTruncated: true } : goal,
+    ),
+  });
+  const unmarked = DashboardState.create({
+    ...base,
     goals: base.goals.map((goal) => (goal.goalId === "goal-1" ? { ...goal, name: TRUNCATED_PREVIEW } : goal)),
   });
+  const unmarkedSection = runsSection(renderOverview(unmarked));
+  const unmarkedRow = runRows(unmarkedSection)[0];
+  assert.ok(unmarkedRow !== undefined, "run の行がある");
+  assert.ok(
+    !textOf(cellFor(unmarkedSection, unmarkedRow, "ゴール")).includes("…"),
+    "印の無い名前は、文の途中で終わっていても省略記号を付けない",
+  );
   const truncatedSection = runsSection(renderOverview(truncated));
   const truncatedRow = runRows(truncatedSection)[0];
   assert.ok(truncatedRow !== undefined, "run の行がある");
   const truncatedGoal = textOf(cellFor(truncatedSection, truncatedRow, "ゴール"));
-  assert.ok(truncatedGoal.includes(`${TRUNCATED_PREVIEW}…`), "切り詰められた preview のゴール名に省略記号を付けて出す");
+  assert.ok(truncatedGoal.includes(`${TRUNCATED_PREVIEW}…`), "印のあるゴール名に省略記号を付けて出す");
 
   const completeSection = runsSection(renderOverview(base));
   const completeRow = runRows(completeSection)[0];

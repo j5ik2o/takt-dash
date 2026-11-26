@@ -773,6 +773,7 @@ fn pending_state() -> v1::DashboardState {
         inquiry_id:      "q-1".to_owned(),
         revision:        None,
         merge_task_last: None,
+        body_truncated:  false,
       },
       v1::PendingDecision {
         r#type:          v1::PendingDecisionType::AwaitingMerge as i32,
@@ -788,6 +789,7 @@ fn pending_state() -> v1::DashboardState {
         inquiry_id:      String::new(),
         revision:        None,
         merge_task_last: None,
+        body_truncated:  false,
       },
       v1::PendingDecision {
         r#type:          v1::PendingDecisionType::Inquiry as i32,
@@ -803,6 +805,7 @@ fn pending_state() -> v1::DashboardState {
         inquiry_id:      "q-other".to_owned(),
         revision:        None,
         merge_task_last: None,
+        body_truncated:  false,
       },
     ],
     thresholds:        Some(v1::AnomalyThresholds {
@@ -833,6 +836,7 @@ fn decisions_pending_state() -> v1::DashboardState {
     inquiry_id:      String::new(),
     revision:        Some(7),
     merge_task_last: None,
+    body_truncated:  false,
   });
   state
 }

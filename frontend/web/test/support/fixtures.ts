@@ -523,6 +523,7 @@ export function createGoal(overrides: Partial<Goal> = {}): Goal {
     serverId: "mini",
     project: "corporate-site",
     name: "採用ページのレイアウトを直す",
+    nameTruncated: false,
     status: GoalStatus.GOAL_STATUS_CREATED,
     executionStatus: ExecutionStatus.EXECUTION_STATUS_ACTIVE,
     taskCounts: { pending: 0, running: 0, completed: 0, failed: 0, exceeded: 0, prFailed: 0 },

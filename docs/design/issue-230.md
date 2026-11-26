@@ -60,7 +60,7 @@ takt-dash で印が消える場所：
 
 - `restore-state.ts`：`nameTruncated`、`bodyTruncated` を `=== true` で復元する（欠けていれば false）。
 - `goal-summary.ts`：推定（`PREVIEW_BYTE_LIMIT`、`goalNameIsTruncatedPreview`、`endsComplete`）を消す。`goalDisplayName(goal)` は `nameTruncated` なら `…` を付ける。`goalListHeading(goal)` は、最初の文が文末記号で閉じていない（`goalHeading` が文末を見つけられず全体を返した）かつ `nameTruncated` のときだけ `…` を付ける。preview がちょうど文末で切れたときは、最初の文は完結しているので印を付けない。
-- `run-view.ts`・`overview-content.tsx`：run のゴール名にも印を運ぶ（`goalNameTruncated`）。
+- `run-view.ts`・`overview-content.tsx`：run のゴール名は、`toRunView` が `goalDisplayName(goal)` で印を反映した表示名にして持つ（`goalName`）。概要はそれをそのまま描く。
 - 判断待ち：`decisionDisplayBody(decision)` を置き、`bodyTruncated` なら最後の段落の末尾に `…` を付ける。`decisions-content.tsx` の本文と、`decision-labels.ts` の読み上げ用の文の両方で使う。
 
 ### 6. CLI（`frontend/cli/src/render.rs`）

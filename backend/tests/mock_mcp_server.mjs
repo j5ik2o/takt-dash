@@ -44,6 +44,9 @@
 //     "responses": { "<道具名>": {...} },  // 指定した書き込み道具の応答を丸ごと差し替える
 //     "toolErrors": { "<道具名>": "<文言>" },  // 指定した道具を、その文言の isError で失敗させる
 //     "noText": ["takt_answer_goal_question"],  // 指定した道具は isError ではない本文の無い応答を返す
+//     "shortened": { "takt_list_goal_questions": ["questions[].body"] },  // 指定した道具のページに、実 takt-mcp が
+//                                                        // 64 KiB に収まらず文を短くしたときの最上位の omissions を付ける。
+//                                                        // "<道具名>:<goalId>" で対象を絞れる。{"paths": [...], "omittedDetails": n} の形でも渡せる
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
 //     "hang": ["takt_list_goal_questions:g1", "takt_get_run:r1@120"], // 指定した呼び出しだけ応答しない。
@@ -107,6 +110,9 @@ const loadState = () => {
   return JSON.parse(readFileSync(statePath, "utf8"));
 };
 
+// 呼び出し中の道具のページへ付ける、文を短くした印（状態の "shortened"）。
+let pageShortened;
+
 const paged = (items, key, offsetRaw) => {
   const offset = Number(offsetRaw ?? 0);
   const page = items.slice(offset, offset + PAGE_SIZE);
@@ -120,7 +126,17 @@ const paged = (items, key, offsetRaw) => {
     offset,
     nextOffset,
     truncated: offset + page.length < items.length,
+    ...shortenedMarker(),
   };
+};
+
+// 実 takt-mcp の jsonResult が文を短くしたときの最上位の印（truncated、omissions、omittedDetails）。
+const shortenedMarker = () => {
+  if (pageShortened === undefined) {
+    return {};
+  }
+  const { paths, omittedDetails } = Array.isArray(pageShortened) ? { paths: pageShortened, omittedDetails: 0 } : pageShortened;
+  return { truncated: true, omissions: paths.map((path) => ({ path })), omittedDetails };
 };
 
 // takt 本体の listTaktGoalRecords と同じく、末尾から limit 件を切り出して反転する。
@@ -140,6 +156,7 @@ const pagedBackward = (items, key, offsetRaw) => {
     offset,
     nextOffset,
     truncated: nextOffset !== null,
+    ...shortenedMarker(),
   };
 };
 
@@ -538,6 +555,7 @@ const handleToolCall = (name, args) => {
   if (state.responses !== undefined && Object.prototype.hasOwnProperty.call(state.responses, name)) {
     return asText(state.responses[name]);
   }
+  pageShortened = (state.shortened ?? {})[scopedKey] ?? (state.shortened ?? {})[name];
   switch (name) {
     case "takt_list_goals":
       return asText(paged(state.goals ?? [], "goals", args.offset));

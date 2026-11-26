@@ -36,7 +36,7 @@ fn harness_with(state: Value) -> GrpcHarness {
         inquiry_id: InquiryId::try_from(INQUIRY_ID).expect("テストの inquiry ID は有効です"),
         goal_id:    Some(GoalId::try_from(GOAL_ID).expect("テストのゴール ID は有効です")),
         kind:       InquiryKind::Question,
-        body:       "続けてよいですか".to_owned(),
+        body:       "続けてよいですか".to_owned().into(),
         options:    vec![],
         answered:   false,
         created_at: time("2026-11-13T07:00:00Z"),

@@ -18,7 +18,7 @@ import { decisionKey, decisionLabel } from "./decision-labels";
 export type { DecisionAction, DecisionActionState };
 export { decisionActionState, buildAnswerAction, buildGoalRegistrationAction, buildMergeAction, pullRequestLinkUrl };
 export { decisionKey, decisionLabel };
-export { decisionTargetDescription, decisionTargetLabel, decisionTypeLabel } from "./decision-labels";
+export { decisionDisplayBody, decisionTargetDescription, decisionTargetLabel, decisionTypeLabel } from "./decision-labels";
 
 export type DecisionOutcome = {
   ok: boolean;

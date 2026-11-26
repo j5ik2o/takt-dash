@@ -5,14 +5,14 @@ use serde_json::Value;
 
 use super::{
   super::client::ToolCallError,
-  parse::{domain_value, optional_string, parse_time, string_field},
+  parse::{domain_value, optional_string, parse_time, string_field, Shortened},
   ToolError,
 };
 use crate::{
   domain::{GoalId, InquiryId, ProjectName, PullRequestNumber, RunSlug, TaskName},
   model::{
     ExecutionStatus, GoalEntry, GoalQuestionEntry, GoalStatus, GoalWorkLogEntry, InquiryEntry, InquiryKind,
-    NotificationEntry, ProjectSnapshot, TaskDetail, TaskEntry, TaskStatus,
+    NotificationEntry, PreviewText, ProjectSnapshot, TaskDetail, TaskEntry, TaskStatus,
   },
 };
 
@@ -119,7 +119,26 @@ fn parse_task_status(value: Option<&Value>) -> Result<TaskStatus, ToolError> {
   }
 }
 
-pub(super) fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
+/// 一覧の要素の目的を、takt-mcp の印とともに読む。
+///
+/// takt-mcp の一覧は目的を 256 バイトで切った preview にし、要素の `omissions.objective.totalBytes`
+/// に元の文のバイト数を入れます。返した preview より元の文が長ければ、切ってあります。ページが
+/// 応答の上限で目的を短くしたとき（`goals[].objective`）も切ってあります。`totalBytes` が無い
+/// 応答（古い takt-mcp）は、ページの印だけで決めます。文の形からは推定しません。
+pub(super) fn parse_goal_objective(value: &Value, shortened: &Shortened) -> PreviewText {
+  let mut objective = shortened.preview(value, "objective");
+  let total_bytes = value
+    .get("omissions")
+    .and_then(|omissions| omissions.get("objective"))
+    .and_then(|objective| objective.get("totalBytes"))
+    .and_then(Value::as_u64);
+  if total_bytes.is_some_and(|total| total > objective.text.len() as u64) {
+    objective.truncated = true;
+  }
+  objective
+}
+
+pub(super) fn parse_goal(value: &Value, shortened: &Shortened) -> Result<GoalEntry, ToolError> {
   let goal_id = domain_value("ゴール ID", GoalId::try_from(string_field(value, "id")?.as_str()))?;
   let status = parse_goal_status(value.get("status"))?;
   let execution_status = parse_goal_execution_status(value.get("executionStatus"))?;
@@ -133,7 +152,7 @@ pub(super) fn parse_goal(value: &Value) -> Result<GoalEntry, ToolError> {
     goal_id,
     status,
     execution_status,
-    objective: optional_string(value, "objective").unwrap_or_default(),
+    objective: parse_goal_objective(value, shortened),
     integration_branch: optional_string(value, "integrationBranch").unwrap_or_default(),
     pull_request_number,
     pull_request_url,
@@ -170,17 +189,17 @@ pub(super) fn parse_task(value: &Value) -> Result<TaskEntry, ToolError> {
   })
 }
 
-pub(super) fn parse_goal_work_log(value: &Value) -> Result<GoalWorkLogEntry, ToolError> {
+pub(super) fn parse_goal_work_log(value: &Value, shortened: &Shortened) -> Result<GoalWorkLogEntry, ToolError> {
   let recorded_at = parse_time(value.get("recordedAt"))?
     .ok_or_else(|| ToolError::Parse("作業記録の recordedAt がありません".to_owned()))?;
   Ok(GoalWorkLogEntry {
     work_log_id: string_field(value, "id")?,
     recorded_at,
-    summary: optional_string(value, "summary").unwrap_or_default(),
+    summary: shortened.display(optional_string(value, "summary").unwrap_or_default(), "summary"),
   })
 }
 
-pub(super) fn parse_goal_question(value: &Value) -> Result<GoalQuestionEntry, ToolError> {
+pub(super) fn parse_goal_question(value: &Value, shortened: &Shortened) -> Result<GoalQuestionEntry, ToolError> {
   let answer = value.get("answer");
   let options = value
     .get("options")
@@ -191,9 +210,11 @@ pub(super) fn parse_goal_question(value: &Value) -> Result<GoalQuestionEntry, To
     question_id: string_field(value, "id")?,
     kind: optional_string(value, "kind").unwrap_or_default(),
     status: optional_string(value, "status").unwrap_or_default(),
-    body: optional_string(value, "body").unwrap_or_default(),
+    body: shortened.display(optional_string(value, "body").unwrap_or_default(), "body"),
     options,
-    answer_text: answer.and_then(|answer| optional_string(answer, "text")),
+    answer_text: answer
+      .and_then(|answer| optional_string(answer, "text"))
+      .map(|text| shortened.display(text, "answer.text")),
     answer_decision: answer.and_then(|answer| optional_string(answer, "decision")),
     answer_report: answer.and_then(|answer| optional_string(answer, "report")),
     created_at: parse_time(value.get("createdAt"))?,
@@ -265,7 +286,7 @@ pub(super) struct ParsedInquiry {
   inquiry_id: InquiryId,
   goal_id:    Option<GoalId>,
   kind:       InquiryKind,
-  body:       String,
+  body:       PreviewText,
   options:    Vec<String>,
   answered:   bool,
   created_at: Option<DateTime<Utc>>,
@@ -274,7 +295,11 @@ pub(super) struct ParsedInquiry {
 /// 1件の問い合わせを解析する。`approval` は判断待ちの種類（問い合わせとマージ待ち）に
 /// 対応する値が無いため、判定対象外として `Ok(None)` を返して読み飛ばします。未知の種類は
 /// 解析エラーにします。
-pub(super) fn parse_inquiry(value: &Value, goal_id: Option<&GoalId>) -> Result<Option<ParsedInquiry>, ToolError> {
+pub(super) fn parse_inquiry(
+  value: &Value,
+  goal_id: Option<&GoalId>,
+  shortened: &Shortened,
+) -> Result<Option<ParsedInquiry>, ToolError> {
   let kind = match value.get("kind").and_then(Value::as_str) {
     | Some("question") => InquiryKind::Question,
     | Some("operation_request") => InquiryKind::OperationRequest,
@@ -304,7 +329,7 @@ pub(super) fn parse_inquiry(value: &Value, goal_id: Option<&GoalId>) -> Result<O
     inquiry_id,
     goal_id,
     kind,
-    body: optional_string(value, "body").unwrap_or_default(),
+    body: shortened.preview(value, "body"),
     options,
     answered,
     created_at: parse_time(value.get("createdAt"))?,
@@ -340,14 +365,18 @@ pub(super) fn resolve_inquiry(
   }
 }
 
-pub(super) fn parse_notification(goal_id: &GoalId, value: &Value) -> Result<NotificationEntry, ToolError> {
+pub(super) fn parse_notification(
+  goal_id: &GoalId,
+  value: &Value,
+  shortened: &Shortened,
+) -> Result<NotificationEntry, ToolError> {
   let recorded_at = parse_time(value.get("recordedAt"))?
     .ok_or_else(|| ToolError::Parse("通知の recordedAt がありません".to_owned()))?;
   Ok(NotificationEntry {
     notification_id: string_field(value, "id")?,
     goal_id: goal_id.clone(),
     kind: string_field(value, "kind")?,
-    body: optional_string(value, "body").unwrap_or_default(),
+    body: shortened.display(optional_string(value, "body").unwrap_or_default(), "body"),
     recorded_at,
   })
 }
@@ -379,7 +408,7 @@ mod tests {
       goal_id: goal_id("g1"),
       status,
       execution_status: ExecutionStatus::Active,
-      objective: String::new(),
+      objective: crate::model::PreviewText::default(),
       integration_branch: String::new(),
       pull_request_number: None,
       pull_request_url: None,

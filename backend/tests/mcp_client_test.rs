@@ -53,7 +53,7 @@ fn previous_goal_question_snapshot() -> ProjectSnapshot {
       goal_id:             GoalId::try_from("g1").expect("テストのゴール ID は有効です"),
       status:              GoalStatus::Created,
       execution_status:    ExecutionStatus::Active,
-      objective:           "ゴール g1".to_owned(),
+      objective:           "ゴール g1".to_owned().into(),
       integration_branch:  "takt/g1".to_owned(),
       pull_request_number: None,
       pull_request_url:    None,
@@ -64,7 +64,7 @@ fn previous_goal_question_snapshot() -> ProjectSnapshot {
       inquiry_id: InquiryId::try_from("q1").expect("テストの inquiry ID は有効です"),
       goal_id:    Some(GoalId::try_from("g1").expect("テストのゴール ID は有効です")),
       kind:       InquiryKind::Question,
-      body:       "前回の質問".to_owned(),
+      body:       "前回の質問".to_owned().into(),
       options:    Vec::new(),
       answered:   false,
       created_at: time("2026-11-13T01:00:00Z"),
@@ -80,7 +80,7 @@ fn previous_notification_snapshot() -> ProjectSnapshot {
       goal_id:             GoalId::try_from("g1").expect("テストのゴール ID は有効です"),
       status:              GoalStatus::AwaitingMerge,
       execution_status:    ExecutionStatus::Active,
-      objective:           "ゴール g1".to_owned(),
+      objective:           "ゴール g1".to_owned().into(),
       integration_branch:  "takt/g1".to_owned(),
       pull_request_number: Some(PullRequestNumber::try_from(5_i64).expect("テストのプルリクエスト番号は有効です")),
       pull_request_url:    Some("https://example.test/pr/5".to_owned()),
@@ -105,7 +105,7 @@ fn previous_standalone_inquiry_snapshot() -> ProjectSnapshot {
       inquiry_id: InquiryId::try_from("s1").expect("テストの inquiry ID は有効です"),
       goal_id:    None,
       kind:       InquiryKind::OperationRequest,
-      body:       "前回の作業依頼".to_owned(),
+      body:       "前回の作業依頼".to_owned().into(),
       options:    Vec::new(),
       answered:   false,
       created_at: time("2026-11-13T01:00:00Z"),
@@ -798,7 +798,7 @@ async fn inquiry_without_created_at_inherits_previous_created_at() {
       inquiry_id: inquiry_id("q-x"),
       goal_id:    Some(goal_id("g1")),
       kind:       takt_dash_backend::model::InquiryKind::Question,
-      body:       "どうしますか".to_owned(),
+      body:       "どうしますか".to_owned().into(),
       options:    Vec::new(),
       answered:   false,
       created_at: time("2026-11-13T01:00:00Z"),
@@ -1223,7 +1223,7 @@ async fn goal_question_tool_error_inherits_only_that_goal_and_leaves_the_healthy
       inquiry_id: inquiry_id("q1"),
       goal_id:    Some(goal_id("g1")),
       kind:       takt_dash_backend::model::InquiryKind::Question,
-      body:       "g1 の質問（前回）".to_owned(),
+      body:       "g1 の質問（前回）".to_owned().into(),
       options:    Vec::new(),
       answered:   false,
       created_at: time("2026-11-13T01:00:00Z"),
@@ -1242,12 +1242,12 @@ async fn goal_question_tool_error_inherits_only_that_goal_and_leaves_the_healthy
     .find(|entry| entry.inquiry_id.as_str() == "q1")
     .expect("道具エラーの g1 の質問を引き継ぎます");
   assert_eq!(q1.goal_id.as_ref().map(GoalId::as_str), Some("g1"));
-  assert_eq!(q1.body, "g1 の質問（前回）", "g1 の質問は前回値を引き継ぎます");
+  assert_eq!(q1.body, "g1 の質問（前回）".into(), "g1 の質問は前回値を引き継ぎます");
   assert_eq!(q1.created_at, time("2026-11-13T01:00:00Z"), "g1 の質問の created_at も前回値を保ちます");
   let q2 =
     snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "q2").expect("健常な g2 の質問は今回値です");
   assert_eq!(q2.goal_id.as_ref().map(GoalId::as_str), Some("g2"));
-  assert_eq!(q2.body, "g2 の質問", "健常なゴールの質問は今回値を採ります");
+  assert_eq!(q2.body, "g2 の質問".into(), "健常なゴールの質問は今回値を採ります");
   client.shutdown().await;
 }
 
@@ -1272,7 +1272,7 @@ async fn timeout_on_goal_questions_keeps_project_connected_and_previous_inquirie
 
   let inquiry =
     snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "q1").expect("前回の問い合わせを引き継ぎます");
-  assert_eq!(inquiry.body, "前回の質問", "タイムアウトしたゴールの問い合わせは前回値です");
+  assert_eq!(inquiry.body, "前回の質問".into(), "タイムアウトしたゴールの問い合わせは前回値です");
   client.shutdown().await;
 }
 
@@ -1330,7 +1330,7 @@ async fn timeout_on_standalone_inquiries_keeps_project_success() {
     .iter()
     .find(|entry| entry.inquiry_id.as_str() == "s1")
     .expect("前回のゴールに属さない問い合わせを引き継ぎます");
-  assert_eq!(inquiry.body, "前回の作業依頼", "タイムアウトした問い合わせは前回値です");
+  assert_eq!(inquiry.body, "前回の作業依頼".into(), "タイムアウトした問い合わせは前回値です");
   client.shutdown().await;
 }
 
@@ -1832,7 +1832,7 @@ async fn read_snapshot_degrades_questions_and_notifications_on_timeout() {
         inquiry_id: inquiry_id("s1"),
         goal_id:    None,
         kind:       takt_dash_backend::model::InquiryKind::Question,
-        body:       "前回の単独の問い合わせ".to_owned(),
+        body:       "前回の単独の問い合わせ".to_owned().into(),
         options:    Vec::new(),
         answered:   false,
         created_at: time("2026-11-13T01:00:00Z"),
@@ -1841,7 +1841,7 @@ async fn read_snapshot_degrades_questions_and_notifications_on_timeout() {
         inquiry_id: inquiry_id("q1"),
         goal_id:    Some(goal_id("g1")),
         kind:       takt_dash_backend::model::InquiryKind::Question,
-        body:       "前回の質問".to_owned(),
+        body:       "前回の質問".to_owned().into(),
         options:    Vec::new(),
         answered:   false,
         created_at: time("2026-11-13T01:00:00Z"),
@@ -1859,10 +1859,10 @@ async fn read_snapshot_degrades_questions_and_notifications_on_timeout() {
   assert_eq!(snapshot.goals.len(), 1, "ゴールは今回値を読みます");
   let s1 =
     snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "s1").expect("単独の問い合わせを引き継ぎます");
-  assert_eq!(s1.body, "前回の単独の問い合わせ", "期限切れの単独の問い合わせは前回値を引き継ぎます");
+  assert_eq!(s1.body, "前回の単独の問い合わせ".into(), "期限切れの単独の問い合わせは前回値を引き継ぎます");
   let q1 =
     snapshot.inquiries.iter().find(|entry| entry.inquiry_id.as_str() == "q1").expect("ゴールの質問を引き継ぎます");
-  assert_eq!(q1.body, "前回の質問", "期限切れのゴールの質問は前回値を引き継ぎます");
+  assert_eq!(q1.body, "前回の質問".into(), "期限切れのゴールの質問は前回値を引き継ぎます");
   assert_eq!(snapshot.notifications.len(), 1, "通知を引き継ぎます");
   assert_eq!(snapshot.notifications[0].body, "通知 n1", "期限切れの通知は前回値を引き継ぎます");
   client.shutdown().await;

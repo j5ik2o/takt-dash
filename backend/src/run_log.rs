@@ -736,7 +736,7 @@ fn tool_use_name(line: &[u8]) -> Option<String> {
     return None;
   }
   let tool = event.get("data")?.get("tool")?.as_str()?;
-  Some(tool.chars().take(MAX_SUMMARY_CHARS).collect())
+  Some(crate::model::truncate_chars(tool, MAX_SUMMARY_CHARS))
 }
 
 /// run のデータ（`meta.json` または本体ログ）を持つディレクトリかを返す。
@@ -907,8 +907,9 @@ fn sanitize(value: &mut Value) {
       }
     },
     | Value::String(text) => {
-      if text.chars().count() > MAX_SUMMARY_CHARS {
-        *text = text.chars().take(MAX_SUMMARY_CHARS).collect();
+      // 上限を超えて切った文字列だけ、末尾に省略記号を付けます（issue #230）。
+      if text.chars().nth(MAX_SUMMARY_CHARS).is_some() {
+        *text = crate::model::truncate_chars(text, MAX_SUMMARY_CHARS);
       }
     },
     | _ => {},
@@ -1002,3 +1003,7 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 #[path = "run_log_tasks_yaml_tests.rs"]
 mod tasks_yaml_tests;
+
+#[cfg(test)]
+#[path = "run_log_sanitize_tests.rs"]
+mod sanitize_tests;

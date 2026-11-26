@@ -5,6 +5,13 @@
 import type { PendingDecision } from "../proto/taktdash";
 import { INQUIRY_KIND, PENDING_DECISION_TYPE } from "./proto-values";
 
+// 判断待ちの本文の表示。backend は takt の応答の印から切り詰めを判定して bodyTruncated に
+// 載せ、body 自体には省略記号を混ぜない（issue #230）。切ってある本文だけ、末尾の空白を
+// 除いた最後の段落の末尾に省略記号を1つ付ける。
+export function decisionDisplayBody(decision: Pick<PendingDecision, "body" | "bodyTruncated">): string {
+  return decision.bodyTruncated ? `${decision.body.trimEnd()}…` : decision.body;
+}
+
 const inquiryKindLabel = (kind: number): string =>
   kind === INQUIRY_KIND.OPERATION_REQUEST ? "作業の依頼" : "質問";
 
@@ -83,7 +90,7 @@ export function decisionLabel(decision: PendingDecision): string {
 export function decisionTargetLabel(decision: PendingDecision): string {
   const parts = decisionLabelParts(decision);
   if (decision.type === PENDING_DECISION_TYPE.INQUIRY) {
-    return `${parts.base} ${parts.identifier}（${decision.body}）`;
+    return `${parts.base} ${parts.identifier}（${decisionDisplayBody(decision)}）`;
   }
   return composeDecisionLabel(parts);
 }
@@ -94,7 +101,7 @@ export function decisionTargetDescription(decision: PendingDecision): string {
   const parts = decisionLabelParts(decision);
   const base = `${decision.project} の${decisionTypeLabel(decision)}`;
   if (decision.type === PENDING_DECISION_TYPE.INQUIRY) {
-    return `${base} ${parts.identifier}（${decision.body}）`;
+    return `${base} ${parts.identifier}（${decisionDisplayBody(decision)}）`;
   }
   return parts.identifier === "" ? base : `${base} ${parts.identifier}`;
 }

@@ -518,7 +518,8 @@ fn registration_decisions(project: &Project, snapshot: &ProjectSnapshot, now: Da
       goal_id:             None,
       inquiry_kind:        None,
       created_at:          now,
-      body:                proposal.summary.clone(),
+      // 登録案の本文は、切ってあれば全文を読み直すか注記を付けて持ちます（#380）。
+      body:                proposal.summary.clone().into(),
       options:             Vec::new(),
       pull_request_number: None,
       pull_request_url:    None,

@@ -7,6 +7,7 @@ import { useCallback, useState, type ReactElement } from "react";
 import type { PendingDecision } from "../proto/taktdash";
 import {
   decisionActionState,
+  decisionDisplayBody,
   decisionKey,
   decisionTypeLabel,
   pullRequestLinkUrl,
@@ -145,7 +146,7 @@ export function DecisionsContent({ state, snapshotLoaded, now, disconnected, rea
                   </div>
                   <div className="decision-body">
                     <div className="desc">
-                      {splitBodyParagraphs(decision.body).map((paragraph, paragraphIndex) => (
+                      {splitBodyParagraphs(decisionDisplayBody(decision)).map((paragraph, paragraphIndex) => (
                         <p key={paragraphIndex}>{paragraph}</p>
                       ))}
                     </div>

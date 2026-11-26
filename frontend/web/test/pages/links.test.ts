@@ -186,6 +186,7 @@ const inquiryDecision = (overrides: Partial<PendingDecision> = {}): PendingDecis
   // 問い合わせにはプルリクエストが無い。proto の必須フィールドとして明示する。
   pullRequest: undefined,
   stale: false,
+  bodyTruncated: false,
   ...overrides,
 });
 

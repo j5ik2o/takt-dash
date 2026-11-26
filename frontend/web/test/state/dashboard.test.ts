@@ -90,6 +90,7 @@ test("承認待ちを独立の区分として数え、内訳の和を total に�
     pullRequest: undefined,
     inquiryId: "",
     stale: false,
+    bodyTruncated: false,
     revision: 3,
   };
   const counts = summarizePendingDecisions(
