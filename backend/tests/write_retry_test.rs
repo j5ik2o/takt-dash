@@ -319,6 +319,34 @@ async fn a_registration_approval_whose_reply_has_no_text_is_not_resent() {
 }
 
 #[tokio::test]
+async fn a_write_whose_http_reply_has_no_text_is_not_resent() {
+  // 常駐 HTTP サーバーの接続先でも、本文の無い応答は結果不明として残り、同じ鍵では送り直さない。
+  let harness = GrpcHarness::builder()
+    .single_project(
+      project("takt-dash", std::path::Path::new("/abs/takt-dash")),
+      server_meta(),
+      json!({ "noText": ["takt_merge_goal_pr"] }),
+    )
+    .http_read()
+    .http_write()
+    .build();
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  let merges = || harness.http_recorded_calls().iter().filter(|call| call["name"] == "takt_merge_goal_pr").count();
+
+  let status = client.approve_goal_merge(merge(Some("merge-1"))).await.expect_err("応答に本文がありません");
+  assert_eq!(status.code(), Code::DeadlineExceeded, "本文の無い応答は結果不明です: {status:?}");
+  assert_eq!(merges(), 1, "takt は呼び出しを受け取っています");
+
+  harness.rewrite_state(json!({}));
+  let retried = client.approve_goal_merge(merge(Some("merge-1"))).await.expect_err("結果不明の操作は送り直しません");
+  assert_eq!(retried.code(), Code::DeadlineExceeded);
+  assert_eq!(merges(), 1, "同じ鍵の再試行で書き込みを重ねません");
+
+  server.stop().await;
+}
+
+#[tokio::test]
 async fn a_write_that_was_never_sent_can_be_retried_with_the_same_key() {
   // 常駐 HTTP サーバーが最初のセッションの確立に応答しない。backend の期限（15 秒）で時間切れに
   // なるが、書き込みの道具は一度も送られていない。
