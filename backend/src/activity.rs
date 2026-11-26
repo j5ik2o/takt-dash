@@ -417,6 +417,10 @@ fn parse_timestamp(text: &str) -> DateTime<Utc> {
 }
 
 #[cfg(test)]
+#[path = "activity_index_tests.rs"]
+mod index_tests;
+
+#[cfg(test)]
 mod tests {
   use std::{
     sync::{mpsc, Arc, Barrier},
