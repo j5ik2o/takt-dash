@@ -144,7 +144,23 @@ export function StateStreamProvider({
         revalidate,
       }),
     });
-    return () => stream.close();
+    // スリープや裏のタブではタイマーが遅れるため、表へ戻ったときに最後の受信からの経過を
+    // 壁時計で確かめ、見張り時間を過ぎていれば利用者が操作する前に切断として扱う（issue #383）。
+    const checkStale = () => stream.checkStale();
+    const checkStaleWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        stream.checkStale();
+      }
+    };
+    document.addEventListener("visibilitychange", checkStaleWhenVisible);
+    window.addEventListener("focus", checkStale);
+    window.addEventListener("online", checkStale);
+    return () => {
+      document.removeEventListener("visibilitychange", checkStaleWhenVisible);
+      window.removeEventListener("focus", checkStale);
+      window.removeEventListener("online", checkStale);
+      stream.close();
+    };
   }, [revalidate]);
 
   return <StateStreamContext.Provider value={value}>{children}</StateStreamContext.Provider>;
