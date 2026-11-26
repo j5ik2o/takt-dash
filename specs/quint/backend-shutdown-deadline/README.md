@@ -30,9 +30,9 @@ backend の停止が、停止の合図から launchd が SIGKILL する前に終
 | 仕様の要素 | コード |
 | --- | --- |
 | `signal` | SIGTERM・SIGINT（`main.rs`）→ 停止の watch |
-| `Draining` と `cycleLength` | `poller.rs` の `run_until_stopped` が、合図の前に始めた `read_cycle_once` を待つこと。周期は道具を何回か呼び、上限は 1 回ごと（`READ_TIMEOUT_SECONDS`）なので、周期の全体の長さに上限は無い。モデルでは `CYCLE_BOUND`（30 秒）まで |
-| `CANCEL_CYCLE` と `CYCLE_GRACE` | 修正案の `run_until_stopped`（`cycle_until_grace`）は、周期と停止の合図を `select!` で待ち、合図のあと周期を `CYCLE_GRACE`（2 秒）だけ待って、終わらなければ周期の future を捨てる |
-| `ABORT_CYCLE_TASKS` と `cycleHeld` | 周期はプロジェクトごとに読み取りタスクを `tokio::spawn` で起動し、タスクは読み取りの間、読み取りハンドル（HTTP）やクライアント（stdio）の鍵を持つ。修正案は `poller.rs` の `ReadTask` で、周期の future を捨てたらタスクも `abort` する。中断しないと、タスクは周期の長さ（`cycleLength`）まで鍵を持ったまま走り、閉じる処理は鍵を待つ |
+| `Draining` と `cycleLength` | `poller_stop.rs` の `run_until_stopped` が、合図の前に始めた `read_cycle_once` を待つこと。周期は道具を何回か呼び、上限は 1 回ごと（`READ_TIMEOUT_SECONDS`）なので、周期の全体の長さに上限は無い。モデルでは `CYCLE_BOUND`（30 秒）まで |
+| `CANCEL_CYCLE` と `CYCLE_GRACE` | 修正案の `poller_stop.rs` の `run_until_stopped`（`cycle_until_grace`）は、周期と停止の合図を `select!` で待ち、合図のあと周期を `CYCLE_GRACE`（2 秒）だけ待って、終わらなければ周期の future を捨てる |
+| `ABORT_CYCLE_TASKS` と `cycleHeld` | 周期はプロジェクトごとに読み取りタスクを `tokio::spawn` で起動し、タスクは読み取りの間、読み取りハンドル（HTTP）やクライアント（stdio）の鍵を持つ。修正案は `poller_stop.rs` の `ReadTask` で、周期の future を捨てたらタスクも `abort` する。中断しないと、タスクは周期の長さ（`cycleLength`）まで鍵を持ったまま走り、閉じる処理は鍵を待つ |
 | `SHORT_CYCLE` | ふだんの周期の長さの見込み（2 秒）。これより短い周期は打ち切らず、その周期の出来事を記録してから止まる |
 | `HTTP_ITEMS` | レジストリの常駐サーバーごとの `HttpSession`（`registry.rs` の `http_sessions`）と、定期読み取りのプロジェクトごとの `HttpReadHandle`（`poller.rs` の `reads`） |
 | `CLOSE_BOUND` | `http.rs` の `SESSION_CLOSE_BOUND` ＝ `CLOSE_WAIT_FOR_ESTABLISH`（修正案で 5 秒）＋ `CLOSE_TIMEOUT`（5 秒） |
@@ -64,7 +64,7 @@ backend の停止が、停止の合図から launchd が SIGKILL する前に終
 - `shortCyclesComplete`：ふだんの短い周期（`SHORT_CYCLE` 以下）は打ち切らない。
 - `safety`：上の 6 つをすべて満たす。
 
-前提（筋書きテストの `boundsAreOrderedTest` で確かめます）：`CLOSE_BOUND < SHUTDOWN_DEADLINE`、`CYCLE_GRACE + SHUTDOWN_DEADLINE < STOP_DEADLINE < EXIT_TIMEOUT`、`SHORT_CYCLE <= CYCLE_GRACE`。コードでは `const _: () = assert!(...)`（`backend/src/mcp/registry.rs` と `backend/src/poller.rs`）で確かめます。
+前提（筋書きテストの `boundsAreOrderedTest` で確かめます）：`CLOSE_BOUND < SHUTDOWN_DEADLINE`、`CYCLE_GRACE + SHUTDOWN_DEADLINE < STOP_DEADLINE < EXIT_TIMEOUT`、`SHORT_CYCLE <= CYCLE_GRACE`。コードでは `const _: () = assert!(...)`（`backend/src/mcp/registry.rs` と `backend/src/poller_stop.rs`）で確かめます。
 
 進行の条件（到達できること。`--witnesses` で数えます）
 

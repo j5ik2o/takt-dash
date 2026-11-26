@@ -176,6 +176,7 @@ stdio の子プロセスは、鍵を持つ要求が終わるか、プロセス�
 
 ## レビューボットの指摘で変えたこと（[PR #390](https://github.com/j5ik2o/takt-dash/pull/390)）
 
-- 周期を打ち切っても、周期がプロジェクトごとに起動した読み取りタスク（`tokio::spawn`）は走り続け、読み取りハンドルやクライアントの鍵を持ったままだった。閉じる段が鍵を取れず、応答するサーバーのセッションも閉じられなかった（Devin Review と CodeRabbit の指摘）。`poller.rs` に `ReadTask`（捨てたら `abort` する `JoinHandle` の包み）を足し、周期の future を捨てたらタスクも中断する。Quint に `ABORT_CYCLE_TASKS`・`cycleHeld`・`withoutTaskAbort` の版を足した（反例あり。修正案は反例なし）。テスト `a_cancelled_cycle_stops_its_http_read_so_the_session_is_closed`（中断を外すと 10 秒待って落ちる）。
+- 周期を打ち切っても、周期がプロジェクトごとに起動した読み取りタスク（`tokio::spawn`）は走り続け、読み取りハンドルやクライアントの鍵を持ったままだった。閉じる段が鍵を取れず、応答するサーバーのセッションも閉じられなかった（Devin Review と CodeRabbit の指摘）。`ReadTask`（捨てたら `abort` する `JoinHandle` の包み）を足し、周期の future を捨てたらタスクも中断する。Quint に `ABORT_CYCLE_TASKS`・`cycleHeld`・`withoutTaskAbort` の版を足した（反例あり。修正案は反例なし）。テスト `a_cancelled_cycle_stops_its_http_read_so_the_session_is_closed`（中断を外すと 10 秒待って落ちる）。
 - `STOP_DEADLINE` で打ち切っても、tokio のランタイムを捨てるときに始まった `spawn_blocking` の終わりを待つ（Devin Review の指摘）。`main.rs` でランタイムを自分で作り、`shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT)`（1 秒）で捨てる。`STOP_DEADLINE + RUNTIME_SHUTDOWN_TIMEOUT < LAUNCHD_EXIT_TIMEOUT` を `const` で検査する。
 - 接続先の仕様の到達条件 `staleRequestServed` と `oldSlotClosedOnReflect` が、意図しない筋書きも数えていた（CodeRabbit と Devin Review の指摘）。置き場を求めた時点の不一致と、反映が手放したセッションを記録して数えるように直し、意図しない筋書きを数えないことのテストを足した。
+- aislop の `complexity/file-too-large`（`poller.rs` が 1100 行を超えた）を受け、停止に関わるもの（上限の定数、`ReadTask`、`run_until_stopped` の周り、`run_until_stop_deadline` とその性質のテスト）を `backend/src/poller_stop.rs` に分けた。`poller` からの公開の名前は変えていない。
