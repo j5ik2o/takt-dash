@@ -39,6 +39,8 @@ tracing-subscriber = "0.3"
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
+# 停止の上限を、止めた時計で確かめるため（`start_paused`）。
+tokio = { version = "1", features = ["test-util"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

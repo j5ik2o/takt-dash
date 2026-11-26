@@ -16,7 +16,8 @@
 // --behavior で `deny`（常に 401）・`drop-session`（常に 404）・`fail-initialized`
 // （notifications/initialized だけ 500）・`drop-session-then-refuse-initialize`（tools/call は
 // 404、2 回目以降の initialize は 500）・`garble-initialize`（initialize の本文が壊れている）・
-// `slow-initialize`（initialize と notifications/initialized を --delay-ms だけ遅らせる）などを
+// `slow-initialize`（initialize と notifications/initialized を --delay-ms だけ遅らせる）・`hang-delete`
+// （DELETE に応答しない）などを
 // 起こせる。
 //
 // 追加の検証用オプション:
@@ -416,6 +417,10 @@ const server = createServer((request, response) => {
       response.writeHead(400).end();
       return;
     }
+    if (behavior === "hang-delete") {
+      // DELETE に応答せず、セッションも破棄しない。応答しないサーバーを閉じる段で待つ状態を再現する。
+      return;
+    }
     if (!sessions.delete(sessionId)) {
       response.writeHead(404).end();
       return;
@@ -550,7 +555,11 @@ const server = createServer((request, response) => {
         jsonBody(response, 200, { jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "cwd は絶対パスの文字列で指定してください" } });
         return;
       }
-      jsonBody(response, 200, { jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) });
+      // 状態の delayMs（mock_mcp_server.mjs と同じ形式）で、道具ごとに応答を遅らせる。
+      const delayMs = loadState().delayMs?.[name] ?? 0;
+      setTimeout(() => {
+        jsonBody(response, 200, { jsonrpc: "2.0", id: message.id, result: handleToolCall(name, args) });
+      }, delayMs);
       return;
     }
     if (message.id !== undefined) {

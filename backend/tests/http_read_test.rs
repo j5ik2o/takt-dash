@@ -526,3 +526,145 @@ async fn a_write_that_must_recreate_a_session_dropped_by_another_request_is_repo
   );
   assert_eq!(server.recorded_calls().len(), calls_before, "書き込み道具はサーバーへ送っていません");
 }
+
+/// mock サーバーへの接続先を、レジストリが受け取る HTTP の接続先として取り出す。
+fn http_server_of(server: &HttpMockServer) -> takt_dash_backend::config::HttpMcpServer {
+  match server.connection() {
+    | takt_dash_backend::config::McpConnection::Http(server) => server,
+    | takt_dash_backend::config::McpConnection::Stdio(_) => unreachable!("mock は HTTP の接続先です"),
+  }
+}
+
+/// レジストリに常駐サーバーのセッションを登録し、確立まで済ませる。
+async fn establish_registered_session(
+  registry: &takt_dash_backend::mcp::McpClientRegistry,
+  server_id: &str,
+  server: &HttpMockServer,
+) {
+  let session = registry.http_session(server_id, &http_server_of(server));
+  let mut handle = HttpReadHandle::with_session(session, std::time::Duration::from_secs(5));
+  handle.connect().await.expect("セッションを確立できます");
+}
+
+#[tokio::test]
+async fn shutdown_does_not_wait_for_an_unresponsive_server_before_closing_the_others() {
+  // DELETE に応答しないサーバーが ID の並びで前にあっても、後ろの応答するサーバーのセッションは
+  // 待たずに閉じる。1 件ずつ閉じると、後ろのサーバーは前の DELETE の打ち切り（5 秒）を待つ。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  let hanging = HttpMockServer::start(&state, Some("hang-delete"));
+  let responsive = HttpMockServer::start(&state, None);
+  let registry = takt_dash_backend::mcp::McpClientRegistry::new();
+  establish_registered_session(&registry, "a-hanging", &hanging).await;
+  establish_registered_session(&registry, "b-responsive", &responsive).await;
+  assert_eq!(responsive.live_session_count(), 1);
+
+  let _ = tokio::time::timeout(std::time::Duration::from_secs(3), registry.shutdown_all()).await;
+
+  assert_eq!(
+    responsive.live_session_count(),
+    0,
+    "応答するサーバーのセッションは、応答しないサーバーを待たずに閉じます: {:?}",
+    responsive.session_events()
+  );
+  assert_eq!(hanging.live_session_count(), 1, "応答しないサーバーのセッションは閉じられません");
+}
+
+proptest::proptest! {
+  #![proptest_config(proptest::prelude::ProptestConfig::with_cases(6))]
+
+  /// 停止は、DELETE に応答しないサーバーが ID の並びのどこにあっても、応答するサーバーの
+  /// セッション（レジストリの置き場とプロジェクトの読み取りハンドル）と、起動済みの子プロセスを
+  /// 閉じ終える。時間は、上限を大きく超えなかったかだけを見る（高負荷のホストでも揺れないように）。
+  #[test]
+  fn shutdown_closes_everything_that_responds_whatever_the_order(
+    servers in proptest::collection::vec((proptest::prelude::any::<u8>(), proptest::prelude::any::<bool>()), 1..=3),
+    reads in proptest::collection::vec(proptest::prelude::any::<usize>(), 0..=2),
+    children in 0usize..=2,
+  ) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+      .enable_all()
+      .build()
+      .expect("テストの tokio ランタイムを作れます");
+    runtime.block_on(async {
+      let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+      let state = write_state(directory.path(), json!({ "goals": [] }));
+      let registry = takt_dash_backend::mcp::McpClientRegistry::new();
+      let mocks: Vec<(HttpMockServer, bool)> = servers
+        .iter()
+        .map(|(_, hangs)| (HttpMockServer::start(&state, if *hangs { Some("hang-delete") } else { None }), *hangs))
+        .collect();
+      for (index, ((order, _), (mock, _))) in servers.iter().zip(&mocks).enumerate() {
+        establish_registered_session(&registry, &format!("{order:03}-{index}"), mock).await;
+      }
+      let mut read_handles = Vec::new();
+      for pick in &reads {
+        let (mock, _) = &mocks[pick % mocks.len()];
+        let mut handle = HttpReadHandle::new(mock.connection(), std::time::Duration::from_secs(5));
+        handle.connect().await.expect("読み取りハンドルのセッションを確立できます");
+        read_handles.push(std::sync::Arc::new(tokio::sync::Mutex::new(handle)));
+      }
+      let processes = directory.path().join("processes.txt");
+      for index in 0..children {
+        let mut config = mock_config(directory.path(), &state, None);
+        config.args.push("--processes".to_owned());
+        config.args.push(processes.display().to_string());
+        let (client, _) = registry.client("local", &format!("proj-{index}"), takt_dash_backend::mcp::Lane::Write, || config);
+        client.lock().await.warm_up().await.expect("子プロセスを起動できます");
+      }
+      let pids: Vec<u32> = std::fs::read_to_string(&processes)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.trim().parse().expect("pid を読めます"))
+        .collect();
+      proptest::prop_assert_eq!(pids.len(), children);
+
+      let deadline = std::time::Duration::from_secs(2);
+      let started = std::time::Instant::now();
+      registry.shutdown_within(deadline, read_handles).await;
+      let elapsed = started.elapsed();
+
+      proptest::prop_assert!(
+        elapsed < deadline + std::time::Duration::from_millis(2500),
+        "停止は上限を大きく超えません（{:?}）",
+        elapsed
+      );
+      for (mock, hangs) in &mocks {
+        if !hangs {
+          proptest::prop_assert_eq!(mock.live_session_count(), 0, "応答するサーバーのセッションは閉じます: {:?}", mock.session_events());
+        }
+      }
+      for pid in pids {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while process_exists(pid) && std::time::Instant::now() < deadline {
+          tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        proptest::prop_assert!(!process_exists(pid), "起動済みの子プロセス {} は止まります", pid);
+      }
+      Ok(())
+    })?;
+  }
+}
+
+#[tokio::test]
+async fn dropping_a_session_during_an_establishment_longer_than_the_close_wait_closes_it_afterwards() {
+  // 設定の反映などで置き場を手放すとき（`Drop`）は、確立の鍵を待たない。確立が停止時の待ち
+  // （5 秒）より長くかかっても、確立は別のタスクで最後まで走り、終わってから最後の持ち主が
+  // 消えた時点で DELETE を送る。サーバーにセッションを残さない。
+  let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
+  let state = write_state(directory.path(), json!({ "goals": [] }));
+  // initialize と notifications/initialized をそれぞれ 3 秒遅らせ、確立の全体を 6 秒にします。
+  let server = HttpMockServer::start(&state, Some("slow-initialize:3000"));
+  let session = HttpSession::new(server.connection());
+  let mut handle = HttpReadHandle::with_session(session, std::time::Duration::from_secs(10));
+  // 確立を始めたところで、呼び出しを打ち切ってハンドル（最後の持ち主）を捨てます。
+  let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle.connect()).await;
+  drop(handle);
+  assert_eq!(server.created_session_count(), 1, "サーバーはセッションを採番しています");
+
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+  while server.live_session_count() != 0 {
+    assert!(std::time::Instant::now() < deadline, "確立のあとでセッションを閉じます: {:?}", server.session_events());
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
+}

@@ -15,14 +15,14 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::broadcast;
 
 use crate::{
   activity::ActivityStore,
-  config::{load_config, Config, HttpMcpServer, McpServer, Project, DEFAULT_INTERVAL_SECONDS},
+  config::{load_config, Config, HttpMcpServer, McpServer, Project},
   domain::PullRequestNumber,
   events::{backend_started, detect, detect_with_terminations},
-  mcp::{client_config, HttpReadHandle, McpClientRegistry, ReadToolSet, ToolCallMetrics, ToolError},
+  mcp::{client_config, HttpReadHandle, McpClientRegistry, ReadToolSet, ToolCallMetrics, ToolError, SHUTDOWN_DEADLINE},
   model::{
     ActivityEvent, ConnectionState, ConnectionTransition, EventKind, ExecutionStatus, GoalEntry, GoalStatus,
     ProjectSnapshot, TaskEntry,
@@ -231,7 +231,7 @@ impl Poller {
         // 読み取りが HTTP 接続先のプロジェクトは、常駐サーバーのハンドルから読みます。
         // 書き込みの通し番号は書き込み先（`write_server`）のものを使います。
         let run_logs = self.run_logs.handle_for(&project.name, &cwd);
-        let task = tokio::spawn(async move {
+        let task = ReadTask::spawn(async move {
           let read_at = Utc::now();
           let mut handle = handle.lock().await;
           let mut tools = ReadToolSet::new(&mut *handle, cwd);
@@ -247,7 +247,7 @@ impl Poller {
           let run_logs = self.run_logs.handle_for(&project.name, &read.cwd);
           let cwd = read.cwd;
           let handle = read.client;
-          let task = tokio::spawn(async move {
+          let task = ReadTask::spawn(async move {
             let read_at = Utc::now();
             let mut client = handle.lock().await;
             let mut tools = ReadToolSet::new(&mut *client, cwd);
@@ -720,11 +720,12 @@ impl Poller {
   }
 
   /// すべてのプロジェクトの子プロセスを終了し、常駐 HTTP サーバーに作ったセッションを閉じる。
+  ///
+  /// レジストリの接続と、プロジェクトごとの読み取りハンドルを同時に閉じ、
+  /// [`SHUTDOWN_DEADLINE`] で打ち切ります。
   pub async fn shutdown(&mut self) {
-    self.registry.shutdown_all().await;
-    for read in std::mem::take(&mut self.reads).into_values() {
-      read.handle.lock().await.close().await;
-    }
+    let reads = std::mem::take(&mut self.reads).into_values().map(|read| read.handle).collect();
+    self.registry.shutdown_within(SHUTDOWN_DEADLINE, reads).await;
   }
 
   fn sync_clients(&self, config: &Config) {
@@ -871,54 +872,15 @@ impl Poller {
 #[path = "poller_signature.rs"]
 mod signature;
 
+#[path = "poller_stop.rs"]
+mod stop;
+
 use signature::StoreSignature;
-
-/// 読み取りサイクルを周期実行する。停止の合図が立つまで回ります。
-///
-/// 各サイクルの設定解決は 1 回で、read_cycle_once が返す間隔をそのまま次の待機に使います。
-/// 設定読み込みに失敗したサイクルは既定の間隔で待ちます。待機中も停止要求を監視し、
-/// 要求を受けたら間隔の満了を待たずにループを抜けて子プロセスを終了します。
-pub async fn run_until_stopped(poller: &mut Poller, mut stop: watch::Receiver<bool>) {
-  while !*stop.borrow() {
-    let started = Utc::now();
-    let interval = match poller.read_cycle_once().await {
-      | Ok(report) => {
-        tracing::debug!(
-          projects_read = report.projects_read,
-          projects_failed = report.projects_failed,
-          events_recorded = report.events_recorded,
-          "定期読み取りの1サイクルを終えました。"
-        );
-        report.interval
-      },
-      | Err(error) => {
-        tracing::warn!(error = %error, "定期読み取りの1サイクルで設定を読み込めませんでした。");
-        Duration::from_secs(DEFAULT_INTERVAL_SECONDS)
-      },
-    };
-    tokio::select! {
-      _ = sleep_until_next(started, interval) => {}
-      _ = wait_for_stop(&mut stop) => break,
-    }
-  }
-  poller.shutdown().await;
-}
-
-async fn wait_for_stop(stop: &mut watch::Receiver<bool>) {
-  while !*stop.borrow() {
-    if stop.changed().await.is_err() {
-      return;
-    }
-  }
-}
-
-async fn sleep_until_next(started: DateTime<Utc>, interval: Duration) {
-  let elapsed = Utc::now().signed_duration_since(started);
-  let remaining = interval.as_millis().saturating_sub(elapsed.num_milliseconds().max(0) as u128);
-  if remaining > 0 {
-    tokio::time::sleep(Duration::from_millis(remaining as u64)).await;
-  }
-}
+use stop::ReadTask;
+pub use stop::{
+  run_until_stop_deadline, run_until_stopped, CYCLE_GRACE, LAUNCHD_EXIT_TIMEOUT, RUNTIME_SHUTDOWN_TIMEOUT,
+  STOP_DEADLINE,
+};
 
 /// 読み取り結果が古いかどうかを、書き込みの通し番号で判定する。
 ///
