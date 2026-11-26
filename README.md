@@ -67,7 +67,11 @@ URL のホストは `127.0.0.1` に限ります。`Authorization` は `Bearer ` 
       "url": "http://127.0.0.1:43117/",
       "headers": { "Authorization": "Bearer <実際のトークン>" }
     },
-    "mac-mini-write": { "command": "node", "args": ["/Users/you/local/takt-custom/dist/app/mcp/index.js"], "env": {} }
+    "mac-mini-write": {
+      "command": "node",
+      "args": ["/Users/you/local/takt-custom/dist/app/mcp/index.js"],
+      "env": { "PATH": "/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/usr/bin:/bin" }
+    }
   },
   "projects": [
     { "name": "takt-dash", "server": "mac-mini-read", "writeServer": "mac-mini-write", "cwd": "/Users/you/Sources/j5ik2o.github.com/j5ik2o/takt-dash" }
@@ -113,7 +117,7 @@ node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/Users/you/local/takt-custom/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PATH</key><string>/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -122,14 +126,16 @@ node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117
 </plist>
 ```
 
-`PATH` の先頭は共有 TAKT の `bin` にします。takt-mcp が起こす daemon とその子（タスクのエージェント・終了フック）は
-この `PATH` を継ぐので、先頭が mise の shims だと、タスクの中の `takt` が npm の takt になります
-（「run の前に TAKT の版を確かめる」）。`PATH` を変えたら、`kickstart` ではなく `unload` と `load` で読み直させます。
+`PATH` の先頭は共有 TAKT の `bin` にし、`node` の置き場も入れます（`ProgramArguments` の `node` はこの `PATH` で探します）。
+takt-mcp が起こす daemon とその子（タスクのエージェント・終了フック）はこの `PATH` を継ぐので、
+先頭が mise の shims だと、タスクの中の `takt` が npm の takt になります（「run の前に TAKT の版を確かめる」）。
+
+`PATH` を変えたら、`kickstart` ではなく `bootout` と `bootstrap` で plist を読み直させます。
+`kickstart` は、launchd が覚えている前の設定のまま起こし直します。
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.example.taktdash-takt-mcp-http.plist    # 登録して起動
-launchctl unload ~/Library/LaunchAgents/com.example.taktdash-takt-mcp-http.plist  # 停止して解除
-launchctl kickstart -k gui/"$(id -u)"/com.example.taktdash-takt-mcp-http           # 再起動
+launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/com.example.taktdash-takt-mcp-http.plist  # 登録して起動
+launchctl bootout gui/"$(id -u)"/com.example.taktdash-takt-mcp-http                               # 停止して解除
 ```
 
 ## フロントエンドを起動する
@@ -210,41 +216,69 @@ mise で入れた npm の takt（0.77.0）はこのキーを知らず、キー�
 そこで、根の `mise.toml` で `PATH` の先頭を共有 TAKT（`~/local/takt-custom/bin`）にしています。
 共有 TAKT の切替の手順は、フォーク（`j5ik2o/takt` の `integration/takt-mcp`）の `docs/shared-takt-switch.md` にあります。
 
-`mise.toml` が効くのは、mise がこのチェックアウトで `PATH` を組んだときだけです。
+#### mise.toml が効くところ
 
-- 効く: 対話シェルでこのディレクトリへ `cd` したとき、`mise exec -C <チェックアウト> -- takt ...`、
-  このチェックアウトで開いた Orca の端末とワーカー。
-- 効かない: `PATH` が mise の shims だけのとき（`shims/takt` は npm の takt を起こします）、
-  別のディレクトリで起動して `PATH` が固まったエージェント（`cd` しても変わりません）、launchd
-  （launchd は plist の `PATH` で先頭を共有 TAKT にします。「launchd に登録する」）。
-- 初めて置いたチェックアウトでは `mise trust` を流します。信頼していないと `PATH` は 0.77.0 に戻り、
-  このディレクトリの中の mise の shims（`python3`・`node`）はエラーで止まります。
-  終了フックの `python3` も shims から起きることがあるので、通知も止まります。
-  `mise trust <ディレクトリ>` は、`mise.toml` が届く前に流しても効きます。
+`mise.toml` が効くのは、mise がこのチェックアウトで `PATH` を組み直すときだけです。
+
+- 効く: 対話シェルでこのディレクトリへ `cd` したとき、Orca の対話端末をこのチェックアウトで開いたとき、
+  `mise exec -C <チェックアウト> -- takt ...`。
+- 効かない:
+  - Orca のボットと構造化ワーカー（`orca-provider-exec` が起こすエージェント）。起動したときの固定の `PATH` で動き、
+    `cd` しても `mise.toml` を読みません。
+  - 非対話の `zsh -c`。dotfiles の `.zshenv` が mise の shims を `PATH` の先頭に積み直すため、`takt` は
+    `shims/takt`（npm の takt）になります。dotfiles の直しが反映されるまで、この形のままです。
+  - `PATH` が mise の shims だけのとき（`shims/takt` は `_.path` があっても npm の takt を起こします）。
+  - launchd。plist の `PATH` で先頭を共有 TAKT にします（「launchd に登録する」）。
+- ボット、ワーカー、スクリプトから `takt` を呼ぶときは、`mise exec -C <チェックアウト> -- takt ...` か、
+  絶対パス `~/local/takt-custom/bin/takt` を使います。
+- MCP の stdio の起動（`.mcp.json`、`taktdash.config.json` の `command`）は、`env` の `PATH` の先頭に
+  `~/local/takt-custom/bin` を書きます（`taktdash.config.example.json` と上の例）。
+
+#### mise の信頼
+
+`mise.toml` は、信頼したディレクトリでだけ読まれます。信頼していないと `PATH` は 0.77.0 に戻り、
+そのディレクトリの中の mise の shims（`python3`・`node`）はエラーで止まります。
+終了フックの `python3` も shims から起きることがあるので、通知も止まります。
+
+- 初めて置いたチェックアウトでは `mise trust` を流します。`mise trust <ディレクトリ>` は、`mise.toml` が届く前に流しても効きます。
 - Orca の作業ツリー（`~/orca/workspaces/takt-dash/<名前>`）は、mise の `trusted_config_paths` に入っていません。
   入るまでは、作業ツリーを作るたびにその中で `mise trust` を流します。
+- TAKT の作業用クローンの置き場（`~/Sources/j5ik2o.github.com/j5ik2o/takt-worktrees`）は `trusted_config_paths` に入っています。
+- 信頼はディレクトリのパスに付きます。ディレクトリを移したり名前を変えたりしたとき、別の場所へ `git clone` したときは、
+  新しいパスでもう一度 `mise trust` を流します。mise の `paranoid` を有効にしているときは、`mise.toml` を書き換えるたびに信頼し直します。
 
-run の前に、run を流すのと同じシェルで次を流します。終了コードが 0 でなければ、`NG:` の行が出ていなくても run しません（`git fetch` が失敗したときは `NG:` が出ません）。
+#### 確かめる
+
+run の前に、run を流すのと同じシェルで `make takt-check` を流します。終了コードが 0 でなければ、`NG:` の行が出ていなくても run しません
+（フォークを取り出せないときは `NG:` が出ません）。
 
 ```sh
-TAKT_REPO=~/Sources/github.com/j5ik2o/takt
-check=$(mktemp)
-git -C "$TAKT_REPO" fetch origin integration/takt-mcp &&
-  git -C "$TAKT_REPO" show origin/integration/takt-mcp:scripts/check-takt-runtime.sh > "$check" &&
-  sh "$check" --key task_finish_hook --repo "$TAKT_REPO" --contains b1acb58ac
+make takt-check                                   # このシェルの PATH の takt を確かめる
+mise exec -C <チェックアウト> -- make takt-check   # mise exec で流すときの takt を確かめる
 ```
 
-3 行を `&&` でつないでいるので、スクリプトを取り出せなかったときも 0 以外で終わります（空のファイルを流して 0 で通ることはありません）。
-
-- スクリプトは、`PATH` の `takt` が共有 TAKT を指すこと、その版が `task_finish_hook` を受け付けること、
-  配置した版が `b1acb58ac`（終了フックを呼ぶ処理）を含むことを確かめます。キーがあるだけで
-  フックを呼ばない版があるため、`--contains` を外しません。
+- 中身は `scripts/takt-check.sh` です。フォークのチェックアウト（`TAKT_REPO`、既定は `~/Sources/github.com/j5ik2o/takt`）の
+  `origin/integration/takt-mcp` から `scripts/check-takt-runtime.sh` を一時ファイルへ取り出し、
+  `--key task_finish_hook --contains b1acb58ac` で流します。一時ファイルは終わるときに `trap` で消します。
+- 確かめるのは、`PATH` の `takt` が共有 TAKT を指すこと、その版が `task_finish_hook` を受け付けること、
+  配置した版が `b1acb58ac`（終了フックを呼ぶ処理）を含むことです。キーがあるだけでフックを呼ばない版があるため、
+  `--contains` を外しません。
 - `takt --version` では見分けられません。フォークは元にした上流の版番号を名乗ります。
+- `make workflow-inspect` は、使う takt（`TAKT_BIN`、既定は `~/local/takt-custom/bin/takt`）で先に同じ確かめを流し、NG なら inspect しません。
 - 1 番目（`PATH` の `takt`）が NG のときは、このチェックアウトの対話シェルへ `cd` し直すか、
-  `mise exec -C <チェックアウト> -- takt ...` で流すか、エージェントをこのチェックアウトで起動し直します。
+  `mise exec -C <チェックアウト> -- takt ...` で流します。
 - 2〜4 番目が NG のときは、共有 TAKT の版が古いか、配置が壊れています。`PATH` を直しても通りません。
   フォークの `docs/shared-takt-switch.md` の手順で、キーとフックを持つ版へ切り替えます。
 - どちらの場合も、直したあと同じシェルで確かめを流し直し、終了コードが 0 になるまで run しません。
+
+#### 戻し方
+
+共有 TAKT を PATH の先頭にする形をやめるときは、次の順で戻します。キーが残ったまま npm の takt に戻ると、設定を読めなくなるためです。
+
+1. `.takt/config.yaml` から `task_finish_hook` のブロックを消す（書いてあるとき）。
+2. `mise.toml` を消す。
+3. 信頼したディレクトリで `mise trust --untrust <ディレクトリ>` を流す。
+4. launchd の plist を控えから戻し、`launchctl bootout` と `launchctl bootstrap` で読み直させる。
 
 ## 検証する
 
