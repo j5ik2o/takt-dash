@@ -1268,7 +1268,7 @@ ol.log-tail li {
 
 .decision-results .result.error {
   background: var(--warn-bg);
-  color: var(--warn);
+  color: var(--orange-d);
 }
 
 .decision-results .result-label {
@@ -1594,7 +1594,7 @@ details.side-foot {
 
 .conversation-notice {
   margin: 0 0 6px;
-  color: var(--warn);
+  color: var(--orange-d);
   font-size: 12px;
 }
 
