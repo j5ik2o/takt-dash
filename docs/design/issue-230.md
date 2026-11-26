@@ -72,6 +72,7 @@ takt-dash で印が消える場所：
 - takt 側の preview の長さ（256 バイト）と応答の形。takt-dash 側の印に絞る。
 - ゴール名・判断待ちの本文の全文を読む経路は作らない（全文はゴール詳細で読める）。
 - run 要約の 80 文字・ログの 512 文字の上限そのもの。
+- リモートの run（takt-mcp 経由で読む run）の要約。`takt_get_run` の通常応答は `summary` も `taskText` も返さず、`parse_remote_run`（`backend/src/mcp/tools/run.rs`）の要約は空のまま（run 詳細は `view: "task"` で本文を読むが、要約は読み直さない）。空の要約は切り詰めではないので、この変更の `…` はローカルで読む run の要約にだけ付く。リモートの run に要約を出すかは、この issue の外の話。
 - 保存済みのアクティビティ（SQLite の `events`）。直す前に記録した文はそのまま。新しく記録する文から `…` が付く。
 - 登録案（#380）、ゴール詳細の目的、run のレポート・指示書（`GetRunContentResponse.truncated` は既にある）。
 - Quint：状態遷移ではない（応答の印を値へ写して表示するだけで、ループ・再試行・遷移・並行に触れない）ため、Quint の仕様は書かない。
