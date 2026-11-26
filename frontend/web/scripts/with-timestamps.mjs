@@ -18,19 +18,36 @@ function writeStampedLine(sink, text) {
 
 function forward(source, sink) {
   const stamper = createLineStamper();
-  const pending = [];
   return new Promise((resolve, reject) => {
+    let pendingCount = 0;
+    let ended = false;
+    let settled = false;
+    const maybeFinish = () => {
+      if (!settled && ended && pendingCount === 0) {
+        settled = true;
+        resolve();
+      }
+    };
+    const fail = (error) => {
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    };
     source.on("data", (chunk) => {
       const out = stamper(chunk);
       if (out.length === 0) {
         return;
       }
-      let callbackResolve;
-      const written = new Promise((res) => {
-        callbackResolve = res;
+      pendingCount += 1;
+      const ok = sink.write(out, (error) => {
+        if (error) {
+          fail(error);
+          return;
+        }
+        pendingCount -= 1;
+        maybeFinish();
       });
-      pending.push(written);
-      const ok = sink.write(out, () => callbackResolve());
       if (!ok) {
         source.pause();
         sink.once("drain", () => {
@@ -39,9 +56,10 @@ function forward(source, sink) {
       }
     });
     source.on("end", () => {
-      Promise.all(pending).then(resolve, reject);
+      ended = true;
+      maybeFinish();
     });
-    source.on("error", reject);
+    source.on("error", fail);
   });
 }
 
