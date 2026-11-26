@@ -14,6 +14,7 @@ import {
   pullRequestLinkUrl,
 } from "./decision-action-builders";
 import { decisionKey, decisionLabel } from "./decision-labels";
+import { OPERATION_ANSWER_REPORT } from "./proto-values";
 
 export type { DecisionAction, DecisionActionState };
 export { decisionActionState, buildAnswerAction, buildGoalRegistrationAction, buildMergeAction, pullRequestLinkUrl };
@@ -47,7 +48,12 @@ export function upsertDecisionResult(results: DecisionResult[], next: DecisionRe
 }
 
 // 画面から届く操作の意図。押下されたボタンと、入力中の本文だけを持ち、状態は持たない。
-export type DecisionDialogKind = "merge" | "approve-registration" | "reject-registration";
+export type DecisionDialogKind =
+  | "merge"
+  | "approve-registration"
+  | "reject-registration"
+  | "answer-report-completed"
+  | "answer-report-unable";
 
 export type DecisionIntent =
   | { type: "answer-text" }
@@ -62,7 +68,9 @@ export type DecisionIntent =
 export type DecisionDialogTarget =
   | { kind: "merge"; prNumber: number; url: string }
   | { kind: "approve-registration"; revision: number }
-  | { kind: "reject-registration"; revision: number };
+  | { kind: "reject-registration"; revision: number }
+  | { kind: "answer-report-completed"; report: number }
+  | { kind: "answer-report-unable"; report: number };
 
 export function openDecisionDialog(
   decision: PendingDecision,
@@ -85,6 +93,10 @@ export function openDecisionDialog(
       }
       return { kind: dialog, revision };
     }
+    case "answer-report-completed":
+      return { kind: dialog, report: OPERATION_ANSWER_REPORT.COMPLETED };
+    case "answer-report-unable":
+      return { kind: dialog, report: OPERATION_ANSWER_REPORT.UNABLE };
   }
 }
 
@@ -131,6 +143,13 @@ export function resolveDecisionIntent(
     case "answer-option":
       return { kind: "submit", action: buildAnswerAction(decision, { text: intent.option }) };
     case "answer-report":
+      // 作業の依頼の2択は、押してもすぐには送らず確認ダイアログを開く（issue #308）。
+      if (intent.report === OPERATION_ANSWER_REPORT.COMPLETED) {
+        return { kind: "open", dialog: "answer-report-completed" };
+      }
+      if (intent.report === OPERATION_ANSWER_REPORT.UNABLE) {
+        return { kind: "open", dialog: "answer-report-unable" };
+      }
       return { kind: "submit", action: buildAnswerAction(decision, { report: intent.report }) };
     case "open":
       return { kind: "open", dialog: intent.dialog };
@@ -154,12 +173,16 @@ export function resolveDecisionIntent(
         }
         return { kind: "submit", action: buildMergeAction(decision) };
       }
-      const targetRevision = dialogTarget.kind === "merge" ? undefined : dialogTarget.revision;
-      if (
-        targetRevision === undefined ||
-        dialogTarget.kind !== intent.dialog ||
-        targetRevision !== decision.revision
-      ) {
+      if (intent.dialog === "answer-report-completed" || intent.dialog === "answer-report-unable") {
+        if (dialogTarget.kind !== intent.dialog) {
+          return staleTarget();
+        }
+        return { kind: "submit", action: buildAnswerAction(decision, { report: dialogTarget.report }) };
+      }
+      if (dialogTarget.kind !== "approve-registration" && dialogTarget.kind !== "reject-registration") {
+        return staleTarget();
+      }
+      if (dialogTarget.kind !== intent.dialog || dialogTarget.revision !== decision.revision) {
         return staleTarget();
       }
       return {

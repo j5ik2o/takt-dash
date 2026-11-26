@@ -5,7 +5,6 @@
 // 検証でき、フォーカス管理はブラウザでのマウント後にだけ働く。
 import { useCallback, useEffect, useId, useRef, type ReactElement, type RefObject } from "react";
 import type { PendingDecision } from "../proto/taktdash";
-import { OPERATION_ANSWER_REPORT } from "../state/proto-values";
 import {
   INITIAL_DECISION_DIALOG_STATE,
   decisionActionState,
@@ -112,7 +111,7 @@ export function decideDialogRestore(input: {
   dialog: DialogKind | null;
   previousDialog: DialogKind | null;
   pendingRestore: DialogKind | null;
-  triggers: Record<DialogKind, { disabled: boolean } | null>;
+  triggers: Partial<Record<DialogKind, { disabled: boolean } | null>>;
   /** 復帰を待つ間に、利用者が別の要素へフォーカスを移していたら true。上書きせず、待ちをやめる。 */
   focusElsewhere: boolean;
 }): DialogRestoreDecision {
@@ -124,7 +123,7 @@ export function decideDialogRestore(input: {
     return { kind: "none" };
   }
   const trigger = input.triggers[target];
-  if (trigger === null || trigger.disabled) {
+  if (trigger === null || trigger === undefined || trigger.disabled) {
     return { kind: "wait", target };
   }
   if (input.focusElsewhere) {
@@ -351,9 +350,13 @@ const DIALOG_TRIGGERS = {
     { dialog: "approve-registration", label: "承認" },
     { dialog: "reject-registration", label: "却下" },
   ],
+  operation: [
+    { dialog: "answer-report-completed", label: "実施した" },
+    { dialog: "answer-report-unable", label: "対応できない" },
+  ],
 } as const satisfies Record<string, DialogTrigger[]>;
 
-type DialogGroup = "merge" | "goal-registration";
+type DialogGroup = "merge" | "goal-registration" | "operation";
 
 // 種別ごとの見出し・対象・本文・確定ボタン名。本文は対象の値（PR 番号・revision）を差し込む。
 // マージは、別のプロジェクトのプルリクエストと取り違えないよう、プロジェクトと、
@@ -380,6 +383,24 @@ function buildConfirmDialogs(
         ],
         message: `プルリクエスト #${prNumber ?? ""} のマージを承認します。よろしいですか。`,
         confirmLabel: "マージする",
+      },
+    ];
+  }
+  if (group === "operation") {
+    return [
+      {
+        dialog: "answer-report-completed",
+        title: "作業の依頼への回答（実施した）",
+        details: [{ label: "プロジェクト", value: decision.project }],
+        message: "作業の依頼に「実施した」と回答します。よろしいですか。",
+        confirmLabel: "実施した",
+      },
+      {
+        dialog: "answer-report-unable",
+        title: "作業の依頼への回答（対応できない）",
+        details: [{ label: "プロジェクト", value: decision.project }],
+        message: "作業の依頼に「対応できない」と回答します。よろしいですか。",
+        confirmLabel: "対応できない",
       },
     ];
   }
@@ -502,6 +523,8 @@ export function DecisionActionsView({
     merge: null,
     "approve-registration": null,
     "reject-registration": null,
+    "answer-report-completed": null,
+    "answer-report-unable": null,
   });
   const previousDialog = useRef<DialogKind | null>(null);
   const pendingRestore = useRef<DialogKind | null>(null);
@@ -596,37 +619,18 @@ export function DecisionActionsView({
       );
 
     case "operation":
-      return (
-        <div className="actions">
-          <DecisionTargetDescription id={descriptionId} targetLabel={descriptionLabel} />
-          <button
-            type="button"
-            disabled={busy || disconnected}
-            aria-label="実施した"
-            aria-describedby={descriptionId}
-            onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.COMPLETED })}
-          >
-            実施した
-          </button>
-          <button
-            type="button"
-            disabled={busy || disconnected}
-            aria-label="対応できない"
-            aria-describedby={descriptionId}
-            onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.UNABLE })}
-          >
-            対応できない
-          </button>
-          <OfflineNote disconnected={disconnected} />
-        </div>
-      );
-
     case "merge":
     case "goal-registration": {
-      const group = state.kind;
+      const group = state.kind === "operation" ? "operation" : state.kind;
       return (
         <DialogActionSection
-          triggers={group === "merge" ? DIALOG_TRIGGERS.merge : DIALOG_TRIGGERS.goalRegistration}
+          triggers={
+            group === "merge"
+              ? DIALOG_TRIGGERS.merge
+              : group === "operation"
+                ? DIALOG_TRIGGERS.operation
+                : DIALOG_TRIGGERS.goalRegistration
+          }
           configs={buildConfirmDialogs(group, decision, dialogTarget)}
           active={dialog}
           descriptionId={descriptionId}
