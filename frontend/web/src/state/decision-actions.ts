@@ -69,8 +69,8 @@ export type DecisionDialogTarget =
   | { kind: "merge"; prNumber: number; url: string }
   | { kind: "approve-registration"; revision: number }
   | { kind: "reject-registration"; revision: number }
-  | { kind: "answer-report-completed"; report: number }
-  | { kind: "answer-report-unable"; report: number };
+  | { kind: "answer-report-completed" }
+  | { kind: "answer-report-unable" };
 
 export function openDecisionDialog(
   decision: PendingDecision,
@@ -94,9 +94,9 @@ export function openDecisionDialog(
       return { kind: dialog, revision };
     }
     case "answer-report-completed":
-      return { kind: dialog, report: OPERATION_ANSWER_REPORT.COMPLETED };
     case "answer-report-unable":
-      return { kind: dialog, report: OPERATION_ANSWER_REPORT.UNABLE };
+      // 回答の値は種別から導く。対象に値を持たせないため、種別と矛盾する値は表現できない。
+      return { kind: dialog };
   }
 }
 
@@ -177,7 +177,11 @@ export function resolveDecisionIntent(
         if (dialogTarget.kind !== intent.dialog) {
           return staleTarget();
         }
-        return { kind: "submit", action: buildAnswerAction(decision, { report: dialogTarget.report }) };
+        const report =
+          intent.dialog === "answer-report-completed"
+            ? OPERATION_ANSWER_REPORT.COMPLETED
+            : OPERATION_ANSWER_REPORT.UNABLE;
+        return { kind: "submit", action: buildAnswerAction(decision, { report }) };
       }
       if (dialogTarget.kind !== "approve-registration" && dialogTarget.kind !== "reject-registration") {
         return staleTarget();

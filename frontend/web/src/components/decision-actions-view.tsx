@@ -175,10 +175,20 @@ export function decideDecisionTransition(input: {
   }
 }
 
+// ダイアログが出てから確定を受け付けるまでの時間（ミリ秒）。一覧のボタンを2回すばやく押したとき、
+// 2回目が同じ座標に出た確定に当たっても送らないため、すべての確認に共通で置く（issue #308）。
+const CONFIRM_ACCEPT_DELAY_MS = 500;
+
 function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, disconnected, onAction }: ConfirmDialogProps): ReactElement {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  // ダイアログが出た時刻。描画の後（effect）で記録する。開くたびに ConfirmDialog が
+  // 作り直される（DialogActionSection が種別を key にする）ため、開き直したら数え直しになる。
+  const openedAt = useRef(0);
+  useEffect(() => {
+    openedAt.current = Date.now();
+  }, []);
   // close を送出したら封じ込めを止める。閉じる途中の focusout で消えゆくダイアログへ
   // フォーカスを戻し、トリガーへの復帰と競合させない。
   const released = useRef(false);
@@ -191,6 +201,14 @@ function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, di
     released.current = true;
     onAction({ type: "cancel" });
   }, [onAction]);
+  // 開いた直後の確定は受け付けない。送らず、ダイアログも閉じない。ボタンは disabled に
+  // しない（無効化は送信中か切断中だけで決める）。やめると Escape はこの間も受け付ける。
+  const confirm = useCallback((): void => {
+    if (Date.now() - openedAt.current < CONFIRM_ACCEPT_DELAY_MS) {
+      return;
+    }
+    onAction({ type: "confirm", dialog });
+  }, [dialog, onAction]);
 
   // 開いた直後にダイアログの見出しへフォーカスを移し、読み上げとキーボード操作の起点にする。
   useEffect(() => {
@@ -322,7 +340,7 @@ function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, di
           <button type="button" disabled={busy} onClick={cancel}>
             やめる
           </button>
-          <button type="button" disabled={busy || disconnected} onClick={() => onAction({ type: "confirm", dialog })}>
+          <button type="button" disabled={busy || disconnected} onClick={confirm}>
             {confirmLabel}
           </button>
         </div>
@@ -483,6 +501,7 @@ function DialogActionSection({
       ))}
       {current === undefined ? null : (
         <ConfirmDialog
+          key={current.dialog}
           dialog={current.dialog}
           title={current.title}
           message={current.message}
