@@ -28,7 +28,7 @@
      - そのゴールに `completed_at` の無い終わった仕上げタスクがあり、前回の起点も無いときは、観測時刻
    - 候補が1つも無ければ観測時刻（いまと同じ）。
 4. **`read_snapshot`**（`backend/src/mcp/tools/mod.rs`）は `&tasks` を渡す。タスクの読み取りはすでに通知より前に済んでいる。
-5. **文の更新**：`model.rs` の `awaiting_merge_at` の説明、`read_snapshot` と `resolve_awaiting_merge_at` の説明、`proto/taktdash.proto` の `Goal.awaiting_merge_at` の行末の説明（「人のマージ待ちになった時刻。仕上げタスクが未着手・実行中のあいだは無い」。番号と型は変えない）。
+5. **文の更新**：`model.rs` の `awaiting_merge_at` の説明、`read_snapshot` と `resolve_awaiting_merge_at` の説明、`proto/taktdash.proto` の `Goal.awaiting_merge_at` の行末の説明（「awaiting_merge のゴールでは人のマージ待ちになった時刻（仕上げタスクが未着手・実行中のあいだは無い）。それ以外のゴールでは awaiting_merge 通知の時刻」。番号と型は変えない）。
 
 前回の起点を候補に入れて「最も遅いもの」を取るのは、既存の滞留防止（読み取りのたびに観測時刻へ戻らない）を保ったまま、仕上げタスクが一覧から外れたとき（`takt_cleanup_tasks` など）に起点が通知の時刻へ戻らないようにするためです。前回の起点は、仕上げタスクの実行中は `None` なので、前の待ちの古い起点が新しい待ちへ持ち越されることは、読み取りのあいだに仕上げタスクの実行がまるごと収まったときしか起きず、そのときも新しい `completed_at` の方が遅いので選ばれません。
 
@@ -79,7 +79,7 @@
 
 - 1ゴールと仕上げタスク1件。動作：時刻を進める、awaiting_merge に入る（通知を記録）、仕上げタスクの投入・開始・終了（`completedAt` あり／なし）、一覧から外す、reopen、backend の再起動、読み取り。
 - 不変条件 `safety` = `notBeforeWait`・`noStartWhileFinishing`・`noReset`・`neverMovesBack`・`notInFuture`。
-- 結果（quint 0.32.0）：`current`（修正前）は `notBeforeWait` と `noStartWhileFinishing` で反例。`noReset` などは反例なし。`fixed` は 50000 サンプル、max-steps 30、seed 90 で反例なし。`quint test` は currentTest 1、fixedTest 5 が通る。
+- 結果（quint 0.32.0）：`current`（修正前）は `notBeforeWait` と `noStartWhileFinishing` で反例。`noReset` などは反例なし。`fixed` は 50000 サンプル、max-steps 30、seed 90 で反例なし。`quint test` は currentTest 1、fixedTest 6 が通る。
 - **残る取りこぼし**（witness `evidenceLost`）：待ちの開始以後の時刻（`completedAt`、それで確定した前回の起点）が backend に何も残っていない読み取りでは、起点は通知の時刻に戻る。仕上げタスクが一覧から外れたあとに backend が再起動したときなど。stale が早まる向きで、修正前と同じ値です。`notBeforeWait` はこの読み取りを除いて検査します。
 
 ## 壊しうる入力

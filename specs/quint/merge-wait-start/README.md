@@ -35,7 +35,7 @@ quint run mergeWaitStart.qnt --main current --invariant safety --max-samples 200
 ```
 quint run mergeWaitStart.qnt --main fixed --invariant safety --max-samples 50000 --max-steps 30 --seed 90 --witnesses waitedAfterFinishTask evidenceLost
 [ok] No violation found
-waitedAfterFinishTask was witnessed in 9113 trace(s) out of 50000 explored (18.23%)
+waitedAfterFinishTask was witnessed in 1764 trace(s) out of 50000 explored (3.53%)
 evidenceLost was witnessed in 4596 trace(s) out of 50000 explored (9.19%)
 ```
 
@@ -43,8 +43,10 @@ evidenceLost was witnessed in 4596 trace(s) out of 50000 explored (9.19%)
 
 ```
 quint test mergeWaitStart_test.qnt --main currentTest   # 1 passing（起点が仕上げタスクより前に確定する筋書き）
-quint test mergeWaitStart_test.qnt --main fixedTest     # 5 passing
+quint test mergeWaitStart_test.qnt --main fixedTest     # 6 passing
 ```
+
+`waitedAfterFinishTask` は、仕上げタスクが終わって始まった待ちで、起点が待ちの開始と一致し、そのあと時刻が進んだ読み取りです。`afterFinish`（仕上げタスクが pending/running から終わったことで始まった待ち）を要求します。この項が無いと、awaiting_merge に入っただけの待ちでも witness が成立し、件数が仕上げタスクを経た経路を通った証拠になりません。awaiting_merge に入っただけの筋書きが witness に届かないことは、`enteringAwaitingMergeIsNotAFinishWitnessTest` が固定します。
 
 ## 残る取りこぼし
 

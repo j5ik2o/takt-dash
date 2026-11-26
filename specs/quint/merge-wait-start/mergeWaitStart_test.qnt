@@ -23,7 +23,13 @@ module fixedTest {
       .then(tick).then(tick).then(read)
       .then(all { assert(lastRead.start == NoStart and safety), all { task == Running, upstream(phase, Done(clock), notif) } })
       .then(tick).then(read)
-      .then(all { assert(lastRead.start == At(2) and safety), tick })
+      .then(all { assert(lastRead.start == At(2) and waitedAfterFinishTask and safety), tick })
+
+  // 仕上げタスクを経ずに awaiting_merge に入っただけの待ちは、waitedAfterFinishTask の witness にならない。
+  run enteringAwaitingMergeIsNotAFinishWitnessTest =
+    init
+      .then(tick).then(enterAwaitingMerge).then(tick).then(read)
+      .then(all { assert(lastRead.start == At(1) and not(waitedAfterFinishTask) and safety), tick })
 
   // 既存の滞留防止：観測時刻が進んでも、読み取りのたびに起点は現在へ戻らない。
   run startDoesNotResetTest =

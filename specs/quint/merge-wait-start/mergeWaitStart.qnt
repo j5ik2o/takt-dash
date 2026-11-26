@@ -22,6 +22,8 @@ module mergeWaitStart {
     humanWait: bool,
     // その時点の、人の待ちが実際に始まった時刻。
     began: Start,
+    // その待ちが、仕上げタスクが終わったことで始まったか。
+    afterFinish: bool,
     // backend が、待ちの開始以後の時刻を1つでも持っていたか（下の evidenceAvailable）。
     evidence: bool,
     // その読み取りの観測時刻。
@@ -41,6 +43,8 @@ module mergeWaitStart {
   var prevStart: Start
   // 観測用：人の待ちが実際に始まった時刻。人の待ちでないあいだは NoStart。
   var waitBegan: Start
+  // 観測用：いまの人の待ちが、仕上げタスクが終わったことで始まったか。
+  var waitAfterFinish: bool
   // 観測用：人の待ちの区切りの番号。待ちが始まる・終わるたびに増える。
   var period: int
   var restarts: int
@@ -52,7 +56,7 @@ module mergeWaitStart {
   var changedSinceRead: bool
 
   val noRead: Read =
-    { start: NoStart, awaiting: false, humanWait: false, began: NoStart, evidence: false, time: -1, period: -1, restarts: -1 }
+    { start: NoStart, awaiting: false, humanWait: false, began: NoStart, afterFinish: false, evidence: false, time: -1, period: -1, restarts: -1 }
 
   pure def isActive(t: MergeTask): bool = match t {
     | Pending => true
@@ -119,6 +123,7 @@ module mergeWaitStart {
     notif' = NoStart,
     prevStart' = NoStart,
     waitBegan' = NoStart,
+    waitAfterFinish' = false,
     period' = 0,
     restarts' = 0,
     lastRead' = noRead,
@@ -131,6 +136,7 @@ module mergeWaitStart {
     clock < MAX_TIME,
     clock' = clock + 1,
     phase' = phase, task' = task, notif' = notif, prevStart' = prevStart, waitBegan' = waitBegan,
+    waitAfterFinish' = waitAfterFinish,
     period' = period, restarts' = restarts, lastRead' = lastRead, beforeLast' = beforeLast,
     changedBetween' = changedBetween, changedSinceRead' = changedSinceRead,
   }
@@ -145,11 +151,13 @@ module mergeWaitStart {
       else if (completedAt(nextTask) != completedAt(task) and completedAt(nextTask) != NoStart) completedAt(nextTask)
       else if (nextTask == DoneNoTime and task != DoneNoTime) At(clock)
       else waitBegan
+    val afterFinish = if (not(nowWaiting)) false else if (humanWait) waitAfterFinish else isActive(task)
     all {
       phase' = nextPhase,
       task' = nextTask,
       notif' = nextNotif,
       waitBegan' = began,
+      waitAfterFinish' = afterFinish,
       period' = if (began != waitBegan) period + 1 else period,
       changedSinceRead' = true,
       clock' = clock, prevStart' = prevStart, restarts' = restarts,
@@ -200,6 +208,7 @@ module mergeWaitStart {
     restarts' = restarts + 1,
     changedSinceRead' = true,
     clock' = clock, phase' = phase, task' = task, notif' = notif, waitBegan' = waitBegan,
+    waitAfterFinish' = waitAfterFinish,
     period' = period, lastRead' = lastRead, beforeLast' = beforeLast, changedBetween' = changedBetween,
   }
 
@@ -212,6 +221,7 @@ module mergeWaitStart {
       awaiting: phase == AwaitingMerge,
       humanWait: humanWait,
       began: waitBegan,
+      afterFinish: waitAfterFinish,
       evidence: evidenceAvailable,
       time: clock,
       period: period,
@@ -220,7 +230,7 @@ module mergeWaitStart {
     changedBetween' = changedSinceRead,
     changedSinceRead' = false,
     clock' = clock, phase' = phase, task' = task, notif' = notif, waitBegan' = waitBegan,
-    period' = period, restarts' = restarts,
+    waitAfterFinish' = waitAfterFinish, period' = period, restarts' = restarts,
   }
 
   action step = any {
@@ -267,8 +277,10 @@ module mergeWaitStart {
 
   val safety = notBeforeWait and noStartWhileFinishing and noReset and neverMovesBack and notInFuture
 
-  // 進行の確認用：仕上げタスクを経た待ちで、起点が completedAt に一致する読み取りへ届くか。
-  val waitedAfterFinishTask = lastRead.humanWait and match lastRead.began {
+  // 進行の確認用：仕上げタスクが終わって始まった待ちで、起点が待ちの開始（completedAt か、
+  // completedAt の無い完了では最初の観測時刻以前の時刻）に一致し、そのあと時刻が進んだ読み取りへ届くか。
+  // `afterFinish` が、仕上げタスクを経ない待ち（awaiting_merge に入っただけ）と区別する目印です。
+  val waitedAfterFinishTask = lastRead.humanWait and lastRead.afterFinish and match lastRead.began {
     | At(b) => lastRead.start == At(b) and b > 0 and lastRead.time > b
     | NoStart => false
   }

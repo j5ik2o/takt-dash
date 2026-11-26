@@ -204,7 +204,7 @@ message Goal {
   TaskStatusCounts task_counts = 7;                    // タスクの状態ごとの件数
   optional string paused_reason = 8;                   // 一時停止の理由
   PullRequest pull_request = 9;                        // プルリクエストの番号と URL
-  optional google.protobuf.Timestamp awaiting_merge_at = 10;  // 人のマージ待ちになった時刻（仕上げタスクが未着手・実行中のあいだは無い）
+  optional google.protobuf.Timestamp awaiting_merge_at = 10;  // awaiting_merge のゴールでは人のマージ待ちになった時刻（仕上げタスクが未着手・実行中のあいだは無い）。それ以外のゴールでは awaiting_merge 通知の時刻
   optional TaskStatus merge_task_last = 11;            // 仕上げタスクの最後の状態（なければ人のマージ待ち）
 }
 

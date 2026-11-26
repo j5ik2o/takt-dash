@@ -159,9 +159,11 @@ pub struct GoalEntry {
   pub integration_branch:  String,
   pub pull_request_number: Option<PullRequestNumber>,
   pub pull_request_url:    Option<String>,
-  /// 人のマージ待ちの起点。awaiting_merge 通知の記録時刻と、仕上げタスクの終了時刻と、前回の起点の
-  /// うち最も遅いもの（`resolve_awaiting_merge_at`）。awaiting_merge でも、仕上げタスクが
-  /// 未着手・実行中のあいだは持ちません。
+  /// マージ待ちの起点（`resolve_awaiting_merge_at`）。
+  /// awaiting_merge のゴールでは人のマージ待ちの起点です。awaiting_merge 通知の記録時刻と、
+  /// 仕上げタスクの終了時刻と、前回の起点のうち最も遅いもので、
+  /// 仕上げタスクが未着手・実行中のあいだは持ちません。
+  /// awaiting_merge でないゴールでは、awaiting_merge 通知の記録時刻（無ければ `None`）です。
   pub awaiting_merge_at:   Option<DateTime<Utc>>,
   /// 一時停止の理由。実行状態が paused で理由が報告されたときだけ持ちます。
   pub paused_reason:       Option<String>,
