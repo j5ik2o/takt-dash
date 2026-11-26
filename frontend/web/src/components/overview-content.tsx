@@ -1,7 +1,7 @@
 import type { ReactElement } from "react";
 import Link from "next/link";
 import type { OverviewView } from "../state/dashboard";
-import { FAILED_TASK_KINDS_LABEL, notRespondingProjectText } from "../state/dashboard";
+import { notRespondingProjectText } from "../state/dashboard";
 import { CONNECTION_STATE } from "../state/proto-values";
 import { decisionKey, decisionTypeLabel } from "../state/decision-actions";
 import { formatClock, formatDateTime, formatDuration, formatModel } from "../state/format";
@@ -113,12 +113,6 @@ export function OverviewContent({
             {view.silentRunCount > 0 ? (
               <p>ログが止まっている run が {view.silentRunCount}件あります。</p>
             ) : null}
-            {view.failedTaskCount > 0 ? (
-              <p>{FAILED_TASK_KINDS_LABEL}のタスクが {view.failedTaskCount}件あります。</p>
-            ) : null}
-            {view.abortedGoalCount > 0 ? (
-              <p>中止したゴールが {view.abortedGoalCount}件あります。</p>
-            ) : null}
           </div>
         ) : null}
       </header>
@@ -182,9 +176,6 @@ export function OverviewContent({
           <div className="t-note">保存済みの履歴を全プロジェクト分集計しています。</div>
           {view.coverage !== "complete" ? (
             <div className="t-note">未読のプロジェクトの最新状態はまだ確認できていません。</div>
-          ) : null}
-          {view.failedTaskCount > 0 ? (
-            <div className="t-note">{FAILED_TASK_KINDS_LABEL}のタスクが {view.failedTaskCount}件残っています。</div>
           ) : null}
         </div>
       </section>
