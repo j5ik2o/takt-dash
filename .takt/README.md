@@ -43,6 +43,12 @@ TAKT の版を戻すときの手順を書く。
 配備してから、キーを戻す。順序は下の「古い TAKT へ戻すとき」の逆で、先にキーを戻し、そのあと
 実際に送れたかを見る。
 
+共有 TAKT（`~/local/takt-custom`、7d5cb2f8）はすでにキーを知る。それでもまだ戻さない。共有 TAKT の
+daemon と takt-mcp が、子プロセスの `PATH` の先頭に自分の `bin` を足す直しが反映されるまで待つ。
+それまでは、起動した側の `PATH` しだいで、タスクの中や非対話のシェルの `takt` が npm の takt
+（0.77.0）になり、キーのある設定を読めない（ルートの README の「run の前に TAKT の版を確かめる」）。
+戻す前に、`make takt-check` が通ることを確かめる。
+
 1. `.takt/config.yaml` に `task_finish_hook` のブロック（`command: [python3,
    .takt/scripts/notify_orca.py]` と `timeout_ms: 15000`）を書き戻す。
 2. 次に終わるタスクで、run のディレクトリの `notify-orca.log` の最後の行が
@@ -83,9 +89,11 @@ TAKT もこの 2 つを読まない。
 `make workflow-inspect`（`tools/workflow-inspect/workflow_inspect.py`）は `.takt/workflows`
 の各 workflow に `takt workflow inspect` を流し、解決できない `workflow_call` を名指しで
 出す（`takt workflow doctor` は同じ状態でも `Workflow OK` と言う）。TAKT を流す前に人が
-確かめる入口で、CI と `make done` には入れていない（CI に takt が無いため）。takt が無けれ
-ば検査をスキップし、名前を渡すと 1 件だけ見る（`make workflow-inspect WORKFLOW=taktdash-change`）。
-使う takt は `TAKT_BIN` で指定でき、既定は PATH 上の `takt`。
+確かめる入口で、CI と `make done` には入れていない（CI に takt が無いため）。スクリプトを直に
+流したときは、takt が無ければ検査をスキップする。名前を渡すと 1 件だけ見る
+（`make workflow-inspect WORKFLOW=taktdash-change`）。
+使う takt は `TAKT_BIN` で指定でき、`make` の既定は共有 TAKT（`~/local/takt-custom/bin/takt`）。
+`make workflow-inspect` は、その takt で先に `make takt-check` と同じ確かめを流し、NG なら inspect しない。
 
 ## 既知の制限
 

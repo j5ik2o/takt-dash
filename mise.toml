@@ -1,0 +1,6 @@
+# このリポジトリの中でだけ、`takt` を共有 TAKT（フォークの ~/local/takt-custom）にする。
+# .takt/config.yaml はフォークにしかないキー（task_finish_hook）を使うため、mise の npm の
+# takt（0.77.0）では設定を読めない。効く条件と run の前の確かめは README の
+# 「run の前に TAKT の版を確かめる」にある。
+[env]
+_.path = ["~/local/takt-custom/bin"]

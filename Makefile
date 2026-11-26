@@ -1,8 +1,12 @@
-.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-build e2e-prod e2e-screenshots e2e-skip-only-check prod-check workflow-inspect
+.PHONY: fmt clippy test typecheck lint proto-gen proto-check coverage done e2e e2e-build e2e-prod e2e-screenshots e2e-skip-only-check prod-check workflow-inspect takt-check
 
 BASE_URL ?= http://127.0.0.1:3000
 
-# workflow-inspect は任意の検査。CI と make done には入れない（CI に takt が無いため）。
+# workflow-inspect と takt-check は任意の検査。CI と make done には入れない（CI に takt が無いため）。
+
+# 共有 TAKT（フォーク）の takt と、確かめのスクリプトを取り出すフォークのチェックアウト。
+TAKT_BIN ?= $(HOME)/local/takt-custom/bin/takt
+TAKT_REPO ?= $(HOME)/Sources/github.com/j5ik2o/takt
 
 # coverage.py と PyYAML を、システム Python を汚さずに用意する。CI の done ジョブは
 # PyYAML しか導入しないため、通常の make done でも coverage 判定を実行できるよう、
@@ -32,11 +36,18 @@ typecheck:
 lint:
 	npm --prefix frontend/web run lint
 
+# run の前に、呼んだシェルの PATH の takt が task_finish_hook を知る共有 TAKT かを確かめる。
+# NG なら 0 以外で終わる。README「run の前に TAKT の版を確かめる」。
+takt-check:
+	TAKT_REPO="$(TAKT_REPO)" sh scripts/takt-check.sh
+
 # 任意。解決できない workflow_call を takt workflow inspect に名指しさせる（doctor は同じ
-# 状態でも Workflow OK と言う）。takt が無ければ検査をスキップして 0 で終わる。名前を渡すと
-# 1 件だけ見る: make workflow-inspect WORKFLOW=taktdash-change
+# 状態でも Workflow OK と言う）。使う takt は TAKT_BIN（既定は共有 TAKT）。先に、その takt で
+# takt-check を流し、NG なら inspect しない。名前を渡すと 1 件だけ見る:
+# make workflow-inspect WORKFLOW=taktdash-change
 workflow-inspect:
-	python3 tools/workflow-inspect/workflow_inspect.py $(WORKFLOW)
+	PATH="$(dir $(TAKT_BIN)):$$PATH" TAKT_REPO="$(TAKT_REPO)" sh scripts/takt-check.sh
+	TAKT_BIN="$(TAKT_BIN)" python3 tools/workflow-inspect/workflow_inspect.py $(WORKFLOW)
 
 proto-gen:
 	test -d frontend/web/node_modules || npm --prefix frontend/web ci
