@@ -555,7 +555,8 @@ fn parse_incoming(body: &[u8], content_type: Option<&str>) -> Result<JsonRpcInco
   }
   serde_json::from_slice(body).map_err(|error| {
     ExchangeError::Transport(TransportError::InvalidJson(format!(
-      "{error}: {}",
+      "{}: {}",
+      super::response_excerpt(&error.to_string()),
       super::response_excerpt(&String::from_utf8_lossy(body))
     )))
   })

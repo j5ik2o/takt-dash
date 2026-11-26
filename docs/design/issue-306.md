@@ -31,14 +31,17 @@ Authorization の値は、どの文面にも入らない（`mcp/http.rs:272` の
 
 | 種類 | コード（変えない） | 文面（案） |
 | --- | --- | --- |
-| `ToolError::Tool`（道具が isError を返した） | UNAVAILABLE | takt が操作を受け付けませんでした。画面を読み込み直して状態を確かめ、必要ならもう一度操作してください。詳しい理由は backend のログにあります。 |
+| `ToolError::Tool`（道具が isError を返した。`refused` が true） | UNAVAILABLE | takt が操作を受け付けませんでした。画面を読み込み直して状態を確かめ、必要ならもう一度操作してください。詳しい理由は backend のログにあります。 |
 | `TransportError::Rpc`（JSON-RPC のエラー） | UNAVAILABLE | 同上 |
+| `ToolError::Tool`（isError ではない応答に本文が無かった。`refused` が false） | UNAVAILABLE | takt-mcp の応答に本文がありませんでした。takt と takt-dash の版の組み合わせを確かめてください。詳しい理由は backend のログにあります。 |
 | `TransportError::Backoff(s)` | UNAVAILABLE | takt-mcp を起動し直すまで待っています。{s} 秒ほどおいてから、もう一度操作してください。 |
 | `TransportError::Timeout(s)` | UNAVAILABLE | takt-mcp から {s} 秒以内に応答がありませんでした。しばらくおいてから、もう一度操作してください。 |
 | そのほかの `TransportError`（Spawn、Io、NotSent、Http、Protocol、InvalidJson、ProcessExited） | UNAVAILABLE | takt-mcp とやり取りできませんでした。takt-mcp が動いているかと、takt-dash の接続先の設定を確かめてから、もう一度操作してください。詳しい理由は backend のログにあります。 |
 | `ToolError::Parse` | INTERNAL | takt-mcp の応答を読み取れませんでした。takt と takt-dash の版の組み合わせを確かめてください。詳しい理由は backend のログにあります。 |
 
 `{s}` は秒数（数字だけ）なので、入れても漏れない。
+
+**実装中の変更（PR のレビューの指摘、Devin Review）。** `extract_tool_text`（`mcp/client.rs`）は、isError ではない応答に `content[0].text` が無いときも `ToolCallError` を返す。takt が断ったわけではないのに「takt が操作を受け付けませんでした」と出さないよう、`ToolCallError` に `refused`（isError で断ったときだけ true）を足し、false のときは上の表の別の文にする。コードと Unknown／Failed の別は変えない（本文の無い書き込みの応答を結果不明として扱うかは別件）。
 
 「詳しい理由は backend のログにあります。」は、ログの場所を添えて「詳しい理由は backend のログ（配置先の data/backend-launchd.err.log）にあります。」にする（以下の表の文も同じ）。本番の backend は `tracing` を標準エラーに書き（`backend/src/main.rs`）、launchd の plist（`~/Library/LaunchAgents/com.ideoplus.taktdash-backend.plist`）の `StandardErrorPath` が `<配置先>/data/backend-launchd.err.log` を指す（`tools/prod-check/prod_log.py` も同じ場所を読む）。配置先の絶対パス（利用者のホームを含む）は画面に出さないので、配置先からの相対で書く。
 
@@ -71,6 +74,8 @@ FAILED_PRECONDITION の文の `（{error.message}）` を、1 の「takt の理�
 `TransportError::InvalidJson` に入れる takt-mcp の応答の本文を、先頭 200 文字（文字の境界で切る）までにし、切ったときは「…（ほか N 文字）」を付ける。`mcp/http.rs` の SSE の枝がすでに 200 文字で切っているので、上限をそろえ、1 つの関数（`response_excerpt`）を 3 か所で使う。
 
 - 対象：`mcp/client.rs:382`（stdio の 1 行）、`mcp/http.rs:550`（SSE）、`mcp/http.rs:557`（JSON の本文）。
+- serde_json の解析エラーの文も、型の合わない文字列を全文で含むことがある（PR のレビューの指摘、CodeRabbit）。`mcp/client.rs:382` と `mcp/http.rs:557` では、解析エラーの文も同じ 200 文字で切る。
+- ログに残す元のエラーは 2000 文字で切る（登録案の食い違いの枝も同じ関数 `log_detail` を通す）。
 - 道具のエラーの本文（`ToolCallError.message`）と JSON-RPC のエラーの本文（`Rpc.message`）は、値としては切らない。`is_stale_registration` が本文の中の語で判定するので、値を変えない。画面へは 1 と 3 の「takt の理由」として、200 文字で切って出す。
 
 ## 変えないこと・範囲の外
@@ -94,7 +99,7 @@ FAILED_PRECONDITION の文の `（{error.message}）` を、1 の「takt の理�
 
 `grpc/` の単体テストに置く。文字列は任意の Unicode（空、改行、`{`、`}`、`（`、制御文字を含む）。
 
-- **P1 文面は本文によらない**：`Tool` と `Rpc` を除く `ToolError` のすべての枝（`TransportError` の 9 種と `Parse`）について、任意の本文 `a`、`b` で作った 2 つの失敗の `tool_error_status` の文面は等しい。`Timeout`・`Backoff` は同じ秒数で比べる。
+- **P1 文面は本文によらない**：`Tool`（`refused` が true）と `Rpc` を除く `ToolError` のすべての枝（`TransportError` の 9 種、`refused` が false の `Tool`、`Parse`）について、任意の本文 `a`、`b` で作った 2 つの失敗の `tool_error_status` の文面は等しい。`Timeout`・`Backoff` は同じ秒数で比べる。
 - **P1a takt の理由**：`Tool`（任意の道具名と本文）と `Rpc`（任意のコードと本文）の文面は、固定の文と `takt_reason(本文)` だけで決まる（道具名とコードによらない）。`takt_reason(s)` は改行と制御文字を含まず、長さは 200 文字＋「…」以下で、`s` を整えたものが 200 文字以下なら、それと等しい。
 - **P2 書き込みの文面も本文によらない**：P1 と同じ組で、`write_failure` が返す Status の文面と、Unknown／Failed の別が等しい。
 - **P3 コードの表**：`tool_error_status` と `write_failure` のコードと Unknown／Failed の別が、表（変更の前のコードの対応を書き写したもの）と一致する。

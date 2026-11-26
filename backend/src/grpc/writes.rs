@@ -10,7 +10,11 @@ use std::future::Future;
 use tonic::Status;
 
 use super::{
-  answer_payload, failure::with_takt_reason, lanes::WriteLane, write_failure, write_ledger::WriteFailure,
+  answer_payload,
+  failure::{log_detail, with_takt_reason},
+  lanes::WriteLane,
+  write_failure,
+  write_ledger::WriteFailure,
   TaktDashServiceImpl,
 };
 use crate::{
@@ -294,7 +298,7 @@ impl RegistrationTarget {
 pub(super) fn registration_write_failure(error: ToolError) -> WriteFailure {
   match error {
     | ToolError::Tool(error) if is_stale_registration(&error.message) => {
-      tracing::warn!(error = %error, "takt-mcp がゴール登録案の食い違いで書き込みを断りました。");
+      log_detail("takt-mcp がゴール登録案の食い違いで書き込みを断りました。", &error);
       WriteFailure::Failed(Status::failed_precondition(with_takt_reason(
         "ゴール登録案は、作り直されたか、すでに承認・却下されています。画面を読み込み直してから、もう一度操作してください。"
           .to_owned(),

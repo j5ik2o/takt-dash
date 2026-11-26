@@ -53,6 +53,9 @@ pub enum TransportError {
 pub struct ToolCallError {
   pub tool:    String,
   pub message: String,
+  /// takt が isError で断ったとき true。isError ではない応答に本文が無かったときは false で、
+  /// `message` は takt の言葉ではなく backend が書いた説明です。
+  pub refused: bool,
 }
 
 /// 道具呼び出しの失敗。輸送エラーと道具エラーを区別します。
@@ -378,8 +381,13 @@ impl McpProcess {
     self.send(&Outgoing::Request(request)).await?;
     loop {
       let line = self.read_line().await?;
-      let incoming: Incoming = serde_json::from_str(&line)
-        .map_err(|error| TransportError::InvalidJson(format!("{error}: {}", super::response_excerpt(&line))))?;
+      let incoming: Incoming = serde_json::from_str(&line).map_err(|error| {
+        TransportError::InvalidJson(format!(
+          "{}: {}",
+          super::response_excerpt(&error.to_string()),
+          super::response_excerpt(&line)
+        ))
+      })?;
       if incoming.is_server_request() {
         let response = Response::empty_result(incoming.id.clone().unwrap_or(Value::Null));
         self.send(&Outgoing::Response(response)).await?;
@@ -426,7 +434,7 @@ pub(super) fn extract_tool_text(tool: &str, result: &Value) -> Result<String, To
       .and_then(|item| item.get("text"))
       .and_then(Value::as_str)
       .unwrap_or("takt-mcp の道具がエラーを返しました");
-    return Err(ToolCallError { tool: tool.to_owned(), message: text.to_owned() });
+    return Err(ToolCallError { tool: tool.to_owned(), message: text.to_owned(), refused: true });
   }
   let text = result
     .get("content")
@@ -437,6 +445,7 @@ pub(super) fn extract_tool_text(tool: &str, result: &Value) -> Result<String, To
     .ok_or_else(|| ToolCallError {
       tool:    tool.to_owned(),
       message: "tools/call の結果に content[0].text がありません".to_owned(),
+      refused: false,
     })?;
   Ok(text.to_owned())
 }

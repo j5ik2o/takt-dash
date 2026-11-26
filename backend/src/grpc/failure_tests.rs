@@ -30,10 +30,12 @@ enum Kind {
   Rpc,
   ProcessExited,
   Tool,
+  /// isError ではない応答に本文が無かった道具エラー。
+  ToolNoText,
   Parse,
 }
 
-const KINDS: [Kind; 12] = [
+const KINDS: [Kind; 13] = [
   Kind::Spawn,
   Kind::Io,
   Kind::NotSent,
@@ -45,6 +47,7 @@ const KINDS: [Kind; 12] = [
   Kind::Rpc,
   Kind::ProcessExited,
   Kind::Tool,
+  Kind::ToolNoText,
   Kind::Parse,
 ];
 
@@ -66,7 +69,8 @@ fn error_of(kind: Kind, text: &str, seconds: u64, label: &str) -> ToolError {
     | Kind::Protocol => ToolError::Transport(TransportError::Protocol(text)),
     | Kind::Rpc => ToolError::Transport(TransportError::Rpc { code: label.len() as i64 - 32_600, message: text }),
     | Kind::ProcessExited => ToolError::Transport(TransportError::ProcessExited),
-    | Kind::Tool => ToolError::Tool(ToolCallError { tool: label.to_owned(), message: text }),
+    | Kind::Tool => ToolError::Tool(ToolCallError { tool: label.to_owned(), message: text, refused: true }),
+    | Kind::ToolNoText => ToolError::Tool(ToolCallError { tool: label.to_owned(), message: text, refused: false }),
     | Kind::Parse => ToolError::Parse(text),
   }
 }
@@ -90,7 +94,9 @@ fn expected_write(kind: Kind) -> (bool, Code) {
     | Kind::Timeout | Kind::Io | Kind::ProcessExited | Kind::InvalidJson | Kind::Protocol | Kind::Parse => {
       (true, Code::DeadlineExceeded)
     },
-    | Kind::Tool | Kind::Rpc | Kind::Http | Kind::Spawn | Kind::Backoff | Kind::NotSent => (false, Code::Unavailable),
+    | Kind::Tool | Kind::ToolNoText | Kind::Rpc | Kind::Http | Kind::Spawn | Kind::Backoff | Kind::NotSent => {
+      (false, Code::Unavailable)
+    },
   }
 }
 
@@ -158,6 +164,7 @@ proptest! {
     let (unknown, status) = split(super::super::writes::registration_write_failure(ToolError::Tool(ToolCallError {
       tool: "takt_approve_goal_registration".to_owned(),
       message: message.clone(),
+      refused: true,
     })));
     prop_assert!(!unknown);
     prop_assert_eq!(status.code(), Code::FailedPrecondition);

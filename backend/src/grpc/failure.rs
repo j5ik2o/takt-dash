@@ -65,7 +65,7 @@ pub(super) fn with_takt_reason(text: String, message: &str) -> String {
 }
 
 /// 元のエラーを上限つきでログへ残す。
-fn log_detail(context: &str, error: &dyn std::fmt::Display) {
+pub(super) fn log_detail(context: &str, error: &dyn std::fmt::Display) {
   tracing::warn!(error = %excerpt(&error.to_string(), LOG_DETAIL_MAX_CHARS), "{context}");
 }
 
@@ -76,7 +76,10 @@ pub(super) fn tool_error_status(error: ToolError) -> Status {
     | ToolError::Parse(_) => Status::internal(format!(
       "takt-mcp の応答を読み取れませんでした。takt と takt-dash の版の組み合わせを確かめてください。{SEE_LOG}"
     )),
-    | ToolError::Tool(error) => Status::unavailable(with_takt_reason(refused_text(), &error.message)),
+    | ToolError::Tool(error) if error.refused => Status::unavailable(with_takt_reason(refused_text(), &error.message)),
+    | ToolError::Tool(_) => Status::unavailable(format!(
+      "takt-mcp の応答に本文がありませんでした。takt と takt-dash の版の組み合わせを確かめてください。{SEE_LOG}"
+    )),
     | ToolError::Transport(TransportError::Rpc { message, .. }) => {
       Status::unavailable(with_takt_reason(refused_text(), &message))
     },
