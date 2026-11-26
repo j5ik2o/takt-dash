@@ -254,29 +254,72 @@ test("main のフィクスチャ（判断待ち2件・応答なしのサーバ�
   assert.deepEqual(tileNotes(completedTile(html)), [HISTORY_NOTE]);
 });
 
-// 種つきの乱数でシナリオを作る（除外なし）。件数は0・1・多数・極端な値を混ぜる。
-const generatedScenarios = (): Scenario[] => {
-  let seed = 141;
-  const next = (): number => {
-    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
-    return seed;
+// 警告の条件（判断待ち・応答のないサーバー・応答のないプロジェクト・ログの無音）の組み合わせを
+// 全部列挙し、組み合わせごとに失敗と中止の件数だけを種つきの乱数で変える（除外なし）。
+// 判断待ちは、無し・滞留の閾値（240分）の前後・滞留と滞留していないものの混在を並べる。
+const PENDING_WAIT_VARIANTS: number[][] = [[], [0], [239], [240], [300, 30], [1, 241, 10_000]];
+const FLAG_VARIANTS = [false, true] as const;
+// 組み合わせごとのシナリオの数。先頭の2件は、失敗・中止が無いものと、全部が多数で全部中止のもの。
+const SAMPLES_PER_COMBINATION = 8;
+
+// mulberry32。32ビットの整数演算だけで更新し、浮動小数点の丸めで下位ビットが偏らないようにする。
+const seededRandom = (seed: number): (() => number) => {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d_2b_79_f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return (t ^ (t >>> 14)) >>> 0;
   };
+};
+
+const generatedScenarios = (): Scenario[] => {
+  const next = seededRandom(141);
   const pick = <T>(values: readonly T[]): T => values[next() % values.length]!;
   const count = (): number => pick([0, 0, 1, 2, 5, 21, 999, 100_000, next() % 60]);
   const failures = (): TaskFailures => ({ failed: count(), exceeded: count(), prFailed: count() });
   const flag = (): boolean => next() % 2 === 0;
-  const waits = [0, 1, 30, 239, 240, 241, 300, 10_000];
-  return Array.from({ length: 400 }, () => ({
-    pendingWaits: Array.from({ length: next() % 4 }, () => pick(waits)),
-    serverDown: flag(),
-    projectDown: flag(),
-    silent: flag(),
-    failures: [failures(), failures()],
-    aborted: [flag(), flag()],
-  }));
+  const scenarios: Scenario[] = [];
+  for (const pendingWaits of PENDING_WAIT_VARIANTS) {
+    for (const serverDown of FLAG_VARIANTS) {
+      for (const projectDown of FLAG_VARIANTS) {
+        for (const silent of FLAG_VARIANTS) {
+          const anomalies = { pendingWaits, serverDown, projectDown, silent };
+          scenarios.push(
+            { ...anomalies, failures: [NO_FAILURES, NO_FAILURES], aborted: [false, false] },
+            { ...anomalies, failures: MANY_FAILURES, aborted: [true, true] },
+            ...Array.from({ length: SAMPLES_PER_COMBINATION - 2 }, (): Scenario => ({
+              ...anomalies,
+              failures: [failures(), failures()],
+              aborted: [flag(), flag()],
+            })),
+          );
+        }
+      }
+    }
+  }
+  return scenarios;
 };
 
-test("任意の失敗・中止の件数で、件数の文は出ず、バナーの文は異常の判定だけで決まる（生成したシナリオ）", () => {
+test("生成したシナリオは、警告の条件の組み合わせを全部含む", () => {
+  const scenarios = generatedScenarios();
+  const combinations = new Set(
+    scenarios.map((scenario) =>
+      JSON.stringify([scenario.pendingWaits, scenario.serverDown, scenario.projectDown, scenario.silent]),
+    ),
+  );
+
+  assert.equal(combinations.size, PENDING_WAIT_VARIANTS.length * 2 ** 3);
+  assert.equal(scenarios.length, combinations.size * SAMPLES_PER_COMBINATION);
+  assert.ok(scenarios.some((scenario) => scenario.aborted.some(Boolean)), "中止したゴールのあるシナリオを含む");
+  assert.ok(
+    scenarios.some((scenario) => scenario.failures.some((failure) => failure.failed + failure.exceeded + failure.prFailed > 0)),
+    "失敗したタスクのあるシナリオを含む",
+  );
+});
+
+test("警告の条件のどの組み合わせでも、任意の失敗・中止の件数で件数の文は出ず、バナーの文は異常の判定だけで決まる（接続中と切断中）", () => {
   for (const scenario of generatedScenarios()) {
     for (const disconnected of [false, true]) {
       const html = renderOverview(buildState(scenario), disconnected);
