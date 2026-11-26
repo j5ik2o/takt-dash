@@ -70,7 +70,7 @@ URL のホストは `127.0.0.1` に限ります。`Authorization` は `Bearer ` 
     "mac-mini-write": {
       "command": "node",
       "args": ["/Users/you/local/takt-custom/dist/app/mcp/index.js"],
-      "env": { "PATH": "/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/usr/bin:/bin" }
+      "env": { "PATH": "/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/Users/you/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
     }
   },
   "projects": [
@@ -117,7 +117,7 @@ node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PATH</key><string>/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/Users/you/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -127,6 +127,7 @@ node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117
 ```
 
 `PATH` の先頭は共有 TAKT の `bin` にし、`node` の置き場も入れます（`ProgramArguments` の `node` はこの `PATH` で探します）。
+タスクのエージェントの CLI や `gh` もこの `PATH` で探すので、その置き場（例の `~/.local/bin`・`/opt/homebrew/bin`）も入れます。
 takt-mcp が起こす daemon とその子（タスクのエージェント・終了フック）はこの `PATH` を継ぐので、
 先頭が mise の shims だと、タスクの中の `takt` が npm の takt になります（「run の前に TAKT の版を確かめる」）。
 
@@ -232,7 +233,9 @@ mise で入れた npm の takt（0.77.0）はこのキーを知らず、キー�
 - ボット、ワーカー、スクリプトから `takt` を呼ぶときは、`mise exec -C <チェックアウト> -- takt ...` か、
   絶対パス `~/local/takt-custom/bin/takt` を使います。
 - MCP の stdio の起動（`.mcp.json`、`taktdash.config.json` の `command`）は、`env` の `PATH` の先頭に
-  `~/local/takt-custom/bin` を書きます（`taktdash.config.example.json` と上の例）。
+  `~/local/takt-custom/bin` を書きます（`taktdash.config.example.json` と上の例）。`taktdash.config.json` の
+  `env` の `PATH` は、backend から継いだ `PATH` を置き換えます（`${PATH}` は展開しません）。`node`、
+  エージェントの CLI、`gh` の置き場も並べます。`.mcp.json` は Claude Code が `${PATH}` を展開するので、後ろに `${PATH}` を付けます。
 
 #### mise の信頼
 

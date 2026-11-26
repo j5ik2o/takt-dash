@@ -6,7 +6,7 @@
         "/Users/you/local/takt-custom/dist/app/mcp/index.js"
       ],
       "env": {
-        "PATH": "/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/usr/bin:/bin"
+        "PATH": "/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/Users/you/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
       }
     },
     "mac-mini-read": {
@@ -24,7 +24,7 @@
         "manager"
       ],
       "env": {
-        "PATH": "/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/usr/bin:/bin"
+        "PATH": "/Users/you/local/takt-custom/bin:/Users/you/.local/share/mise/installs/node/24/bin:/Users/you/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
       },
       "manager": true
     }
