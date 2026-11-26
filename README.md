@@ -33,14 +33,14 @@ takt-mcp に接続できない環境でも gRPC サーバー自体は起動し�
 ### backend を反映する
 
 launchd のジョブで動かしている backend は、反映するチェックアウトで次のスクリプトを流して作り直します。
-plist の `ProgramArguments` の先頭が、そのチェックアウトの `target/debug/takt-dash-backend` で、`RunAtLoad` が true であることが前提です。
+plist の `Label` が `--label` と同じで、起こす実行ファイル（`Program`、無ければ `ProgramArguments` の先頭）がそのチェックアウトの `target/debug/takt-dash-backend` で、`RunAtLoad` が true であることが前提です。`Label` か実行ファイルが合わなければ、ジョブに触らずに `NG:` で終わります。
 
 ```sh
 scripts/deploy-backend.sh --label <backend のジョブのラベル>
 scripts/deploy-backend.sh --label <backend のジョブのラベル> --skip-build   # 前の版のバイナリへ戻したあと
 ```
 
-- スクリプトは `cargo build --locked -p takt-dash-backend` でビルドし、`launchctl bootout` と `launchctl bootstrap` でジョブを起こし直します。
+- スクリプトは `cargo build --locked -p takt-dash-backend --target-dir <チェックアウト>/target` でビルドし、`launchctl bootout` と `launchctl bootstrap` でジョブを起こし直します。
   起こし直したあとの3秒のあいだ、最初の pid のまま動き続けていなければ、`NG:` を出して 0 以外で終わります。
 - `--plist` を省くと `~/Library/LaunchAgents/<ラベル>.plist` を読みます。
 - ビルドに失敗したときは、ジョブに触らずに終わります。動いている版はそのままです。

@@ -31,15 +31,23 @@ done
 [ -n "$label" ] || die "--label を指定してください。"
 [ -n "$plist" ] || plist="$HOME/Library/LaunchAgents/$label.plist"
 [ -f "$plist" ] || die "plist がありません: $plist"
+# bootout は --label のジョブを、bootstrap は plist の Label のジョブを扱う。違うと別のジョブを止めてしまう。
+plist_label=$(plutil -extract Label raw -o - "$plist") || die "plist の Label を読めません: $plist"
+[ "$plist_label" = "$label" ] || die "plist の Label $plist_label は、指定したラベル $label と一致しません。"
 
 app_dir=$(cd "$(dirname "$0")/.." && pwd) || exit 1
 binary="$app_dir/target/debug/takt-dash-backend"
-program=$(plutil -extract ProgramArguments.0 raw -o - "$plist") || die "plist の ProgramArguments を読めません: $plist"
+# launchd は Program があればそれを、無ければ ProgramArguments の先頭を起こす。
+program=$(plutil -extract Program raw -o - "$plist" 2> /dev/null) ||
+  program=$(plutil -extract ProgramArguments.0 raw -o - "$plist") ||
+  die "plist の Program も ProgramArguments も読めません: $plist"
 # plist が別のバイナリを指していると、作り直しても起こし直しても新しい版にならない。
 [ "$program" = "$binary" ] || die "plist の実行ファイル $program は、このチェックアウトのバイナリ $binary ではありません。"
 
 if [ "$build" = 1 ]; then
-  (cd "$app_dir" && cargo build --locked -p takt-dash-backend) || die "ビルドに失敗しました。動いている版はそのままです。"
+  # CARGO_TARGET_DIR や build.target-dir があっても、plist の指す target/debug に出す。
+  (cd "$app_dir" && cargo build --locked -p takt-dash-backend --target-dir "$app_dir/target") ||
+    die "ビルドに失敗しました。動いている版はそのままです。"
 fi
 codesign -v "$binary" || die "バイナリの署名を確かめられません: $binary"
 echo "バイナリ: $binary sha256 $(shasum -a 256 "$binary" | cut -d' ' -f1)"
