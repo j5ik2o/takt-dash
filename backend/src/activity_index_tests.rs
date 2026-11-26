@@ -3,8 +3,9 @@
 //!
 //! 読み取りの公開の関数を呼び、その間に接続で流れた SQL を、束縛した値を埋めた形で trace で集める。
 //! 集めた SQL を `EXPLAIN QUERY PLAN` に渡し、events を `SEARCH ... USING ... INDEX
-//! events_occurred_at` で読み、`SCAN events` が無いことを見る。SQL
-//! の文面には依らないので、実装の形を問わない。
+//! events_occurred_at (occurred_at>? AND occurred_at<?)` で読み、`SCAN events` が無いことを見る。
+//! 開始と終了の両方の条件が索引で絞られていることまで見るので、片側だけを索引で絞り、
+//! もう片側を索引の外で絞る形も落ちる。SQL の文面には依らないので、実装の形を問わない。
 
 use std::sync::{Arc, Mutex};
 
@@ -96,6 +97,14 @@ fn query_plan(store: &ActivityStore, sql: &str) -> Vec<String> {
     .expect("実行計画の行を読めます")
 }
 
+/// 索引 events_occurred_at を、開始と終了の両方の条件で使って events を探す計画か。
+fn searches_occurred_at_range(plan: &[String]) -> bool {
+  plan.iter().any(|detail| {
+    detail.starts_with("SEARCH events USING")
+      && detail.contains("INDEX events_occurred_at (occurred_at>? AND occurred_at<?)")
+  })
+}
+
 fn assert_every_read_searches_the_occurred_at_index(name: &str, read: impl FnOnce(&ActivityStore)) {
   let store = store_with_events();
   let statements = traced_reads(&store, read);
@@ -103,11 +112,8 @@ fn assert_every_read_searches_the_occurred_at_index(name: &str, read: impl FnOnc
   for statement in &statements {
     let plan = query_plan(&store, &statement.sql);
     assert!(
-      plan
-        .iter()
-        .any(|detail| detail.starts_with("SEARCH events USING")
-          && detail.contains("INDEX events_occurred_at (occurred_at")),
-      "{name}: events を occurred_at の索引で探します\nSQL: {}\n計画: {plan:#?}",
+      searches_occurred_at_range(&plan),
+      "{name}: events を occurred_at の索引で、開始と終了の両方の条件で探します\nSQL: {}\n計画: {plan:#?}",
       statement.sql
     );
     assert!(
@@ -135,4 +141,28 @@ fn today_counts_by_server_search_the_occurred_at_index() {
   assert_every_read_searches_the_occurred_at_index("today_counts_by_server", |store| {
     store.today_counts_by_server(at("2026-11-14T03:00:00Z")).expect("サーバー別の件数を取得できます");
   });
+}
+
+/// 変異: 片側の条件だけを索引で絞り、もう片側を索引の外で絞る SQL は、計画の検査で落ちる。
+///
+/// 単項の `+` を付けた列は索引の条件に使われないので、その条件は索引で探した行を読んでから絞る。
+/// 件数は変わらず、表を頭から読む歩数も 0 のままなので、計画の文で見分けるしかない。
+#[test]
+fn one_sided_index_range_fails_the_plan_check() {
+  let store = store_with_events();
+  let both = "SELECT COUNT(*) FROM events WHERE occurred_at >= '2026-11-13T15:00:00.000Z' AND occurred_at < '2026-11-14T15:00:00.000Z'";
+  assert!(searches_occurred_at_range(&query_plan(&store, both)), "両側を索引で絞る SQL は通ります: {both}");
+
+  for sql in [
+    "SELECT COUNT(*) FROM events WHERE occurred_at >= '2026-11-13T15:00:00.000Z' AND +occurred_at < '2026-11-14T15:00:00.000Z'",
+    "SELECT COUNT(*) FROM events WHERE +occurred_at >= '2026-11-13T15:00:00.000Z' AND occurred_at < '2026-11-14T15:00:00.000Z'",
+    "SELECT server_id, COUNT(*) FROM events WHERE occurred_at >= '2026-11-13T15:00:00.000Z' AND +occurred_at < '2026-11-14T15:00:00.000Z' AND server_id != '' GROUP BY server_id",
+  ] {
+    let plan = query_plan(&store, sql);
+    assert!(
+      plan.iter().any(|detail| detail.contains("INDEX events_occurred_at")),
+      "変異の SQL も索引は使います（片側だけ）\nSQL: {sql}\n計画: {plan:#?}"
+    );
+    assert!(!searches_occurred_at_range(&plan), "片側だけを索引で絞る SQL は落ちます\nSQL: {sql}\n計画: {plan:#?}");
+  }
 }
