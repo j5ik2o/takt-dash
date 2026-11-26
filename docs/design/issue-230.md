@@ -133,3 +133,24 @@ Web（`frontend/web/test/state/goal-summary.test.ts` ほか。生成のループ
 - **上流（takt、takt-mcp）**：変えない。`omissions.objective.totalBytes` と、ページの `omissions`／`omittedDetails` を読むだけ。
 - **保存済みデータ**：アクティビティの SQLite は形を変えない。古い行は書き換えない。
 - **守りの仕組み（CI・関門・ルールセット）**：変えない。`make proto-check` は生成し直したコードで通す。
+
+## 設計レビューの指摘への対応（2026-11-26）
+
+### 1. `…` が二重にならないこと
+
+- いまの main で、画面と CLI が自分で `…` を付けている所を洗い出した（`grep -rn "…" frontend/web/src frontend/web/app frontend/cli/src`、`slice(0`・`"..."` も確認）。文字として `…` を付けるのは `goal-summary.ts:76,83`（推定。この変更で印による判定へ置き換える）だけ。run の要約、run のログ、通知、アクティビティ、ゴール詳細の質問・作業記録の表示は、文字列をそのまま描き、`…` を付けていない。
+- CSS の `text-overflow: ellipsis`（`globals.css` の `.srv-list a`、`.goal-card-head h3`、`.goal-head`）は、はみ出した分を見た目で隠すだけで文字列を変えない。backend の `…` と重なっても、表示される `…` は 1 つ（はみ出すときは CSS の `…`、はみ出さないときは文字列の `…`）。
+- Web の印の判定は proto の項目だけを見て、文字列の末尾の `…` を見ない。`Goal.name` と `PendingDecision.body` の文字列には backend が `…` を混ぜない（I4）ので、印による `…` は 1 つだけ。
+- テスト：backend は `display()` を 2 回通さない形（`PreviewText` は印と文を分けて持ち、`display()` は射影のときに 1 回だけ呼ぶ）にし、アクティビティの文・`task_summary`・`sanitize` が `……` を含まないことを性質で確かめる（P3・P4 に「結果は `…` で終わるとき、その前の文字は入力の文字で、`……` を作らない」を足す。入力が元から `…` で終わる文は、切っていなければ変えない）。Web は `goalDisplayName`・`goalListHeading`・`decisionDisplayBody` が `nameTruncated`/`bodyTruncated` が true でも `…` を 1 つだけ足すこと（入力の末尾が `…` のときも 1 つだけ足す。takt の原文の `…` は原文の一部として残す）を確かめる。CLI も同じ。
+
+### 2. 古いものと新しいものの組み合わせ
+
+- 本番は backend と web（と CLI）を同じコミットから同時に入れる前提。この前提を PR 本文にも書く。
+- 新しい web と古い backend：`name_truncated`・`body_truncated` が来ないので false。推定を消すので、ゴール名と判断待ちの本文の `…` は出なくなる（今より印が減る）。同時に入れる前提で、この組み合わせは置かない。
+- 古い web・CLI と新しい backend：知らない項目 12・14 は読み飛ばす。`Goal.name` と `PendingDecision.body` の文字列は今と同じなので、古い web の推定は今と同じに動く。変わるのは、アクティビティ・run 要約・run ログ・ゴール詳細の質問と作業記録・通知の文が、切ってあるときだけ末尾に `…` が増えることだけ。古い web はこれらの文に `…` を付けていない（上の 1.）ので、二重にならない。
+
+### 3. proto の番号
+
+- `Goal` はいま 1〜11 を使い、`reserved` は無い。12 は未使用。
+- `PendingDecision` はいま 1〜13 を使い（12 は `revision`、13 は `merge_task_last`）、`reserved` は無い。14 は未使用。13 を飛ばしてはいない（使用中のため次の番号が 14）。
+- ファイル内の `reserved` は `Server` の 6（`concurrency`）と、`StepLog`・`RunReport` の `content` だけで、2 つのメッセージには関係しない。
