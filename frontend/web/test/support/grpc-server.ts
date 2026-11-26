@@ -73,6 +73,8 @@ export type ServerBehavior = {
   hangUnary?: boolean;
   // getOverview が受け取った deadline を観測する。既定値の生成そのものを確かめるテストで使う。
   onOverviewDeadline?: (deadline: grpc.Deadline) => void;
+  // getRunDetail が受け取った deadline を観測する。
+  onRunDetailDeadline?: (deadline: grpc.Deadline) => void;
   // ストリームを送り終えた後も接続を保ち、クライアントの切断を待つか。
   holdWatchOpen?: boolean;
   // WatchState を購読している呼び出しがキャンセルされたときに呼ばれる。
@@ -210,6 +212,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       callback: grpc.sendUnaryData<GetRunDetailResponse>,
     ) => {
       behavior.calls?.push("GetRunDetail");
+      behavior.onRunDetailDeadline?.(call.getDeadline());
       if (behavior.hangUnary) {
         hangUntilCancelled(call, callback);
         return;
