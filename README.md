@@ -30,6 +30,28 @@ cargo build -p takt-dash-backend
 プロジェクト（`servers` / `projects`）、読み取り間隔、異常判定の閾値を書きます。
 takt-mcp に接続できない環境でも gRPC サーバー自体は起動し、状態は空として返します。
 
+### backend を反映する
+
+launchd のジョブで動かしている backend は、反映するチェックアウトで次のスクリプトを流して作り直します。
+plist の `Label` が `--label` と同じで、起こす実行ファイル（`Program`、無ければ `ProgramArguments` の先頭）がそのチェックアウトの `target/debug/takt-dash-backend` で、`RunAtLoad` が true であることが前提です。`Label` か実行ファイルが合わなければ、ジョブに触らずに `NG:` で終わります。
+
+```sh
+scripts/deploy-backend.sh --label <backend のジョブのラベル>
+scripts/deploy-backend.sh --label <backend のジョブのラベル> --skip-build   # 前の版のバイナリへ戻したあと
+```
+
+- スクリプトは `cargo build --locked -p takt-dash-backend --target-dir <チェックアウト>/target` でビルドし、`launchctl bootout` と `launchctl bootstrap` でジョブを起こし直します。
+  起こし直したあとの3秒のあいだ、最初の pid のまま動き続けていなければ、`NG:` を出して 0 以外で終わります。
+- `--plist` を省くと `~/Library/LaunchAgents/<ラベル>.plist` を読みます。
+- ビルドに失敗したときは、ジョブに触らずに終わります。動いている版はそのままです。
+- `launchctl kickstart -k` で起こし直してはいけません（issue #402）。ログインのときに読まれたジョブには、
+  macOS の Background Task Management が、plist の実行ファイルの署名から作った起動の制約を付けます。
+  ad-hoc の署名の cdhash はビルドのたびに変わるため、作り直したあとの最初の起動がこの制約に合わず、
+  カーネルが `OS_REASON_CODESIGNING`（Launch Constraint Violation）で止めます。backend は、launchd が起こし直すまでの約8秒止まります。
+  `launchctl bootstrap` で読み直したジョブには、この制約が付きません。
+- 前の版のバイナリを置き直して戻すときも、同じ理由で `--skip-build` を付けて流します。
+- `bootstrap` は plist を読み直します。plist を書き換えたまま反映すると、その書き換えも効きます。
+
 ## 読み取りを常駐 HTTP サーバーへ向ける
 
 `mcpServers` のエントリは、子プロセスを起動する stdio 起動方法か、ホストごとに常駐する
