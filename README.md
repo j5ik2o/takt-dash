@@ -111,12 +111,20 @@ node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117
     <string>-c</string>
     <string>exec node /Users/you/local/takt-custom/dist/app/mcp/index.js --http --http-port 43117 --http-token "$TAKTDASH_HTTP_TOKEN"</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/you/local/takt-custom/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardErrorPath</key><string>/tmp/taktdash-takt-mcp-http.err.log</string>
 </dict>
 </plist>
 ```
+
+`PATH` の先頭は共有 TAKT の `bin` にします。takt-mcp が起こす daemon とその子（タスクのエージェント・終了フック）は
+この `PATH` を継ぐので、先頭が mise の shims だと、タスクの中の `takt` が npm の takt になります
+（「run の前に TAKT の版を確かめる」）。`PATH` を変えたら、`kickstart` ではなく `unload` と `load` で読み直させます。
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.example.taktdash-takt-mcp-http.plist    # 登録して起動
@@ -207,10 +215,14 @@ mise で入れた npm の takt（0.77.0）はこのキーを知らず、キー�
 - 効く: 対話シェルでこのディレクトリへ `cd` したとき、`mise exec -C <チェックアウト> -- takt ...`、
   このチェックアウトで開いた Orca の端末とワーカー。
 - 効かない: `PATH` が mise の shims だけのとき（`shims/takt` は npm の takt を起こします）、
-  別のディレクトリで起動して `PATH` が固まったエージェント（`cd` しても変わりません）、launchd。
+  別のディレクトリで起動して `PATH` が固まったエージェント（`cd` しても変わりません）、launchd
+  （launchd は plist の `PATH` で先頭を共有 TAKT にします。「launchd に登録する」）。
 - 初めて置いたチェックアウトでは `mise trust` を流します。信頼していないと `PATH` は 0.77.0 に戻り、
   このディレクトリの中の mise の shims（`python3`・`node`）はエラーで止まります。
   終了フックの `python3` も shims から起きることがあるので、通知も止まります。
+  `mise trust <ディレクトリ>` は、`mise.toml` が届く前に流しても効きます。
+- Orca の作業ツリー（`~/orca/workspaces/takt-dash/<名前>`）は、mise の `trusted_config_paths` に入っていません。
+  入るまでは、作業ツリーを作るたびにその中で `mise trust` を流します。
 
 run の前に、run を流すのと同じシェルで次を流します。`NG:` の行が出て終了コードが 0 でなければ、run しません。
 
