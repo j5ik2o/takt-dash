@@ -30,9 +30,14 @@ const cssRules = (css: string): CssRule[] => {
   return rules;
 };
 
+// 同じ規則内に同名プロパティが複数ある場合も、CSS の後勝ちに合わせて最後の宣言を返す。
 const declaration = (body: string, property: string): string | undefined => {
-  const match = new RegExp(`(?:^|;)\\s*${escapeRegExp(property)}\\s*:\\s*([^;]+)`, "i").exec(body);
-  return match?.[1]?.trim();
+  const pattern = new RegExp(`(?:^|;)\\s*${escapeRegExp(property)}\\s*:\\s*([^;]+)`, "gi");
+  let latest: string | undefined;
+  for (const match of body.matchAll(pattern)) {
+    latest = match[1]?.trim();
+  }
+  return latest;
 };
 
 const declarationMatching = (css: string, selector: RegExp, property: string): string | undefined => {
@@ -72,14 +77,16 @@ const rootValue = (css: string, token: string, seen = new Set<string>()): string
   return rootValue(css, alias[1]!, seen);
 };
 
-const resolveColor = (css: string, selector: RegExp, property: string, label: string): string => {
-  const value = requireDeclaration(css, selector, property, label);
+const resolveTokenColor = (css: string, value: string, label: string): string => {
   const token = /^var\(\s*(--[a-z0-9-]+)\s*\)$/i.exec(value);
   if (token === null) {
-    assert.fail(`${label} の ${property} がトークン参照ではない: ${value}`);
+    assert.fail(`${label} がトークン参照ではない: ${value}`);
   }
   return rootValue(css, token[1]!, new Set());
 };
+
+const resolveColor = (css: string, selector: RegExp, property: string, label: string): string =>
+  resolveTokenColor(css, requireDeclaration(css, selector, property, label), `${label} の ${property}`);
 
 test("書き込み失敗の文は薄橙の地で 4.5:1 以上のコントラストを持つ", async () => {
   const css = await readCss();
@@ -97,8 +104,8 @@ test("書き込み失敗の文は薄橙の地で 4.5:1 以上のコントラス�
     `.decision-results .result.error の文字色 ${color} は地色 ${background} に対し ${ratio.toFixed(2)}:1 で 4.5:1 を下回る`,
   );
 
-  // 変更前の --warn（#d9661a）は --warn-bg（#fdf1e7）上で 3.22:1。同じ値へ戻す変更を拒否する。
-  const before = contrastRatio(rootValue(css, "--warn"), background);
+  // 変更前の #d9661a（--warn / --orange）は --warn-bg（#fdf1e7）上で 3.22:1。同じ値へ戻す変更を拒否する。
+  const before = contrastRatio("#d9661a", background);
   assert.ok(ratio > before, `変更前の ${before.toFixed(2)}:1 から改善していない`);
 });
 
@@ -113,26 +120,33 @@ test("会話の注意文はメッセージの白地で 4.5:1 以上のコント�
     `.conversation-notice の文字色 ${color} は地色 ${background} に対し ${ratio.toFixed(2)}:1 で 4.5:1 を下回る`,
   );
 
-  // 変更前の --warn（#d9661a）は --surface（#fff）上で 3.58:1。同じ値へ戻す変更を拒否する。
-  const before = contrastRatio(rootValue(css, "--warn"), background);
+  // 変更前の #d9661a（--warn / --orange）は --surface（#fff）上で 3.58:1。同じ値へ戻す変更を拒否する。
+  const before = contrastRatio("#d9661a", background);
   assert.ok(ratio > before, `変更前の ${before.toFixed(2)}:1 から改善していない`);
 });
 
-test("明るい橙トークン（--warn / --orange）を文字色に使う規則を残さない", async () => {
+test("--warn または --orange を文字色に使う規則があれば 4.5:1 以上のコントラストを持つ", async () => {
   const css = await readCss();
-  const warnHex = rootValue(css, "--warn");
   const surfaceHex = rootValue(css, "--surface");
-  assert.ok(
-    contrastRatio(warnHex, surfaceHex) < 4.5,
-    `前提の確認: --warn (${warnHex}) が白地 (${surfaceHex}) でも 4.5:1 未満であること`,
-  );
 
   const offending: string[] = [];
   for (const rule of cssRules(css)) {
     const color = declaration(rule.body, "color");
-    if (color !== undefined && /^var\(\s*--(?:warn|orange)\s*\)$/i.test(color)) {
-      offending.push(`${rule.selectors.trim()} { color: ${color}; }`);
+    if (color === undefined) {
+      continue;
+    }
+    const token = /^var\(\s*(--(?:warn|orange))\s*\)$/i.exec(color);
+    if (token === null) {
+      continue;
+    }
+    const fgHex = rootValue(css, token[1]!, new Set());
+    const bgDecl = declaration(rule.body, "background") ?? declaration(rule.body, "background-color");
+    const bgToken = bgDecl === undefined ? null : /^var\(\s*(--[a-z0-9-]+)\s*\)$/i.exec(bgDecl);
+    const bgHex = bgToken === null ? surfaceHex : rootValue(css, bgToken[1]!, new Set());
+    const ratio = contrastRatio(fgHex, bgHex);
+    if (ratio < 4.5) {
+      offending.push(`${rule.selectors.trim()} { color: ${color}; } (${fgHex} on ${bgHex}: ${ratio.toFixed(2)}:1)`);
     }
   }
-  assert.deepEqual(offending, [], `4.5:1 に届かない文字色を使う規則がある: ${offending.join(", ")}`);
+  assert.deepEqual(offending, [], `4.5:1 に届かない警告文字色を使う規則がある: ${offending.join(", ")}`);
 });
