@@ -20,10 +20,15 @@
 //   "op"  ：修正案。op 全体（鍵の取得、起動と初期化、道具の呼び出し）を要求から切り離して最後まで
 //           走らせる。要求は結果を待つのをやめるだけ。
 // BUDGET は backend の総上限（0 は上限なし）。WEB_DEADLINE は Web の gRPC の deadline。
+// CHECK_WAITER は、DETACH = "op" で切り離したタスクが鍵を待つ間に、要求がまだ待っているかを
+// 確かめるか。確かめないと、要求が諦めた後もタスクは鍵の待ちに残り、鍵が空いてから、誰も
+// 待っていない読み取りを流す（設計レビューの指摘 1）。確かめれば、要求が終わった時点で鍵の待ちを
+// やめる。鍵を取って読み取りを始めた後は、要求が終わっても最後まで進める（issue #180）。
 module runDetailDeadline {
   const WEB_DEADLINE: int
   const BUDGET: int
   const DETACH: str
+  const CHECK_WAITER: bool
 
   pure val INIT_TIMEOUT: int = 60
   pure val CALL_TIMEOUT: int = 15
@@ -55,6 +60,10 @@ module runDetailDeadline {
   // 要求の始めに、子プロセスが使える状態で、レーンも空いていたか。
   var reqFoundReady: bool
   var outcomes: List[Outcome]
+  // 鍵を待っているタスク（待っている要求のタスクと、要求に諦められたタスク）の数。
+  var waitingTasks: int
+  // 要求に諦められた後で、鍵を取って読み取りを始めたタスクの数。
+  var abandonedOps: int
 
   // ---- 補助 ----
 
@@ -90,6 +99,10 @@ module runDetailDeadline {
     spawns' = spawns,
     opEventAt' = opEventAt,
     opCallsLeft' = opCallsLeft,
+    // 鍵を待っていた要求が終わると、そのタスクは鍵の待ちをやめる。ただし、切り離したタスクが
+    // 要求を確かめない版では、タスクは鍵の待ちに残る。
+    waitingTasks' = if (reqQueued and not(DETACH == "op" and not(CHECK_WAITER))) waitingTasks - 1 else waitingTasks,
+    abandonedOps' = abandonedOps,
     // 鍵を待っていた要求の終わりは、前の要求の op に触れない。
     if (reqQueued or opPhase == OpNone or result == "Ok") all {
       opPhase' = opPhase,
@@ -118,16 +131,19 @@ module runDetailDeadline {
     reqActive' = true,
     reqCount' = reqCount + 1,
     reqStartedAt' = now,
-    reqFoundReady' = (procReady and opPhase == OpNone),
+    reqFoundReady' = (procReady and opPhase == OpNone and waitingTasks == 0),
     outcomes' = outcomes,
     now' = now,
     killedByCancel' = killedByCancel,
-    if (opPhase == OpNone) all {
+    abandonedOps' = abandonedOps,
+    if (opPhase == OpNone and waitingTasks == 0) all {
       reqQueued' = false,
       procReady' = procReady,
+      waitingTasks' = waitingTasks,
       beginOp(initD, callD),
     } else all {
       reqQueued' = true,
+      waitingTasks' = waitingTasks + 1,
       procReady' = procReady,
       opPhase' = opPhase,
       opEventAt' = opEventAt,
@@ -138,10 +154,14 @@ module runDetailDeadline {
   }
 
   // 前の要求から切り離された op が終わり、鍵が空いたので、待っていた要求の op を始める。
+  // 鍵の待ちは先着順なので、諦められたタスクが先に並んでいれば、そちらが先に鍵を取る。
   action dequeue(initD: int, callD: int): bool = all {
     reqActive,
     reqQueued,
     opPhase == OpNone,
+    waitingTasks == 1,
+    waitingTasks' = 0,
+    abandonedOps' = abandonedOps,
     reqQueued' = false,
     reqActive' = reqActive,
     reqCount' = reqCount,
@@ -154,9 +174,40 @@ module runDetailDeadline {
     beginOp(initD, callD),
   }
 
+  // 要求に諦められたのに鍵の待ちに残ったタスクが、鍵を取って読み取りを始める（CHECK_WAITER が
+  // 偽の版だけで起きる）。
+  action abandonedDequeue(initD: int, callD: int): bool = all {
+    opPhase == OpNone,
+    waitingTasks > (if (reqActive and reqQueued) 1 else 0),
+    waitingTasks' = waitingTasks - 1,
+    abandonedOps' = abandonedOps + 1,
+    if (procReady) all {
+      opPhase' = OpCalling,
+      opEventAt' = now + callD,
+      spawns' = spawns,
+    } else all {
+      opPhase' = OpInit,
+      opEventAt' = now + initD,
+      spawns' = spawns + 1,
+    },
+    opCallsLeft' = CALLS,
+    opOrphan' = true,
+    procReady' = procReady,
+    killedByCancel' = killedByCancel,
+    now' = now,
+    reqActive' = reqActive,
+    reqQueued' = reqQueued,
+    reqCount' = reqCount,
+    reqStartedAt' = reqStartedAt,
+    reqFoundReady' = reqFoundReady,
+    outcomes' = outcomes,
+  }
+
   // 初期化が終わる。待つ要求がいれば最初の呼び出しを始め、いなければ（DETACH = "init" で
   // 切り離した初期化）初期化だけで終える。DETACH = "op" の切り離した op は、呼び出しまで進む。
   action initDone(callD: int): bool = all {
+    waitingTasks' = waitingTasks,
+    abandonedOps' = abandonedOps,
     opPhase == OpInit,
     now == opEventAt,
     procReady' = true,
@@ -183,6 +234,8 @@ module runDetailDeadline {
 
   // 道具の呼び出しが 1 回終わる。最後の呼び出しなら op を終え、待つ要求がいれば成功で返す。
   action callDone(callD: int): bool = all {
+    waitingTasks' = waitingTasks,
+    abandonedOps' = abandonedOps,
     opPhase == OpCalling,
     now == opEventAt,
     if (opCallsLeft > 1) all {
@@ -239,7 +292,7 @@ module runDetailDeadline {
     (opPhase != OpNone and now == opEventAt)
       or (reqActive and BUDGET > 0 and now == reqStartedAt + BUDGET)
       or (reqActive and now == reqStartedAt + WEB_DEADLINE)
-      or (reqActive and reqQueued and opPhase == OpNone)
+      or (opPhase == OpNone and waitingTasks > 0)
 
   // 次の出来事の時刻まで時間を進める。要求が無いときは、次の要求までの間として gap 秒まで進める。
   action advance(gap: int): bool = {
@@ -251,6 +304,8 @@ module runDetailDeadline {
     all {
       not(eventDue),
       reqActive or opPhase != OpNone,
+      waitingTasks' = waitingTasks,
+      abandonedOps' = abandonedOps,
       nextAt > now,
       now' = nextAt,
       procReady' = procReady,
@@ -270,9 +325,12 @@ module runDetailDeadline {
   }
 
   action stutter: bool = all {
+    waitingTasks' = waitingTasks,
+    abandonedOps' = abandonedOps,
     not(reqActive),
     opPhase == OpNone,
     reqCount == MAX_REQUESTS,
+    waitingTasks == 0,
     now' = now,
     procReady' = procReady,
     spawns' = spawns,
@@ -304,6 +362,8 @@ module runDetailDeadline {
     reqQueued' = false,
     reqFoundReady' = false,
     outcomes' = [],
+    waitingTasks' = 0,
+    abandonedOps' = 0,
   }
 
   action step: bool = {
@@ -313,6 +373,7 @@ module runDetailDeadline {
     any {
       startRequest(initD, callD),
       dequeue(initD, callD),
+      abandonedDequeue(initD, callD),
       initDone(callD),
       callDone(callD),
       budgetExpires,
@@ -347,9 +408,15 @@ module runDetailDeadline {
       and (not(reqActive) or now - reqStartedAt <= bound)
   }
 
+  // 6. 鍵を待つタスクの数は、待っている要求の数を超えない（設計レビューの指摘 1）。
+  val waitingTasksBoundedByWaiters: bool = waitingTasks <= (if (reqActive and reqQueued) 1 else 0)
+
+  // 7. 要求に諦められた後で、鍵の待ちから読み取りを始めるタスクは無い。
+  val noReadsForAbandonedWaits: bool = abandonedOps == 0
+
   val safety: bool =
     backendAnswersFirst and readyReadsWithinCallTimeoutsSucceed and noKillByCancel and spawnsOnce
-      and requestsAreBounded
+      and requestsAreBounded and waitingTasksBoundedByWaiters and noReadsForAbandonedWaits
 
   // ---- 到達の確認（quint run で違反として見つかれば、その筋書きに到達できる） ----
 
@@ -367,25 +434,30 @@ module runDetailDeadline {
 
 // 修正前：Web の deadline 30 秒、backend の総上限なし、op は要求の future の中。
 module current {
-  import runDetailDeadline(WEB_DEADLINE = 30, BUDGET = 0, DETACH = "none").*
+  import runDetailDeadline(WEB_DEADLINE = 30, BUDGET = 0, DETACH = "none", CHECK_WAITER = false).*
 }
 
 // 期限だけを直した版：Web 50 秒・backend 45 秒だが、op は要求の future の中。
 module budgetOnly {
-  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "none").*
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "none", CHECK_WAITER = false).*
 }
 
 // 初期化だけを切り離した版。
 module detachInitOnly {
-  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "init").*
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "init", CHECK_WAITER = false).*
 }
 
 // 切り離しだけで、期限を直さない版。
 module detachOnly {
-  import runDetailDeadline(WEB_DEADLINE = 30, BUDGET = 0, DETACH = "op").*
+  import runDetailDeadline(WEB_DEADLINE = 30, BUDGET = 0, DETACH = "op", CHECK_WAITER = true).*
+}
+
+// 期限を直し、読み取り全体を切り離したが、鍵の待ちで要求を確かめない版（設計の最初の版）。
+module withoutWaiterCheck {
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "op", CHECK_WAITER = false).*
 }
 
 // 修正案：Web 50 秒、backend の総上限 45 秒、op 全体を要求から切り離す。
 module fixed {
-  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "op").*
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "op", CHECK_WAITER = true).*
 }

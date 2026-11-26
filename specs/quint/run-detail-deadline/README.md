@@ -9,17 +9,18 @@ run 詳細の取得（GetRunDetail）が、backend の総上限と Web の gRPC 
 | ファイル | 内容 |
 | --- | --- |
 | `runDetailDeadline.qnt` | 状態機械、不変条件、到達の確認 |
-| `runDetailDeadline_test.qnt` | issue の筋書きを修正前・途中の版・修正案でたどるテスト（8 件） |
+| `runDetailDeadline_test.qnt` | issue の筋書きを修正前・途中の版・修正案でたどるテスト（10 件） |
 
-`runDetailDeadline.qnt` は遷移を 3 つの定数で切り替えます。
+`runDetailDeadline.qnt` は遷移を 4 つの定数で切り替えます。
 
-| モジュール | `WEB_DEADLINE` | `BUDGET` | `DETACH` | 表すもの |
-| --- | --- | --- | --- | --- |
-| `current` | 30 | 0（なし） | `none` | 修正前。Web の deadline は 30 秒で、backend の総上限は無い。読み取りは要求の future の中にあり、打ち切りで捨てられる |
-| `budgetOnly` | 50 | 45 | `none` | 期限だけを直した版 |
-| `detachInitOnly` | 50 | 45 | `init` | 期限を直し、起動と初期化だけを要求から切り離した版 |
-| `detachOnly` | 30 | 0 | `op` | 読み取り全体を切り離したが、期限を直さない版 |
-| `fixed` | 50 | 45 | `op` | 修正案。Web 50 秒、backend の総上限 45 秒、読み取り全体（鍵の取得、起動と初期化、道具の呼び出し）を要求から切り離す |
+| モジュール | `WEB_DEADLINE` | `BUDGET` | `DETACH` | `CHECK_WAITER` | 表すもの |
+| --- | --- | --- | --- | --- | --- |
+| `current` | 30 | 0（なし） | `none` | － | 修正前。Web の deadline は 30 秒で、backend の総上限は無い。読み取りは要求の future の中にあり、打ち切りで捨てられる |
+| `budgetOnly` | 50 | 45 | `none` | － | 期限だけを直した版 |
+| `detachInitOnly` | 50 | 45 | `init` | － | 期限を直し、起動と初期化だけを要求から切り離した版 |
+| `detachOnly` | 30 | 0 | `op` | true | 読み取り全体を切り離したが、期限を直さない版 |
+| `withoutWaiterCheck` | 50 | 45 | `op` | false | 読み取り全体を切り離したが、鍵を待つ間に要求を確かめない版（設計の最初の版。設計レビューの指摘 1） |
+| `fixed` | 50 | 45 | `op` | true | 修正案。Web 50 秒、backend の総上限 45 秒、読み取り全体（鍵の取得、起動と初期化、道具の呼び出し）を要求から切り離す |
 
 ## 仕様とコードの対応
 
@@ -34,6 +35,8 @@ run 詳細の取得（GetRunDetail）が、backend の総上限と Web の gRPC 
 | `DETACH = "none"` の打ち切り | 修正前。要求の future を捨てると、`spawn` の中の子プロセスは `kill_on_drop` で止まり、`request` で外していた子プロセスも捨てられる（`client.rs` の `request` の説明） |
 | `DETACH = "op"` と `opOrphan` | 修正案。`resolve.rs` の `ReadSource::Stdio` の各読み取りを `tokio::spawn` したタスクで行い、要求は `JoinHandle` を待つだけにする。要求が終わっても、タスクは最後まで走る |
 | `reqQueued` | 切り離した読み取りが鍵を持っている間に来た要求は、`lock_owned().await` で鍵を待つ |
+| `waitingTasks` と `CHECK_WAITER` | 鍵を待つタスクの数。修正案のタスクは、`tokio::select!` で鍵の取得と `oneshot` の送り手の `closed()` を待ち、要求が諦めたら鍵を取らずに終える。鍵の待ちは先着順（tokio の `Mutex` は公平） |
+| `abandonedDequeue` と `abandonedOps` | 要求を確かめない版で、諦められたタスクが鍵を取って読み取りを流すこと |
 | `budgetExpires` の `BackendDeadline` | `Status::deadline_exceeded`。Web は `BackendUnavailableError("no-response")` にして「backend が応答しません。読み取りが遅れている可能性があります。」と前に読めた内容を出す |
 | `webDeadlineExpires` の `WebDeadline` | Web 側の deadline の超過（同じ表示）。修正案では起きない |
 
@@ -56,7 +59,9 @@ run 詳細の取得（GetRunDetail）が、backend の総上限と Web の gRPC 
 - `noKillByCancel`：要求の打ち切りで子プロセスを捨てない（issue #180）。
 - `spawnsOnce`：初期化が失敗しないモデルなので、子プロセスの起動は 1 回だけ。
 - `requestsAreBounded`：要求は、backend の総上限（無ければ Web の deadline）を超えて待たない。
-- `safety`：上の 5 つ。
+- `waitingTasksBoundedByWaiters`：鍵を待つタスクの数は、待っている要求の数を超えない。
+- `noReadsForAbandonedWaits`：要求に諦められた後で、鍵の待ちから読み取りを始めるタスクは無い。
+- `safety`：上の 7 つ。
 
 到達の確認（`quint run` で違反として見つかれば、その筋書きに到達できる）
 
@@ -70,8 +75,9 @@ cd specs/quint/run-detail-deadline
 quint typecheck runDetailDeadline.qnt
 quint typecheck runDetailDeadline_test.qnt
 quint test runDetailDeadline_test.qnt --main=runDetailDeadline_test
-for m in current budgetOnly detachInitOnly detachOnly fixed; do
-  for inv in backendAnswersFirst readyReadsWithinCallTimeoutsSucceed noKillByCancel spawnsOnce requestsAreBounded; do
+for m in current budgetOnly detachInitOnly detachOnly withoutWaiterCheck fixed; do
+  for inv in backendAnswersFirst readyReadsWithinCallTimeoutsSucceed noKillByCancel spawnsOnce requestsAreBounded \
+      waitingTasksBoundedByWaiters noReadsForAbandonedWaits; do
     quint run runDetailDeadline.qnt --main=$m --invariant=$inv --max-samples=20000 --max-steps=40
   done
 done
@@ -81,16 +87,17 @@ quint run runDetailDeadline.qnt --main=fixed --invariant=slowSuccessUnreachable 
 ```
 
 - `typecheck`：2 ファイルともエラーなし。
-- `quint test`：8 件すべて成功。
+- `quint test`：10 件すべて成功。
 - 不変条件ごとの `quint run`：
 
-| モジュール | backendAnswersFirst | readyReadsWithinCallTimeoutsSucceed | noKillByCancel | spawnsOnce | requestsAreBounded |
-| --- | --- | --- | --- | --- | --- |
-| `current` | 違反 | 違反 | 違反 | 違反 | 成立 |
-| `budgetOnly` | 成立 | 成立 | 違反 | 違反 | 成立 |
-| `detachInitOnly` | 成立 | 成立 | 違反 | 違反 | 成立 |
-| `detachOnly` | 違反 | 違反 | 成立 | 成立 | 成立 |
-| `fixed` | 成立 | 成立 | 成立 | 成立 | 成立 |
+| モジュール | backendAnswersFirst | readyReads… | noKillByCancel | spawnsOnce | requestsAreBounded | waitingTasksBounded… | noReadsForAbandoned… |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `current` | 違反 | 違反 | 違反 | 違反 | 成立 | 成立 | 成立 |
+| `budgetOnly` | 成立 | 成立 | 違反 | 違反 | 成立 | 成立 | 成立 |
+| `detachInitOnly` | 成立 | 成立 | 違反 | 違反 | 成立 | 成立 | 成立 |
+| `detachOnly` | 違反 | 違反 | 成立 | 成立 | 成立 | 成立 | 成立 |
+| `withoutWaiterCheck` | 成立 | 成立 | 成立 | 成立 | 成立 | 違反 | 違反 |
+| `fixed` | 成立 | 成立 | 成立 | 成立 | 成立 | 成立 | 成立 |
 
 - `fixed` の `safety`（10 万件、60 手）：違反なし。
 - `fixed` の到達の確認 2 つ：どちらも違反として見つかる（到達できる）。

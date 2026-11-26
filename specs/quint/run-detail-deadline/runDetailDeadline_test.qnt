@@ -1,10 +1,11 @@
 // -*- mode: Bluespec; -*-
 // issue #59 と #180 の筋書きを、修正前・途中の版・修正案でたどる。
 module runDetailDeadline_test {
-  import runDetailDeadline(WEB_DEADLINE = 30, BUDGET = 0, DETACH = "none") as before from "./runDetailDeadline"
-  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "none") as budgetOnly from "./runDetailDeadline"
-  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "init") as initOnly from "./runDetailDeadline"
-  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "op") as after from "./runDetailDeadline"
+  import runDetailDeadline(WEB_DEADLINE = 30, BUDGET = 0, DETACH = "none", CHECK_WAITER = false) as before from "./runDetailDeadline"
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "none", CHECK_WAITER = false) as budgetOnly from "./runDetailDeadline"
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "init", CHECK_WAITER = false) as initOnly from "./runDetailDeadline"
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "op", CHECK_WAITER = true) as after
+  import runDetailDeadline(WEB_DEADLINE = 50, BUDGET = 45, DETACH = "op", CHECK_WAITER = false) as noCheck from "./runDetailDeadline"
 
   // 期限の並び：呼び出しの期限 × 回り道の呼び出しの回数 ≦ backend の総上限 < Web の deadline。
   run deadlinesAreOrderedTest =
@@ -98,4 +99,35 @@ module runDetailDeadline_test {
       .expect(after::outcomes.length() == 2 and after::outcomes[1].result == "BackendDeadline"
         and not(after::outcomes[1].foundReady) and after::outcomes[1].elapsed == 45
         and after::opOrphan and after::safety)
+
+  // 設計レビューの指摘 1：切り離した読み取りが初期化と呼び出しに長くかかる間に、画面が読み直す。
+  // 要求を確かめない版では、諦められた 2 つめの要求のタスクが鍵の待ちに残る。3 つめの要求が来ると
+  // 鍵を待つタスクは 2 つになり、鍵が空くと、諦められたタスクが先に誰も待っていない読み取りを流す。
+  run abandonedWaitsRunReadsWithoutWaiterCheckTest =
+    noCheck::init
+      .then(noCheck::startRequest(59, 14)).then(noCheck::advance(1)).then(noCheck::budgetExpires)
+      .then(noCheck::startRequest(1, 14)).then(noCheck::advance(1)).then(noCheck::initDone(14))
+      .then(noCheck::advance(1)).then(noCheck::callDone(14))
+      .then(noCheck::advance(1)).then(noCheck::callDone(14))
+      .then(noCheck::advance(1)).then(noCheck::budgetExpires)
+      .then(noCheck::startRequest(1, 14))
+      .then(all { assert(noCheck::waitingTasks == 2 and not(noCheck::waitingTasksBoundedByWaiters)), noCheck::advance(1) })
+      .then(noCheck::callDone(14))
+      .then(noCheck::abandonedDequeue(1, 14))
+      .expect(noCheck::abandonedOps == 1 and not(noCheck::noReadsForAbandonedWaits))
+
+  // 修正案：同じ筋書きで、諦められた要求のタスクは鍵の待ちをやめる。鍵を待つのは、待っている要求の
+  // タスクだけで、鍵が空くとそのタスクが読み取りを始める。
+  run abandonedWaitsLeaveWithWaiterCheckTest =
+    after::init
+      .then(after::startRequest(59, 14)).then(after::advance(1)).then(after::budgetExpires)
+      .then(after::startRequest(1, 14)).then(after::advance(1)).then(after::initDone(14))
+      .then(after::advance(1)).then(after::callDone(14))
+      .then(after::advance(1)).then(after::callDone(14))
+      .then(after::advance(1)).then(after::budgetExpires)
+      .then(after::startRequest(1, 14))
+      .then(all { assert(after::waitingTasks == 1 and after::safety), after::advance(1) })
+      .then(after::callDone(14))
+      .then(after::dequeue(1, 14))
+      .expect(after::waitingTasks == 0 and after::abandonedOps == 0 and after::reqActive and after::safety)
 }
