@@ -34,20 +34,27 @@ fail() {
 }
 
 check_spec() {
-  local entry=$1 dir spec_file test_file spec_path test_path
+  local entry=$1 dir spec_file test_file spec_path test_path spec_work
   local spec_ir test_ir out mod name passing max
   local run_main run_inv run_steps run_samples
-  local spec_runs expected_mods actual_mods ok=0
+  local spec_runs expected_mods actual_mods test_mods_raw mod_runs_raw runs_raw ok=0
   local runs=() bad=()
 
-  dir=$(jq -r '.dir' <<<"$entry")
-  spec_file=$(jq -r '.spec' <<<"$entry")
-  test_file=$(jq -r '.test' <<<"$entry")
+  if ! dir=$(jq -r '.dir' <<<"$entry") \
+    || ! spec_file=$(jq -r '.spec' <<<"$entry") \
+    || ! test_file=$(jq -r '.test' <<<"$entry"); then
+    fail "$manifest" "failed to parse spec entry from manifest"
+    return 1
+  fi
   spec_path="specs/quint/$dir/$spec_file"
   test_path="specs/quint/$dir/$test_file"
-  spec_ir="$work/${dir}.spec.ir.json"
-  test_ir="$work/${dir}.test.ir.json"
-  out="$work/${dir}.out"
+  if ! spec_work=$(mktemp -d "$work/spec.XXXXXX"); then
+    fail "$spec_path" "failed to create temp directory"
+    return 1
+  fi
+  spec_ir="$spec_work/spec.ir.json"
+  test_ir="$spec_work/test.ir.json"
+  out="$spec_work/out"
 
   if ! "$quint" typecheck "$spec_path"; then
     fail "$spec_path" "quint typecheck failed"
@@ -62,7 +69,10 @@ check_spec() {
     fail "$spec_path" "quint parse failed"
     return 1
   fi
-  spec_runs=$(jq -r '[.modules[].declarations[] | select(.qualifier == "run") | .name] | join(", ")' "$spec_ir")
+  if ! spec_runs=$(jq -r '[.modules[].declarations[] | select(.qualifier == "run") | .name] | join(", ")' "$spec_ir"); then
+    fail "$spec_path" "failed to inspect parsed IR"
+    return 1
+  fi
   if [ -n "$spec_runs" ]; then
     fail "$spec_path" "model file defines run declaration(s) ($spec_runs); move tests to $test_path"
     return 1
@@ -73,23 +83,42 @@ check_spec() {
     return 1
   fi
 
-  expected_mods=$(jq -r '.test_modules | sort | join(",")' <<<"$entry")
-  actual_mods=$(jq -r '[.modules[] | select(([.declarations[] | select(.qualifier == "run")] | length) > 0) | .name] | sort | join(",")' "$test_ir")
+  if ! expected_mods=$(jq -r '.test_modules | sort | join(",")' <<<"$entry"); then
+    fail "$test_path" "failed to read test_modules from manifest"
+    return 1
+  fi
+  if ! actual_mods=$(jq -r '[.modules[] | select(([.declarations[] | select(.qualifier == "run")] | length) > 0) | .name] | sort | join(",")' "$test_ir"); then
+    fail "$test_path" "failed to inspect test IR modules"
+    return 1
+  fi
   if [ "$actual_mods" != "$expected_mods" ]; then
     fail "$test_path" "modules with run declarations (${actual_mods:-none}) do not match ci-specs.json test_modules ($expected_mods)"
     return 1
   fi
 
+  if ! test_mods_raw=$(jq -r '.test_modules[]' <<<"$entry") || [ -z "$test_mods_raw" ]; then
+    fail "$test_path" "failed to read test_modules from manifest"
+    return 1
+  fi
   while IFS= read -r mod; do
+    [ -n "$mod" ] || continue
     runs=()
     bad=()
-    while IFS= read -r name; do
-      runs+=("$name")
-      case $name in
-        *Test) ;;
-        *) bad+=("$name") ;;
-      esac
-    done < <(jq -r --arg m "$mod" '.modules[] | select(.name == $m) | .declarations[] | select(.qualifier == "run") | .name' "$test_ir")
+    if ! mod_runs_raw=$(jq -r --arg m "$mod" '.modules[] | select(.name == $m) | .declarations[] | select(.qualifier == "run") | .name' "$test_ir"); then
+      fail "$test_path" "failed to inspect run declarations in module $mod"
+      ok=1
+      continue
+    fi
+    if [ -n "$mod_runs_raw" ]; then
+      while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        runs+=("$name")
+        case $name in
+          *Test) ;;
+          *) bad+=("$name") ;;
+        esac
+      done <<<"$mod_runs_raw"
+    fi
 
     if [ "${#runs[@]}" -eq 0 ]; then
       fail "$test_path" "module $mod defines no run; every test module needs at least one"
@@ -112,13 +141,22 @@ check_spec() {
       fail "$test_path" "quint test passed ${passing:-0} test(s) in module $mod but IR defines ${#runs[@]} run(s)"
       ok=1
     fi
-  done < <(jq -r '.test_modules[]' <<<"$entry")
+  done <<<"$test_mods_raw"
 
+  if ! runs_raw=$(jq -c '.runs[]' <<<"$entry") || [ -z "$runs_raw" ]; then
+    fail "$spec_path" "failed to read runs from manifest"
+    return 1
+  fi
   while IFS= read -r run_cfg; do
-    run_main=$(jq -r '.main' <<<"$run_cfg")
-    run_inv=$(jq -r '.invariant' <<<"$run_cfg")
-    run_steps=$(jq -r '.max_steps' <<<"$run_cfg")
-    run_samples=$(jq -r '.max_samples' <<<"$run_cfg")
+    [ -n "$run_cfg" ] || continue
+    if ! run_main=$(jq -r '.main' <<<"$run_cfg") \
+      || ! run_inv=$(jq -r '.invariant' <<<"$run_cfg") \
+      || ! run_steps=$(jq -r '.max_steps' <<<"$run_cfg") \
+      || ! run_samples=$(jq -r '.max_samples' <<<"$run_cfg"); then
+      fail "$spec_path" "failed to parse run configuration from manifest"
+      ok=1
+      continue
+    fi
 
     if ! "$quint" run \
       --main="$run_main" \
@@ -142,20 +180,37 @@ check_spec() {
       fail "$spec_path" "no trace took a step (main=$run_main, max trace length $max): step is never enabled"
       ok=1
     fi
-  done < <(jq -c '.runs[]' <<<"$entry")
+  done <<<"$runs_raw"
 
   return "$ok"
 }
 
+if ! specs_raw=$(jq -c '.specs[]' "$manifest") || [ -z "$specs_raw" ]; then
+  echo "::error file=$manifest::failed to read specs from manifest"
+  exit 1
+fi
+
 failed=()
+checked=0
 while IFS= read -r entry; do
-  dir=$(jq -r '.dir' <<<"$entry")
+  [ -n "$entry" ] || continue
+  if ! dir=$(jq -r '.dir' <<<"$entry"); then
+    echo "::error file=$manifest::failed to read spec dir from manifest entry"
+    failed+=("$manifest")
+    continue
+  fi
+  checked=$((checked + 1))
   echo "::group::specs/quint/$dir"
   if ! check_spec "$entry"; then
     failed+=("specs/quint/$dir")
   fi
   echo '::endgroup::'
-done < <(jq -c '.specs[]' "$manifest")
+done <<<"$specs_raw"
+
+if [ "$checked" -eq 0 ]; then
+  echo "::error file=$manifest::no Quint specs were checked"
+  exit 1
+fi
 
 if [ "${#failed[@]}" -gt 0 ]; then
   for spec_dir in "${failed[@]}"; do

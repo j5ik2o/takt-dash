@@ -37,6 +37,12 @@ def is_safe_segment(name: Any) -> bool:
     )
 
 
+def is_safe_rel_dir(name: Any) -> bool:
+    if not isinstance(name, str) or not name or "\\" in name:
+        return False
+    return all(is_safe_segment(part) for part in name.split("/"))
+
+
 def extract_fenced_commands(readme_text: str) -> list[str]:
     """Markdown のフェンスコードブロックから、バックスラッシュ継続を結合したコマンド行を返す。"""
     commands: list[str] = []
@@ -280,7 +286,7 @@ def _validate_entry(
     test_file = entry.get("test")
     test_modules = entry.get("test_modules")
 
-    if not is_safe_segment(spec_dir):
+    if not is_safe_rel_dir(spec_dir):
         emit_error(f"specs[{idx}].dir is invalid: {spec_dir!r}", manifest_rel)
         return 1
     if spec_dir in seen_dirs:
