@@ -195,6 +195,40 @@ TAKT は、同じ PR やブランチを対象にした run どうしを、実行
 - `.takt/config.yaml` の `concurrency` は 1 にしています。TAKT はキューから取り出すとき、実行中のタスクと同じブランチかを照合しないためです。
   そのぶん、別のブランチのタスクも1件ずつ順に動き、並列で進める利点はなくなります。
 
+### run の前に TAKT の版を確かめる
+
+`.takt/config.yaml` は、フォークにしかないキー（`task_finish_hook`）を使います。
+mise で入れた npm の takt（0.77.0）はこのキーを知らず、`takt list` でも設定エラーで止まります。
+そこで、根の `mise.toml` で `PATH` の先頭を共有 TAKT（`~/local/takt-custom/bin`）にしています。
+共有 TAKT の切替の手順は、フォーク（`j5ik2o/takt` の `integration/takt-mcp`）の `docs/shared-takt-switch.md` にあります。
+
+`mise.toml` が効くのは、mise がこのチェックアウトで `PATH` を組んだときだけです。
+
+- 効く: 対話シェルでこのディレクトリへ `cd` したとき、`mise exec -C <チェックアウト> -- takt ...`、
+  このチェックアウトで開いた Orca の端末とワーカー。
+- 効かない: `PATH` が mise の shims だけのとき（`shims/takt` は npm の takt を起こします）、
+  別のディレクトリで起動して `PATH` が固まったエージェント（`cd` しても変わりません）、launchd。
+- 初めて置いたチェックアウトでは `mise trust` を流します。信頼していないと `PATH` は 0.77.0 に戻り、
+  このディレクトリの中の mise の shims（`python3`・`node`）はエラーで止まります。
+  終了フックの `python3` も shims から起きることがあるので、通知も止まります。
+
+run の前に、run を流すのと同じシェルで次を流します。`NG:` の行が出て終了コードが 0 でなければ、run しません。
+
+```sh
+TAKT_REPO=~/Sources/github.com/j5ik2o/takt
+git -C "$TAKT_REPO" fetch origin integration/takt-mcp
+check=$(mktemp)
+git -C "$TAKT_REPO" show origin/integration/takt-mcp:scripts/check-takt-runtime.sh > "$check"
+sh "$check" --key task_finish_hook --repo "$TAKT_REPO" --contains b1acb58ac
+```
+
+- スクリプトは、`PATH` の `takt` が共有 TAKT を指すこと、その版が `task_finish_hook` を受け付けること、
+  配置した版が `b1acb58ac`（終了フックを呼ぶ処理）を含むことを確かめます。キーがあるだけで
+  フックを呼ばない版があるため、`--contains` を外しません。
+- `takt --version` では見分けられません。フォークは元にした上流の版番号を名乗ります。
+- NG のときは、このチェックアウトの対話シェルへ `cd` し直すか、`mise exec -C <チェックアウト> -- takt ...`
+  で流すか、エージェントをこのチェックアウトで起動し直します。
+
 ## 検証する
 
 ```bash
