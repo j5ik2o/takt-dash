@@ -13,7 +13,7 @@ use std::{
   time::{Duration as StdDuration, Instant},
 };
 
-use chrono::{DateTime, Duration, FixedOffset, Utc};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, Utc};
 use rusqlite::{params, Connection, OpenFlags};
 
 use crate::{
@@ -305,8 +305,8 @@ impl ActivityStore {
       for back in (0..7).rev() {
         let day = today - Duration::days(back);
         let date = DailyDate::from(day);
-        let total = count_on(connection, date.as_str(), None)?;
-        let attention = count_on(connection, date.as_str(), Some(&ATTENTION_KINDS))?;
+        let total = count_on(connection, day, None)?;
+        let attention = count_on(connection, day, Some(&ATTENTION_KINDS))?;
         summaries.push(DailyCount { date, total, attention });
       }
       Ok(summaries)
@@ -319,12 +319,12 @@ impl ActivityStore {
   pub fn today_counts_by_server(&self, now: DateTime<Utc>) -> rusqlite::Result<Vec<ServerCount>> {
     self.with_reader(|connection| {
       let jst = FixedOffset::east_opt(9 * 3600).expect("JST のオフセットは固定です");
-      let date = now.with_timezone(&jst).date_naive().format("%Y-%m-%d").to_string();
+      let (start, end) = jst_day_range(now.with_timezone(&jst).date_naive());
       let mut statement = connection.prepare(
-        "SELECT server_id, COUNT(*) FROM events WHERE date(occurred_at, '+9 hours') = ?1 AND server_id != ''
+        "SELECT server_id, COUNT(*) FROM events WHERE occurred_at >= ?1 AND occurred_at < ?2 AND server_id != ''
          GROUP BY server_id ORDER BY COUNT(*) DESC, server_id",
       )?;
-      let rows = statement.query_map(params![date], |row| {
+      let rows = statement.query_map(params![start, end], |row| {
         let server_id: String = row.get(0)?;
         let server_id =
           ServerId::try_from(server_id.as_str()).map_err(|error| conversion_error(0, error.to_string()))?;
@@ -373,19 +373,32 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
   )
 }
 
+/// JST の日の開始と終了を、UTC の時刻の文字列の組で返す。
+/// 開始は JST の 00:00 を UTC にした時刻（前日の 15:00Z）、終了はその1日後である。
+fn jst_day_range(day: NaiveDate) -> (String, String) {
+  let midnight = day.and_hms_opt(0, 0, 0).expect("JST の日の開始時刻を作れます");
+  let start_naive = midnight - Duration::hours(9);
+  let end_naive = start_naive + Duration::days(1);
+  let start = DateTime::<Utc>::from_naive_utc_and_offset(start_naive, Utc);
+  let end = DateTime::<Utc>::from_naive_utc_and_offset(end_naive, Utc);
+  (format_timestamp(start), format_timestamp(end))
+}
+
 /// JST の日付に一致する出来事の件数を数える。
-fn count_on(connection: &Connection, jst_date: &str, kinds: Option<&[EventKind]>) -> rusqlite::Result<i32> {
+fn count_on(connection: &Connection, day: NaiveDate, kinds: Option<&[EventKind]>) -> rusqlite::Result<i32> {
+  let (start, end) = jst_day_range(day);
   let count: i64 = match kinds {
     | None => connection.query_row(
-      "SELECT COUNT(*) FROM events WHERE date(occurred_at, '+9 hours') = ?1",
-      params![jst_date],
+      "SELECT COUNT(*) FROM events WHERE occurred_at >= ?1 AND occurred_at < ?2",
+      params![start, end],
       |row| row.get(0),
     )?,
     | Some(kinds) => {
       let placeholders = kinds.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-      let sql =
-        format!("SELECT COUNT(*) FROM events WHERE date(occurred_at, '+9 hours') = ?1 AND kind IN ({placeholders})");
-      let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(jst_date.to_owned())];
+      let sql = format!(
+        "SELECT COUNT(*) FROM events WHERE occurred_at >= ?1 AND occurred_at < ?2 AND kind IN ({placeholders})"
+      );
+      let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(start), Box::new(end)];
       for kind in kinds {
         values.push(Box::new(kind.as_str().to_owned()));
       }
@@ -415,6 +428,10 @@ fn parse_timestamp(text: &str) -> DateTime<Utc> {
     .map(|time| time.with_timezone(&Utc))
     .unwrap_or_else(|_| DateTime::<Utc>::UNIX_EPOCH)
 }
+
+#[cfg(test)]
+#[path = "activity_index_tests.rs"]
+mod index_tests;
 
 #[cfg(test)]
 mod tests {
