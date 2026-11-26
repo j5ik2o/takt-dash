@@ -27,7 +27,7 @@ test("書き込みの失敗が項目に表示され、注入を解くと復帰�
 
   const failure = tray.getByRole("alert").filter({ hasText: QUESTION_ID });
   await expect(failure).toBeVisible({ timeout: 15_000 });
-  await expect(failure).toContainText(/takt-mcp の道具が失敗しました|backend に接続できません。/);
+  await expect(failure).toContainText(/takt が操作を受け付けませんでした。|backend に接続できません。/);
   await expect(decisionItem).toBeVisible();
   await expect.poll(async () => answerCallCount(stack), { timeout: 15_000 }).toBe(1);
 

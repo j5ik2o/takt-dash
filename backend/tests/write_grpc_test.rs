@@ -2472,3 +2472,67 @@ async fn a_list_read_cut_by_the_limit_keeps_the_later_items() {
 
   poller.shutdown().await;
 }
+
+// --- 画面に出す失敗の文面（issue #306） ---
+
+#[tokio::test]
+async fn a_tool_error_shows_only_a_fixed_message_and_a_bounded_takt_reason() {
+  // takt の道具のエラーの本文は、改行を空白にし、上限で切った「takt の理由」として出す。
+  // 道具名つきの内部の表示や、改行を含む本文の全体は、画面に届く文面に入れない。
+  let long_tail = "x".repeat(500);
+  let reason = format!("ゴールは待ちの状態ではありません\n詳細: {long_tail}");
+  let harness =
+    harness_with_pending_proposals(json!({ "toolErrors": { "takt_approve_goal_registration": reason } }), &[3]);
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+
+  let status = client
+    .approve_goal_registration(ApproveGoalRegistrationRequest {
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        3,
+    })
+    .await
+    .expect_err("道具エラーはエラーとして返ります");
+
+  assert_eq!(status.code(), Code::Unavailable, "コードは変えません");
+  let message = status.message();
+  assert!(message.starts_with("takt が操作を受け付けませんでした。"), "固定の文で始めます: {message}");
+  assert!(
+    message.contains("takt の理由: ゴールは待ちの状態ではありません 詳細: x"),
+    "takt の理由を改行を空白にして続けます: {message}"
+  );
+  assert!(!message.contains('\n'), "改行を含めません: {message}");
+  assert!(!message.contains("takt_approve_goal_registration"), "道具名つきの内部の表示を出しません: {message}");
+  assert!(!message.contains(&long_tail), "本文の全体は出しません: {message}");
+  assert!(message.ends_with('…'), "切ったことを示します: {message}");
+
+  server.stop().await;
+}
+
+#[tokio::test]
+async fn a_write_with_an_unreadable_config_does_not_show_the_config_path() {
+  let harness = harness_with_pending_proposals(json!({}), &[3]);
+  let server = start_server(&harness).await;
+  let mut client = client(server.address).await;
+  std::fs::write(harness.config_path(), "{ 壊れた設定").expect("設定ファイルを書き換えられます");
+
+  let status = client
+    .approve_goal_registration(ApproveGoalRegistrationRequest {
+      idempotency_key: None,
+      server_id:       "mac-mini".to_owned(),
+      project:         "takt-dash".to_owned(),
+      revision:        3,
+    })
+    .await
+    .expect_err("設定を読めなければ書き込めません");
+
+  assert_eq!(status.code(), Code::Unavailable, "コードは変えません");
+  let directory = harness.config_path().parent().expect("設定ファイルは置き場の中にあります").display().to_string();
+  assert!(!status.message().contains(&directory), "設定のパスを出しません: {}", status.message());
+  assert!(status.message().contains("設定ファイルを直して"), "次にすることを伝えます: {}", status.message());
+  assert!(calls_named(&harness, "takt_approve_goal_registration").is_empty(), "takt を呼びません");
+
+  server.stop().await;
+}

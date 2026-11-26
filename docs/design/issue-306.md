@@ -25,7 +25,7 @@ Authorization の値は、どの文面にも入らない（`mcp/http.rs:272` の
 
 画面（`_shared.ts`）は変えない。backend の文面を「そのまま出せる文」として扱う今の約束（#305、#319）を保ち、その約束を backend の側で守る。種類を知っているのは backend の境界なので、そこで決める。
 
-### 1. `tool_error_status`（`backend/src/grpc/mod.rs`）
+### 1. `tool_error_status`（`backend/src/grpc/mod.rs` から新しい `backend/src/grpc/failure.rs` へ移す）
 
 元のエラーを `tracing::warn!` に残し、種類ごとに次の文を返す。コードは今と同じ。
 
@@ -40,6 +40,15 @@ Authorization の値は、どの文面にも入らない（`mcp/http.rs:272` の
 
 `{s}` は秒数（数字だけ）なので、入れても漏れない。
 
+「詳しい理由は backend のログにあります。」は、ログの場所を添えて「詳しい理由は backend のログ（配置先の data/backend-launchd.err.log）にあります。」にする（以下の表の文も同じ）。本番の backend は `tracing` を標準エラーに書き（`backend/src/main.rs`）、launchd の plist（`~/Library/LaunchAgents/com.ideoplus.taktdash-backend.plist`）の `StandardErrorPath` が `<配置先>/data/backend-launchd.err.log` を指す（`tools/prod-check/prod_log.py` も同じ場所を読む）。配置先の絶対パス（利用者のホームを含む）は画面に出さないので、配置先からの相対で書く。
+
+**takt の理由を残す（設計レビューの決定、2026-11-26）。** `ToolError::Tool` と `TransportError::Rpc` の文は、固定の文のあとに「takt の理由: <本文>」を続ける。
+- 本文は、道具のエラーの `ToolCallError.message` と、JSON-RPC のエラーの `message` だけ。`ToolCallError` の表示（「takt-mcp の道具 {tool} がエラーを返しました: …」）は使わない。
+- 改行と制御文字は空白 1 つにし、前後の空白を落とし、先頭 200 文字で切る。切ったら「…」を付ける。空になったら「takt の理由: 」ごと付けない。
+- 輸送のエラーの本文、`InvalidJson` の応答の本文、`ConfigError` の本文は、この欄にも出さない。
+- 理由：takt の理由（例：「ゴールが待ちの状態ではない」）は、利用者が次に何をするかを決める材料で、消すと画面からは「受け付けませんでした」しか分からない。画面は LAN と VPN の中で使う前提（オーナーの決定）なので、takt の理由を出しても困らない。issue の主な問題は、設定のパスと生の応答が出て読みにくいことで、それは消す。
+- 3 の登録案の食い違い（`registration_write_failure`）も、同じ形で「takt の理由: …」を続ける（今は括弧で本文を全部付けている）。
+
 ### 2. `write_failure`（`backend/src/grpc/mod.rs`）
 
 - 結果不明の枝から `（{error}）`、`（{message}）` を外す。元のエラーはログへ。
@@ -51,7 +60,7 @@ Authorization の値は、どの文面にも入らない（`mcp/http.rs:272` の
 
 ### 3. `registration_write_failure`（`backend/src/grpc/writes.rs`）
 
-FAILED_PRECONDITION の文から `（{error.message}）` を外す。「ゴール登録案は、作り直されたか、すでに承認・却下されています。画面を読み込み直してから、もう一度操作してください。」元の本文はログへ。食い違いの判定（`is_stale_registration`）は変えない。
+FAILED_PRECONDITION の文の `（{error.message}）` を、1 の「takt の理由: …」（改行を空白にし、200 文字で切ったもの）に替える。「ゴール登録案は、作り直されたか、すでに承認・却下されています。画面を読み込み直してから、もう一度操作してください。takt の理由: …」元の本文はログへ。食い違いの判定（`is_stale_registration`）は変えない。
 
 ### 4. 設定の読み込みの失敗（`grpc/resolve.rs:90`、`grpc/mod.rs:575`、`:624`）
 
@@ -62,7 +71,7 @@ FAILED_PRECONDITION の文から `（{error.message}）` を外す。「ゴー�
 `TransportError::InvalidJson` に入れる takt-mcp の応答の本文を、先頭 200 文字（文字の境界で切る）までにし、切ったときは「…（ほか N 文字）」を付ける。`mcp/http.rs` の SSE の枝がすでに 200 文字で切っているので、上限をそろえ、1 つの関数（`response_excerpt`）を 3 か所で使う。
 
 - 対象：`mcp/client.rs:382`（stdio の 1 行）、`mcp/http.rs:550`（SSE）、`mcp/http.rs:557`（JSON の本文）。
-- 道具のエラーの本文（`ToolCallError.message`）と JSON-RPC のエラーの本文（`Rpc.message`）は切らない。`is_stale_registration` が本文の中の語で判定するので、値を変えない。画面には 1〜3 で出なくなり、ログに残すだけになる。
+- 道具のエラーの本文（`ToolCallError.message`）と JSON-RPC のエラーの本文（`Rpc.message`）は、値としては切らない。`is_stale_registration` が本文の中の語で判定するので、値を変えない。画面へは 1 と 3 の「takt の理由」として、200 文字で切って出す。
 
 ## 変えないこと・範囲の外
 
@@ -74,8 +83,9 @@ FAILED_PRECONDITION の文から `（{error.message}）` を外す。「ゴー�
 
 ## 守る不変条件
 
-1. 書き込み RPC が返す Status の文面は、takt-mcp の応答の本文（道具のエラー、JSON-RPC のエラー、輸送のエラーの本文、解析の失敗の本文）と、設定のエラーの本文（パス、接続先の URL）を含まない。
-2. 1〜4 の境界が返す文面は、失敗の種類（と Timeout・Backoff の秒数）だけで決まる。
+1. 書き込み RPC が返す Status の文面は、輸送のエラーの本文、解析の失敗の本文、`InvalidJson` の応答の本文と、設定のエラーの本文（パス、接続先の URL）を含まない。
+2. 1〜4 の境界が返す文面は、失敗の種類（と Timeout・Backoff の秒数、道具のエラーと JSON-RPC のエラーの本文を整えた「takt の理由」）だけで決まる。
+2a. 「takt の理由」は、改行と制御文字を含まず、200 文字と「…」を超えない。
 3. gRPC の状態コードは、どの失敗でも変更の前と同じ。書き込みの Unknown／Failed の振り分けも同じ（#305 の結果不明の 504、#391 のコードを保つ）。
 4. 文面から外した詳細は、同じ失敗で backend のログに残る。
 5. `InvalidJson` に入る応答の本文は、先頭 200 文字までと省略の印だけ。
@@ -84,10 +94,11 @@ FAILED_PRECONDITION の文から `（{error.message}）` を外す。「ゴー�
 
 `grpc/` の単体テストに置く。文字列は任意の Unicode（空、改行、`{`、`}`、`（`、制御文字を含む）。
 
-- **P1 文面は本文によらない**：`ToolError` のすべての枝（`TransportError` の全 10 種と `Tool`、`Parse`）について、任意の本文 `a`、`b` で作った 2 つの失敗の `tool_error_status` の文面は等しい。`Timeout`・`Backoff` は同じ秒数で比べる。
+- **P1 文面は本文によらない**：`Tool` と `Rpc` を除く `ToolError` のすべての枝（`TransportError` の 9 種と `Parse`）について、任意の本文 `a`、`b` で作った 2 つの失敗の `tool_error_status` の文面は等しい。`Timeout`・`Backoff` は同じ秒数で比べる。
+- **P1a takt の理由**：`Tool`（任意の道具名と本文）と `Rpc`（任意のコードと本文）の文面は、固定の文と `takt_reason(本文)` だけで決まる（道具名とコードによらない）。`takt_reason(s)` は改行と制御文字を含まず、長さは 200 文字＋「…」以下で、`s` を整えたものが 200 文字以下なら、それと等しい。
 - **P2 書き込みの文面も本文によらない**：P1 と同じ組で、`write_failure` が返す Status の文面と、Unknown／Failed の別が等しい。
 - **P3 コードの表**：`tool_error_status` と `write_failure` のコードと Unknown／Failed の別が、表（変更の前のコードの対応を書き写したもの）と一致する。
-- **P4 登録案の食い違い**：`stale_summary` を含む任意の本文で、`registration_write_failure` の文面が 3 の固定の文と等しく、コードは FAILED_PRECONDITION。
+- **P4 登録案の食い違い**：`stale_summary` を含む任意の本文で、`registration_write_failure` の文面が 3 の固定の文と `takt_reason(本文)` だけで決まり、コードは FAILED_PRECONDITION。
 - **P5 設定**：`ConfigError` のすべての枝（任意のパスと本文）で、`config_load_status` の文面が等しく、コードは UNAVAILABLE。
 - **P6 抜き出し**：任意の文字列 `s` で、`response_excerpt(s)` は (a) `s` が 200 文字以下なら `s` と等しい、(b) それより長ければ `s` の先頭 200 文字で始まり、全体は 200 文字＋省略の印の長さ以下。文字の境界で切る（パニックしない）。
 
@@ -95,7 +106,7 @@ P1、P2、P5 は「本文が文面に入らない」より強い（どんな本�
 
 ## 不具合を捕らえるテスト（先に書いて、失敗を確かめる）
 
-- `backend/tests/write_grpc_test.rs`：偽の takt-mcp が、道具のエラーとして目印の文字列（`/Users/zq24zq/secret/config.json` のようなパス）を返すとき、書き込み RPC の Status の文面に目印が入らない。修正前は入るので失敗する。
+- `backend/tests/write_grpc_test.rs`：偽の takt-mcp が、複数行で長い道具のエラーを返すとき、書き込み RPC の Status の文面は固定の文で始まり、「takt の理由: 」に 1 行目が続き、改行を含まず、長さに上限がある。修正前は道具名つきの本文が改行ごと全部入るので失敗する。
 - 同：設定ファイルを壊して（存在しないパス）書き込み RPC を呼ぶと、文面に設定のパスが入らない。修正前は入る。
 - 上の PBT の P1〜P6。
 
@@ -114,6 +125,6 @@ P1、P2、P5 は「本文が文面に入らない」より強い（どんな本�
 
 - **上流（takt、takt-mcp）**：なし。
 - **保存済みのデータ**：なし。状態ストアにも書き込みの台帳にも、文面は保存しない（台帳はメモリの中で Status を持つだけ）。
-- **公開 API**：proto と gRPC の状態コードは変えない。Status の文面は変わる。文面に頼るのは画面（そのまま出すだけ）と、backend のテストの `contains` の確認。テストの確認は新しい文面に合わせて直す（「読み込み直」「結果は不明」「再送していません」「接続先の設定が変わる前」は残る）。
+- **公開 API**：proto と gRPC の状態コードは変えない。Status の文面は変わる。文面に頼るのは画面（そのまま出すだけ）と、backend のテストの `contains` の確認。テストの確認は新しい文面に合わせて直す（「読み込み直」「結果は不明」「再送していません」「接続先の設定が変わる前」は残る）。e2e の `e2e/tests/flow-8-write-failure-recovery.spec.ts` は、旧い文（「takt-mcp の道具が失敗しました」）を待っていたので、新しい文（「takt が操作を受け付けませんでした。」）に直す。
 - **守りの仕組み**：CI、関門、ルールセットは変えない。
 - **運用**：書き込みの失敗が backend のログ（launchd の標準エラー）に `warn` で 1 行ずつ増える。書き込みは人の操作の回数だけなので、量は小さい。

@@ -549,12 +549,15 @@ fn parse_incoming(body: &[u8], content_type: Option<&str>) -> Result<JsonRpcInco
     return response.ok_or_else(|| {
       ExchangeError::Transport(TransportError::InvalidJson(format!(
         "text/event-stream の応答に結果を持つメッセージがありません: {}",
-        text.chars().take(200).collect::<String>()
+        super::response_excerpt(&text)
       )))
     });
   }
   serde_json::from_slice(body).map_err(|error| {
-    ExchangeError::Transport(TransportError::InvalidJson(format!("{error}: {}", String::from_utf8_lossy(body))))
+    ExchangeError::Transport(TransportError::InvalidJson(format!(
+      "{error}: {}",
+      super::response_excerpt(&String::from_utf8_lossy(body))
+    )))
   })
 }
 

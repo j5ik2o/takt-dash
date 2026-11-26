@@ -378,8 +378,8 @@ impl McpProcess {
     self.send(&Outgoing::Request(request)).await?;
     loop {
       let line = self.read_line().await?;
-      let incoming: Incoming =
-        serde_json::from_str(&line).map_err(|error| TransportError::InvalidJson(format!("{error}: {line}")))?;
+      let incoming: Incoming = serde_json::from_str(&line)
+        .map_err(|error| TransportError::InvalidJson(format!("{error}: {}", super::response_excerpt(&line))))?;
       if incoming.is_server_request() {
         let response = Response::empty_result(incoming.id.clone().unwrap_or(Value::Null));
         self.send(&Outgoing::Response(response)).await?;

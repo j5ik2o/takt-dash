@@ -15,6 +15,7 @@
 
 pub mod assembly;
 mod detached_read;
+mod failure;
 mod lanes;
 pub mod mapping;
 mod resolve;
@@ -32,6 +33,7 @@ use std::{
 
 use assembly::{activity_event, assemble_goals, assemble_state_for, conversation_response};
 use chrono::{DateTime, Utc};
+use failure::{config_load_status, tool_error_status, write_failure};
 use mapping::{
   execution_status, goal_question, goal_status, goal_task, goal_work_log, optional_timestamp, run_status, task_status,
   timestamp,
@@ -41,14 +43,14 @@ use run_updates::{parse_log_cursor, read_updates_response};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use write_ledger::{WriteFailure, WriteLedger};
+use write_ledger::WriteLedger;
 
 use crate::{
   activity::ActivityStore,
   config::load_config,
   conversation::{ConversationQuery, ConversationReader},
   domain::{GoalId, IdempotencyKey, InstructionId, ProjectName, ReportFilename, RunSlug, ServerId, TaskName},
-  mcp::{McpClientRegistry, ToolError, TransportError},
+  mcp::McpClientRegistry,
   model::{self},
   run_log::{ContentRead, InitialRead, Instruction},
   run_progress::{RunLogHandle, RunLogHandles, RunReadFailure},
@@ -270,58 +272,11 @@ fn assemble_runs(views: &[model::ProjectView], store: &StateStore, now: DateTime
   runs
 }
 
-/// takt-mcp の道具エラーを gRPC のステータスへ変換する境界。
-fn tool_error_status(error: ToolError) -> Status {
-  match error {
-    | ToolError::Parse(message) => Status::internal(format!("takt-mcp の応答を解析できませんでした: {message}")),
-    | ToolError::Tool(error) => Status::unavailable(format!("takt-mcp の道具が失敗しました: {error}")),
-    | ToolError::Transport(error) => Status::unavailable(format!("takt-mcp へ接続できませんでした: {error}")),
-  }
-}
-
 /// 書き込み要求の鍵を検証する境界。鍵の無い要求は `None` のまま通します。
 fn idempotency_key(key: &Option<String>) -> Result<Option<IdempotencyKey>, Status> {
   key.as_deref().map(IdempotencyKey::try_from).transpose().map_err(|error| {
     Status::invalid_argument(format!("idempotency_key が不正です（1 から 128 文字の ASCII 表示文字）: {error}"))
   })
-}
-
-/// 書き込み道具のエラーを、書き込みの失敗へ変換する境界。
-///
-/// 接続の確立は道具を送る前に試みていますが、確立済みのセッションを使い回す HTTP 接続先では、
-/// 道具を送る段で初めて接続の失敗が分かることがあります。接続を張れなかった失敗と、消えた
-/// セッションを作り直せなかった失敗（[`TransportError::NotSent`]）は、道具が takt へ届いて
-/// いないので、書き込みは適用されていません。
-/// takt が拒否を返した失敗（道具のエラー、JSON-RPC のエラー、HTTP のエラーステータス）も、
-/// 書き込みが適用されていないと分かります。応答を受け取れなかった失敗と応答を読めなかった失敗は、
-/// 適用されたかどうか分かりません。接続の失敗と区別して DEADLINE_EXCEEDED で返し、結果が不明で
-/// あることを利用者へ伝えます。
-fn write_failure(error: ToolError) -> WriteFailure {
-  const CHECK: &str = "状態を確かめてから、必要ならやり直してください。";
-  match error {
-    | ToolError::Transport(TransportError::Timeout(seconds)) => WriteFailure::Unknown(Status::deadline_exceeded(
-      format!("takt-mcp から {seconds} 秒以内に応答がなく、操作の結果は不明です。{CHECK}"),
-    )),
-    | ToolError::Transport(
-      error @ (TransportError::Io(_)
-      | TransportError::ProcessExited
-      | TransportError::InvalidJson(_)
-      | TransportError::Protocol(_)),
-    ) => WriteFailure::Unknown(Status::deadline_exceeded(format!(
-      "takt-mcp の応答を受け取れず、操作の結果は不明です（{error}）。{CHECK}"
-    ))),
-    | ToolError::Parse(message) => WriteFailure::Unknown(Status::deadline_exceeded(format!(
-      "takt-mcp の応答を解析できず、操作の結果は不明です（{message}）。{CHECK}"
-    ))),
-    | error @ (ToolError::Tool(_)
-    | ToolError::Transport(
-      TransportError::Rpc { .. }
-      | TransportError::Http(_)
-      | TransportError::Spawn(_)
-      | TransportError::Backoff(_)
-      | TransportError::NotSent(_),
-    )) => WriteFailure::Failed(tool_error_status(error)),
-  }
 }
 
 /// run の保存場所の読み取り失敗を gRPC のステータスへ変換する。
@@ -571,8 +526,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
         Some(GoalId::try_from(text).map_err(|error| Status::invalid_argument(format!("goalId が不正です: {error}")))?)
       },
     };
-    let config = load_config(&self.config_path)
-      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
+    let config = load_config(&self.config_path).map_err(config_load_status)?;
     let configured = config
       .projects
       .iter()
@@ -620,8 +574,7 @@ impl v1::takt_dash_service_server::TaktDashService for TaktDashServiceImpl {
     }
     let project_name = ProjectName::try_from(project)
       .map_err(|error| Status::invalid_argument(format!("project が不正です: {error}")))?;
-    let config = load_config(&self.config_path)
-      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
+    let config = load_config(&self.config_path).map_err(config_load_status)?;
     let configured = config
       .projects
       .iter()

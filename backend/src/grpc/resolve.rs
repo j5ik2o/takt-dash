@@ -86,8 +86,7 @@ impl TaktDashServiceImpl {
   ///
   /// 設定に無いサーバー・プロジェクトは `unavailable` で返し、takt-mcp を起動しません。
   pub(super) fn resolve_project(&self, server_id: &ServerId, project: &ProjectName) -> Result<ResolvedProject, Status> {
-    let config = load_config(&self.config_path)
-      .map_err(|error| Status::unavailable(format!("設定を読み込めませんでした: {error}")))?;
+    let config = load_config(&self.config_path).map_err(super::config_load_status)?;
     resolve_project_in(&config, server_id, project)
   }
 
