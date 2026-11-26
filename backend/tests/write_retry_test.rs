@@ -11,7 +11,9 @@ use common::*;
 use grpc_harness::{client, start_server, GrpcHarness};
 use serde_json::{json, Value};
 use takt_dash_backend::{
+  config::{load_config, McpServer},
   domain::{GoalId, InquiryId, RegistrationRevision},
+  mcp::{client_config, Lane},
   model::{InquiryEntry, InquiryKind, ProjectSnapshot, RegistrationProposalEntry},
   takt_dash::v1::{AnswerInquiryRequest, ApproveGoalMergeRequest, ApproveGoalRegistrationRequest},
 };
@@ -53,6 +55,25 @@ fn harness_with(state: Value) -> GrpcHarness {
     time("2026-11-13T12:00:00Z"),
   );
   harness
+}
+
+/// 書き込みレーンの子プロセスを、呼び出し側の期限を測る前に起動して初期化しておく。
+///
+/// 呼び出し側の期限（[`CALLER_DEADLINE`]）と、mock の応答の遅れを見込んだ待ちで測るのは、
+/// takt への書き込みの往復だけです。高負荷では子プロセスの起動だけでこれを超え、mock へ
+/// 書き込みが届く前に呼び出し側が待つのをやめます。gRPC の書き込みと同じ起動設定で
+/// レジストリから書き込みレーンを取り、起動を済ませます。設定が違うとレジストリが
+/// 作り直すため、各テストは最後に子プロセスが1本だけだったことを確かめます。
+async fn warm_write_lane(harness: &GrpcHarness) {
+  let config = load_config(harness.config_path()).expect("テストの設定を読めます");
+  let project =
+    config.projects.iter().find(|project| project.name == "takt-dash").expect("テストのプロジェクトがあります");
+  let Some(McpServer::Stdio(server)) = config.servers.get(&project.write_server) else {
+    panic!("テストの書き込み接続先は stdio です");
+  };
+  let (handle, _) =
+    harness.registry.client(&project.write_server, &project.name, Lane::Write, || client_config(server, &project.cwd));
+  handle.lock().await.warm_up().await.expect("書き込みレーンの子プロセスを起動できます");
 }
 
 fn call_count(harness: &GrpcHarness, name: &str) -> usize {
@@ -100,6 +121,7 @@ fn within<T>(message: T, deadline: Duration) -> Request<T> {
 #[tokio::test]
 async fn retrying_an_answer_whose_response_timed_out_does_not_answer_twice() {
   let harness = harness_with(json!({ "delays": { "takt_answer_goal_question": SLOW_REPLY_MS } }));
+  warm_write_lane(&harness).await;
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -116,12 +138,15 @@ async fn retrying_an_answer_whose_response_timed_out_does_not_answer_twice() {
   assert_eq!(retried.inquiry_id, INQUIRY_ID);
   assert_eq!(call_count(&harness, "takt_answer_goal_question"), 1, "再試行で回答を重ねません");
 
+  assert_eq!(harness.recorded_processes().len(), 1, "温めた書き込みレーンの子プロセスへ書き込みます");
+
   server.stop().await;
 }
 
 #[tokio::test]
 async fn retrying_a_merge_approval_whose_response_timed_out_does_not_merge_twice() {
   let harness = harness_with(json!({ "delays": { "takt_merge_goal_pr": SLOW_REPLY_MS } }));
+  warm_write_lane(&harness).await;
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -131,6 +156,8 @@ async fn retrying_a_merge_approval_whose_response_timed_out_does_not_merge_twice
   client.approve_goal_merge(merge(Some("merge-1"))).await.expect("同じ鍵の再試行は、先の承認の結果を受け取ります");
 
   assert_eq!(call_count(&harness, "takt_merge_goal_pr"), 1, "再試行でマージの承認を重ねません");
+
+  assert_eq!(harness.recorded_processes().len(), 1, "温めた書き込みレーンの子プロセスへ書き込みます");
 
   server.stop().await;
 }
@@ -188,6 +215,7 @@ async fn a_write_without_a_key_finishes_after_the_caller_gives_up() {
   // 鍵のない書き込みも、呼び出し側が待つのをやめた後まで実行する。takt へ送った書き込みの
   // 子プロセスを打ち切らず、成功を書き込みの通し番号に記録します。
   let harness = harness_with(json!({ "delays": { "takt_merge_goal_pr": SLOW_REPLY_MS } }));
+  warm_write_lane(&harness).await;
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
 
@@ -197,6 +225,8 @@ async fn a_write_without_a_key_finishes_after_the_caller_gives_up() {
 
   assert_eq!(call_count(&harness, "takt_merge_goal_pr"), 1, "takt へ書き込みが届いています");
   assert_eq!(harness.registry.write_sequence("mac-mini", "takt-dash"), 1, "書き込みの応答を受け取って記録します");
+
+  assert_eq!(harness.recorded_processes().len(), 1, "温めた書き込みレーンの子プロセスへ書き込みます");
 
   server.stop().await;
 }

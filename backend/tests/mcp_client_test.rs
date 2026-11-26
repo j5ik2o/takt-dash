@@ -304,6 +304,9 @@ async fn drip_feed_that_keeps_the_connection_busy_still_times_out_on_the_whole_c
   let directory = tempfile::tempdir().expect("一時ディレクトリを作れます");
   let state = write_state(directory.path(), json!({}));
   let mut client = mock_client(mock_config_with_timeout(directory.path(), &state, Some("drip"), 1));
+  // 起動と initialize は呼び出しの期限に含まれない。高負荷では、起動の許可の待ちと mock の
+  // 起動だけで数秒かかるため、先に済ませてから呼び出しだけを測る。
+  client.warm_up().await.expect("mock を起動して初期化できます");
 
   let started = std::time::Instant::now();
   let error = transport(
