@@ -110,10 +110,11 @@ pub(super) fn tool_error_status(error: ToolError) -> Status {
 /// 道具を送る段で初めて接続の失敗が分かることがあります。接続を張れなかった失敗と、消えた
 /// セッションを作り直せなかった失敗（[`TransportError::NotSent`]）は、道具が takt へ届いて
 /// いないので、書き込みは適用されていません。
-/// takt が拒否を返した失敗（道具のエラー、JSON-RPC のエラー、HTTP のエラーステータス）も、
-/// 書き込みが適用されていないと分かります。応答を受け取れなかった失敗と応答を読めなかった失敗は、
-/// 適用されたかどうか分かりません。接続の失敗と区別して DEADLINE_EXCEEDED で返し、結果が不明で
-/// あることを利用者へ伝えます。
+/// takt が拒否を返した失敗（isError の道具のエラー、JSON-RPC のエラー、HTTP
+/// のエラーステータス）も、 書き込みが適用されていないと分かります。応答を受け取れなかった失敗、
+/// 応答を読めなかった失敗、 isError ではないのに本文の無い応答（issue
+/// #395）は、適用されたかどうか分かりません。接続の失敗と区別して DEADLINE_EXCEEDED
+/// で返し、結果が不明で あることを利用者へ伝えます。
 pub(super) fn write_failure(error: ToolError) -> WriteFailure {
   match error {
     | ToolError::Transport(TransportError::Timeout(seconds)) => {
@@ -137,6 +138,12 @@ pub(super) fn write_failure(error: ToolError) -> WriteFailure {
       log_detail("takt-mcp の書き込みの応答を解析できませんでした。", &error);
       WriteFailure::Unknown(Status::deadline_exceeded(format!(
         "takt-mcp の応答を読み取れず、操作の結果は不明です。{CHECK}"
+      )))
+    },
+    | ToolError::Tool(ref tool) if !tool.refused => {
+      log_detail("takt-mcp の書き込みの応答に本文がありませんでした。", &error);
+      WriteFailure::Unknown(Status::deadline_exceeded(format!(
+        "takt-mcp の応答に本文がなく、操作の結果は不明です。{CHECK}"
       )))
     },
     | error @ (ToolError::Tool(_)

@@ -8,9 +8,12 @@
 // DEDUP = false は修正前の遷移（backend は試行を区別せず、届いた要求を毎回 takt へ送る）。
 // DEDUP = true は修正案の遷移（要求は論理操作の鍵を持ち、backend は鍵ごとの台帳を引く）。
 // EXPIRY = true は、台帳が完了した記録を忘れること（保持期限・backend の再起動）を許す。
+// EMPTY_REPLY_UNKNOWN は、takt が isError ではない本文の無い応答を返したときの扱い（issue #395）。
+// false は修正前（適用されなかった失敗として伝え、台帳の記録を消す）、true は修正案（結果不明）。
 module writeRetry {
   const DEDUP: bool
   const EXPIRY: bool
+  const EMPTY_REPLY_UNKNOWN: bool
 
   type Key = str
 
@@ -125,6 +128,20 @@ module writeRetry {
     }
   }
 
+  // takt が isError ではない本文の無い応答を返す（issue #395）。takt は断っていないので、
+  // 書き込みを適用したあと（Unacked）でも、適用する前（Writing）でも起こりうる。応答を返したので、
+  // takt があとから適用することはない。
+  action taktEmptyReply(id: int): bool = {
+    val a = attempts.get(id)
+    val v = if (EMPTY_REPLY_UNKNOWN) SawUnknown else SawRejected
+    all {
+      a.phase == Writing or a.phase == Unacked,
+      attempts' = settleJoined(attempts.set(id, seen({ ...a, phase: Finished }, v)), a.key, v),
+      applied' = applied,
+      ledger' = if (DEDUP) ledger.set(a.key, if (EMPTY_REPLY_UNKNOWN) Unknown else Absent) else ledger,
+    }
+  }
+
   // backend が takt の応答を待つのをやめる（backend から takt への期限切れ）。
   action taktTimeout(id: int): bool = {
     val a = attempts.get(id)
@@ -190,6 +207,7 @@ module writeRetry {
       taktApply(id),
       taktAck(id),
       taktReject(id),
+      taktEmptyReply(id),
       taktTimeout(id),
       callerTimeout(id),
     },
@@ -245,15 +263,20 @@ module writeRetry {
 
 // 修正前の遷移。
 module current {
-  import writeRetry(DEDUP = false, EXPIRY = false).*
+  import writeRetry(DEDUP = false, EXPIRY = false, EMPTY_REPLY_UNKNOWN = false).*
 }
 
 // 修正案の遷移。台帳は記録を保持し続ける。
 module fixed {
-  import writeRetry(DEDUP = true, EXPIRY = false).*
+  import writeRetry(DEDUP = true, EXPIRY = false, EMPTY_REPLY_UNKNOWN = true).*
 }
 
 // 修正案の遷移で、台帳が記録を忘れることを許したもの。修正の限界を確かめるために置く。
 module fixedWithExpiry {
-  import writeRetry(DEDUP = true, EXPIRY = true).*
+  import writeRetry(DEDUP = true, EXPIRY = true, EMPTY_REPLY_UNKNOWN = true).*
+}
+
+// issue #395 の修正前。台帳はあるが、本文の無い応答を適用されなかった失敗として扱う。
+module emptyReplyAsRejected {
+  import writeRetry(DEDUP = true, EXPIRY = false, EMPTY_REPLY_UNKNOWN = false).*
 }

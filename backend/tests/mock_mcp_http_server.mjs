@@ -260,6 +260,10 @@ const handleToolCall = (name, args) => {
   if (isError.has(name) || isError.has(scopedKey)) {
     return { content: [{ type: "text", text: `${name} は失敗しました。` }], isError: true };
   }
+  // isError ではないのに本文（content[0].text）の無い応答を返す（issue #395）。
+  if ((state.noText ?? []).includes(name)) {
+    return { content: [] };
+  }
   // 道具エラーの文言の指定。実 takt-mcp が返す文言（stale_summary など）を再現する。
   if (state.toolErrors !== undefined && Object.prototype.hasOwnProperty.call(state.toolErrors, name)) {
     return { content: [{ type: "text", text: state.toolErrors[name] }], isError: true };

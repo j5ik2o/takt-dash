@@ -43,6 +43,7 @@
 //     "proposalsByCwd": { "<cwd>": [ {"revision","repositoryDirectory","summary"} ] },
 //     "responses": { "<道具名>": {...} },  // 指定した書き込み道具の応答を丸ごと差し替える
 //     "toolErrors": { "<道具名>": "<文言>" },  // 指定した道具を、その文言の isError で失敗させる
+//     "noText": ["takt_answer_goal_question"],  // 指定した道具は isError ではない本文の無い応答を返す
 //     "isError": ["takt_list_tasks", "takt_get_run:r1"]  // 指定した道具を isError で失敗させる。
 //                                                        // "<道具名>:<goalId または runSlug>" で対象を絞れる
 //     "hang": ["takt_list_goal_questions:g1", "takt_get_run:r1@120"], // 指定した呼び出しだけ応答しない。
@@ -524,6 +525,10 @@ const handleToolCall = (name, args) => {
   const scopedKey = `${name}:${args.goalId ?? args.runSlug ?? args.workflow ?? ""}`;
   if (isError.has(name) || isError.has(scopedKey)) {
     return { content: [{ type: "text", text: `${name} は失敗しました。` }], isError: true };
+  }
+  // isError ではないのに本文（content[0].text）の無い応答を返す（issue #395）。
+  if ((state.noText ?? []).includes(name)) {
+    return { content: [] };
   }
   // 道具エラーの文言の指定。実 takt-mcp が返す文言（stale_summary など）を再現する。
   if (state.toolErrors !== undefined && Object.prototype.hasOwnProperty.call(state.toolErrors, name)) {

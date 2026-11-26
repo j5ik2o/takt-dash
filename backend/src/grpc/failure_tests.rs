@@ -1,4 +1,5 @@
-//! 失敗の文面の性質（設計 docs/design/issue-306.md の P1〜P6）。
+//! 失敗の文面の性質（設計 docs/design/issue-306.md の P1〜P6、docs/design/issue-395.md の
+//! P7・P8）。
 
 use proptest::prelude::*;
 use tonic::Code;
@@ -88,16 +89,26 @@ fn expected_tool_code(kind: Kind) -> Code {
   }
 }
 
-/// 変更の前の `write_failure` の振り分けとコード。`true` は Unknown（結果不明）。
+/// `write_failure` の振り分けとコード。`true` は Unknown（結果不明）。takt
+/// が断ったと分かる失敗だけが Failed で、takt が断っていない本文の無い応答（`ToolNoText`）は
+/// Unknown です（issue #395）。
 fn expected_write(kind: Kind) -> (bool, Code) {
   match kind {
-    | Kind::Timeout | Kind::Io | Kind::ProcessExited | Kind::InvalidJson | Kind::Protocol | Kind::Parse => {
-      (true, Code::DeadlineExceeded)
-    },
-    | Kind::Tool | Kind::ToolNoText | Kind::Rpc | Kind::Http | Kind::Spawn | Kind::Backoff | Kind::NotSent => {
-      (false, Code::Unavailable)
-    },
+    | Kind::Timeout
+    | Kind::Io
+    | Kind::ProcessExited
+    | Kind::InvalidJson
+    | Kind::Protocol
+    | Kind::Parse
+    | Kind::ToolNoText => (true, Code::DeadlineExceeded),
+    | Kind::Tool | Kind::Rpc | Kind::Http | Kind::Spawn | Kind::Backoff | Kind::NotSent => (false, Code::Unavailable),
   }
+}
+
+/// 道具エラーの本文。登録案の食い違いを表す語を混ぜます。
+fn tool_message() -> impl Strategy<Value = String> {
+  (text(), prop::sample::select(vec!["", "stale_summary", "does not own the pending registration proposal"]), text())
+    .prop_map(|(before, marker, after)| format!("{before}{marker}{after}"))
 }
 
 fn split(failure: WriteFailure) -> (bool, Status) {
@@ -142,7 +153,7 @@ proptest! {
     assert_displayable(first.message());
   }
 
-  /// P2・P3：書き込みの失敗の文面も本文によらず、Unknown／Failed の別とコードは変更の前と同じ。
+  /// P2・P3：書き込みの失敗の文面も本文によらず、Unknown／Failed の別とコードは `expected_write` のとおり。
   #[test]
   fn write_failure_message_does_not_depend_on_the_body(kind in kind(), a in text(), b in text(), seconds in any::<u64>()) {
     let (first_unknown, first) = split(write_failure(error_of(kind, &a, seconds, "tool")));
@@ -154,6 +165,40 @@ proptest! {
     } else {
       prop_assert_eq!(first.message(), second.message());
     }
+    assert_displayable(first.message());
+  }
+
+  /// P7：takt が断っていない道具エラーは、どちらの書き込みの境界でも結果不明（DEADLINE_EXCEEDED）。
+  /// takt が断った道具エラーは Failed で、登録の境界は食い違いの語があれば FAILED_PRECONDITION。
+  #[test]
+  fn only_refused_tool_errors_are_known_not_applied(tool in text(), message in tool_message(), refused in any::<bool>()) {
+    let error = || ToolError::Tool(ToolCallError { tool: tool.clone(), message: message.clone(), refused });
+    let (write_unknown, write_status) = split(write_failure(error()));
+    let (registration_unknown, registration_status) =
+      split(super::super::writes::registration_write_failure(error()));
+    prop_assert_eq!(write_unknown, !refused);
+    prop_assert_eq!(registration_unknown, !refused);
+    let stale = message.contains("stale_summary") || message.contains("does not own the pending registration proposal");
+    let (write_code, registration_code) = match (refused, stale) {
+      | (false, _) => (Code::DeadlineExceeded, Code::DeadlineExceeded),
+      | (true, false) => (Code::Unavailable, Code::Unavailable),
+      | (true, true) => (Code::Unavailable, Code::FailedPrecondition),
+    };
+    prop_assert_eq!(write_status.code(), write_code);
+    prop_assert_eq!(registration_status.code(), registration_code);
+  }
+
+  /// P8：takt が断っていない道具エラーの書き込みの文面は、本文と道具名によらず同じで、1 行。
+  #[test]
+  fn unrefused_write_message_does_not_depend_on_the_tool_or_the_body(
+    tool_a in text(), tool_b in text(), body_a in tool_message(), body_b in tool_message(),
+  ) {
+    let failure = |tool: &str, message: &str| {
+      split(write_failure(ToolError::Tool(ToolCallError { tool: tool.to_owned(), message: message.to_owned(), refused: false })))
+    };
+    let (_, first) = failure(&tool_a, &body_a);
+    let (_, second) = failure(&tool_b, &body_b);
+    prop_assert_eq!(first.message(), second.message());
     assert_displayable(first.message());
   }
 
