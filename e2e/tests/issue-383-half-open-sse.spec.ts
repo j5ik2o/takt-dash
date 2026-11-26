@@ -66,7 +66,9 @@ test("半開きで無音になった接続を 40 秒で切断として扱い、�
 
   // 時計を止めてから 40 秒進める。止めずに進めると、テスト側が遅れた間に再接続の 1 秒が
   // 過ぎて新しい接続が受信し、切断中の画面を観測できないことがある。
-  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1));
+  // pauseAt は未来の時刻しか受け付けない。読んでから呼ぶまでに時計が進んでも過去に
+  // ならないよう 5 秒先で止める（最初の受信の直後なので、見張りの 40 秒には届かない）。
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 5_000));
   await page.evaluate(() => (window as unknown as { __halfOpenStateStream: () => void }).__halfOpenStateStream());
   await page.clock.fastForward(40_000);
 
