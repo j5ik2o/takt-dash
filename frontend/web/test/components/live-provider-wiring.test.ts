@@ -17,12 +17,13 @@
 // router.refresh 相当の再描画でも購読が維持されることは、マウントしなければ検証できない。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { act, createElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
+import { act, createElement, StrictMode, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { ConnectionState, DashboardState } from "../../src/proto/taktdash.ts";
 import { createDashboardState, NOW } from "../support/fixtures.ts";
+import { parseStreamUrl } from "../support/stream-url.ts";
 import { assertUnreadRunList, assertRejectsUnreadEmptyClaim } from "../support/run-list.ts";
 import { dashboardStateFromProto } from "../../src/state/restore-state.ts";
 import { formatClock } from "../../src/state/format.ts";
@@ -738,7 +739,8 @@ test("マウントで /api/state へ接続し、SSE の受信が Context と画�
 
   assert.equal(FakeEventSource.instances.length, 1, "マウントで接続が1つだけ開く");
   const source = FakeEventSource.instances[0]!;
-  assert.equal(source.url, "/api/state", "本番と同じ URL へ接続する");
+  assert.equal(parseStreamUrl(source.url).path, "/api/state", "本番と同じ URL へ接続する");
+  assert.equal(parseStreamUrl(source.url).ticket?.attempt, 1, "画面の識別子と最初の試行の番号を載せる");
   assert.equal(source.closed, false, "接続は開いたまま");
   assert.equal(holder.current?.disconnected, false, "初期値は接続中");
   assert.match(container.innerHTML, /corporate-site/, "初期状態の判断待ちが画面に出る");
@@ -778,7 +780,13 @@ test("SSE の切断が画面の通知へ反映され、再接続後の受信で�
 
   await waitForConnections(2);
   const reconnected = FakeEventSource.instances[1]!;
-  assert.equal(reconnected.url, "/api/state", "再接続も同じ URL へ向かう");
+  assert.equal(parseStreamUrl(reconnected.url).path, "/api/state", "再接続も同じ URL へ向かう");
+  assert.equal(
+    parseStreamUrl(reconnected.url).ticket?.screen,
+    parseStreamUrl(source.url).ticket?.screen,
+    "再接続も同じ画面の識別子",
+  );
+  assert.equal(parseStreamUrl(reconnected.url).ticket?.attempt, 2, "再接続は次の番号");
   await fireMessage(reconnected, wireState());
   assert.equal(holder.current?.disconnected, false, "再接続後の受信で切断フラグが消える");
   assert.equal(countOccurrences(container.innerHTML, BACKEND_UNREACHABLE_MESSAGE), 0, "通知が画面から消える");
@@ -980,4 +988,31 @@ test("アンマウントで復帰イベントの購読を外す", async (t) => {
     assert.ok(added.has(type), `${type} を購読する`);
     assert.equal(removed.get(type), added.get(type), `${type} の購読を同じ関数で外す`);
   }
+});
+
+test("StrictMode の二重の mount でも、開いたままの接続は 1 本だけ残る（issue #385）", async () => {
+  installDomEnvironment();
+  FakeEventSource.instances = [];
+  (globalThis as unknown as { EventSource: typeof FakeEventSource }).EventSource = FakeEventSource;
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const providerProps: ComponentProps<typeof StateStreamProvider> = {
+    initialSnapshotLoaded: true,
+    initialState: createDashboardState(),
+    children: createElement(LiveDecisions),
+  };
+  await act(async () => {
+    root.render(createElement(StrictMode, null, createElement(StateStreamProvider, providerProps)));
+  });
+  assert.equal(FakeEventSource.instances.length, 2, "StrictMode は effect を 2 回走らせ、接続を 2 回開く");
+  const open = FakeEventSource.instances.filter((source) => !source.closed);
+  assert.equal(open.length, 1, "先の mount の接続は close で閉じる");
+  const screens = new Set(FakeEventSource.instances.map((source) => parseStreamUrl(source.url).ticket?.screen));
+  assert.equal(screens.size, FakeEventSource.instances.length, "mount ごとに別の識別子なので、互いに閉じ合わない");
+  await act(async () => {
+    root.unmount();
+  });
+  container.remove();
+  assert.equal(FakeEventSource.instances.filter((source) => !source.closed).length, 0);
 });

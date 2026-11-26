@@ -2,7 +2,7 @@
 
 `frontend/web/app/api/state/route.ts`（backend の `WatchState` を SSE に中継する）が、画面に見捨てられた接続のサーバー側の資源（route.ts の `ReadableStream`、gRPC のストリーム、backend の `WatchState` のタスク）を長く溜めないことを Quint で確かめた記録です。設計は `docs/design/issue-385.md`。
 
-仕様とコードは機械的にはつながっていません。コードの挙動は `frontend/web/test/api/state-route.test.ts`、`frontend/web/test/server/state-relay.test.ts`、`frontend/web/test/components/state-stream.test.ts` が確かめます。
+仕様とコードは機械的にはつながっていません。コードの挙動は `frontend/web/test/api/state-route.test.ts`、`frontend/web/test/server/state-relay.test.ts`（状態機械の PBT）、`frontend/web/test/components/state-stream.test.ts`、`frontend/web/test/components/live-provider-wiring.test.ts`、`e2e/tests/issue-385-abandoned-sse.spec.ts` が確かめます。
 
 ## ファイル
 

@@ -179,3 +179,179 @@ test("backend のストリーム終了（end）後も共有 gRPC クライアン
     await server.shutdown();
   }
 });
+
+// issue #385: 画面に見捨てられた接続を、サーバー側に溜めない。
+const SCREEN_A = "0123456789abcdef0123456789abcdef";
+const SCREEN_B = "fedcba9876543210fedcba9876543210";
+let screenSerial = 0;
+// route.ts の登録簿はプロセスで 1 つなので、テストごとに別の画面の識別子を使う。
+const freshScreen = (base: string): string => {
+  screenSerial += 1;
+  return `${base.slice(0, 24)}${screenSerial.toString(16).padStart(8, "0")}`;
+};
+const stateUrl = (screen: string, attempt: number): string =>
+  `http://localhost/api/state?screen=${screen}&attempt=${attempt}`;
+
+const waitUntil = async (predicate: () => boolean, timeoutMs = 2_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
+
+const readWithin = async <T>(reader: ReadableStreamDefaultReader<T>, ms: number) =>
+  Promise.race([
+    reader.read(),
+    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), ms)),
+  ]);
+
+const decodeEvent = (chunk: Uint8Array | undefined): string => new TextDecoder().decode(chunk);
+
+test("同じ画面の新しい試行が届いたら、古い接続を閉じて backend の購読を外す", async () => {
+  let cancelled = 0;
+  const calls: string[] = [];
+  const server = await startTaktDashServer({
+    watch: [createDashboardState()],
+    holdWatchOpen: true,
+    calls,
+    onWatchCancelled: () => {
+      cancelled += 1;
+    },
+  });
+  const screen = freshScreen(SCREEN_A);
+  try {
+    await withServerEnv(server.address, async () => {
+      const older = await GET(new NextRequest(stateUrl(screen, 1)));
+      const olderReader = older.body!.getReader();
+      assert.equal((await olderReader.read()).done, false);
+      const newer = await GET(new NextRequest(stateUrl(screen, 2)));
+      const newerReader = newer.body!.getReader();
+      assert.equal((await newerReader.read()).done, false);
+      const olderNext = await readWithin(olderReader, 1_000);
+      assert.notEqual(olderNext, "timeout", "古い接続は待たずに終わる");
+      assert.equal(olderNext !== "timeout" && olderNext.done, true, "古い接続は終わる");
+      await waitUntil(() => cancelled === 1);
+      assert.equal(cancelled, 1, "古い接続の backend の購読だけを外す");
+      assert.equal(await readWithin(newerReader, 100), "timeout", "新しい接続は開いたまま");
+      await newerReader.cancel();
+    });
+  } finally {
+    await server.shutdown();
+  }
+  assert.deepEqual(calls.filter((call) => call === "WatchState").length, 2);
+});
+
+test("新しい試行が開いている間に遅れて届いた古い試行は、backend を購読せずに 204 で断る", async () => {
+  const calls: string[] = [];
+  let cancelled = 0;
+  const server = await startTaktDashServer({
+    watch: [createDashboardState()],
+    holdWatchOpen: true,
+    calls,
+    onWatchCancelled: () => {
+      cancelled += 1;
+    },
+  });
+  const screen = freshScreen(SCREEN_A);
+  try {
+    await withServerEnv(server.address, async () => {
+      const newer = await GET(new NextRequest(stateUrl(screen, 3)));
+      const newerReader = newer.body!.getReader();
+      assert.equal((await newerReader.read()).done, false);
+      const stale = await GET(new NextRequest(stateUrl(screen, 2)));
+      assert.equal(stale.status, 204);
+      assert.equal(stale.body, null);
+      assert.equal(await readWithin(newerReader, 100), "timeout", "いま使っている接続は閉じない");
+      assert.equal(cancelled, 0);
+      await newerReader.cancel();
+    });
+  } finally {
+    await server.shutdown();
+  }
+  assert.equal(calls.filter((call) => call === "WatchState").length, 1, "断った試行は backend を購読しない");
+});
+
+test("別の画面の接続と、識別子の無い接続は、付け替えで閉じない", async () => {
+  const server = await startTaktDashServer({ watch: [createDashboardState()], holdWatchOpen: true });
+  const screenA = freshScreen(SCREEN_A);
+  const screenB = freshScreen(SCREEN_B);
+  try {
+    await withServerEnv(server.address, async () => {
+      const readers = [];
+      for (const url of [
+        stateUrl(screenA, 1),
+        "http://localhost/api/state",
+        `http://localhost/api/state?screen=${screenA.toUpperCase()}&attempt=9`,
+        stateUrl(screenB, 5),
+        "http://localhost/api/state",
+      ]) {
+        const response = await GET(new NextRequest(url));
+        assert.equal(response.status, 200);
+        const reader = response.body!.getReader();
+        assert.equal((await reader.read()).done, false);
+        readers.push(reader);
+      }
+      for (const reader of readers) {
+        assert.equal(await readWithin(reader, 50), "timeout", "どの接続も開いたまま");
+        await reader.cancel();
+      }
+    });
+  } finally {
+    await server.shutdown();
+  }
+});
+
+test("Next が読めない間は最新の状態 1 件だけを持ち、読めたら最新を送る", async () => {
+  const states = [0, 1, 2, 3, 4].map((offset) => ({
+    ...createDashboardState(),
+    readAt: new Date(NOW.getTime() + offset * 1_000),
+  }));
+  const server = await startTaktDashServer({ watch: states, holdWatchOpen: true });
+  try {
+    await withServerEnv(server.address, async () => {
+      const response = await GET(new NextRequest(stateUrl(freshScreen(SCREEN_A), 1)));
+      // 読まずに待ち、backend の 5 件をすべて受けさせる。
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      assert.match(decodeEvent(first.value), /2026-11-13T07:30:00/);
+      const second = await reader.read();
+      assert.match(decodeEvent(second.value), /2026-11-13T07:30:04/, "途中の版を飛ばして最新を送る");
+      assert.equal(await readWithin(reader, 100), "timeout", "飛ばした版は送らない");
+      await reader.cancel();
+    });
+  } finally {
+    await server.shutdown();
+  }
+});
+
+test("Next の cancel のあとに abort が来ても、gRPC のストリームは 1 回だけ閉じる", async () => {
+  const controller = new AbortController();
+  const server = await startTaktDashServer({ watch: [createDashboardState()], holdWatchOpen: true });
+  let cancels = 0;
+  try {
+    await withServerEnv(server.address, async () => {
+      const client = getBackendClient();
+      const original = client.watchState.bind(client);
+      client.watchState = () => {
+        const stream = original();
+        const cancel = stream.cancel.bind(stream);
+        stream.cancel = () => {
+          cancels += 1;
+          cancel();
+        };
+        return stream;
+      };
+      const response = await GET(
+        new NextRequest(stateUrl(freshScreen(SCREEN_A), 1), { signal: controller.signal }),
+      );
+      const reader = response.body!.getReader();
+      assert.equal((await reader.read()).done, false);
+      await reader.cancel();
+      controller.abort();
+    });
+  } finally {
+    await server.shutdown();
+  }
+  assert.equal(cancels, 1);
+});

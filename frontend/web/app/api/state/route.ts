@@ -1,6 +1,9 @@
 import type { NextRequest } from "next/server";
 import { DashboardState } from "../../../src/proto/taktdash";
 import { getBackendClient, markBackendResponded } from "../../../src/grpc/client";
+import { createScreenStreams } from "../../../src/server/screen-streams";
+import { relayStateStream } from "../../../src/server/state-relay";
+import { parseStreamTicket } from "../../../src/state/stream-ticket";
 
 export const dynamic = "force-dynamic";
 
@@ -13,64 +16,22 @@ const SSE_HEADERS = {
 const toSseEvent = (state: DashboardState): Uint8Array =>
   new TextEncoder().encode(`data: ${JSON.stringify(DashboardState.toJSON(state))}\n\n`);
 
+// 画面ごとに開いている接続の登録簿。プロセスで 1 つ（issue #385）。
+const screenStreams = createScreenStreams();
+
 export async function GET(request: NextRequest): Promise<Response> {
-  // 共有クライアントはストリームを閉じても破棄しない。SSE ごとに作成・close しない。
-  const stream = getBackendClient().watchState();
-  const signal = request.signal;
-
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      let finished = false;
-      const finish = () => {
-        if (finished) {
-          return;
-        }
-        finished = true;
-        signal.removeEventListener("abort", finish);
-        stream.cancel();
-        stream.destroy();
-        try {
-          controller.close();
-        } catch {
-          // 既に閉じている場合は何もしない。
-        }
-      };
-
-      if (signal.aborted) {
-        finish();
-        return;
-      }
-
-      signal.addEventListener("abort", finish);
-      stream.on("data", (state: DashboardState) => {
-        markBackendResponded();
-        if (finished) {
-          return;
-        }
-        try {
-          controller.enqueue(toSseEvent(state));
-        } catch {
-          finish();
-        }
-      });
-      stream.on("error", finish);
-      stream.on("end", () => {
-        if (finished) {
-          return;
-        }
-        finished = true;
-        try {
-          controller.close();
-        } catch {
-          // 既に閉じている場合は何もしない。
-        }
-      });
-    },
-    cancel() {
-      stream.cancel();
-      stream.destroy();
-    },
+  const ticket = parseStreamTicket(request.nextUrl.searchParams);
+  const body = relayStateStream({
+    // 共有クライアントはストリームを閉じても破棄しない。SSE ごとに作成・close しない。
+    openStream: () => getBackendClient().watchState(),
+    signal: request.signal,
+    admit: ticket === undefined ? undefined : (close) => screenStreams.admit(ticket, close),
+    encode: toSseEvent,
+    onState: markBackendResponded,
   });
-
+  if (body === undefined) {
+    // 同じ画面のもっと新しい試行が開いている。この要求の EventSource は画面がもう閉じている。
+    return new Response(null, { status: 204, headers: { "Cache-Control": "no-cache, no-transform" } });
+  }
   return new Response(body, { headers: SSE_HEADERS });
 }
