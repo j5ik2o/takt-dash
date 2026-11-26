@@ -488,7 +488,7 @@ test("選択肢の回答は選んだ文字列を text として一覧の識別�
   assert.equal(action.payload.inquiryId, decision.inquiryId);
 });
 
-test("自由記述と作業の依頼の意図も従来どおりの回答を組み立てる", () => {
+test("自由記述の意図は従来どおりの回答を組み立て、作業の依頼の意図は送らずに確認を開く", () => {
   const textResolution = resolveDecisionIntent(textQuestion(), { type: "answer-text" }, { text: " 補足します " });
   assert.equal(textResolution.kind, "submit");
   const textAction = textResolution.kind === "submit" ? textResolution.action : undefined;
@@ -496,13 +496,12 @@ test("自由記述と作業の依頼の意図も従来どおりの回答を組�
   assert.equal(textAction.kind, "answer");
   assert.equal(textAction.payload.text, " 補足します ");
 
-  const reportResolution = resolveDecisionIntent(operation(), { type: "answer-report", report: 2 }, { text: "" });
-  assert.equal(reportResolution.kind, "submit");
-  const reportAction = reportResolution.kind === "submit" ? reportResolution.action : undefined;
-  assert.ok(reportAction);
-  assert.equal(reportAction.kind, "answer");
-  assert.equal(reportAction.payload.report, 2);
-  assert.equal(reportAction.payload.text, undefined);
+  // 作業の依頼の2択は確認ダイアログを開き、確定したときだけ送る（issue #308）。
+  // 確定で送る内容は test/components/issue-308-operation-confirm.test.ts が確かめる。
+  for (const report of [1, 2]) {
+    const reportResolution = resolveDecisionIntent(operation(), { type: "answer-report", report }, { text: "" });
+    assert.equal(reportResolution.kind, "open", `report ${report} は確認を開く`);
+  }
 });
 
 test("操作結果は一覧と同じ key を持ち、同じ key の結果は置換して別 key は保持する", () => {
