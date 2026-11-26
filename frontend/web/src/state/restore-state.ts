@@ -220,6 +220,7 @@ const toGoal = (raw: unknown): DashboardGoal => {
     serverId: toServerId(value.serverId),
     project: toProjectName(value.project),
     name: String(value.name ?? ""),
+    nameTruncated: value.nameTruncated === true, // 欠落（古い backend）と true 以外は false
     status: enumFromWire("GoalStatus", value.status),
     executionStatus: enumFromWire("ExecutionStatus", value.executionStatus),
     taskCounts: toTaskCounts(value.taskCounts),
@@ -285,6 +286,7 @@ const toPendingDecision = (raw: unknown): DashboardPendingDecision => {
     inquiryKind: enumFromWireOrUnrecognizedName("InquiryKind", value.inquiryKind),
     createdAt: toDate(value.createdAt),
     body: String(value.body ?? ""),
+    bodyTruncated: value.bodyTruncated === true,
     options: Array.isArray(value.options) ? value.options.map((option) => String(option)) : [],
     pullRequest: toPullRequest(value.pullRequest),
     stale: value.stale === true,

@@ -827,7 +827,7 @@ async fn standalone_inquiry_tool_error_keeps_connected_and_previous_inquiry() {
   let decisions =
     harness.store.pending_decisions(chrono::Utc::now(), takt_dash_backend::model::PendingDecisionFilter::Inquiry);
   assert!(
-    decisions.iter().any(|decision| decision.body == "作業をお願いします"),
+    decisions.iter().any(|decision| decision.body == "作業をお願いします".into()),
     "前回の standalone 問い合わせを保持します"
   );
 

@@ -22,7 +22,8 @@ const SENTENCE_END = new Set(["。", "！", "？"]);
 
 // 括弧・引用の外側にある最初の文末記号までを1文として取り出す。対応する開き括弧が
 // 無い閉じ括弧は深さを負にせず無視し、文末記号が無ければ前後の空白を除いた全体を返す。
-export function goalHeading(name: string): string {
+// complete は、文末記号で閉じた1文を取り出せたか。
+function firstSentence(name: string): { text: string; complete: boolean } {
   const expectedClosers: string[] = [];
   for (let index = 0; index < name.length; index += 1) {
     const char = name.charAt(index);
@@ -38,49 +39,35 @@ export function goalHeading(name: string): string {
       continue;
     }
     if (SENTENCE_END.has(char) && expectedClosers.length === 0) {
-      return name.slice(0, index + 1).trim();
+      return { text: name.slice(0, index + 1).trim(), complete: true };
     }
   }
-  return name.trim();
+  return { text: name.trim(), complete: false };
+}
+
+export function goalHeading(name: string): string {
+  return firstSentence(name).text;
 }
 
 // takt-mcp の一覧応答は、ゴールの objective を UTF-8 の 256 バイトで切り詰めた
-// preview を名前として返す。切り詰めの印は応答の別項目にあり、proto の Goal.name
-// には載らないため、表示側はバイト長と文末の形から切り詰めを推定する。バイト長が
-// preview の上限に達し、文末記号でも閉じ括弧でも終わっていない名前は、文の途中で
-// 切れた preview だと判断して省略記号を付け、単語の途中で黙って切れたように見せない
-// （issue #153）。恒久対策は backend が切り詰めの印を proto へ載せることであり、
-// ここでの推定はそれまでの表示側の対処である。
-const PREVIEW_BYTE_LIMIT = 256;
-// 切り詰めは文字の境界で行われるため、結果は上限から最大で1文字分（4バイト）短くなる。
-const PREVIEW_BYTE_FLOOR = PREVIEW_BYTE_LIMIT - 4;
+// preview を名前として返す。backend は takt の応答の印（要素の omissions.objective.totalBytes
+// と、ページの omissions）から切り詰めを判定し、Goal.nameTruncated に載せる（issue #230）。
+// 表示側は文の形やバイト長から推定せず、この印だけで省略記号を付ける。name 自体には
+// backend も省略記号を混ぜないため、省略記号は1つだけになる。
+export type GoalNameInput = { name: string; nameTruncated: boolean };
 
-const utf8Encoder = new TextEncoder();
-
-const endsComplete = (value: string): boolean => {
-  const last = value.charAt(value.length - 1);
-  return SENTENCE_END.has(last) || CLOSING_BRACKETS.has(last);
-};
-
-// 一覧応答の preview として切り詰められた名前かどうかを推定する。
-export function goalNameIsTruncatedPreview(name: string): boolean {
-  const trimmed = name.trim();
-  if (trimmed === "" || endsComplete(trimmed)) {
-    return false;
-  }
-  return utf8Encoder.encode(trimmed).length >= PREVIEW_BYTE_FLOOR;
-}
+const ELLIPSIS = "…";
 
 // 一覧で名前の全体を出す場合の表示名。切り詰められた preview には省略記号を付ける。
-export function goalDisplayName(name: string): string {
-  return goalNameIsTruncatedPreview(name) ? `${name.trim()}…` : name;
+export function goalDisplayName(goal: GoalNameInput): string {
+  return goal.nameTruncated ? `${goal.name.trim()}${ELLIPSIS}` : goal.name;
 }
 
-// 一覧の見出し。最初の1文が preview の範囲で完結する場合はその文を出し、
-// 1文自体が切り詰められている場合は省略記号を付ける。
-export function goalListHeading(name: string): string {
-  const heading = goalHeading(name);
-  return heading === name.trim() && goalNameIsTruncatedPreview(name) ? `${heading}…` : heading;
+// 一覧の見出し。最初の1文が preview の範囲で文末記号まで完結する場合はその文を出し、
+// 1文自体が切り詰められている場合だけ省略記号を付ける。
+export function goalListHeading(goal: GoalNameInput): string {
+  const heading = firstSentence(goal.name);
+  return goal.nameTruncated && !heading.complete ? `${heading.text}${ELLIPSIS}` : heading.text;
 }
 
 export type GoalTaskProgress = {

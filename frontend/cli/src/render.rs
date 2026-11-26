@@ -113,7 +113,7 @@ fn render_goal_line(goal: &proto::v1::Goal) -> Result<String, domain::DomainErro
   let running = TaskCount::try_from(counts.running)?;
   Ok(format!(
     "- {project}/{goal_id}「{}」完了{completed}件・失敗{failed}件（未着手{pending}件・実行中{running}件）",
-    goal.name
+    goal_name(goal)
   ))
 }
 
@@ -128,7 +128,26 @@ fn render_pending_detail(decision: &proto::v1::PendingDecision) -> Result<String
   let project = ProjectName::try_from(decision.project.as_str())?;
   let server_id = ServerId::try_from(decision.server_id.as_str())?;
   let kind = decision_label(PendingDecisionType::try_from(decision.r#type)?, decision.inquiry_kind)?;
-  Ok(format!("- {project}/{server_id}: {kind} {}", decision.body))
+  Ok(format!("- {project}/{server_id}: {kind} {}", decision_body(decision)))
+}
+
+/// ゴールの名前。takt が切った preview（`name_truncated`）は末尾に省略記号を付ける（issue #230）。
+/// backend は name に省略記号を混ぜないため、省略記号は 1 つだけになる。
+fn goal_name(goal: &proto::v1::Goal) -> String {
+  if goal.name_truncated {
+    format!("{}…", goal.name.trim_end())
+  } else {
+    goal.name.clone()
+  }
+}
+
+/// 判断待ちの本文。takt が切った文（`body_truncated`）は末尾に省略記号を付ける（issue #230）。
+fn decision_body(decision: &proto::v1::PendingDecision) -> String {
+  if decision.body_truncated {
+    format!("{}…", decision.body.trim_end())
+  } else {
+    decision.body.clone()
+  }
 }
 
 /// 判断待ちの種類を表示ラベルへ変換する。問い合わせのときだけ問い合わせの種類を検証する。
@@ -289,7 +308,7 @@ fn render_goal_row(goal: &Goal) -> String {
     goal.server_id,
     goal.project,
     goal.goal_id,
-    goal.name,
+    goal_name(goal),
     goal_status_label(goal.status),
     execution_status_label(goal.execution_status),
     counts.completed,
@@ -397,7 +416,7 @@ fn render_decision(
 ) -> Result<String, domain::DomainError> {
   let decision_type = PendingDecisionType::try_from(decision.r#type)?;
   let kind = decision_label(decision_type, decision.inquiry_kind)?;
-  let mut lines = vec![format!("- {kind}: {}", decision.body)];
+  let mut lines = vec![format!("- {kind}: {}", decision_body(decision))];
   if !decision.inquiry_id.is_empty() {
     let inquiry_id = InquiryId::try_from(decision.inquiry_id.as_str())?;
     lines.push(format!("問い合わせID: {inquiry_id}"));

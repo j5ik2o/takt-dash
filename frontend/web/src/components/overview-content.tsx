@@ -6,7 +6,6 @@ import { CONNECTION_STATE } from "../state/proto-values";
 import { decisionKey, decisionTypeLabel } from "../state/decision-actions";
 import { formatClock, formatDateTime, formatDuration, formatModel } from "../state/format";
 import { decisionHref, projectHref, serverAnchorId } from "../state/anchors";
-import { goalDisplayName } from "../state/goal-summary";
 import { readCountText } from "../state/read-coverage";
 import type { BackendUnavailableSituation } from "../grpc/client";
 import { BackendUnavailableNotice } from "./backend-unavailable-notice";
@@ -288,7 +287,7 @@ export function OverviewContent({
                         </a>
                       </td>
                       <td className="run-goal" data-label="ゴール">
-                        {runView.goalName ? <span className="g">{goalDisplayName(runView.goalName)}</span> : null}
+                        {runView.goalName ? <span className="g">{runView.goalName}</span> : null}
                         <div className="task">タスク「{runView.run.summary || runView.run.taskName}」</div>
                       </td>
                       <td className="run-step" data-label="ステップ">

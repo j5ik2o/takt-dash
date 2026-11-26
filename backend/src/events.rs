@@ -101,7 +101,9 @@ fn detect_goals(
 ) {
   for goal in &next.goals {
     let previous = prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id);
-    let name = goal.objective.trim().to_string();
+    // 目的は takt が切った preview
+    // のことがあるため、切ってあれば「」の中の末尾に省略記号を付けます。
+    let name = crate::model::with_ellipsis(goal.objective.text.trim(), goal.objective.truncated);
     match previous {
       | None => events.push(event(
         now,
@@ -264,7 +266,7 @@ fn detect_inquiries(
         server_id,
         Some(project),
         EventKind::Inquiry,
-        format!("問い合わせ「{}」を受け付けました。", inquiry.body),
+        format!("問い合わせ「{}」を受け付けました。", inquiry.body.display()),
         None,
       ));
     }

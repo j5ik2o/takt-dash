@@ -1,5 +1,7 @@
 //! mcp 応答のページ形式と基本フィールドの解析補助。
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
@@ -14,6 +16,8 @@ pub(super) fn domain_value<T>(label: &str, result: Result<T, DomainError>) -> Re
 pub(super) struct Page {
   pub(super) items:       Vec<Value>,
   pub(super) next_offset: Option<usize>,
+  /// 応答が 64 KiB に収まらず、takt-mcp が要素の文を短くした項目。
+  pub(super) shortened:   Shortened,
 }
 
 impl Page {
@@ -24,7 +28,57 @@ impl Page {
       .ok_or_else(|| ToolError::Parse(format!("応答に {key} の配列がありません")))?
       .clone();
     let next_offset = value.get("nextOffset").and_then(Value::as_u64).map(|value| value as usize);
-    Ok(Page { items, next_offset })
+    Ok(Page { items, next_offset, shortened: Shortened::from_value(value, key) })
+  }
+}
+
+/// ページの要素のうち、takt-mcp が応答の大きさの上限で短くした項目（issue #230）。
+///
+/// takt-mcp の一覧は 64 KiB に収まるまで要素の数を減らし、1 件でも収まらないときだけ文を
+/// 短くします。そのとき応答の最上位に `omissions: [{ "path": "<配列名>[].<項目>" }]` を付け、
+/// 書き切れなかった分の数を `omittedDetails` に入れます。path の番号は `[]` にまとめられて
+/// いるため、どの要素かは分かりません。ページの要素はそのとき 1 件なので、ページのすべての
+/// 要素の、その項目を短くしたとみなします。`omittedDetails` が正のときは、どの項目かを
+/// takt-mcp が書き切れていないので、すべての項目を短くしたとみなします。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct Shortened {
+  fields: BTreeSet<String>,
+  all:    bool,
+}
+
+impl Shortened {
+  pub(super) fn from_value(value: &Value, key: &str) -> Self {
+    let prefix = format!("{key}[].");
+    let fields = value
+      .get("omissions")
+      .and_then(Value::as_array)
+      .into_iter()
+      .flatten()
+      .filter_map(|omission| omission.get("path").and_then(Value::as_str))
+      .filter_map(|path| path.strip_prefix(&prefix))
+      .map(str::to_owned)
+      .collect();
+    let all = value.get("omittedDetails").and_then(Value::as_u64).is_some_and(|count| count > 0);
+    Shortened { fields, all }
+  }
+
+  /// 要素の `field`（`body`、`answer.text` など、要素からの path）を短くしたか。
+  pub(super) fn covers(&self, field: &str) -> bool {
+    self.all || self.fields.contains(field)
+  }
+
+  /// 要素の文の項目を読み、短くしてあれば印を付ける。
+  /// 空の文は短くしようがないので、印を付けません。
+  pub(super) fn preview(&self, value: &Value, field: &str) -> crate::model::PreviewText {
+    let text = optional_string(value, field).unwrap_or_default();
+    let truncated = !text.is_empty() && self.covers(field);
+    crate::model::PreviewText { text, truncated }
+  }
+
+  /// 文を、短くしてあれば末尾に省略記号を付けた表示用の文にする。空の文はそのままです。
+  pub(super) fn display(&self, text: String, field: &str) -> String {
+    let cut = !text.is_empty() && self.covers(field);
+    crate::model::with_ellipsis(&text, cut)
   }
 }
 

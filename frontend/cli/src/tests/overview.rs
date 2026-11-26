@@ -98,6 +98,7 @@ fn overview_rendering_distinguishes_operation_request_inquiry() {
     inquiry_id:      String::new(),
     revision:        None,
     merge_task_last: None,
+    body_truncated:  false,
   }];
 
   let rendered = render_overview(&state).expect("有効です");

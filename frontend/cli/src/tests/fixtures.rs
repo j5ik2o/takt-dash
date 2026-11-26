@@ -91,6 +91,7 @@ fn sample_overview_goals() -> Vec<v1::Goal> {
     pull_request:      Some(v1::PullRequest { number: 42, url: "https://example.test/pr/42".to_owned() }),
     awaiting_merge_at: Some(ts(1_731_500_000)),
     merge_task_last:   None,
+    name_truncated:    false,
   }]
 }
 
@@ -156,6 +157,7 @@ fn sample_overview_pending_decisions() -> Vec<PendingDecision> {
       inquiry_id:      String::new(),
       revision:        None,
       merge_task_last: None,
+      body_truncated:  false,
     },
     PendingDecision {
       r#type:          PendingDecisionType::AwaitingMerge as i32,
@@ -171,6 +173,7 @@ fn sample_overview_pending_decisions() -> Vec<PendingDecision> {
       inquiry_id:      String::new(),
       revision:        None,
       merge_task_last: None,
+      body_truncated:  false,
     },
     PendingDecision {
       r#type:          PendingDecisionType::GoalRegistration as i32,
@@ -186,6 +189,7 @@ fn sample_overview_pending_decisions() -> Vec<PendingDecision> {
       inquiry_id:      String::new(),
       revision:        Some(3),
       merge_task_last: None,
+      body_truncated:  false,
     },
   ]
 }
@@ -220,6 +224,7 @@ pub(super) fn sample_goals() -> Vec<v1::Goal> {
       pull_request:      Some(v1::PullRequest { number: 42, url: "https://example.test/pr/42".to_owned() }),
       awaiting_merge_at: Some(ts(1_731_500_000)),
       merge_task_last:   None,
+      name_truncated:    false,
     },
     v1::Goal {
       goal_id:           "goal-web".to_owned(),
@@ -240,6 +245,7 @@ pub(super) fn sample_goals() -> Vec<v1::Goal> {
       pull_request:      None,
       awaiting_merge_at: None,
       merge_task_last:   Some(TASK_STATUS_PENDING),
+      name_truncated:    false,
     },
   ]
 }

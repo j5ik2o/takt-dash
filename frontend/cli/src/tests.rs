@@ -10,3 +10,4 @@ mod fixtures;
 mod goals;
 mod overview;
 mod support;
+mod truncation;

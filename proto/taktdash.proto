@@ -206,6 +206,7 @@ message Goal {
   PullRequest pull_request = 9;                        // プルリクエストの番号と URL
   optional google.protobuf.Timestamp awaiting_merge_at = 10;  // awaiting_merge のゴールでは人のマージ待ちになった時刻（仕上げタスクが未着手・実行中のあいだは無い）。それ以外のゴールでは awaiting_merge 通知の時刻
   optional TaskStatus merge_task_last = 11;            // 仕上げタスクの最後の状態（なければ人のマージ待ち）
+  bool name_truncated = 12;                            // name は takt が切った preview で、続きがある（takt の応答の印による。name 自体には省略記号を含めない）
 }
 
 // ゴールの実行で通ったステップを表す。
@@ -259,6 +260,7 @@ message PendingDecision {
   string inquiry_id = 11;                 // 問い合わせの識別子（AnswerInquiry の inquiry_id に渡す。マージ待ちは空。ゴールに属さない問い合わせには回答できない）
   optional int32 revision = 12;           // ゴール登録の承認待ちの revision（承認・却下に渡す。それ以外は省略）
   optional TaskStatus merge_task_last = 13;  // マージ待ちのゴールの仕上げタスクの最後の状態（それ以外は省略する）
+  bool body_truncated = 14;               // body は takt が切った文で、続きがある（takt の応答の印による。body 自体には省略記号を含めない）
 }
 
 // 異常判定の基準を表す。

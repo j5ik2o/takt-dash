@@ -1,5 +1,6 @@
 import type { AnomalyThresholds, Goal, Project, Run, Server } from "../proto/taktdash";
 import { formatClock } from "./format";
+import { goalDisplayName } from "./goal-summary";
 import { CONNECTION_STATE } from "./proto-values";
 
 // 復元境界の内部状態では、ゴール非所属の Run.goalId は未指定になるため、
@@ -13,6 +14,7 @@ export type RunView = {
   state: "live" | "warn" | "idle";
   label: string;
   note: string;
+  // ゴールの表示名。takt が切った preview には省略記号を付けてある（issue #230）。
   goalName?: string;
   currentStepName?: string;
   stepNumber?: number;
@@ -34,14 +36,15 @@ export function toRunView(
 ): RunView {
   const server = serverById.get(run.serverId);
   const lastStep = run.steps.at(-1);
-  const goalName = run.goalId !== undefined ? goalsById?.get(run.goalId)?.name : undefined;
+  const goal = run.goalId !== undefined ? goalsById?.get(run.goalId) : undefined;
+  const goalName = goal !== undefined && goal.name !== "" ? goalDisplayName(goal) : undefined;
   const elapsedSeconds = run.lastLogAt
     ? Math.max(0, Math.floor((now.getTime() - run.lastLogAt.getTime()) / 1_000))
     : undefined;
   const derived = {
     run,
     server,
-    goalName: goalName !== undefined && goalName !== "" ? goalName : undefined,
+    goalName,
     currentStepName:
       run.currentStepName !== undefined && run.currentStepName !== "" ? run.currentStepName : undefined,
     model: lastStep?.model !== undefined && lastStep.model !== "" ? lastStep.model : undefined,

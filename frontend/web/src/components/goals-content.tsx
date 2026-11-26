@@ -77,8 +77,8 @@ export function GoalsContent({ state, snapshotLoaded, project, disconnected, una
         <ul className="cards">
           {goals.map((goal) => {
             const counts = countEntries(goal);
-            const heading = goalListHeading(goal.name);
-            const fullName = goalDisplayName(goal.name);
+            const heading = goalListHeading(goal);
+            const fullName = goalDisplayName(goal);
             return (
               <li className="card" key={goal.goalId}>
                 <div className="card-head goal-card-head">

@@ -211,9 +211,10 @@ impl RunLogView {
 /// takt のタスク要約と同じ規則（前後の空白を除き、1行目の先頭 80 文字）で、タスクの本文を縮める。
 ///
 /// takt は UTF-16 の単位で 80 を数えますが、ここでは文字（Unicode のスカラー値）で数えます。
-/// 差が出るのは BMP の外の文字（絵文字など）を含むときだけです。
+/// 差が出るのは BMP の外の文字（絵文字など）を含むときだけです。1 行目が 80 文字を超えて切った
+/// ときだけ、末尾に省略記号を付けます（issue #230）。1 行目だけにするのは要約で、印は付けません。
 pub(crate) fn task_summary(task_text: &str) -> String {
-  task_text.trim().lines().next().unwrap_or_default().chars().take(TASK_SUMMARY_CHARS).collect()
+  crate::model::truncate_chars(task_text.trim().lines().next().unwrap_or_default(), TASK_SUMMARY_CHARS)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -14,6 +14,60 @@ use crate::domain::{
   ConversationId, GoalId, InquiryId, ProjectName, PullRequestNumber, RegistrationRevision, RunSlug, TaskName,
 };
 
+/// 切り詰めた文の末尾に付ける省略記号。
+pub const ELLIPSIS: char = '…';
+
+/// takt の応答の文と、takt の印がその文を途中で切ってあると言っているか（issue #230）。
+///
+/// `text` は応答の文のまま持ち、省略記号を混ぜません。印は文の形から推定せず、takt の応答の
+/// `omissions` だけから決めます。省略記号を付けた表示用の文は [`PreviewText::display`] で作ります。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreviewText {
+  pub text:      String,
+  pub truncated: bool,
+}
+
+impl PreviewText {
+  /// 切っていないと分かっている文。
+  pub fn complete(text: impl Into<String>) -> Self {
+    PreviewText { text: text.into(), truncated: false }
+  }
+
+  /// 切ってあれば末尾に省略記号を 1 つ付けた、表示用の文。
+  pub fn display(&self) -> String {
+    with_ellipsis(&self.text, self.truncated)
+  }
+}
+
+impl From<String> for PreviewText {
+  fn from(text: String) -> Self {
+    PreviewText::complete(text)
+  }
+}
+
+impl From<&str> for PreviewText {
+  fn from(text: &str) -> Self {
+    PreviewText::complete(text)
+  }
+}
+
+/// `cut` なら末尾に省略記号を 1 つ付ける。
+pub fn with_ellipsis(text: &str, cut: bool) -> String {
+  if cut {
+    format!("{text}{ELLIPSIS}")
+  } else {
+    text.to_owned()
+  }
+}
+
+/// 先頭 `max_chars` 文字（Unicode のスカラー値）に収め、超えた分を切ったときだけ省略記号を付ける。
+pub fn truncate_chars(text: &str, max_chars: usize) -> String {
+  match text.char_indices().nth(max_chars) {
+    | Some((end, _)) => with_ellipsis(&text[..end], true),
+    | None => text.to_owned(),
+  }
+}
+
 /// ゴールの状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalStatus {
@@ -155,7 +209,8 @@ pub struct GoalEntry {
   pub goal_id:             GoalId,
   pub status:              GoalStatus,
   pub execution_status:    ExecutionStatus,
-  pub objective:           String,
+  /// 一覧の目的。takt-mcp は 256 バイトで切った preview を返し、印を別の項目に持ちます。
+  pub objective:           PreviewText,
   pub integration_branch:  String,
   pub pull_request_number: Option<PullRequestNumber>,
   pub pull_request_url:    Option<String>,
@@ -269,7 +324,7 @@ pub struct InquiryEntry {
   pub inquiry_id: InquiryId,
   pub goal_id:    Option<GoalId>,
   pub kind:       InquiryKind,
-  pub body:       String,
+  pub body:       PreviewText,
   pub options:    Vec<String>,
   pub answered:   bool,
   pub created_at: DateTime<Utc>,
@@ -418,7 +473,7 @@ pub struct PendingDecision {
   pub goal_id:             Option<String>,
   pub inquiry_kind:        Option<InquiryKind>,
   pub created_at:          DateTime<Utc>,
-  pub body:                String,
+  pub body:                PreviewText,
   pub options:             Vec<String>,
   pub pull_request_number: Option<PullRequestNumber>,
   pub pull_request_url:    Option<String>,
@@ -486,3 +541,7 @@ pub struct ProjectView {
   /// 状態の元になった snapshot。プロジェクトがまだ一度も読めていない場合は None。
   pub snapshot:         Option<ProjectSnapshot>,
 }
+
+#[cfg(test)]
+#[path = "model_preview_tests.rs"]
+mod preview_tests;

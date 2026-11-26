@@ -93,33 +93,83 @@ test("タスクの件数が無いゴールは全件0として扱う", () => {
 const TRUNCATED_PREVIEW =
   "taktDash の関門と道具の穴4件を解消する。対象は issue #132（https://github.com/j5ik2o/takt-dash/issues/132 、proto-check が index 依存で、proto を変更するタスクは machine_gate を通過できない）、issue #98（https://";
 
-test("切り詰められた preview の表示名には省略記号を付ける", () => {
-  assert.equal(goalDisplayName(TRUNCATED_PREVIEW), `${TRUNCATED_PREVIEW}…`);
+// 切り詰めの印は backend が takt の応答から判定して nameTruncated に載せる（issue #230）。
+// 表示側は文の形やバイト長から推定しない。
+const cut = (name: string) => ({ name, nameTruncated: true });
+const whole = (name: string) => ({ name, nameTruncated: false });
+
+test("印のある preview の表示名には省略記号を付ける", () => {
+  assert.equal(goalDisplayName(cut(TRUNCATED_PREVIEW)), `${TRUNCATED_PREVIEW}…`);
 });
 
-test("文で完結する長い名前には省略記号を付けない", () => {
-  const complete = `${"あ".repeat(84)}。`;
-  assert.equal(goalDisplayName(complete), complete);
+test("QA で見つかった、文の途中で切れた短い目的にも印があれば省略記号を付ける", () => {
+  assert.equal(goalDisplayName(cut("土台と完成申請の宛先は、プルリク")), "土台と完成申請の宛先は、プルリク…");
 });
 
-test("閉じ括弧で終わる長い名前には省略記号を付けない", () => {
-  const complete = `${"あ".repeat(83)}（補足）`;
-  assert.equal(goalDisplayName(complete), complete);
+test("印の無い名前は、256 バイトで文末記号が無くても省略記号を付けない", () => {
+  const longWithoutEnd = `${"あ".repeat(84)}htt`;
+  assert.equal(goalDisplayName(whole(longWithoutEnd)), longWithoutEnd);
+  assert.equal(goalDisplayName(whole(TRUNCATED_PREVIEW)), TRUNCATED_PREVIEW);
+});
+
+test("印のある名前は、文末記号で終わっていても続きがあるので省略記号を付ける", () => {
+  const endsWithStop = `${"あ".repeat(84)}。`;
+  assert.equal(goalDisplayName(cut(endsWithStop)), `${endsWithStop}…`);
 });
 
 test("短い名前はそのまま表示する", () => {
-  assert.equal(goalDisplayName("採用ページのレイアウトを直す"), "採用ページのレイアウトを直す");
+  assert.equal(goalDisplayName(whole("採用ページのレイアウトを直す")), "採用ページのレイアウトを直す");
 });
 
-test("見出しが最初の文で完結する場合は省略記号を付けない", () => {
-  assert.equal(goalListHeading(TRUNCATED_PREVIEW), "taktDash の関門と道具の穴4件を解消する。");
+test("見出しが最初の文で完結する場合は、印があっても省略記号を付けない", () => {
+  assert.equal(goalListHeading(cut(TRUNCATED_PREVIEW)), "taktDash の関門と道具の穴4件を解消する。");
 });
 
-test("最初の文自体が preview で切れている見出しには省略記号を付ける", () => {
-  const cut = `${"あ".repeat(84)}htt`;
-  assert.equal(goalListHeading(cut), `${cut}…`);
+test("preview がちょうど最初の文の文末で切れた見出しには省略記号を付けない", () => {
+  assert.equal(goalListHeading(cut("最初の文で切れた。")), "最初の文で切れた。");
 });
 
-test("文末記号の無い短い名前の見出しには省略記号を付けない", () => {
-  assert.equal(goalListHeading("採用ページのレイアウトを直す"), "採用ページのレイアウトを直す");
+test("最初の文自体が切れている見出しには、印があるときだけ省略記号を付ける", () => {
+  const text = `${"あ".repeat(84)}htt`;
+  assert.equal(goalListHeading(cut(text)), `${text}…`);
+  assert.equal(goalListHeading(whole(text)), text);
+});
+
+test("文末記号の無い短い名前の見出しには、印が無ければ省略記号を付けない", () => {
+  assert.equal(goalListHeading(whole("採用ページのレイアウトを直す")), "採用ページのレイアウトを直す");
+});
+
+// 生成した名前で、印と省略記号の関係を確かめる（設計の P6・P7）。
+const PARTS = ["あ", "😀", "。", "！", "「", "」", "（", "）", " ", "\n", "…", "https://example.test/a", "a"];
+
+const generatedNames = (): string[] => {
+  let seed = 230;
+  const next = () => {
+    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+    return seed;
+  };
+  return Array.from({ length: 500 }, () =>
+    Array.from({ length: next() % 30 }, () => PARTS[next() % PARTS.length]).join(""),
+  );
+};
+
+test("表示名は印のあるときだけ、前後の空白を除いた名前の末尾に省略記号を1つ足す（生成した名前）", () => {
+  for (const name of generatedNames()) {
+    assert.equal(goalDisplayName(whole(name)), name, JSON.stringify(name));
+    assert.equal(goalDisplayName(cut(name)), `${name.trim()}…`, JSON.stringify(name));
+  }
+});
+
+test("見出しは印が無ければ最初の文のまま、印があれば最初の文が閉じていないときだけ省略記号を足す（生成した名前）", () => {
+  for (const name of generatedNames()) {
+    const heading = goalHeading(name);
+    assert.equal(goalListHeading(whole(name)), heading, JSON.stringify(name));
+    const marked = goalListHeading(cut(name));
+    if (heading !== name.trim()) {
+      // 最初の文が文末記号で閉じ、その後ろに続きがある。
+      assert.equal(marked, heading, JSON.stringify(name));
+    } else {
+      assert.ok(marked === heading || marked === `${heading}…`, JSON.stringify(name));
+    }
+  }
 });

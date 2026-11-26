@@ -490,7 +490,8 @@ fn run_entry_summary_is_the_first_line_of_the_meta_task() {
 
 #[test]
 fn run_entry_summary_is_cut_at_eighty_characters() {
-  // 1行目が 80 文字を超えるときは、先頭 80 文字（バイトではなく文字）で切る。
+  // 1行目が 80 文字を超えるときは、先頭 80 文字（バイトではなく文字）で切り、切ったことが
+  // 分かるよう末尾に省略記号を付ける（issue #230）。
   let project = Project::new();
   let fixture = project.fixture(&["r1"]);
   let mut meta = running_meta("implement", 1, WORKFLOW, "2026-11-13T09:00:00Z");
@@ -501,7 +502,7 @@ fn run_entry_summary_is_cut_at_eighty_characters() {
 
   let entry = logs.read(&run_slug("r1")).expect("run を読めます").run_entry(&run_slug("r1"), &task(None));
 
-  assert_eq!(entry.summary, "あ".repeat(79) + "い");
+  assert_eq!(entry.summary, "あ".repeat(79) + "い…");
 }
 
 #[test]

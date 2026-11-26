@@ -241,7 +241,11 @@ fn caps_a_long_tool_name_to_the_summary_limit() {
 
   let read = activity(&mut reader, &fixture.run_dir);
 
-  assert_eq!(read.latest_tool.map(|tool| tool.chars().count()), Some(MAX_SUMMARY_CHARS), "道具名は上限で切り詰めます");
+  assert_eq!(
+    read.latest_tool,
+    Some("T".repeat(MAX_SUMMARY_CHARS) + "…"),
+    "道具名は上限で切り詰め、切ったことが分かるよう末尾に省略記号を付けます"
+  );
 }
 
 #[test]

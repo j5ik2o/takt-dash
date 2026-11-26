@@ -677,7 +677,11 @@ export interface Goal {
     | Date
     | undefined;
   /** 仕上げタスクの最後の状態（なければ人のマージ待ち） */
-  mergeTaskLast?: TaskStatus | undefined;
+  mergeTaskLast?:
+    | TaskStatus
+    | undefined;
+  /** name は takt が切った preview で、続きがある（takt の応答の印による。name 自体には省略記号を含めない） */
+  nameTruncated: boolean;
 }
 
 /** ゴールの実行で通ったステップを表す。 */
@@ -789,7 +793,11 @@ export interface PendingDecision {
     | number
     | undefined;
   /** マージ待ちのゴールの仕上げタスクの最後の状態（それ以外は省略する） */
-  mergeTaskLast?: TaskStatus | undefined;
+  mergeTaskLast?:
+    | TaskStatus
+    | undefined;
+  /** body は takt が切った文で、続きがある（takt の応答の印による。body 自体には省略記号を含めない） */
+  bodyTruncated: boolean;
 }
 
 /** 異常判定の基準を表す。 */
@@ -2097,6 +2105,7 @@ function createBaseGoal(): Goal {
     pullRequest: undefined,
     awaitingMergeAt: undefined,
     mergeTaskLast: undefined,
+    nameTruncated: false,
   };
 }
 
@@ -2134,6 +2143,9 @@ export const Goal: MessageFns<Goal> = {
     }
     if (message.mergeTaskLast !== undefined) {
       writer.uint32(88).int32(message.mergeTaskLast);
+    }
+    if (message.nameTruncated !== false) {
+      writer.uint32(96).bool(message.nameTruncated);
     }
     return writer;
   },
@@ -2239,6 +2251,14 @@ export const Goal: MessageFns<Goal> = {
             message.mergeTaskLast = reader.int32() as any;
             continue;
           }
+          case 12: {
+            if (tag !== 96) {
+              break;
+            }
+
+            message.nameTruncated = reader.bool();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -2296,6 +2316,11 @@ export const Goal: MessageFns<Goal> = {
         : isSet(object.merge_task_last)
         ? taskStatusFromJSON(object.merge_task_last)
         : undefined,
+      nameTruncated: isSet(object.nameTruncated)
+        ? globalThis.Boolean(object.nameTruncated)
+        : isSet(object.name_truncated)
+        ? globalThis.Boolean(object.name_truncated)
+        : false,
     };
   },
 
@@ -2334,6 +2359,9 @@ export const Goal: MessageFns<Goal> = {
     if (message.mergeTaskLast !== undefined) {
       obj.mergeTaskLast = taskStatusToJSON(message.mergeTaskLast);
     }
+    if (message.nameTruncated !== false) {
+      obj.nameTruncated = message.nameTruncated;
+    }
     return obj;
   },
 
@@ -2357,6 +2385,7 @@ export const Goal: MessageFns<Goal> = {
       : undefined;
     message.awaitingMergeAt = object.awaitingMergeAt ?? undefined;
     message.mergeTaskLast = object.mergeTaskLast ?? undefined;
+    message.nameTruncated = object.nameTruncated ?? false;
     return message;
   },
 };
@@ -3010,6 +3039,7 @@ function createBasePendingDecision(): PendingDecision {
     inquiryId: "",
     revision: undefined,
     mergeTaskLast: undefined,
+    bodyTruncated: false,
   };
 }
 
@@ -3053,6 +3083,9 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     }
     if (message.mergeTaskLast !== undefined) {
       writer.uint32(104).int32(message.mergeTaskLast);
+    }
+    if (message.bodyTruncated !== false) {
+      writer.uint32(112).bool(message.bodyTruncated);
     }
     return writer;
   },
@@ -3174,6 +3207,14 @@ export const PendingDecision: MessageFns<PendingDecision> = {
             message.mergeTaskLast = reader.int32() as any;
             continue;
           }
+          case 14: {
+            if (tag !== 112) {
+              break;
+            }
+
+            message.bodyTruncated = reader.bool();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -3231,6 +3272,11 @@ export const PendingDecision: MessageFns<PendingDecision> = {
         : isSet(object.merge_task_last)
         ? taskStatusFromJSON(object.merge_task_last)
         : undefined,
+      bodyTruncated: isSet(object.bodyTruncated)
+        ? globalThis.Boolean(object.bodyTruncated)
+        : isSet(object.body_truncated)
+        ? globalThis.Boolean(object.body_truncated)
+        : false,
     };
   },
 
@@ -3275,6 +3321,9 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     if (message.mergeTaskLast !== undefined) {
       obj.mergeTaskLast = taskStatusToJSON(message.mergeTaskLast);
     }
+    if (message.bodyTruncated !== false) {
+      obj.bodyTruncated = message.bodyTruncated;
+    }
     return obj;
   },
 
@@ -3298,6 +3347,7 @@ export const PendingDecision: MessageFns<PendingDecision> = {
     message.inquiryId = object.inquiryId ?? "";
     message.revision = object.revision ?? undefined;
     message.mergeTaskLast = object.mergeTaskLast ?? undefined;
+    message.bodyTruncated = object.bodyTruncated ?? false;
     return message;
   },
 };

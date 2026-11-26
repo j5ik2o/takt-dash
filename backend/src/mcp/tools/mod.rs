@@ -224,7 +224,7 @@ impl<'a> ToolSetCore<'a> {
       let value = self.call_json("takt_list_goals", json!({ "offset": offset })).await?;
       let page = Page::from_value(&value, "goals")?;
       for item in &page.items {
-        entries.push(parse_goal(item)?);
+        entries.push(parse_goal(item, &page.shortened)?);
       }
       match page.next_offset {
         | Some(next) => offset = next,
@@ -312,7 +312,7 @@ impl<'a> ToolSetCore<'a> {
         self.call_json("takt_list_goal_questions", json!({ "goalId": goal_id.as_str(), "offset": offset })).await?;
       let page = Page::from_value(&value, "questions")?;
       for item in &page.items {
-        if let Some(entry) = parse_inquiry(item, Some(goal_id))? {
+        if let Some(entry) = parse_inquiry(item, Some(goal_id), &page.shortened)? {
           entries.push(entry);
         }
       }
@@ -331,7 +331,7 @@ impl<'a> ToolSetCore<'a> {
       let value = self.call_json("takt_list_standalone_inquiries", json!({ "offset": offset })).await?;
       let page = Page::from_value(&value, "inquiries")?;
       for item in &page.items {
-        if let Some(entry) = parse_inquiry(item, None)? {
+        if let Some(entry) = parse_inquiry(item, None, &page.shortened)? {
           entries.push(entry);
         }
       }
@@ -549,7 +549,7 @@ impl<'a> ToolSetCore<'a> {
         .await?;
       let page = Page::from_value(&value, "items")?;
       for item in &page.items {
-        let notification = parse_notification(goal_id, item)?;
+        let notification = parse_notification(goal_id, item, &page.shortened)?;
         if notification.kind == "awaiting_merge"
           && awaiting_merge_at.is_none_or(|current| notification.recorded_at > current)
         {
@@ -768,7 +768,7 @@ impl<'a> ToolSetCore<'a> {
       let value = self.call_json("takt_list_goal_work_log", json!({ "goalId": goal_id, "offset": offset })).await?;
       let page = Page::from_value(&value, "workLog")?;
       for item in &page.items {
-        entries.push(parse_goal_work_log(item)?);
+        entries.push(parse_goal_work_log(item, &page.shortened)?);
       }
       match page.next_offset {
         | Some(next) => offset = next,
@@ -786,7 +786,7 @@ impl<'a> ToolSetCore<'a> {
       let value = self.call_json("takt_list_goal_questions", json!({ "goalId": goal_id, "offset": offset })).await?;
       let page = Page::from_value(&value, "questions")?;
       for item in &page.items {
-        entries.push(parse_goal_question(item)?);
+        entries.push(parse_goal_question(item, &page.shortened)?);
       }
       match page.next_offset {
         | Some(next) => offset = next,
@@ -900,6 +900,10 @@ pub struct MergeGoalPrResult {
   pub task_name: TaskName,
   pub workflow:  String,
 }
+
+#[cfg(test)]
+#[path = "preview_tests.rs"]
+mod preview_tests;
 
 #[cfg(test)]
 mod tests {
