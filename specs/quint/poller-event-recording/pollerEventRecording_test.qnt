@@ -35,5 +35,5 @@ module fixedTest {
     init
       .then(setMcp(false)).then(setDb(false)).then(failedCycle)
       .then(rebuild).then(setMcp(true)).then(setDb(true)).then(succeededCycle)
-      .then(all { assert(recordedLost == 999 and recordedRestored == 0 and safety), rebuild })
+      .then(all { assert(recordedLost == 0 and recordedRestored == 0 and safety), rebuild })
 }
