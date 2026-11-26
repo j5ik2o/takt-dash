@@ -79,16 +79,29 @@ export function decideDialogKey(input: {
 // 2回目が同じ座標に出た確定に当たっても送らないため、すべての確認に共通で置く（issue #308）。
 const CONFIRM_ACCEPT_DELAY_MS = 500;
 
+// 確定の受付を始めたかどうかを持つ。初めは受け付けず、setTimeout で 500ms 後に
+// 受け付けを始める。壁時計には頼らない。閉じるときにタイマーを解くため、前に開いた
+// ダイアログのタイマーが、開き直したダイアログを早く受け付けにしない。開くたびに
+// ConfirmDialog が作り直される（DialogActionSection が種別を key にする）ため数え直す。
+function useConfirmAcceptance(): () => boolean {
+  const acceptingConfirm = useRef(false);
+  useEffect(() => {
+    acceptingConfirm.current = false;
+    const timer = setTimeout(() => {
+      acceptingConfirm.current = true;
+    }, CONFIRM_ACCEPT_DELAY_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, []);
+  return useCallback((): boolean => acceptingConfirm.current, []);
+}
+
 function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, disconnected, onAction }: ConfirmDialogProps): ReactElement {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
-  // ダイアログが出た時刻。描画の後（effect）で記録する。開くたびに ConfirmDialog が
-  // 作り直される（DialogActionSection が種別を key にする）ため、開き直したら数え直しになる。
-  const openedAt = useRef(0);
-  useEffect(() => {
-    openedAt.current = Date.now();
-  }, []);
+  const isAcceptingConfirm = useConfirmAcceptance();
   // close を送出したら封じ込めを止める。閉じる途中の focusout で消えゆくダイアログへ
   // フォーカスを戻し、トリガーへの復帰と競合させない。
   const released = useRef(false);
@@ -104,11 +117,11 @@ function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, di
   // 開いた直後の確定は受け付けない。送らず、ダイアログも閉じない。ボタンは disabled に
   // しない（無効化は送信中か切断中だけで決める）。やめると Escape はこの間も受け付ける。
   const confirm = useCallback((): void => {
-    if (Date.now() - openedAt.current < CONFIRM_ACCEPT_DELAY_MS) {
+    if (!isAcceptingConfirm()) {
       return;
     }
     onAction({ type: "confirm", dialog });
-  }, [dialog, onAction]);
+  }, [isAcceptingConfirm, dialog, onAction]);
 
   // 開いた直後にダイアログの見出しへフォーカスを移し、読み上げとキーボード操作の起点にする。
   useEffect(() => {
