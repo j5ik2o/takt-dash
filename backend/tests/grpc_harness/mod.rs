@@ -325,6 +325,20 @@ impl GrpcHarness {
     std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
   }
 
+  /// 設定ファイルの stdio の接続先すべてについて、mock の takt-mcp の起動引数の末尾に `args`
+  /// を足す。 設定は要求のたびに読み直すため、次に起動する子プロセスから効きます。
+  pub fn append_mock_args(&self, args: &[&str]) {
+    let text = std::fs::read_to_string(&self.config_path).expect("設定を読めます");
+    let mut value: Value = serde_json::from_str(&text).expect("設定を解析できます");
+    let servers = value["mcpServers"].as_object_mut().expect("設定に mcpServers があります");
+    for server in servers.values_mut() {
+      if let Some(list) = server.get_mut("args").and_then(Value::as_array_mut) {
+        list.extend(args.iter().map(|arg| json!(arg)));
+      }
+    }
+    std::fs::write(&self.config_path, value.to_string()).expect("設定ファイルを書けます");
+  }
+
   /// 設定ファイルのプロジェクト一覧を書き換える。追加するプロジェクトの `cwd` は、
   /// この harness が作る実在のプロジェクトディレクトリの絶対パスに置き換えて書きます。
   pub fn rewrite_projects(&self, mutate: impl FnOnce(&mut Value, &Path)) {
@@ -418,8 +432,21 @@ pub async fn start_server(harness: &GrpcHarness) -> RunningServer {
   start_server_at(harness, Arc::new(chrono::Utc::now)).await
 }
 
+/// GetRunDetail の総上限を差し替えて gRPC サーバを起動する。
+pub async fn start_server_with_run_detail_budget(harness: &GrpcHarness, budget: std::time::Duration) -> RunningServer {
+  start_server_configured(harness, Arc::new(chrono::Utc::now), Some(budget)).await
+}
+
 /// 現在時刻を返す関数を注入して gRPC サーバを起動する。固定時計のテストで使います。
 pub async fn start_server_at(harness: &GrpcHarness, clock: takt_dash_backend::grpc::Clock) -> RunningServer {
+  start_server_configured(harness, clock, None).await
+}
+
+async fn start_server_configured(
+  harness: &GrpcHarness,
+  clock: takt_dash_backend::grpc::Clock,
+  run_detail_budget: Option<std::time::Duration>,
+) -> RunningServer {
   let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("空きポートを確保できます");
   let address = listener.local_addr().expect("待ち受けアドレスを取得できます");
   let (stop, _) = tokio::sync::watch::channel(false);
@@ -437,6 +464,10 @@ pub async fn start_server_at(harness: &GrpcHarness, clock: takt_dash_backend::gr
     },
     clock,
   );
+  let service = match run_detail_budget {
+    | Some(budget) => service.with_run_detail_budget(budget),
+    | None => service,
+  };
   let task = tokio::spawn(async move {
     let _ = takt_dash_backend::grpc::serve_with_listener(listener, service, stop_rx).await;
   });

@@ -1,4 +1,5 @@
 import { restoreDashboardState, type DashboardState } from "../state/restore-state";
+import { createScreenId, withStreamTicket } from "../state/stream-ticket";
 
 /** EventSource のうち、この画面が使う部分だけを表す。テストでは差し替える。 */
 export type EventSourceLike = {
@@ -26,6 +27,11 @@ export type OpenStateStreamOptions = {
   scheduleWatchdog?: (run: () => void, delayMs: number) => () => void;
   /** 壁時計。見張りの経過時間の判定に使う。 */
   now?: () => number;
+  /**
+   * 画面の識別子。開く URL に試行の番号と一緒に載せ、サーバーが同じ画面の古い接続を閉じる
+   * のに使う（issue #385）。既定は openStateStream ごとの乱数。
+   */
+  screenId?: string;
 };
 
 export type StateStream = {
@@ -150,6 +156,18 @@ const detachSource = (target: EventSourceLike): void => {
   target.close();
 };
 
+/**
+ * 開くたびに次の試行の URL を返す。番号は 1 から開くたびに 1 増え、サーバーは同じ画面の
+ * 番号の小さい接続を古いと見なして閉じる（issue #385）。
+ */
+const createAttemptUrls = (url: string, screen: string): (() => string) => {
+  let attempt = 0;
+  return () => {
+    attempt += 1;
+    return withStreamTicket(url, { screen, attempt });
+  };
+};
+
 export function openStateStream(options: OpenStateStreamOptions): StateStream {
   const staleTimeoutMs = options.staleTimeoutMs ?? STATE_STREAM_STALE_TIMEOUT_MS;
   assertStaleTimeout(staleTimeoutMs);
@@ -162,6 +180,7 @@ export function openStateStream(options: OpenStateStreamOptions): StateStream {
   // 連続失敗の回数。受信に成功したら 0 に戻し、次の失敗を再び 1 秒待ちから始める。
   let consecutiveFailures = 0;
   let lastActivityAt = 0; // 最後の有効な受信（または接続の開始）の壁時計
+  const nextUrl = createAttemptUrls(options.url, options.screenId ?? createScreenId());
   const isCurrent = (target: EventSourceLike) => !closed && source === target;
 
   const disconnect = (target: EventSourceLike) => {
@@ -201,7 +220,7 @@ export function openStateStream(options: OpenStateStreamOptions): StateStream {
   };
 
   const connect = () => {
-    const current = options.createEventSource(options.url);
+    const current = options.createEventSource(nextUrl());
     source = current;
     current.onmessage = (event) => {
       if (!isCurrent(current)) {

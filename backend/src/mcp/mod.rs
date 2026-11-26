@@ -28,7 +28,7 @@ pub fn connection_key(connection: &crate::config::McpConnection) -> String {
 pub use client::{CallError, McpClient, McpClientConfig, ToolCallError, ToolCaller, TransportError};
 pub use http::{HttpReadHandle, HttpSession};
 pub use metrics::{ToolCallMetrics, ToolCallOutcome, ToolCallStat};
-pub use registry::{ClientHandle, Lane, McpClientRegistry};
+pub use registry::{ClientHandle, Lane, McpClientRegistry, SHUTDOWN_DEADLINE};
 pub use tools::{
   client_config, ApproveGoalRegistrationResult, MergeGoalPrResult, ReadToolSet, RemoteRun, ToolError, WriteToolSet,
 };

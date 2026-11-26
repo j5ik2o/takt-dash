@@ -7,6 +7,7 @@ import { DashboardState } from "../../src/proto/taktdash.ts";
 import { LiveGoals } from "../../src/components/live-goals.tsx";
 import { StateStreamProvider } from "../../src/components/state-provider.tsx";
 import { createHealthyDashboardState } from "../support/fixtures.ts";
+import { parseStreamUrl } from "../support/stream-url.ts";
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -45,7 +46,7 @@ test("削除済みURLのライブ画面は初回取得失敗から正常な対�
     assert.doesNotMatch(container.textContent ?? "", /ゴールはありません/);
     const source = FakeEventSource.instances[0];
     assert.ok(source);
-    assert.equal(source.url, "/api/state");
+    assert.equal(parseStreamUrl(source.url).path, "/api/state");
     const base = createHealthyDashboardState();
     const removed = DashboardState.create({ ...base,
       projects: base.projects.filter((project) => project.name !== "esa"),

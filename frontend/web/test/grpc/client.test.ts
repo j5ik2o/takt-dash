@@ -23,6 +23,7 @@ import {
   hasBackendResponded,
   resetBackendResponded,
   resolveBackendAddress,
+  RUN_DETAIL_DEADLINE_MS,
   type BackendClient,
 } from "../../src/grpc/client.ts";
 import type { GetGoalDetailRequest, GetTaskDetailRequest } from "../../src/proto/taktdash.ts";
@@ -482,7 +483,7 @@ const settleWithin = async (promise: Promise<unknown>, ms: number): Promise<stri
 test("応答を返さない 5 つの unary RPC は有限の deadline で終了する", async () => {
   await withServer({ hangUnary: true }, async ({ address }) => {
     // 既定の deadline を待たずに観測できるよう、テストから短い deadline を渡す。
-    const options = { env: { TAKTDASH_BACKEND_ADDR: address }, deadlineMs: 50 };
+    const options = { env: { TAKTDASH_BACKEND_ADDR: address }, deadlineMs: 50, runDetailDeadlineMs: 50 };
     const client = createBackendClient(options);
     try {
       const calls = {
@@ -531,6 +532,77 @@ test("deadlineMs を指定しない既定の unary は有限の deadline を送�
   assert.ok(Number.isFinite(observedDeadlineMs), "既定の deadline は有限値である必要があります");
   assert.ok(observedDeadlineMs > before, "既定の deadline は観測時刻より未来である必要があります");
   assert.ok(observedDeadlineMs <= after + 60_000, "既定の deadline は 60 秒以内である必要があります");
+});
+
+test("既定の getRunDetail は backend の総上限 45 秒より長く、50 秒以内の deadline を送る", async () => {
+  // issue #59：回り道の run 詳細は takt-mcp を順に何回も呼ぶので、ほかの unary の 30 秒では足りない。
+  // backend の総上限（45 秒）より先に Web が打ち切らないことを、送られた deadline で確かめる。
+  let observedDeadlineMs: number | undefined;
+  const before = Date.now();
+  await withServer(
+    {
+      runDetail: createRunDetailResponse("run-aaa"),
+      onRunDetailDeadline: (deadline) => {
+        observedDeadlineMs = typeof deadline === "number" ? deadline : deadline.getTime();
+      },
+    },
+    async ({ address }) => {
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+      try {
+        await client.getRunDetail("run-aaa");
+      } finally {
+        await client.close();
+      }
+    },
+  );
+  const after = Date.now();
+  assert.equal(RUN_DETAIL_DEADLINE_MS, 50_000);
+  assert.ok(observedDeadlineMs !== undefined, "getRunDetail はサーバーへ deadline を送る必要があります");
+  assert.ok(observedDeadlineMs > after + 45_000, "deadline は backend の総上限 45 秒より後である必要があります");
+  // サーバーは受け取った時刻に grpc-timeout を足して deadline を作るので、上の端は呼び出しの後の時刻で見る。
+  assert.ok(observedDeadlineMs <= after + RUN_DETAIL_DEADLINE_MS, "deadline は 50 秒以内である必要があります");
+  assert.ok(observedDeadlineMs > before, "deadline は呼び出しの時刻より後である必要があります");
+});
+
+test("既定の getOverview の deadline は 30 秒以内のまま", async () => {
+  let observedDeadlineMs: number | undefined;
+  await withServer(
+    {
+      overview: createDashboardState(),
+      onOverviewDeadline: (deadline) => {
+        observedDeadlineMs = typeof deadline === "number" ? deadline : deadline.getTime();
+      },
+    },
+    async ({ address }) => {
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+      try {
+        await client.getOverview();
+      } finally {
+        await client.close();
+      }
+    },
+  );
+  const after = Date.now();
+  assert.ok(observedDeadlineMs !== undefined, "getOverview はサーバーへ deadline を送る必要があります");
+  assert.ok(observedDeadlineMs <= after + 30_000, "getRunDetail 以外の unary の deadline は 30 秒以内のままです");
+});
+
+test("backend の総上限の DEADLINE_EXCEEDED は、getRunDetail で応答なしとして扱う", async () => {
+  await withServer(
+    { runDetail: { code: grpc.status.DEADLINE_EXCEEDED, details: "run run-aaa の詳細を 45 秒以内に読めませんでした。" } },
+    async ({ address }) => {
+      const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
+      try {
+        await assert.rejects(client.getRunDetail("run-aaa"), (error: unknown) => {
+          assert.ok(error instanceof BackendUnavailableError);
+          assert.equal(error.failure, "no-response");
+          return true;
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
 });
 
 test("deadline の超過は BackendUnavailableError として扱う", async () => {

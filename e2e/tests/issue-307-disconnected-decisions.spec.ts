@@ -4,7 +4,8 @@ import { expect, test } from "../support/test";
 // ブラウザのオフライン化ではループバックの SSE が切れないため、/api/state への接続を
 // 失敗させたうえで、開いている EventSource を閉じてエラーを伝える。経路を戻すと、画面の
 // 再接続の予約が次の接続を開き、状態を受け取って切断の表示が消える。
-const SSE_PATH = "**/api/state";
+// 画面は URL に画面の識別子と試行の番号を載せる（issue #385）。引数の有無のどちらにも当てる。
+const SSE_PATH = /\/api\/state(\?|$)/;
 
 const recordEventSources = (): void => {
   const opened: EventSource[] = [];

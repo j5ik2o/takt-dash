@@ -663,3 +663,137 @@ async fn server_reassignment_publishes_the_new_server_without_the_old_projection
   grpc.stop().await;
   poller.shutdown().await;
 }
+
+/// 停止の合図を、サイクルが読み取りを終えて記録の直前（`BeforeApply`）で止まっているときに送る。
+/// `resume_after` が `Some` なら、その時間のあとでサイクルを再開させます。`None`
+/// なら再開させません。 合図から `run_until_stopped` が戻るまでの時間を返します。
+async fn stop_during_a_cycle(poller: &mut Poller, resume_after: Option<Duration>) -> Duration {
+  let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+  let (reached, resume) = arm(poller, ReadBoundary::BeforeApply);
+  let control = async move {
+    reached.await.expect("サイクルが記録の直前まで進みます");
+    let stopped_at = tokio::time::Instant::now();
+    stop_tx.send(true).expect("停止の合図を送れます");
+    let kept = match resume_after {
+      | Some(delay) => {
+        tokio::time::sleep(delay).await;
+        resume.send(()).expect("サイクルを再開できます");
+        None
+      },
+      // 再開させないまま持ち続けます。サイクルが打ち切られれば、待っている側は消えます。
+      | None => Some(resume),
+    };
+    (stopped_at, kept, stop_tx)
+  };
+  let ((), (stopped_at, kept, _stop_tx)) =
+    timeout(Duration::from_secs(10), async { tokio::join!(super::run_until_stopped(poller, stop_rx), control) })
+      .await
+      .expect("run_until_stopped は停止の合図から上限までに戻ります");
+  let elapsed = stopped_at.elapsed();
+  drop(kept);
+  elapsed
+}
+
+/// プロジェクトのゴールの追加として記録された出来事の、ゴール ID ごとの件数。
+fn created_goal_counts(harness: &GrpcHarness, ids: &[&str]) -> Vec<usize> {
+  let events = harness.activity.recent_events(50).expect("SQLite の出来事を読めます");
+  ids
+    .iter()
+    .map(|id| events.iter().filter(|event| event.kind == EventKind::GoalCreated && event.body.contains(id)).count())
+    .collect()
+}
+
+#[tokio::test]
+async fn a_stop_signal_during_a_long_cycle_cancels_it_and_a_restart_records_each_event_once() {
+  // 停止の合図のあと、サイクルが CYCLE_GRACE を過ぎても終わらなければ打ち切る。打ち切った
+  // サイクルは記録の前で止まり、出来事を半端に残さない。次の起動は基準化から始まり、同じ出来事を
+  // 二重に記録しない。
+  let harness = harness();
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active")]}));
+  let mut first = poller(&harness);
+  assert_eq!(first.read_cycle_once().await.unwrap().events_recorded, 0);
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active"), goal(ADDED_A, "active")]}));
+
+  let elapsed = stop_during_a_cycle(&mut first, None).await;
+
+  assert!(elapsed >= super::CYCLE_GRACE, "合図のあと CYCLE_GRACE はサイクルを待ちます（{elapsed:?}）");
+  assert!(elapsed < super::CYCLE_GRACE + Duration::from_secs(5), "サイクルの再開を待たずに戻ります（{elapsed:?}）");
+  assert_eq!(created_goal_counts(&harness, &[ADDED_A]), vec![0], "打ち切ったサイクルは記録の前で止まります");
+
+  // 次の起動。新しい Poller の最初のサイクルは基準化だけで、出来事を記録しません。
+  let mut restarted = poller(&harness);
+  assert_eq!(restarted.read_cycle_once().await.unwrap().events_recorded, 0, "再起動で出来事を二重に記録しません");
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active"), goal(ADDED_A, "active"), goal(ADDED_B, "active")]}));
+  assert_eq!(restarted.read_cycle_once().await.unwrap().events_recorded, 1);
+  // 打ち切ったサイクルで見つけたはずの ADDED_A は記録されない。これは、サイクルの間に backend を
+  // 止めたとき（SIGKILL
+  // を含む）と同じで、再起動のあとの最初のサイクルが基準化だけであることによる。
+  assert_eq!(created_goal_counts(&harness, &[ADDED_A, ADDED_B]), vec![0, 1]);
+  restarted.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stop_signal_during_a_short_cycle_lets_it_record_before_stopping() {
+  // 停止の合図のあと CYCLE_GRACE の間に終わるサイクルは、最後まで走らせ、その出来事を 1 件だけ
+  // 記録してから止まる。次の起動で同じ出来事を記録し直さない。
+  let harness = harness();
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active")]}));
+  let mut first = poller(&harness);
+  assert_eq!(first.read_cycle_once().await.unwrap().events_recorded, 0);
+  harness.rewrite_state(json!({"goals": [goal(GOAL, "active"), goal(ADDED_A, "active")]}));
+
+  stop_during_a_cycle(&mut first, Some(Duration::from_millis(200))).await;
+
+  assert_eq!(created_goal_counts(&harness, &[ADDED_A]), vec![1], "合図のあとに終わったサイクルの出来事を記録します");
+  let mut restarted = poller(&harness);
+  assert_eq!(restarted.read_cycle_once().await.unwrap().events_recorded, 0);
+  assert_eq!(created_goal_counts(&harness, &[ADDED_A]), vec![1], "再起動で同じ出来事を二重に記録しません");
+  restarted.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_cancelled_cycle_stops_its_http_read_so_the_session_is_closed() {
+  // 停止の合図のあと CYCLE_GRACE で周期を打ち切ると、周期が起動した HTTP の読み取りタスクも
+  // 中断する。読み取りハンドルの鍵が空き、停止の段が応答するサーバーのセッションを DELETE
+  // で閉じる。 タスクを中断しないと、遅い道具の呼び出しが終わるまで鍵が空かず、停止がそれを待つ。
+  let harness = harness();
+  let http_state = harness.project_dir().join("http-state.json");
+  std::fs::write(
+    &http_state,
+    json!({"goals": [goal(GOAL, "active")], "delayMs": {"takt_list_goals": 10_000}}).to_string(),
+  )
+  .unwrap();
+  let http = common::HttpMockServer::start(&http_state, None);
+  let mut config: Value = serde_json::from_str(&std::fs::read_to_string(harness.config_path()).unwrap()).unwrap();
+  config["mcpServers"]["mac-mini"] = json!({
+    "type": "http",
+    "url": http.url(),
+    "headers": { "Authorization": format!("Bearer {}", http.token()) },
+  });
+  std::fs::write(harness.config_path(), config.to_string()).unwrap();
+  let mut poller = poller(&harness);
+  let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+  let control = async {
+    // 読み取りが遅い道具の呼び出しに入るまで待ちます。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !http.recorded_calls().iter().any(|call| call["name"] == "takt_list_goals") {
+      assert!(tokio::time::Instant::now() < deadline, "読み取りが道具を呼びます");
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(http.live_session_count(), 1, "読み取りのセッションが生きています");
+    let stopped_at = tokio::time::Instant::now();
+    stop_tx.send(true).unwrap();
+    stopped_at
+  };
+  let ((), stopped_at) =
+    timeout(Duration::from_secs(30), async { tokio::join!(super::run_until_stopped(&mut poller, stop_rx), control) })
+      .await
+      .expect("run_until_stopped は戻ります");
+  let elapsed = stopped_at.elapsed();
+
+  assert!(
+    elapsed < super::CYCLE_GRACE + Duration::from_secs(3),
+    "遅い道具の呼び出しの終わりを待たずに止まります（{elapsed:?}）"
+  );
+  assert_eq!(http.live_session_count(), 0, "読み取りのセッションを閉じます: {:?}", http.session_events());
+}

@@ -18,12 +18,26 @@
 use std::{
   collections::{BTreeMap, BTreeSet},
   sync::{Arc, Mutex},
+  time::Duration,
 };
 
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::{sync::Mutex as AsyncMutex, task::JoinSet};
 
-use super::{HttpSession, McpClient, McpClientConfig};
+use super::{http::SESSION_CLOSE_BOUND, HttpReadHandle, HttpSession, McpClient, McpClientConfig};
 use crate::{config::HttpMcpServer, domain::ScreenReadLanes};
+
+/// backend の停止で、takt-mcp への接続を閉じる段の上限。
+///
+/// 閉じる処理はすべて同時に始めるので、応答しないサーバーも 1 件の上限
+/// （[`SESSION_CLOSE_BOUND`]）で打ち切られ、この上限の前に終わります。これを超えて待つのは、
+/// 画面の読み書きの要求が道具の呼び出しの間クライアントの鍵を持っている stdio の子プロセスだけで、
+/// それは見捨てます（プロセスの終了で `kill_on_drop` により止まります）。
+pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
+
+const _: () = assert!(
+  SESSION_CLOSE_BOUND.as_secs() < SHUTDOWN_DEADLINE.as_secs(),
+  "応答しないサーバーも、閉じる段の上限の前に打ち切られるようにします"
+);
 
 /// takt-mcp への接続の用途を表すレーン。
 ///
@@ -109,24 +123,24 @@ struct HttpEntry {
 /// レジストリの内部状態。map と「作り直した」集合と書き込みの通し番号を同じロックで保護します。
 #[derive(Default)]
 struct RegistryInner {
-  clients:       BTreeMap<ClientKey, Entry>,
-  rebuilt:       BTreeSet<ProjectKey>,
-  /// 設定再読込で HTTP
-  /// と分かったサーバー。旧設定で開始済みの要求にレーンを再登録させないために使います。
-  http_servers:  BTreeSet<String>,
-  /// 設定を 1 回でも反映したか。反映の前は、`http_servers` が空でも「設定から消えた」とは
+  clients:        BTreeMap<ClientKey, Entry>,
+  rebuilt:        BTreeSet<ProjectKey>,
+  /// 設定の反映で HTTP と分かったサーバーと、その接続先。旧設定で開始済みの要求に、
+  /// レーンや旧接続先の置き場を登録させないために使います。
+  http_endpoints: BTreeMap<String, HttpMcpServer>,
+  /// 設定を 1 回でも反映したか。反映の前は、`http_endpoints` が空でも「設定から消えた」とは
   /// みなしません。
-  configured:    bool,
+  configured:     bool,
   /// 常駐 HTTP サーバーごとのセッション。画面の読み取りと書き込みの要求が共有します。
-  http_sessions: BTreeMap<String, HttpEntry>,
+  http_sessions:  BTreeMap<String, HttpEntry>,
   /// 画面読み取りレーンの次回割り当て位置。プロジェクトごとにラウンドロビンで進めます。
-  screen_next:   BTreeMap<ProjectKey, u32>,
+  screen_next:    BTreeMap<ProjectKey, u32>,
   /// プロジェクトごとの書き込みの通し番号。書き込みが成功するたびに1つ進めます。
-  write_counts:  BTreeMap<ProjectKey, u64>,
+  write_counts:   BTreeMap<ProjectKey, u64>,
   /// プロジェクトごとの書き込みゲート。書き込み経路と定期読み取りの反映の段が共有し、
   /// 通し番号の前進と読み取り結果の反映を直列化します。通し番号そのものとは別の構造に
   /// することで、ゲートを保持したまま通し番号を記録してもデッドロックしません。
-  write_gates:   BTreeMap<ProjectKey, Arc<AsyncMutex<()>>>,
+  write_gates:    BTreeMap<ProjectKey, Arc<AsyncMutex<()>>>,
 }
 
 /// プロジェクトごとの takt-mcp クライアントをレーン別に所有するレジストリ。
@@ -197,15 +211,17 @@ impl McpClientRegistry {
   /// takt-mcp はセッションに期限を持たないため、要求ごとにセッションを作らず、サーバーごとに
   /// 1 つを使い回します。登録済みの接続先（URL とトークン）が `server` と異なる場合は、
   /// 置き場を作り直します。外した置き場は、利用中の要求が終わって最後の持ち主が消えた
-  /// 時点で、古いセッションを DELETE で閉じます。設定から消えたサーバーは登録せず、
-  /// その要求だけが使うセッションを返します。
+  /// 時点で、古いセッションを DELETE で閉じます。
+  ///
+  /// 設定を反映した後は、反映済みの接続先と `server` を比べます。設定から消えたサーバーと、
+  /// 接続先が反映済みのものと違う要求（旧設定で解決済みの要求）は登録せず、その要求だけが
+  /// 使うセッションを返します。旧接続先の置き場を登録し直して、新しい接続先の置き場を
+  /// 追い出さないためです。
   pub fn http_session(&self, server_id: &str, server: &HttpMcpServer) -> HttpSession {
     let (session, replaced) = {
       let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-      if inner.configured && !inner.http_servers.contains(server_id) {
-        // 設定から消えた（または stdio へ変わった）サーバーを、旧設定で解決済みの要求が
-        // 登録し直さないようにします。その要求だけが使うセッションを渡し、要求が終われば
-        // 閉じます。
+      if inner.configured && inner.http_endpoints.get(server_id) != Some(server) {
+        // その要求だけが使うセッションを渡し、要求が終われば閉じます。
         return HttpSession::for_server(server.clone());
       }
       if let Some(entry) = inner.http_sessions.get(server_id) {
@@ -278,7 +294,7 @@ impl McpClientRegistry {
     let make_handle = || Arc::new(AsyncMutex::new(McpClient::with_lane(wanted.clone(), &lane_key.label())));
     let (handle, created, replaced) = {
       let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-      if inner.http_servers.contains(server_id) {
+      if inner.http_endpoints.contains_key(server_id) {
         // 旧設定を解決済みの要求には元の接続先を渡し、要求が終われば子プロセスを解放します。
         return (make_handle(), true);
       }
@@ -330,9 +346,8 @@ impl McpClientRegistry {
   /// `http` は、設定にある HTTP サーバーとその接続先です。接続先（URL とトークン）が変わった
   /// サーバーのセッションも、次の画面の要求を待たずにここで手放して閉じます。
   pub(crate) fn retain_configured(&self, wanted: &BTreeSet<ProjectKey>, http: BTreeMap<String, HttpMcpServer>) {
-    let http_servers: BTreeSet<String> = http.keys().cloned().collect();
     let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-    let keep_stdio = |key: &ProjectKey| !http_servers.contains(&key.0) && wanted.contains(key);
+    let keep_stdio = |key: &ProjectKey| !http.contains_key(&key.0) && wanted.contains(key);
     inner.clients.retain(|(server_id, project, _), _| keep_stdio(&(server_id.clone(), project.clone())));
     inner.rebuilt.retain(keep_stdio);
     inner.screen_next.retain(|key, _| keep_stdio(key));
@@ -347,7 +362,7 @@ impl McpClientRegistry {
         .collect();
       stale.iter().filter_map(|server_id| inner.http_sessions.remove(server_id)).collect()
     };
-    inner.http_servers = http_servers;
+    inner.http_endpoints = http;
     inner.configured = true;
     // 設定から消えた HTTP サーバーの置き場は、map のロックを解放してから破棄します。
     drop(inner);
@@ -387,27 +402,51 @@ impl McpClientRegistry {
     inner.write_gates.entry(key).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
   }
 
-  /// すべてのクライアントを map から取り出し、1 件ずつ排他取得して停止する。常駐 HTTP
-  /// サーバーのセッションも、DELETE で閉じます。
+  /// すべてのクライアントと HTTP セッションを閉じる。[`Self::shutdown_within`] を
+  /// [`SHUTDOWN_DEADLINE`] で呼びます。
+  pub async fn shutdown_all(&self) {
+    self.shutdown_within(SHUTDOWN_DEADLINE, Vec::new()).await;
+  }
+
+  /// すべてのクライアントと HTTP セッションを map から取り出し、`reads`（定期読み取りの
+  /// プロジェクトごとの読み取りハンドル）とあわせて同時に閉じ始め、`deadline` まで待つ。
+  ///
+  /// stdio のクライアントは鍵を取って子プロセスを止め、HTTP セッションは DELETE で閉じます。
+  /// 1 件ずつ閉じると、応答しない相手が後ろの相手を待たせるため、同時に閉じます。
+  /// `deadline` を過ぎたら残りを見捨てて返ります。見捨てた stdio の子プロセスは、鍵を持つ
+  /// 要求が終わるか、プロセスの終了で `kill_on_drop` により止まります。
   ///
   /// map のロックは取り出しの後すぐに解放します。クライアントごとのロックだけを
   /// 取得するため、停止が別の操作を待つことはあってもデッドロックしません。
-  pub async fn shutdown_all(&self) {
-    let clients: Vec<ClientHandle> = {
+  pub async fn shutdown_within(&self, deadline: Duration, reads: Vec<Arc<AsyncMutex<HttpReadHandle>>>) {
+    let (clients, sessions) = {
       let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
       inner.rebuilt.clear();
-      std::mem::take(&mut inner.clients).into_values().map(|entry| entry.client).collect()
+      let clients: Vec<ClientHandle> =
+        std::mem::take(&mut inner.clients).into_values().map(|entry| entry.client).collect();
+      let sessions: Vec<HttpSession> =
+        std::mem::take(&mut inner.http_sessions).into_values().map(|entry| entry.session).collect();
+      (clients, sessions)
     };
+    let mut closing = JoinSet::new();
     for client in clients {
-      client.lock().await.shutdown().await;
+      closing.spawn(async move { client.lock().await.shutdown().await });
     }
-    let sessions: Vec<HttpSession> = {
-      let mut inner = self.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
-      std::mem::take(&mut inner.http_sessions).into_values().map(|entry| entry.session).collect()
-    };
     for session in sessions {
-      session.close().await;
+      closing.spawn(async move { session.close().await });
     }
+    for read in reads {
+      closing.spawn(async move { read.lock().await.close().await });
+    }
+    let finished = tokio::time::timeout(deadline, async { while closing.join_next().await.is_some() {} }).await;
+    if finished.is_err() {
+      tracing::warn!(
+        remaining = closing.len(),
+        deadline_secs = deadline.as_secs_f64(),
+        "停止の上限までに閉じ終えられなかった takt-mcp への接続を見捨てます。"
+      );
+    }
+    // `closing` を捨てると、残りの閉じる処理は中断されます。
   }
 }
 
@@ -581,10 +620,14 @@ mod tests {
   }
 
   fn http_server(port: u16) -> crate::config::HttpMcpServer {
+    http_server_with(port, "test-token")
+  }
+
+  fn http_server_with(port: u16, token: &str) -> crate::config::HttpMcpServer {
     crate::config::HttpMcpServer {
       endpoint:      crate::config::HttpServerEndpoint::try_from(format!("http://127.0.0.1:{port}/").as_str())
         .expect("ループバックの URL を解釈できます"),
-      authorization: "Bearer test-token".to_owned(),
+      authorization: format!("Bearer {token}"),
     }
   }
 
@@ -618,6 +661,28 @@ mod tests {
   }
 
   #[test]
+  fn a_stale_request_does_not_evict_the_session_of_the_new_endpoint() {
+    // 接続先を 4100 から 4101 へ変えて反映したあと、4100 で解決済みの要求が来ても、4101 の
+    // 置き場を追い出さない。旧設定の要求は、その要求だけが使うセッションを受け取る。
+    let registry = McpClientRegistry::new();
+    registry.retain_configured(&BTreeSet::new(), BTreeMap::from([("resident".to_owned(), http_server(4100))]));
+    registry.retain_configured(&BTreeSet::new(), BTreeMap::from([("resident".to_owned(), http_server(4101))]));
+    let current = registry.http_session("resident", &http_server(4101));
+
+    let stale = registry.http_session("resident", &http_server(4100));
+
+    assert!(!stale.shares_with(&current), "旧設定の要求は、新しい接続先の置き場を使いません");
+    assert!(
+      current.shares_with(&registry.http_session("resident", &http_server(4101))),
+      "新しい接続先の置き場は登録されたままです"
+    );
+    assert!(
+      !stale.shares_with(&registry.http_session("resident", &http_server(4100))),
+      "旧設定の要求の置き場は登録しません"
+    );
+  }
+
+  #[test]
   fn reloading_a_config_with_a_changed_endpoint_drops_the_old_session() {
     // 同じサーバー ID の接続先が変わったら、次の画面の要求を待たずに、設定の反映で旧接続先の
     // 置き場を手放す（最後の持ち主が消えた時点でセッションを閉じる）。
@@ -634,5 +699,196 @@ mod tests {
       kept.shares_with(&registry.http_session("resident", &http_server(4101))),
       "接続先が同じなら置き場を保ちます"
     );
+  }
+
+  /// 性質のテストで選ぶ接続先。ポート 2 種とトークン 2 種の組み合わせです。
+  fn endpoint_strategy() -> impl proptest::strategy::Strategy<Value = (u16, bool)> + Clone {
+    use proptest::prelude::*;
+    (prop_oneof![Just(4100u16), Just(4101u16)], any::<bool>())
+  }
+
+  fn endpoint_of((port, alternate_token): (u16, bool)) -> crate::config::HttpMcpServer {
+    http_server_with(port, if alternate_token { "rotated-token" } else { "test-token" })
+  }
+
+  /// `http_session` の性質のテストの操作。
+  #[derive(Debug, Clone)]
+  enum SessionOp {
+    /// 設定を反映する。ID `a`・`b` ごとに、接続先か、設定に無いか。
+    Reflect([Option<(u16, bool)>; 2]),
+    /// ID と接続先を選んで置き場を求め、返った置き場を持つ。
+    Request(usize, (u16, bool)),
+    /// 持っている置き場を 1 つ手放す（要求の終わり）。
+    Release(usize),
+  }
+
+  fn session_op_strategy() -> impl proptest::strategy::Strategy<Value = SessionOp> {
+    use proptest::prelude::*;
+    let reflect_entry = proptest::option::of(endpoint_strategy());
+    prop_oneof![
+      [reflect_entry.clone(), reflect_entry].prop_map(SessionOp::Reflect),
+      (0usize..2, endpoint_strategy()).prop_map(|(id, endpoint)| SessionOp::Request(id, endpoint)),
+      any::<usize>().prop_map(SessionOp::Release),
+    ]
+  }
+
+  const SESSION_IDS: [&str; 2] = ["a", "b"];
+
+  /// レジストリに登録された置き場の、ID ごとの写し。
+  fn registered_sessions(registry: &McpClientRegistry) -> BTreeMap<String, super::HttpSession> {
+    let inner = registry.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+    inner.http_sessions.iter().map(|(id, entry)| (id.clone(), entry.session.clone())).collect()
+  }
+
+  proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+    /// `http_session` は、反映の後は反映済みの接続先と同じ要求だけに登録済みの置き場を渡し、
+    /// 違う要求（接続先が違う、トークンだけが違う、設定に無い）には、登録に触れずに、
+    /// その要求だけが使う置き場を渡す。反映の前は、要求の接続先の置き場を登録する。
+    #[test]
+    fn http_sessions_follow_the_reflected_endpoints(ops in proptest::collection::vec(session_op_strategy(), 1..24)) {
+      let registry = McpClientRegistry::new();
+      let mut reflected: Option<BTreeMap<String, crate::config::HttpMcpServer>> = None;
+      let mut held: Vec<super::HttpSession> = Vec::new();
+      for op in ops {
+        match op {
+          | SessionOp::Reflect(entries) => {
+            let http: BTreeMap<String, crate::config::HttpMcpServer> = SESSION_IDS
+              .iter()
+              .zip(entries)
+              .filter_map(|(id, entry)| entry.map(|endpoint| ((*id).to_owned(), endpoint_of(endpoint))))
+              .collect();
+            registry.retain_configured(&BTreeSet::new(), http.clone());
+            reflected = Some(http);
+          },
+          | SessionOp::Request(id_index, endpoint) => {
+            let id = SESSION_IDS[id_index];
+            let wanted = endpoint_of(endpoint);
+            let before = registered_sessions(&registry);
+            let session = registry.http_session(id, &wanted);
+            let after = registered_sessions(&registry);
+            proptest::prop_assert_eq!(session.server(), &wanted, "要求の接続先の置き場を返します");
+            let matches_reflected = reflected.as_ref().map(|http| http.get(id) == Some(&wanted));
+            match matches_reflected {
+              | Some(false) => {
+                proptest::prop_assert_eq!(before.keys().collect::<Vec<_>>(), after.keys().collect::<Vec<_>>());
+                for (key, registered) in &before {
+                  proptest::prop_assert!(registered.shares_with(&after[key]), "登録済みの置き場を変えません");
+                  proptest::prop_assert!(!registered.shares_with(&session), "登録済みの置き場を渡しません");
+                }
+              },
+              | Some(true) | None => {
+                let registered = after.get(id).expect("要求の置き場が登録されています");
+                proptest::prop_assert!(registered.shares_with(&session), "登録した置き場を渡します");
+                if let Some(previous) = before.get(id) {
+                  if previous.server() == &wanted {
+                    proptest::prop_assert!(previous.shares_with(&session), "同じ接続先の置き場は共有します");
+                  }
+                }
+              },
+            }
+            held.push(session);
+          },
+          | SessionOp::Release(index) => {
+            if !held.is_empty() {
+              let index = index % held.len();
+              held.remove(index);
+            }
+          },
+        }
+        if let Some(http) = &reflected {
+          for (id, registered) in registered_sessions(&registry) {
+            proptest::prop_assert_eq!(http.get(&id), Some(registered.server()), "登録は反映済みの接続先だけです");
+          }
+        }
+      }
+    }
+  }
+
+  /// 停止の性質のテストで選ぶ、閉じる対象 1 件の状態。`true` はテストが鍵を持ったまま。
+  fn busy_flags(max: usize) -> impl proptest::strategy::Strategy<Value = Vec<bool>> {
+    proptest::collection::vec(proptest::prelude::any::<bool>(), 0..=max)
+  }
+
+  proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    /// `shutdown_within` は、鍵を持たれたものが 1 つでもあれば止めた時計でちょうど `deadline`
+    /// で返り、無ければ時計を進めずに返る。返ったあと、レジストリは空で、閉じる処理は鍵を
+    /// 持ち続けない。
+    #[test]
+    fn shutdown_returns_at_the_deadline_only_when_something_is_held(
+      clients in busy_flags(3),
+      reads in busy_flags(3),
+      sessions in 0usize..=2,
+      deadline_secs in 1u64..=30,
+    ) {
+      let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .expect("テストの tokio ランタイムを作れます");
+      runtime.block_on(async {
+        let registry = McpClientRegistry::new();
+        let client_handles: Vec<(super::ClientHandle, bool)> = clients
+          .iter()
+          .enumerate()
+          .map(|(index, busy)| (registry.client("local", &format!("proj-{index}"), Lane::Write, config).0, *busy))
+          .collect();
+        for index in 0..sessions {
+          drop(registry.http_session(&format!("resident-{index}"), &http_server(4100 + index as u16)));
+        }
+        let read_handles: Vec<(Arc<tokio::sync::Mutex<super::HttpReadHandle>>, bool)> = reads
+          .iter()
+          .map(|busy| {
+            let handle = super::HttpReadHandle::new(
+              crate::config::McpConnection::Http(http_server(4200)),
+              Duration::from_secs(5),
+            );
+            (Arc::new(tokio::sync::Mutex::new(handle)), *busy)
+          })
+          .collect();
+        let mut client_guards = Vec::new();
+        for (handle, busy) in &client_handles {
+          if *busy {
+            client_guards.push(handle.clone().lock_owned().await);
+          }
+        }
+        let mut read_guards = Vec::new();
+        for (handle, busy) in &read_handles {
+          if *busy {
+            read_guards.push(handle.clone().lock_owned().await);
+          }
+        }
+        let anything_held = !client_guards.is_empty() || !read_guards.is_empty();
+        let deadline = Duration::from_secs(deadline_secs);
+
+        let started = tokio::time::Instant::now();
+        registry.shutdown_within(deadline, read_handles.iter().map(|(handle, _)| handle.clone()).collect()).await;
+        let elapsed = started.elapsed();
+
+        if anything_held {
+          proptest::prop_assert_eq!(elapsed, deadline, "鍵を持たれたものがあれば、上限ちょうどで返ります");
+        } else {
+          proptest::prop_assert_eq!(elapsed, Duration::ZERO, "鍵を持たれたものが無ければ、待たずに返ります");
+        }
+        {
+          let inner = registry.inner.lock().expect("takt-mcp レジストリのロックが壊れています");
+          proptest::prop_assert!(inner.clients.is_empty() && inner.http_sessions.is_empty(), "レジストリは空です");
+        }
+        drop(client_guards);
+        drop(read_guards);
+        // 見捨てた閉じる処理は中断されており、鍵を持ち続けません。
+        tokio::task::yield_now().await;
+        for (handle, _) in &client_handles {
+          proptest::prop_assert!(handle.try_lock().is_ok(), "クライアントの鍵は空いています");
+        }
+        for (handle, _) in &read_handles {
+          proptest::prop_assert!(handle.try_lock().is_ok(), "読み取りハンドルの鍵は空いています");
+        }
+        Ok(())
+      })?;
+    }
   }
 }

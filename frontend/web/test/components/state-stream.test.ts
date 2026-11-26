@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { ConnectionState, DashboardState } from "../../src/proto/taktdash.ts";
 import { createDashboardState, BACKEND_BRANCH, BACKEND_COMMIT, NOW } from "../support/fixtures.ts";
+import { parseStreamUrl } from "../support/stream-url.ts";
 import {
   openStateStream,
   STATE_STREAM_STALE_TIMEOUT_MS,
@@ -105,7 +106,8 @@ test("受信した状態で画面の状態を置き換える", () => {
   const received: RestoredDashboardState[] = [];
   const stream = open(Ctor, { onState: (state) => received.push(state) });
   const source = Ctor.instances[0]!;
-  assert.equal(source.url, "/api/state");
+  assert.equal(parseStreamUrl(source.url).path, "/api/state");
+  assert.equal(parseStreamUrl(source.url).ticket?.attempt, 1, "最初の試行は 1 番");
   source.onmessage?.({
     data: JSON.stringify({ readAt: "2026-11-13T07:30:00.000Z", servers: [{ serverId: "mini", name: "Mac mini" }] }),
   });
@@ -184,7 +186,11 @@ test("切断（エラー）時は接続を捨て、待機してから同じ URL 
 
   scheduler.runLatest();
   assert.equal(Ctor.instances.length, 2, "予約した待機の後に新しい接続を作る");
-  assert.equal(Ctor.instances[1]!.url, "/api/state");
+  const firstUrl = parseStreamUrl(Ctor.instances[0]!.url);
+  const secondUrl = parseStreamUrl(Ctor.instances[1]!.url);
+  assert.equal(secondUrl.path, "/api/state");
+  assert.equal(secondUrl.ticket?.screen, firstUrl.ticket?.screen, "開き直しも同じ画面の識別子");
+  assert.equal(secondUrl.ticket?.attempt, 2, "開き直すたびに番号を 1 増やす");
   stream.close();
 });
 
@@ -751,6 +757,7 @@ const runStateMachine = (seed: number, steps: number): void => {
   let wallSkewSinceArm = false;
   let currentStep = 0;
   let currentOp = "init";
+  let screenOfRun: string | undefined;
 
   const live = (kind: Timer["kind"]) => timers.filter((t) => t.kind === kind && !t.cancelled && !t.fired);
   const openConns = () => conns.filter((c) => !c.closed);
@@ -799,8 +806,14 @@ const runStateMachine = (seed: number, steps: number): void => {
 
   const stream = openStateStream({
     url: "/api/state",
-    createEventSource: () => {
+    createEventSource: (url) => {
       assert.equal(closed, false, "close の後に接続を作らない");
+      // 同じ openStateStream の接続は同じ識別子を持ち、番号は開いた順に 1 ずつ増える（issue #385）。
+      const ticket = parseStreamUrl(url).ticket;
+      assert.ok(ticket !== undefined, `接続の URL に識別子と番号を載せる ${url}`);
+      assert.equal(ticket.attempt, conns.length + 1, `番号は開いた順 ${url}`);
+      if (screenOfRun === undefined) screenOfRun = ticket.screen;
+      assert.equal(ticket.screen, screenOfRun, `識別子は開き直しても同じ ${url}`);
       const source = new PbtSource();
       conns.push(source);
       expectedLast = wall;
@@ -950,4 +963,26 @@ test("性質: 200 系列 × 60 手のどの並びでも、接続・見張り・�
   for (let seed = 1; seed <= 200; seed += 1) {
     runStateMachine(0x383 * 1000 + seed, 60);
   }
+});
+
+// ===== 画面の識別子と試行の番号（issue #385） =====
+
+test("別の openStateStream は別の識別子を持つ", () => {
+  const Ctor = freshFakes();
+  const first = open(Ctor, {});
+  const second = open(Ctor, {});
+  const [a, b] = Ctor.instances.map((source) => parseStreamUrl(source.url).ticket);
+  assert.ok(a !== undefined && b !== undefined);
+  assert.notEqual(a.screen, b.screen);
+  assert.match(a.screen, /^[0-9a-f]{32}$/);
+  first.close();
+  second.close();
+});
+
+test("screenId を渡すとその識別子を使い、引数のある URL には & で足す", () => {
+  const Ctor = freshFakes();
+  const screenId = "00112233445566778899aabbccddeeff";
+  const stream = open(Ctor, {}, undefined, { url: "/api/state?debug=1", screenId });
+  assert.equal(Ctor.instances[0]!.url, `/api/state?debug=1&screen=${screenId}&attempt=1`);
+  stream.close();
 });
