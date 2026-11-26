@@ -355,6 +355,12 @@ const mountOperationPage = async (decision: PendingDecision = operation()) => {
         mock.timers.tick(ms);
       });
     },
+    // 端末の時計の補正をまねる。Date だけを ms ずらし、時間は過ぎない（setTimeout は動かない）。
+    jumpWallClock: async (ms: number): Promise<void> => {
+      await act(async () => {
+        mock.timers.setTime(Date.now() + ms);
+      });
+    },
     settle: async (): Promise<void> => {
       await act(async () => {
         for (const resolve of pending.splice(0)) {
@@ -518,6 +524,31 @@ test("判断待ちのページで確認をやめて開き直すと、開き直�
   }
 });
 
+// 確定を受け付けるまでの時間は、過ぎた時間で数え、壁時計（Date）では数えない（CodeRabbit、PR #404）。
+// 開いた直後に端末の時計が進んでも、確定は受け付けない。mock.timers は Date と setTimeout を
+// 1つの時計で動かすので、時計が戻る場合（戻すと setTimeout も遅れる）はここでは作れない。
+test("判断待ちのページで確認を開いた直後に壁時計が進んでも、確定を受け付けるのは開いてから 500ms 過ぎてから", async () => {
+  for (const flow of CONFIRM_FLOWS) {
+    const page = await mountOperationPage(flow.decision());
+    const jump = CONFIRM_DELAY_MS * 2;
+    const name = `${flow.name}（壁時計を ${jump}ms 進める）`;
+    try {
+      await page.click(page.trigger(flow.trigger));
+      assert.ok(page.dialog(), `${name}: 押すと確認ダイアログが出る`);
+      await page.jumpWallClock(jump);
+      await page.click(page.dialogButton("confirm"));
+      assert.equal(page.sent.length, 0, `${name}: 開いた直後の確定は送らない`);
+      assert.ok(page.dialog(), `${name}: 開いた直後の確定ではダイアログを閉じない`);
+      await page.wait(CONFIRM_DELAY_MS);
+      await page.click(page.dialogButton("confirm"));
+      assert.equal(page.sent.length, 1, `${name}: 開いてから ${CONFIRM_DELAY_MS}ms 過ぎた確定は送る`);
+      assert.equal(page.sent[0]?.url, flow.url, name);
+    } finally {
+      await page.unmount();
+    }
+  }
+});
+
 // 種を決めた疑似乱数（mulberry32）。失敗したときに、種と操作の列から同じ列を作り直せる。
 const random = (seed: number): (() => number) => {
   let state = seed >>> 0;
@@ -587,10 +618,14 @@ test("性質: 作業の依頼への任意の操作の列で、書き込みは確
         repressedAt = now;
       }
     };
+    // 押し直した時刻を覚えるのは、開いたまま、押せる（送信中でも切断中でもない）2択を押したときだけ。
+    // 押せない2択の押下は何も起こさないので、それで確定の期待を「どちらでもよい」に緩めない。
     const press = async (name: string): Promise<void> => {
       const wasOpen = page.dialog() !== null;
-      await page.click(page.trigger(name));
-      if (wasOpen) {
+      const trigger = page.trigger(name);
+      const accepted = !trigger.disabled && !page.disconnected;
+      await page.click(trigger);
+      if (wasOpen && accepted) {
         repressedAt = now;
       }
       observeDialog();

@@ -113,44 +113,45 @@ test("作業の依頼の2択を二重に押しても、やめれば書き込み�
 
 // 一覧の2択を2回すばやく押すと、1回目で確認ダイアログが開き、2回目のクリックが、同じ座標に出た
 // 確定のボタンに当たることがある（Devin Review、PR #404）。重なる配置を画面の大きさに頼らずに作るため、
-// 1回目のクリックの直後、開いたダイアログの確定へ2回目のクリック（detail = 2）をページの中から送る。
-// 開いた直後の確定は送らず、ダイアログは開いたまま残り、待ってから確定すれば1回だけ届く。
+// 1回目のクリックで開いたダイアログの確定へ、2回目のクリック（detail = 2）をページの中から送る。
+// 開いた直後の確定は送らず、ダイアログは開いたまま残り、時計を進めてから確定すれば1回だけ届く。
+// 「開いた直後」を実時間の速さに頼らずに作るため、ページの時計（page.clock）を止めてから押す。
+// 止めている間は、Playwright のクリック（要素の安定を requestAnimationFrame で待つ）が進まないので、
+// クリックはページの中から送り、表示は条件を待つアサーションで確かめる。
 test("作業の依頼の2択を二重にすばやく押して、2回目が確定に当たっても、確認の前には書き込みが届かない", async ({
   page,
   isolatedStack: stack,
 }) => {
+  await page.clock.install();
   const item = await openOperation(page, stack);
   const unable = item.getByRole("button", { name: "対応できない" });
   const dialog = page.getByRole("dialog", { name: "作業の依頼への回答（対応できない）" });
+  const dialogConfirm = dialog.getByRole("button", { name: "対応できない" });
+  const clickInPage = (element: HTMLElement, detail: number): void => {
+    element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail }));
+  };
 
-  const elapsed = await unable.evaluate(async (trigger) => {
-    const started = performance.now();
-    trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
-    const confirmButton = (): HTMLButtonElement | undefined =>
-      Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find(
-        (button) => button.textContent !== "やめる",
-      );
-    while (confirmButton() === undefined && performance.now() - started < 200) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    const confirm = confirmButton();
-    if (confirm === undefined) {
-      throw new Error("1回目のクリックで確認ダイアログが開かない");
-    }
-    confirm.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 2 }));
-    return performance.now() - started;
-  });
-  expect(elapsed, "2回目のクリックは、開いた直後（確定を受け付けるまでの時間の中）に当たる").toBeLessThan(
-    CONFIRM_DELAY_MS,
-  );
+  // pauseAt は未来の時刻しか受け付けない。読んでから呼ぶまでに時計が進んでも過去にならないよう、1 秒先で止める。
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  const openedAt = await page.evaluate(() => Date.now());
+  await unable.evaluate(clickInPage, 1);
+  await expect(dialog, "1回目のクリックで確認ダイアログが開く").toBeVisible();
+  await dialogConfirm.evaluate(clickInPage, 2);
+  expect(
+    await page.evaluate(() => Date.now()),
+    "2回目のクリックは、開いたのと同じ時刻（確定を受け付けるまでの時間の中）に当たる",
+  ).toBe(openedAt);
 
   await expect(dialog, "開いた直後の確定ではダイアログを閉じない").toBeVisible();
-  // 書き込みは backend を経て届くので、届くなら届くだけの時間を待ってから数える。
+  // 書き込みは backend を経て届くので、届くなら届くだけの時間を待ってから数える（ページの時計は止めたまま）。
   await page.waitForTimeout(2_000);
   expect(await answerCalls(stack), "二重クリックの2回目では届かない").toHaveLength(0);
   await expect(page.getByRole("status").filter({ hasText: "回答を送信しました。" })).toHaveCount(0);
 
-  await dialog.getByRole("button", { name: "対応できない" }).click();
+  // ページの時計を、確定を受け付けるまでの時間だけ進めてから、ふつうに確定する。
+  await page.clock.runFor(CONFIRM_DELAY_MS);
+  await page.clock.resume();
+  await dialogConfirm.click();
   await expect(page.getByRole("status").filter({ hasText: "回答を送信しました。" })).toBeVisible();
   await expect.poll(async () => (await answerCalls(stack)).length, { timeout: 15_000 }).toBe(1);
   const calls = await answerCalls(stack);
