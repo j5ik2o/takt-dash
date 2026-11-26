@@ -127,7 +127,7 @@
 
 `specs/quint/state-stream-watchdog/` に Quint の仕様とテストを置いています。
 
-- `specs/quint/state-stream-watchdog/stateStreamWatchdog.qnt`：単調時計（`monoNow`）と壁時計（`wallNow`）の 2 本の時計を持つ状態機械、`deliverMessage(id)`・`deliverError(id)` の一本化、実状態のみで記述した 9 つの安全不変条件（`safety`）、8 つの到達条件（見張りタイマーで切って戻る `witnessWatchdogTimerRecover` と、復帰時確認で切って戻る `witnessWakeCheckRecover` を含む）。不変条件 4 は、切断のたびに残す原因（`lastDisconnectCause`）と切った時点の壁時計の経過（`lastDisconnectGap`）で書く
+- `specs/quint/state-stream-watchdog/stateStreamWatchdog.qnt`：単調時計（`monoNow`）と壁時計（`wallNow`）の 2 本の時計を持つ状態機械、`deliverMessage(id)`・`deliverError(id)` の一本化、実状態のみで記述した 10 の安全不変条件（`safety`。開いている現在の接続には必ず見張りが付く `activeConnHasWatchdog` を PR のレビューで足した）、8 つの到達条件（見張りタイマーで切って戻る `witnessWatchdogTimerRecover` と、復帰時確認で切って戻る `witnessWakeCheckRecover` を含む）。不変条件 4 は、切断のたびに残す原因（`lastDisconnectCause`）と切った時点の壁時計の経過（`lastDisconnectGap`）で書く
 - `specs/quint/state-stream-watchdog/stateStreamWatchdog_test.qnt`：17 件の筋書きテスト
 - `specs/quint/state-stream-watchdog/README.md`：モデルの範囲・前提・変異の反例・実行結果
 

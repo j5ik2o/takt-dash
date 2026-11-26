@@ -529,6 +529,12 @@ module stateStreamWatchdog {
   val watchdogMatchesActiveConn: bool =
     watchdogArmed implies (not(closed) and activeConn != NONE and watchdogConn == activeConn)
 
+  // 5b. 見張りのある構成では、開いている現在の接続には必ず見張りが付いている
+  //     （開き直した直後の、切断表示のまま見張りの無い接続を許さない）。
+  val activeConnHasWatchdog: bool =
+    (WATCHDOG and not(closed) and activeConn != NONE) implies
+      (watchdogArmed and watchdogConn == activeConn)
+
   // 6. close の後は接続もタイマーも残らない。
   val nothingActiveWhenClosed: bool =
     closed implies (
@@ -547,6 +553,7 @@ module stateStreamWatchdog {
     appliedStateMatchesActiveWhenConnected,
     noPrematureWatchdogDisconnect,
     watchdogMatchesActiveConn,
+    activeConnHasWatchdog,
     nothingActiveWhenClosed,
   }
 

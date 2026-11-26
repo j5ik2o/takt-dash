@@ -894,13 +894,14 @@ for (const [name, fire] of wakeEvents) {
       assert.equal(holder.current?.disconnected, false);
       const pending = holder.current?.state.pendingDecisions.length;
 
-      const base = Date.now();
-      t.mock.method(Date, "now", () => base + 39_000);
+      // 実時間に合わせて進む時計にずらす。止めると waitForConnections の期限も止まる。
+      const realNow = Date.now.bind(Date);
+      t.mock.method(Date, "now", () => realNow() + 39_000);
       await act(async () => fire());
       assert.equal(holder.current?.disconnected, false, "期限前の復帰では切らない");
       assert.equal(first.closed, false);
 
-      t.mock.method(Date, "now", () => base + 40_000);
+      t.mock.method(Date, "now", () => realNow() + 40_000);
       await act(async () => fire());
       assert.equal(holder.current?.disconnected, true, "期限を過ぎた復帰で切断として扱う");
       assert.equal(first.closed, true, "半開きの接続を閉じる");
@@ -925,8 +926,8 @@ test("裏へ回った visibilitychange（hidden）では鮮度を確かめない
   );
   try {
     await fireMessage(FakeEventSource.instances[0]!, wireState());
-    const base = Date.now();
-    t.mock.method(Date, "now", () => base + 60_000);
+    const realNow = Date.now.bind(Date);
+    t.mock.method(Date, "now", () => realNow() + 60_000);
     setVisibility("hidden");
     await act(async () => {
       document.dispatchEvent(new window.Event("visibilitychange"));

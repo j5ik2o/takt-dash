@@ -8,7 +8,7 @@
 
 | ファイル | 内容 |
 | --- | --- |
-| `stateStreamWatchdog.qnt` | 単調時計・壁時計の 2 時計を持つ状態機械、実状態の 9 つの安全不変条件（`safety`）、8 つの到達条件（witnesses） |
+| `stateStreamWatchdog.qnt` | 単調時計・壁時計の 2 時計を持つ状態機械、実状態の 10 の安全不変条件（`safety`）、8 つの到達条件（witnesses） |
 | `stateStreamWatchdog_test.qnt` | issue #383 の筋書きを 5 構成でたどる 17 件のテスト |
 
 `stateStreamWatchdog.qnt` は遷移を 5 つの定数で切り替えます。`WAKE_CUTOFF` は復帰時 `checkStale` が切断と判定する壁時計経過のしきい値で、`earlyWakeCutoff` 以外は `STALE_TIMEOUT` と同じ 8 です。
@@ -48,8 +48,9 @@
 - `appliedStateMatchesActiveWhenConnected`：接続中に最後に適用した状態は、現在の接続から届いたものだけ。
 - `noPrematureWatchdogDisconnect`：期限より前に見張りタイマーでも復帰時確認（`checkStale`）でも切らない。切断のたびに原因（`lastDisconnectCause`）と切った時点の壁時計の経過（`lastDisconnectGap = wallNow - lastActivityWall`）を状態に残し、「原因が `WatchdogTimer` か `WakeCheck` なら `lastDisconnectGap >= STALE_TIMEOUT`」と状態で書いています。
 - `watchdogMatchesActiveConn`：見張りタイマーは開いている現在の接続 1 本だけに紐づく。
+- `activeConnHasWatchdog`：見張りのある構成では、開いている現在の接続には必ず見張りが付いている。開き直した接続に見張りを張り忘れると、その接続は切断表示のまま期限を過ぎても残り、`silentConnectionMustDisconnect` だけでは捕まえられないため、別に置いています。
 - `nothingActiveWhenClosed`：`stream.close()` 後は接続もタイマーも残らない。
-- `safety`：上の 9 つをすべて満たす。
+- `safety`：上の 10 をすべて満たす。
 
 進行の条件（到達できること。`--witnesses` で数えます）
 
@@ -101,6 +102,13 @@ quint run stateStreamWatchdog.qnt --main=earlyWakeCutoff --invariant=safety \
 ```
 
 4 手で `safety` に違反します（最後の受信から壁時計で 25 秒（5 目盛り）の `wakeFromSleep(5)` で `checkStale` が切断し、`lastDisconnectCause = WakeCheck`・`lastDisconnectGap = 5 < 8` となって `noPrematureWatchdogDisconnect` に違反）。前の版では復帰時の切断の枝が不変条件 4 の観測に入っておらず、この変異でも `safety` が通っていました。
+
+### 開き直した接続に見張りを張らない変異（写しで確認）：`safety` が破れる
+
+`reconnectFire` で `watchdogArmed' = false`・`watchdogConn' = NONE` とした写しを作り、`--main=fixed` で走らせました。
+
+- `--invariant=silentConnectionMustDisconnect --max-steps=40 --max-samples=20000 --seed=0x383`：反例なし。開き直した接続は切断表示のままなので、この条件だけでは見張りの張り忘れを捕まえられません。
+- `--invariant=safety --max-steps=25 --max-samples=10000 --seed=0x383`：9 手で違反します（`activeConnHasWatchdog`）。
 
 ### 修正案（`fixed`）：反例なし
 

@@ -7,11 +7,15 @@ import { expect, test } from "../support/test";
 const installHalfOpenSwitch = (): void => {
   const opened: Array<{ muted: boolean }> = [];
   const Original = window.EventSource;
-  const mute = <E,>(owner: { muted: boolean }, handler: ((event: E) => void) | null) =>
+  const delivered = { messages: 0 };
+  (window as unknown as { __stateStreamDelivered: typeof delivered }).__stateStreamDelivered = delivered;
+  const mute = <E,>(owner: { muted: boolean }, handler: ((event: E) => void) | null, count = false) =>
     handler === null
       ? null
       : (event: E) => {
-          if (!owner.muted) handler(event);
+          if (owner.muted) return;
+          handler(event);
+          if (count) delivered.messages += 1;
         };
   window.EventSource = class extends Original {
     muted = false;
@@ -20,7 +24,7 @@ const installHalfOpenSwitch = (): void => {
       opened.push(this);
     }
     override set onmessage(handler: ((event: MessageEvent) => void) | null) {
-      super.onmessage = mute(this, handler);
+      super.onmessage = mute(this, handler, true);
     }
     override get onmessage() {
       return super.onmessage;
@@ -54,6 +58,11 @@ test("半開きで無音になった接続を 40 秒で切断として扱い、�
   const trigger = item.getByRole("button", { name: "マージを承認" });
   await expect(trigger).toBeEnabled();
   await expect(page.getByText("再接続するまで操作できません。")).toHaveCount(0);
+  // サーバー描画の初期状態でもボタンは有効なため、SSE の最初の受信が画面へ届いてから
+  // 半開きにする。受信済みの接続が黙る経路を確かめる。
+  await page.waitForFunction(
+    () => (window as unknown as { __stateStreamDelivered: { messages: number } }).__stateStreamDelivered.messages > 0,
+  );
 
   await page.evaluate(() => (window as unknown as { __halfOpenStateStream: () => void }).__halfOpenStateStream());
   await page.clock.fastForward(40_000);
