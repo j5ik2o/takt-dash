@@ -422,27 +422,24 @@ test("応答なしのプロジェクトの run は従来どおり最後に読め
   assert.doesNotMatch(run.note ?? "", /読み取りが遅れています/);
 });
 
-test("概要は実行上限・24時間完了・失敗・中止・無音を導出する", () => {
+test("概要は実行上限・24時間完了・無音を導出する", () => {
   const view = buildOverviewView(createDashboardState(), NOW, true);
 
   assert.equal(view.runLimit, 8, "全プロジェクトの concurrency の合計を実行上限にする");
   assert.equal(view.completedTasks24h, 4, "全プロジェクトの24時間完了タスクを合計する");
-  assert.equal(view.failedTaskCount, 1, "失敗・上限超過・PR作成失敗を合わせて数える");
-  assert.equal(view.abortedGoalCount, 0, "中止したゴールは無い");
   assert.equal(view.silentRunCount, 0, "無音の run は無い");
   assert.equal(view.hasAnomalies, true, "判断待ちなどがあるので異常ありとする");
 });
 
-test("異常が無い状態は hasAnomalies を false にし、失敗・中止・無音を数えない", () => {
+test("異常が無い状態は hasAnomalies を false にし、無音を数えない", () => {
   const view = buildOverviewView(createHealthyDashboardState(), NOW, true);
 
   assert.equal(view.hasAnomalies, false, "異常が無ければ false にする");
   assert.equal(view.silentRunCount, 0);
-  assert.equal(view.failedTaskCount, 0);
-  assert.equal(view.abortedGoalCount, 0);
 });
 
-test("中止したゴールは異常として数える", () => {
+// issue #141：中止したゴールは要件 2.7 の異常でも接続の異常でもない。
+test("中止したゴールだけでは異常にしない", () => {
   const base = createHealthyDashboardState();
   const state = {
     ...base,
@@ -452,8 +449,7 @@ test("中止したゴールは異常として数える", () => {
   };
   const view = buildOverviewView(state, NOW, true);
 
-  assert.equal(view.abortedGoalCount, 1);
-  assert.equal(view.hasAnomalies, true);
+  assert.equal(view.hasAnomalies, false);
 });
 
 test("ログが止まった run は無音として数え、異常ありにする", () => {
@@ -601,7 +597,8 @@ test("進行中ゴールは完了・中止・未着手・人のマージ待ち�
   assert.deepEqual(inProgress, ["g-paused", "g-merge-in-progress"], "一時停止中と仕上げタスク進行中のマージ待ちだけを数える");
 });
 
-test("失敗タスクは失敗・上限超過・PR作成失敗の3分類を合計する", () => {
+// issue #141：失敗・上限超過・PR作成失敗のタスクは要件 2.7 の異常でも接続の異常でもない。
+test("失敗・上限超過・PR作成失敗のタスクだけでは異常にしない", () => {
   const base = createHealthyDashboardState();
   const state = {
     ...base,
@@ -616,7 +613,7 @@ test("失敗タスクは失敗・上限超過・PR作成失敗の3分類を合�
   };
   const view = buildOverviewView(state, NOW, true);
 
-  assert.equal(view.failedTaskCount, 6, "failed 1 + exceeded 2 + prFailed 3 を合計する");
+  assert.equal(view.hasAnomalies, false, "failed 1 + exceeded 2 + prFailed 3 があっても異常にしない");
 });
 test("人のマージ待ちは仕上げタスクの末尾状態だけで判定する", () => {
   const awaiting = (mergeTaskLast?: TaskStatus): ReturnType<typeof createGoal> =>
@@ -1078,7 +1075,7 @@ test("書き込み専用サーバーは概要バナーの応答なしに数え�
     [],
     "読み取りを行わないサーバーを「から応答がありません」の対象にしない",
   );
-  assert.equal(view.hasAnomalies, true, "判断待ち・失敗の異常は従来どおり知らせる");
+  assert.equal(view.hasAnomalies, true, "判断待ちの異常は従来どおり知らせる");
 });
 
 test("まだ読めていないプロジェクトがあるサーバーも表示状態が warn になる", () => {
