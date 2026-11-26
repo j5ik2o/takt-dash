@@ -817,6 +817,13 @@ async fn issue27(switch_write: bool) {
   let old_read = harness.registry.take_for_read("mac-mini", "takt-dash", "mac-mini").expect("旧 poller があります");
   let old_client = old_read.client.clone();
   drop(old_read);
+  let initial = load_config(harness.config_path()).unwrap();
+  let McpServer::Stdio(old_server) = &initial.servers["mac-mini"] else {
+    panic!("stdio です");
+  };
+  let old_launch = client_config(old_server, &initial.projects[0].cwd);
+  let (old_write, created) = harness.registry.client("mac-mini", "takt-dash", Lane::Write, || old_launch.clone());
+  assert!(!created, "切り替え前の書き込みレーンは周期で用意済みです");
 
   let mut config: Value = serde_json::from_str(&std::fs::read_to_string(harness.config_path()).unwrap()).unwrap();
   config["mcpServers"]["mini-two"] = config["mcpServers"]["mac-mini"].clone();
@@ -845,11 +852,18 @@ async fn issue27(switch_write: bool) {
   assert_eq!(
     harness.registry.take_for_read("mac-mini", "takt-dash", "mac-mini").is_none(),
     switch_write,
-    "書き込み先にも使わなくなった旧クライアントは外れます"
+    "書き込み先にも使わなくなった旧 server のレーンは外れ、書き込み先に残る旧 server のレーンは残ります"
   );
   let new_read = harness.registry.take_for_read("mini-two", "takt-dash", "mini-two").expect("新 poller があります");
   assert!(!Arc::ptr_eq(&old_client, &new_read.client), "旧クライアントを再利用しません");
   drop(new_read);
+  // 旧 server の書き込みレーンは、書き込み先が残るなら同じクライアントのまま残り、書き込み先も
+  // 切り替えたなら外れています（外れていれば、ここで新しく作られます）。
+  let (write_after, write_created) =
+    harness.registry.client("mac-mini", "takt-dash", Lane::Write, || old_launch.clone());
+  assert_eq!(write_created, switch_write, "旧 server の書き込みレーンは、書き込み先に使う間だけ残ります");
+  assert_eq!(Arc::ptr_eq(&old_write, &write_after), !switch_write, "残した書き込みレーンは同じクライアントです");
+  drop((old_write, write_after));
 
   // 回復した最初の成功は基準化だけで、旧基準との差分を出来事にしません。
   harness.rewrite_state(json!({"goals": [goal(GOAL, "active"), goal(ADDED_A, "active")]}));
