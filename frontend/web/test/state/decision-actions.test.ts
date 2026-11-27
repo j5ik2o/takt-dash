@@ -23,6 +23,7 @@ import {
   upsertDecisionResult,
   type DecisionAction,
 } from "../../src/state/decision-actions.ts";
+import { DIALOG_TRIGGERS } from "../../src/components/confirm-dialog.tsx";
 
 const decisions = createActionableDashboardState().pendingDecisions;
 
@@ -488,7 +489,7 @@ test("選択肢の回答は選んだ文字列を text として一覧の識別�
   assert.equal(action.payload.inquiryId, decision.inquiryId);
 });
 
-test("自由記述の意図は従来どおりの回答を組み立て、作業の依頼の意図は送らずに確認を開く", () => {
+test("自由記述の意図は従来どおりの回答を組み立て、作業の依頼の2択のボタンの意図は送らずに確認を開く", () => {
   const textResolution = resolveDecisionIntent(textQuestion(), { type: "answer-text" }, { text: " 補足します " });
   assert.equal(textResolution.kind, "submit");
   const textAction = textResolution.kind === "submit" ? textResolution.action : undefined;
@@ -496,11 +497,12 @@ test("自由記述の意図は従来どおりの回答を組み立て、作業�
   assert.equal(textAction.kind, "answer");
   assert.equal(textAction.payload.text, " 補足します ");
 
-  // 作業の依頼の2択は確認ダイアログを開き、確定したときだけ送る（issue #308）。
+  // 作業の依頼の2択のボタンは開く意図を出し、確認ダイアログを開く。確定したときだけ送る（issue #308）。
+  // 2択の report から直接開く（または送る）意図は無い（issue #415）。
   // 確定で送る内容は test/components/issue-308-operation-confirm.test.ts が確かめる。
-  for (const report of [1, 2]) {
-    const reportResolution = resolveDecisionIntent(operation(), { type: "answer-report", report }, { text: "" });
-    assert.equal(reportResolution.kind, "open", `report ${report} は確認を開く`);
+  for (const { dialog, label } of DIALOG_TRIGGERS.operation) {
+    const reportResolution = resolveDecisionIntent(operation(), { type: "open", dialog }, { text: "" });
+    assert.deepEqual(reportResolution, { kind: "open", dialog }, `${label} は確認を開く`);
   }
 });
 

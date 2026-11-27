@@ -5,8 +5,9 @@
 // 前半は DOM を持たない遷移（decideDecisionTransition）とサーバー描画で確かめる。
 // 後半は判断待ちのページ（DecisionsContent）を jsdom の DOM へマウントし、本物のボタンを
 // 押して、書き込み（fetch）が何回、どの内容で、どの接続状態で出たかを観測する。
-// 確認の種別の名前は実装が決める。テストは、2択の意図から開いたダイアログの状態を
-// そのまま使い、種別の名前を書かない。
+// 確認の種別の名前は実装が決める。テストは、2択のボタン（DIALOG_TRIGGERS.operation）の名前から
+// 種別を引き、そのボタンが出す開く意図で開いた状態をそのまま使い、種別の名前を書かない。
+// 2択の report から直接開く（または送る）意図は無い（issue #415 で answer-report を消した）。
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { act, createElement } from "react";
@@ -21,6 +22,7 @@ import {
   decideDecisionTransition,
   type DecisionTransition,
 } from "../../src/components/decision-actions-view.tsx";
+import { DIALOG_TRIGGERS } from "../../src/components/confirm-dialog.tsx";
 import {
   INITIAL_DECISION_DIALOG_STATE,
   type DecisionDialogState,
@@ -81,9 +83,14 @@ const OFFLINE_NOTE = "再接続するまで操作できません。";
 const transition = (decision: PendingDecision, intent: Parameters<typeof decideDecisionTransition>[0]["intent"], state: DecisionDialogState): DecisionTransition =>
   decideDecisionTransition({ decision, intent, text: "", state });
 
-// 2択のボタンが出す意図から、開いたダイアログの状態を得る。開かずに送るなら失敗にする。
+// 2択のボタンが出す開く意図から、開いたダイアログの状態を得る。ボタンは名前で
+// DIALOG_TRIGGERS.operation から引く。開かずに送るなら失敗にする。
 const openByReport = (decision: PendingDecision, report: Report): Extract<DecisionDialogState, { kind: "open" }> => {
-  const opened = transition(decision, { type: "answer-report", report }, INITIAL_DECISION_DIALOG_STATE);
+  const choice = CHOICES.find((candidate) => candidate.report === report);
+  assert.ok(choice, `report ${report} の2択がある`);
+  const trigger = DIALOG_TRIGGERS.operation.find((candidate) => candidate.label === choice.trigger);
+  assert.ok(trigger, `一覧に「${choice.trigger}」のボタンがある`);
+  const opened = transition(decision, { type: "open", dialog: trigger.dialog }, INITIAL_DECISION_DIALOG_STATE);
   assert.equal(opened.kind, "state", `report ${report} は送らずにダイアログを開く: ${JSON.stringify(opened)}`);
   if (opened.kind !== "state") {
     throw new Error("2択はダイアログを開く");
@@ -168,7 +175,7 @@ const renderView = (
       busy,
       disconnected,
       onTextChange: () => {},
-      onAction: () => {},
+      onAction: () => true,
     }),
   );
   return new JSDOM(html).window.document;
@@ -280,11 +287,18 @@ const installDomEnvironment = (): void => {
 // 送った書き込み。disconnected は、送った時点で画面が切断中だったか。
 type SentWrite = { url: string; body: Record<string, unknown>; disconnected: boolean };
 
+// 書き込みへの応答。ok は成功、throw は fetch の例外（通信の失敗）、not-ok は backend の失敗の応答。
+type WriteResponse = { kind: "ok" } | { kind: "throw" } | { kind: "not-ok"; error: string };
+
 // 判断待ちのページを判断待ち1件（既定は作業の依頼）でマウントし、書き込みを fetch の差し替えで受ける。
-// 書き込みの応答は settle を呼ぶまで返さない（送信中を作る）。
+// 書き込みの応答は settle を呼ぶまで返さない（送信中を作る）。応答は respond が、書き込みの順番
+// （0 から）ごとに選ぶ。既定はすべて成功。
 // 時計（Date と setTimeout）は node:test の mock.timers で止め、wait で進める。確定を受け付けるまでの
 // 時間は、wait で進めた分だけ過ぎる。
-const mountOperationPage = async (decision: PendingDecision = operation()) => {
+const mountOperationPage = async (
+  decision: PendingDecision = operation(),
+  respond: (index: number) => WriteResponse = () => ({ kind: "ok" }),
+) => {
   installDomEnvironment();
   mock.timers.enable({ apis: ["Date", "setTimeout"], now: NOW.getTime() });
   const state: DashboardState = { ...createActionableDashboardState(), pendingDecisions: [decision] };
@@ -292,11 +306,22 @@ const mountOperationPage = async (decision: PendingDecision = operation()) => {
   const pending: (() => void)[] = [];
   let disconnected = false;
   (globalThis as unknown as { fetch: unknown }).fetch = (url: string, init?: { body?: string }) => {
+    const response = respond(sent.length);
     sent.push({ url, body: JSON.parse(init?.body ?? "{}") as Record<string, unknown>, disconnected });
-    return new Promise((resolve) => {
-      pending.push(() =>
-        resolve({ ok: true, json: async () => ({ ok: true }) } as unknown as Response),
-      );
+    return new Promise((resolve, reject) => {
+      pending.push(() => {
+        switch (response.kind) {
+          case "ok":
+            resolve({ ok: true, json: async () => ({ ok: true }) } as unknown as Response);
+            return;
+          case "throw":
+            reject(new TypeError("Failed to fetch"));
+            return;
+          case "not-ok":
+            resolve({ ok: false, json: async () => ({ ok: false, error: response.error }) } as unknown as Response);
+            return;
+        }
+      });
     });
   };
   const container = document.createElement("div");
@@ -348,6 +373,26 @@ const mountOperationPage = async (decision: PendingDecision = operation()) => {
     escape: async (): Promise<void> => {
       await act(async () => {
         document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+    },
+    // 1つの act の中で操作を続けて行う。React の描き直しは act の終わりまで起きないので、
+    // 2つ目以降の操作は、1つ目の操作の前の描画（disabled も前のまま）に当たる。
+    inOneAct: async (operations: () => void): Promise<void> => {
+      await act(async () => {
+        operations();
+      });
+    },
+    // Tab（shift なら Shift+Tab）のキーを document へ送る。jsdom はフォーカスを動かさないので、
+    // 動くのはダイアログの封じ込めが動かした分だけになる。
+    tab: async (shift: boolean): Promise<void> => {
+      await act(async () => {
+        document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Tab", shiftKey: shift, bubbles: true }));
+      });
+    },
+    // フォーカスのある要素からフォーカスを外す（body へ移す）。
+    blur: async (): Promise<void> => {
+      await act(async () => {
+        (document.activeElement as HTMLElement | null)?.blur();
       });
     },
     wait: async (ms: number): Promise<void> => {
@@ -557,6 +602,186 @@ test("判断待ちのページで確認を開いた直後に壁時計が進ん�
     } finally {
       await page.unmount();
     }
+  }
+});
+
+// ---- issue #415: 送信中の二重の確定の守り、閉じる途中の扱い、送信の失敗の後 ----
+
+const pressEscape = (): void => {
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+};
+
+// 描き直しで確定が disabled になる前（1つの act の中）に確定を2回押しても、書き込みは1回だけ出る。
+// 送信中の守りは、描画の busy ではなく、押した時点ですぐ見える守りで持つ（docs/design/issue-415.md）。
+test("判断待ちのページで1つの act の中で確定を2回押しても、書き込みは1回だけ出る", async () => {
+  for (const flow of CONFIRM_FLOWS) {
+    const page = await mountOperationPage(flow.decision());
+    try {
+      await page.click(page.trigger(flow.trigger));
+      await page.wait(CONFIRM_DELAY_MS);
+      const confirm = page.dialogButton("confirm");
+      assert.ok(confirm, `${flow.name}: 確認ダイアログに確定のボタンがある`);
+      await page.inOneAct(() => {
+        confirm.click();
+        confirm.click();
+      });
+      assert.equal(page.sent.length, 1, `${flow.name}: 1つの act の中の2回の確定で、書き込みは1回`);
+      assert.equal(page.sent[0]?.url, flow.url, flow.name);
+      await page.settle();
+      assert.equal(page.dialog(), null, `${flow.name}: 結果が返ったらダイアログを閉じる`);
+      assert.equal(page.sent.length, 1, `${flow.name}: 結果の後も書き込みは1回`);
+    } finally {
+      await page.unmount();
+    }
+  }
+});
+
+// 送信中の「やめる」と Escape は、描き直しの前に届いても捨てる。ダイアログは送信中のまま開いていて、
+// フォーカスの封じ込めも外れない（外れると、送信の終わりまで Tab がダイアログの外へ抜ける）。
+test("判断待ちのページで1つの act の中で確定の後にやめる・Escape を送っても、送信中のまま開いていて、フォーカスはダイアログの中に留まる", async () => {
+  for (const flow of CONFIRM_FLOWS) {
+    for (const close of ["やめる", "Escape"] as const) {
+      const name = `${flow.name}（${close}）`;
+      const page = await mountOperationPage(flow.decision());
+      try {
+        await page.click(page.trigger(flow.trigger));
+        await page.wait(CONFIRM_DELAY_MS);
+        const confirm = page.dialogButton("confirm");
+        const cancel = page.dialogButton("cancel");
+        assert.ok(confirm && cancel, `${name}: 確認ダイアログに確定とやめるがある`);
+        await page.inOneAct(() => {
+          confirm.click();
+          if (close === "やめる") {
+            cancel.click();
+          } else {
+            pressEscape();
+          }
+        });
+        assert.equal(page.sent.length, 1, `${name}: 書き込みは確定の1回`);
+        const dialog = page.dialog();
+        assert.ok(dialog, `${name}: 送信中はダイアログを閉じない`);
+        assert.equal(page.dialogButton("cancel")?.disabled, true, `${name}: 送信中はやめるを押せない`);
+        for (const shift of [false, true]) {
+          const key = shift ? "Shift+Tab" : "Tab";
+          // フォーカスを body へ外してから Tab を送る。封じ込めが動いていれば、ダイアログの中へ戻す。
+          await page.blur();
+          await page.tab(shift);
+          assert.ok(
+            dialog.contains(document.activeElement),
+            `${name}: 送信中の ${key} の後、フォーカスはダイアログの中にある（今は ${document.activeElement?.outerHTML.slice(0, 80)}）`,
+          );
+        }
+        await page.settle();
+        assert.equal(page.dialog(), null, `${name}: 結果が返ったらダイアログを閉じる`);
+        assert.equal(page.sent.length, 1, `${name}: 結果の後も書き込みは1回`);
+      } finally {
+        await page.unmount();
+      }
+    }
+  }
+});
+
+// 同じ描き直しの区間で「やめる」の後に確定を押しても、閉じたはずの確認から送らない。
+test("判断待ちのページで1つの act の中でやめるの後に確定を押すと、送らずに閉じる", async () => {
+  for (const flow of CONFIRM_FLOWS) {
+    const page = await mountOperationPage(flow.decision());
+    try {
+      await page.click(page.trigger(flow.trigger));
+      await page.wait(CONFIRM_DELAY_MS);
+      const confirm = page.dialogButton("confirm");
+      const cancel = page.dialogButton("cancel");
+      assert.ok(confirm && cancel, `${flow.name}: 確認ダイアログに確定とやめるがある`);
+      await page.inOneAct(() => {
+        cancel.click();
+        confirm.click();
+      });
+      assert.equal(page.sent.length, 0, `${flow.name}: やめた後の確定は送らない`);
+      assert.equal(page.dialog(), null, `${flow.name}: やめると閉じる`);
+      await page.settle();
+      assert.equal(page.sent.length, 0, `${flow.name}: 後からも送らない`);
+    } finally {
+      await page.unmount();
+    }
+  }
+});
+
+// 送信の失敗の2つの形と、結果に出る文言。
+const FAILURES: { name: string; response: WriteResponse; message: string }[] = [
+  {
+    name: "fetch の例外",
+    response: { kind: "throw" },
+    message: "操作を送信できませんでした。通信を確認してください。",
+  },
+  {
+    name: "失敗の応答",
+    response: { kind: "not-ok", error: "fake の書き込みは受け付けませんでした。" },
+    message: "fake の書き込みは受け付けませんでした。",
+  },
+];
+
+// 送信が失敗しても、成功のときと同じく閉じて結果を出し、フォーカスは押した2択へ戻る。
+// 送信中の守りは解けていて、開き直した確認は、開いた直後は送らず、500ms 過ぎた確定を1回だけ送る。
+// やり直しは、1回目と同じ冪等の鍵で送る。
+test("判断待ちのページで作業の依頼の送信が失敗すると、閉じて失敗の文言を出し、押した2択へフォーカスが戻り、開き直すと 500ms 後の確定を同じ鍵で1回だけ送る", async () => {
+  for (const choice of CHOICES) {
+    for (const failure of FAILURES) {
+      const name = `${choice.trigger}（${failure.name}）`;
+      const page = await mountOperationPage(operation(), (index) => (index === 0 ? failure.response : { kind: "ok" }));
+      try {
+        await page.click(page.trigger(choice.trigger));
+        await page.wait(CONFIRM_DELAY_MS);
+        await page.click(page.dialogButton("confirm"));
+        assert.equal(page.sent.length, 1, `${name}: 確定で1回送る`);
+        await page.settle();
+        assert.equal(page.dialog(), null, `${name}: 失敗の結果が返ったらダイアログを閉じる`);
+        assert.ok((page.container.textContent ?? "").includes(failure.message), `${name}: 失敗の文言を出す`);
+        assert.equal(document.activeElement, page.trigger(choice.trigger), `${name}: 押した2択へフォーカスが戻る`);
+        for (const { trigger } of CHOICES) {
+          assert.equal(page.trigger(trigger).disabled, false, `${name}: 失敗の後、${trigger} は押せる`);
+        }
+
+        await page.click(page.trigger(choice.trigger));
+        assert.ok(page.dialog(), `${name}: 開き直す`);
+        await page.click(page.dialogButton("confirm"));
+        assert.equal(page.sent.length, 1, `${name}: 開き直した直後の確定は送らない`);
+        await page.wait(CONFIRM_DELAY_MS - 1);
+        await page.click(page.dialogButton("confirm"));
+        assert.equal(page.sent.length, 1, `${name}: 開き直してから ${CONFIRM_DELAY_MS - 1}ms の確定も送らない`);
+        await page.wait(1);
+        await page.click(page.dialogButton("confirm"));
+        await page.click(page.dialogButton("confirm"));
+        assert.equal(page.sent.length, 2, `${name}: 開き直してから ${CONFIRM_DELAY_MS}ms 過ぎた確定は1回だけ送る`);
+        assert.equal(page.sent[1]?.body.report, choice.report, name);
+        assert.equal(typeof page.sent[0]?.body.idempotencyKey, "string", `${name}: 1回目は冪等の鍵を付ける`);
+        assert.equal(page.sent[1]?.body.idempotencyKey, page.sent[0]?.body.idempotencyKey, `${name}: やり直しは同じ鍵`);
+        await page.settle();
+        assert.equal(page.dialog(), null, `${name}: やり直しの結果が返ったら閉じる`);
+        assert.match(page.container.textContent ?? "", /回答を送信しました。/);
+      } finally {
+        await page.unmount();
+      }
+    }
+  }
+});
+
+// 確認を挟まずに送る回答（選択肢）も、同じ送信中の守りを通る。自由記述の「回答する」も同じ run を
+// 通るが、このマウントでは、入力欄に値を入れて input のイベントを送っても本文の state が変わらなかった
+// ので、選択肢で確かめる。
+test("判断待ちのページで1つの act の中で選択肢を2回押しても、書き込みは1回だけ出る", async () => {
+  const page = await mountOperationPage(findDecision("inquiry-options"));
+  try {
+    const button = page.trigger("今週");
+    await page.inOneAct(() => {
+      button.click();
+      button.click();
+    });
+    assert.equal(page.sent.length, 1, "選択肢の2回の押下で、書き込みは1回");
+    assert.equal(page.sent[0]?.body.text, "今週");
+    await page.settle();
+    assert.match(page.container.textContent ?? "", /回答を送信しました。/);
+    assert.equal(page.sent.length, 1);
+  } finally {
+    await page.unmount();
   }
 });
 

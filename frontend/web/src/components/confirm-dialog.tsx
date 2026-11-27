@@ -37,7 +37,7 @@ type ConfirmDialogProps = {
   confirmLabel: string;
   busy: boolean;
   disconnected: boolean;
-  onAction: (intent: DecisionActionsIntent) => void;
+  onAction: (intent: DecisionActionsIntent) => boolean;
 };
 
 export type DialogKeyDecision =
@@ -112,12 +112,16 @@ function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, di
     busyRef.current = busy;
   }, [busy]);
   const cancel = useCallback((): void => {
-    released.current = true;
-    onAction({ type: "cancel" });
+    if (onAction({ type: "cancel" })) {
+      released.current = true;
+    }
   }, [onAction]);
   // 開いた直後の確定は受け付けない。送らず、ダイアログも閉じない。ボタンは disabled に
   // しない（無効化は送信中か切断中だけで決める）。やめると Escape はこの間も受け付ける。
   const confirm = useCallback((): void => {
+    if (released.current) {
+      return;
+    }
     if (!isAcceptingConfirm()) {
       return;
     }
@@ -388,7 +392,7 @@ type DialogActionSectionProps = {
   busy: boolean;
   disconnected: boolean;
   triggerRefs: RefObject<Record<DialogKind, HTMLButtonElement | null>>;
-  onAction: (intent: DecisionActionsIntent) => void;
+  onAction: (intent: DecisionActionsIntent) => boolean;
 };
 
 // 確認ダイアログを開くトリガー群と、いま開いている種別のダイアログをまとめて描画する。

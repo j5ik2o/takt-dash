@@ -4,6 +4,8 @@
 
 仕様とコードは機械的にはつながっていません。コードの挙動は `frontend/web/test/components/decision-actions.test.ts`（全組み合わせの性質のテストを含む）、`frontend/web/test/components/issue-308-operation-confirm.test.ts`（任意の操作の列の性質のテストを含む）、`e2e/tests/issue-307-disconnected-decisions.spec.ts`、`e2e/tests/issue-308-operation-confirm.spec.ts` が確かめます。
 
+仕様の `confirm` は、送ることと `busy` にすることを、`confirmEnabled`（ダイアログが開いていて、送信中でない）を見て1手で行います。この1手のうち、`busy` の分はコードでは `DecisionActions` の `run` の頭の ref の守り（描き直しを待たずに送信中を見て立てる）に、`dialog` の分は `ConfirmDialog` の `released` の守り（やめた後の確定を送らない）に当たります（[j5ik2o/takt-dash#415](https://github.com/j5ik2o/takt-dash/issues/415)、`docs/design/issue-415.md`）。
+
 ## ファイル
 
 | ファイル | 内容 |

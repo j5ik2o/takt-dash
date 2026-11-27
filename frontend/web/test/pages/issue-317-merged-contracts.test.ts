@@ -96,7 +96,7 @@ const renderActions = (decision: PendingDecision): string =>
       disconnected: false,
       dialogTarget: null,
       onTextChange: () => {},
-      onAction: () => {},
+      onAction: () => true,
     }),
   );
 

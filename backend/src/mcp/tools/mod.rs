@@ -14,22 +14,24 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use super::{
-  client::{CallError, McpClientConfig, ToolCaller, TransportError},
-  metrics::{ToolCallMetrics, ToolCallOutcome},
+  client::{CallError, McpClientConfig, ToolCaller},
+  metrics::ToolCallMetrics,
 };
 use crate::{
   config::StdioMcpServer,
   domain::{GoalId, InquiryId, MergeUntil, ProjectName, PullRequestNumber, RunSlug, TaskName},
   model::{
-    ExecutionStatus, GoalDetail, GoalEntry, GoalQuestionEntry, GoalStatus, GoalTaskEntry, GoalWorkLogEntry,
-    InquiryEntry, NotificationEntry, ProjectSnapshot, RunEntry, TaskDetail, TaskEntry, TaskStatus, TerminalReads,
+    GoalDetail, GoalEntry, GoalQuestionEntry, GoalTaskEntry, GoalWorkLogEntry, InquiryEntry, ProjectSnapshot, RunEntry,
+    TaskDetail, TaskEntry, TaskStatus, TerminalReads,
   },
   run_progress::{read_run, retain_runs, RunLogHandle, RunReadFailure},
 };
 
 mod goal;
 mod goal_registration;
+mod notifications;
 mod parse;
+mod previous;
 mod run;
 mod sets;
 mod summary_cache;
@@ -37,10 +39,11 @@ mod summary_cache;
 use self::{
   goal::{
     is_missing_goal_field, parse_goal, parse_goal_execution_status, parse_goal_question, parse_goal_status,
-    parse_goal_work_log, parse_inquiry, parse_notification, parse_task, parse_task_detail, prev_inquiries,
-    resolve_awaiting_merge_at, resolve_inquiry, ParsedInquiry, TaskLinkFields,
+    parse_goal_work_log, parse_inquiry, parse_task, parse_task_detail, prev_inquiries, resolve_awaiting_merge_at,
+    resolve_inquiry, ParsedInquiry, TaskLinkFields,
   },
   parse::{domain_value, optional_string, required_string, string_field, Page},
+  previous::{call_outcome, degrades_to_previous, is_terminal, is_timeout, is_unchanged_terminal_goal, previous_run},
   run::{parse_remote_run, step_entries, step_log_entries, step_log_next_offset},
   summary_cache::{goal_summaries, GoalSummaryKey},
 };
@@ -95,21 +98,6 @@ impl From<CallError> for ToolError {
       | CallError::Tool(error) => ToolError::Tool(error),
     }
   }
-}
-
-/// 輸送エラーのうち期限切れかどうか。
-fn is_timeout(error: &ToolError) -> bool {
-  matches!(error, ToolError::Transport(TransportError::Timeout(_)))
-}
-
-/// 補助読み取りの失敗のうち、前回値へ縮退してよい失敗かどうか。
-///
-/// 道具エラーは従来どおり縮退します。輸送の期限切れも、高負荷で1件の補助読み取りが
-/// 遅れただけでプロジェクト全体を失敗させないため、縮退の対象に加えます。それ以外の
-/// 輸送エラー（プロセス終了・起動失敗など）は接続自体が壊れている兆候として、
-/// 従来どおり全体の失敗にします。
-fn degrades_to_previous(error: &ToolError) -> bool {
-  matches!(error, ToolError::Tool(_)) || is_timeout(error)
 }
 
 /// 1プロジェクト分の道具のまとまりの実装本体。
@@ -497,134 +485,6 @@ impl<'a> ToolSetCore<'a> {
       }
     }
     Err(ToolError::Parse("takt_get_workflow のページ追従が上限に達しました".to_owned()))
-  }
-
-  /// ゴールごとの通知と、マージ待ちの起点時刻を集める。あわせて、終端状態で通知を読めたゴール
-  /// （読み取りを省いたゴールを含む）を返します。
-  async fn list_notifications(
-    &mut self,
-    goals: &[GoalEntry],
-    prev: Option<&ProjectSnapshot>,
-  ) -> Result<(Vec<NotificationEntry>, BTreeMap<GoalId, DateTime<Utc>>, BTreeSet<GoalId>), ToolError> {
-    let mut notifications = Vec::new();
-    let mut awaiting_merge_at = BTreeMap::new();
-    let mut read_in_terminal = BTreeSet::new();
-    for goal in goals {
-      if is_unchanged_terminal_goal(goal, prev, |reads| &reads.notifications) {
-        inherit_previous_notifications(&mut notifications, &mut awaiting_merge_at, goal, prev);
-        read_in_terminal.insert(goal.goal_id.clone());
-        continue;
-      }
-      match self.list_goal_notifications(&goal.goal_id).await {
-        | Ok((goal_notifications, goal_awaiting_merge_at)) => {
-          if let Some(recorded_at) = goal_awaiting_merge_at {
-            awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
-          }
-          notifications.extend(goal_notifications);
-          if is_terminal(goal) {
-            read_in_terminal.insert(goal.goal_id.clone());
-          }
-        },
-        | Err(error) if degrades_to_previous(&error) => {
-          inherit_previous_notifications(&mut notifications, &mut awaiting_merge_at, goal, prev);
-        },
-        | Err(error) => return Err(error),
-      }
-    }
-    Ok((notifications, awaiting_merge_at, read_in_terminal))
-  }
-
-  /// 1 ゴールの通知を nextOffset が null になるまで追従して集める。あわせて、そのゴールの
-  /// awaiting_merge 通知のうち最も新しい recordedAt を返す。
-  async fn list_goal_notifications(
-    &mut self,
-    goal_id: &GoalId,
-  ) -> Result<(Vec<NotificationEntry>, Option<DateTime<Utc>>), ToolError> {
-    let mut notifications = Vec::new();
-    let mut awaiting_merge_at: Option<DateTime<Utc>> = None;
-    let mut offset = 0;
-    for _ in 0..MAX_PAGES {
-      let value = self
-        .call_json("takt_get_goal", json!({ "goalId": goal_id.as_str(), "path": "notifications", "offset": offset }))
-        .await?;
-      let page = Page::from_value(&value, "items")?;
-      for item in &page.items {
-        let notification = parse_notification(goal_id, item, &page.shortened)?;
-        if notification.kind == "awaiting_merge"
-          && awaiting_merge_at.is_none_or(|current| notification.recorded_at > current)
-        {
-          awaiting_merge_at = Some(notification.recorded_at);
-        }
-        notifications.push(notification);
-      }
-      match page.next_offset {
-        | Some(next) => offset = next,
-        | None => return Ok((notifications, awaiting_merge_at)),
-      }
-    }
-    Err(ToolError::Parse("takt_get_goal の notices 追従が上限に達しました".to_owned()))
-  }
-}
-
-/// 道具呼び出しの結果を集計用の結果へ分類する。応答の解析エラーは道具呼び出し自体の結果では
-/// ないため、ここでは扱いません。
-fn call_outcome(result: &Result<String, CallError>) -> ToolCallOutcome {
-  match result {
-    | Ok(_) => ToolCallOutcome::Succeeded,
-    | Err(CallError::Tool(_)) => ToolCallOutcome::Failed,
-    | Err(CallError::Transport(TransportError::Timeout(_))) => ToolCallOutcome::TimedOut,
-    | Err(CallError::Transport(_)) => ToolCallOutcome::Failed,
-  }
-}
-
-/// 終端（`status == Completed` または `execution_status == Aborted`）のゴールか。
-fn is_terminal(goal: &GoalEntry) -> bool {
-  goal.status == GoalStatus::Completed || goal.execution_status == ExecutionStatus::Aborted
-}
-
-/// 補助読み取りの項目 `item` を省ける、前回と同じ状態の終端ゴールかを判定する。
-///
-/// 前回の同じゴールが同じ終端状態で、かつ前回その状態でこの項目を読めていた場合だけ省けます。
-/// 初回観測、状態変化、`AwaitingMerge` などの非終端、前回の終端状態で読み取りに失敗した項目は
-/// 読み取り対象のままです。問い合わせへの回答の後に前回の記録から外されたゴールも、
-/// 質問を読み直します。
-fn is_unchanged_terminal_goal(
-  goal: &GoalEntry,
-  prev: Option<&ProjectSnapshot>,
-  item: impl Fn(&TerminalReads) -> &BTreeSet<GoalId>,
-) -> bool {
-  let Some(prev) = prev else {
-    return false;
-  };
-  let Some(previous) = prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id) else {
-    return false;
-  };
-  previous.status == goal.status
-    && previous.execution_status == goal.execution_status
-    && is_terminal(goal)
-    && item(&prev.terminal_reads).contains(&goal.goal_id)
-}
-
-/// 前回 snapshot の同じ runSlug の run を返す。前回が無ければ `None` です。
-fn previous_run(prev: Option<&ProjectSnapshot>, run_slug: &RunSlug) -> Option<RunEntry> {
-  prev.and_then(|snapshot| snapshot.runs.iter().find(|entry| entry.run_slug == run_slug.as_str())).cloned()
-}
-
-/// 前回 snapshot の同じゴールの通知と、マージ待ちの起点時刻を引き継ぐ。前回が無ければ何もしません。
-fn inherit_previous_notifications(
-  notifications: &mut Vec<NotificationEntry>,
-  awaiting_merge_at: &mut BTreeMap<GoalId, DateTime<Utc>>,
-  goal: &GoalEntry,
-  prev: Option<&ProjectSnapshot>,
-) {
-  let Some(prev) = prev else {
-    return;
-  };
-  notifications.extend(prev.notifications.iter().filter(|entry| entry.goal_id == goal.goal_id).cloned());
-  if let Some(recorded_at) =
-    prev.goals.iter().find(|entry| entry.goal_id == goal.goal_id).and_then(|entry| entry.awaiting_merge_at)
-  {
-    awaiting_merge_at.insert(goal.goal_id.clone(), recorded_at);
   }
 }
 

@@ -43,7 +43,7 @@ type DecisionActionsViewProps = {
   /** backend と切れている間は、回答を送れないので操作を止める（issue #307）。 */
   disconnected: boolean;
   onTextChange: (text: string) => void;
-  onAction: (intent: DecisionActionsIntent) => void;
+  onAction: (intent: DecisionActionsIntent) => boolean;
 };
 
 export type DialogRestoreDecision =
