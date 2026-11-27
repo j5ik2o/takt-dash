@@ -142,7 +142,9 @@ node scripts/with-timestamps.mjs <program> [args...]
 
 対象の issue：[j5ik2o/takt-dash#413](https://github.com/j5ik2o/takt-dash/issues/413)（#186 のマージ後の点検の指摘）。変えるのは `frontend/web/scripts/with-timestamps.mjs` とこの文書だけ。`line-stamper.mjs`、時刻の形、plist（まだ入れていない）、既存のテストは変えない。
 
-- 合図で終わった子（指摘 1）：子が合図 S（番号 n は `os.constants.signals[S]`）で終わったら、自分の受け手を外す。S が「自分へ送ってよい合図」（既定の動作が core を作らずに終わり、Node が無視も別の用途にも使わないもの：SIGHUP・SIGINT・SIGTERM・SIGKILL・SIGALRM・SIGUSR2・SIGVTALRM・SIGPROF）で、外したあと S の受け手が残っていない（`process.listenerCount(S) === 0`）ときだけ、自分へ S を送る。送ったあと 1000ms のうちに死ななければ `process.exit(128 + n)`（タイマーは `unref` しない）。それ以外（SIGPIPE・SIGXFSZ は Node が無視、SIGUSR1 は Inspector を起こす、SIGABRT・SIGSEGV・SIGQUIT・SIGTRAP などは core とクラッシュレポートを作る、知らない合図、受け手が残っている）は、送らずにすぐ `process.exit(128 + n)`。
+- 合図で終わった子（指摘 1）：子が合図 S（番号 n は `os.constants.signals[S]`）で終わったら、自分の受け手を外す。S が「自分へ送ってよい合図」（既定の動作が core を作らずに終わり、Node が無視も別の用途にも使わないもの：SIGHUP・SIGINT・SIGTERM・SIGKILL・SIGALRM・SIGUSR2・SIGVTALRM・SIGPROF）で、外したあと S の受け手が残っていない（`process.listenerCount(S) === 0`）ときだけ、自分へ S を送る。自分へ送ったあと、`unref` しない 1000ms のタイマーを置く。合図が効けば合図で死に、飲み込まれたら（受け手が後から足された、遮られたなど）タイマーで `process.exit(128 + n)`。それ以外（SIGPIPE・SIGXFSZ は Node が無視、SIGUSR1 は Inspector を起こす、SIGABRT・SIGSEGV・SIGQUIT・SIGTRAP などは core とクラッシュレポートを作る、知らない合図、受け手が残っている）は、送らずにすぐ `process.exit(128 + n)`。
+- 終わる時機：合図の経路でも終了コードの経路でも、自分へ合図を送るのと `process.exit` を呼ぶのは、両方の流れの転送の終わり（書き込みの完了か失敗）を待ったあとに限る（最後の行を落とさない。I6 のまま）。
+- 想定外の例外（I9 の受け口）：`main` の外側を `try`／`catch` で包み、`unhandledRejection` と `uncaughtException` の受け手も付ける。想定外の例外が来たら、標準エラーへ時刻付きの 1 行 `with-timestamps: 想定外の失敗: <message>` を書き（書けなくても続ける）、1 で終わる。テストは足さない（外から起こせない）。
 - 引数なし（指摘 2）：`main` の最初で `process.stdout` と `process.stderr` に何もしない `error` の受け手を付け、終わるまで外さない（書き込みのコールバックに EPIPE が来たあとで `error` の出来事が来ても、捕まえていない例外にしない）。`writeStampedLine` は書き込みのコールバックで解決する。引数なしは標準エラーが壊れていても常に 2。
 - 起こせない（指摘 3）：起こせたかは `spawn` のその場で決める。`spawn` が投げた（空の文字列など）か、戻った `child.pid` が `undefined`（ENOENT・EACCES）なら起こせない。投げたときはその例外の、`pid` が無いときは続いて来る `error` の理由で、標準エラーへ時刻付きの 1 行（`<program を JSON の文字列にしたもの>: <理由>`。空でも `"": …` と分かる）を書き、127 で終わる。起こせたあとの `error`（動いている子への `kill` の EPERM など）は 127 の理由にしない（受け手は付けたまま、何もしない）。`forward` は source の `end` でも `close` でも終わる（先に来た方、2 回目は無視）。
 - 書き込みの失敗の知らせ（指摘 4）：流れごとに「最初の失敗」の時点で、すぐもう一方の流れへ 1 行 `with-timestamps: <stdout|stderr> への書き込みに失敗しました: <message>` を書く。流れごとに 1 回だけ。もう一方も既に失敗していれば書かない（両方失敗なら何もしない）。子の終わりのあとの `reportForwardFailure` は無くす（二重に知らせない）。
@@ -157,7 +159,7 @@ node scripts/with-timestamps.mjs <program> [args...]
 - I8：書き込みの失敗の知らせは、流れごとに高々 1 回、失敗した流れと逆の流れにだけ、子の生死と関係なく失敗の直後に出る。
 - I9：ラッパーは、どの経路でも時刻の無い行を書かない（捕まえていない例外のスタックを出さない）。
 
-性質（総当たり）：合図 S を {SIGHUP, SIGINT, SIGTERM, SIGKILL, SIGALRM, SIGUSR1, SIGUSR2, SIGPIPE, SIGXFSZ} と、Linux ではさらに core を作る合図 {SIGABRT, SIGQUIT, SIGSEGV, SIGTRAP}、親の状態を「受け手なし／SIGHUP の受け手あり」の両方で総当たりし、子（`/bin/sh -c 'kill -s S $$'`）が S で終わるとき、ラッパーは I6' のとおりに終わり（送ってよい合図は S か 128 + n、それ以外は 128 + n で合図では終わらない）、標準エラーに `Debugger listening` を含まない。乱数でなく総当たりにするのは、領域が有限で小さいため。core を作る合図を macOS で除くのは、テストの子（sh）のクラッシュレポートが手元の `~/Library/Logs/DiagnosticReports` に溜まるためで、ラッパーの分岐は OS で変わらないので CI（Linux）で確かめる。
+性質（総当たり）：合図 S を {SIGHUP, SIGINT, SIGTERM, SIGKILL, SIGALRM, SIGUSR1, SIGUSR2, SIGPIPE, SIGXFSZ} と、Linux ではさらに core を作る合図 {SIGABRT, SIGQUIT, SIGSEGV, SIGTRAP, SIGBUS, SIGILL, SIGFPE, SIGSYS}（足すのは子を終わらせる合図だけ。SIGSTOP・SIGTSTP・SIGCONT・SIGCHLD・SIGWINCH など、止める・無視される合図は子が終わらないので除く）、親の状態を「受け手なし／SIGHUP の受け手あり」の両方で総当たりし、子（`/bin/sh -c 'kill -s S $$'`）が S で終わるとき、ラッパーは I6' のとおりに終わり（送ってよい合図は S か 128 + n、それ以外は 128 + n で合図では終わらない）、標準エラーに `Debugger listening` を含まない。乱数でなく総当たりにするのは、領域が有限で小さいため。core を作る合図を macOS で除くのは、テストの子（sh）のクラッシュレポートが手元の `~/Library/Logs/DiagnosticReports` に溜まるためで、ラッパーの分岐は OS で変わらないので CI（Linux）で確かめる。
 
 壊しうる入力：空の文字列のプログラム、存在しないプログラム、実行の権限の無いファイル、閉じた標準エラー（引数なし・起こせないとき）、閉じた標準出力・閉じた標準エラー（常駐中）、両方が閉じている、もう一方の流れが改行の無い行の途中、子が Node の無視する合図・Inspector の合図・core を作る合図・名前の無い合図で終わる、親が受け手を持つ合図で子が終わる、起こせたあとの子への `kill` の失敗。
 
@@ -188,4 +190,4 @@ node scripts/with-timestamps.mjs <program> [args...]
 - 実行の権限の無いファイル → 127、時刻付きの行にそのパスを含む。
 - 常駐中に標準出力が閉じたパイプ → 子が動いている間に、標準エラーに時刻付きの知らせが 1 行だけ出る。逆向き（標準エラーが閉じ、標準出力へ知らせる）も同じ。
 - 子が標準エラーに改行の無い行を書いた途中で標準出力が失敗する → 標準エラーの全部の行が時刻で始まり、子の行の続きにも時刻が付き、知らせは独立した 1 行。
-- 待ちの上限は数秒にし、CI の重さで揺れないようにする。採らないもの（外から作りにくい）：両方が失敗、`error` だけで `close` が来ない、`end` の無い `close`。
+- 待ちには上限を付ける（ラッパーの終わりは 15 秒、出力は 5 秒。超えたら SIGKILL して失敗）。「知らせが 2 行目を出さない」の確かめは固定の時間で待たず、子が知らせのあとに 30 回失敗する側へ書いてから、もう一方の流れへ書く印の行を待つ。採らないもの（外から作りにくい）：両方が失敗、`error` だけで `close` が来ない、`end` の無い `close`。

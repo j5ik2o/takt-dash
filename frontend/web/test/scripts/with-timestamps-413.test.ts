@@ -13,6 +13,8 @@ import { unstamp } from "../support/stamped-lines.ts";
 
 const WRAPPER = fileURLToPath(new URL("../../scripts/with-timestamps.mjs", import.meta.url));
 
+const CLOSE_TIMEOUT_MS = 15000;
+
 type Ended = { code: number | null; signal: NodeJS.Signals | null };
 
 type Run = {
@@ -53,8 +55,14 @@ const runWrapper = (args: string[], options: RunOptions = {}): Run => {
       wake();
     });
   let done = false;
-  const closed = new Promise<Ended>((resolve) => {
+  // ラッパーの終わりの待ちの上限。超えたら SIGKILL して失敗にする（テストを固めない）。
+  const closed = new Promise<Ended>((resolve, reject) => {
+    const limit = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${CLOSE_TIMEOUT_MS}ms 待ってもラッパーが終わりません。args: ${JSON.stringify(args)}`));
+    }, CLOSE_TIMEOUT_MS);
     child.on("close", (code, signal) => {
+      clearTimeout(limit);
       done = true;
       resolve({ code, signal });
       wake();
@@ -175,7 +183,8 @@ test("親が SIGHUP を無視している状態で子が SIGHUP で終わると�
 test("性質（総当たり）: どの合図で子が終わっても、親の SIGHUP の受け手の有無によらず、送ってよい合図は合図か 128 + 番号、それ以外は 128 + 番号で終わり、Inspector を起こさない", async () => {
   const signals: NodeJS.Signals[] = ["SIGHUP", "SIGINT", "SIGTERM", "SIGKILL", "SIGALRM", "SIGUSR1", "SIGUSR2", "SIGPIPE", "SIGXFSZ"];
   // core とクラッシュレポートを作る合図。macOS では子（sh）のクラッシュレポートが手元に溜まるので、CI（Linux）で確かめる。
-  if (process.platform !== "darwin") signals.push("SIGABRT", "SIGQUIT", "SIGSEGV", "SIGTRAP");
+  // 足すのは子を終わらせる合図だけ（SIGSTOP などの止める合図、SIGCHLD などの無視される合図は子が終わらない）。
+  if (process.platform !== "darwin") signals.push("SIGABRT", "SIGQUIT", "SIGSEGV", "SIGTRAP", "SIGBUS", "SIGILL", "SIGFPE", "SIGSYS");
   await withTempDir(async (dir) => {
     const listener = await writeSighupListener(dir);
     for (const withListener of [false, true]) {
@@ -228,6 +237,7 @@ test("実行の権限の無いファイルなら、時刻付きの行を標準�
 });
 
 // 子は pid を「知らせを受ける側」の流れへ書き、そのあと「失敗する側」の流れへ書き続ける。
+// 失敗する側へ 30 回書いたら、知らせを受ける側へ印の行 "after 30" を書く。
 // nodeChild と同じく、固まらないよう 10 秒で自分から終わる。
 const keepsWriting = (failing: "stdout" | "stderr"): string[] => {
   const other = failing === "stdout" ? "stderr" : "stdout";
@@ -238,7 +248,10 @@ const keepsWriting = (failing: "stdout" | "stderr"): string[] => {
       setTimeout(() => process.exit(99), 10000);
       process.${other}.write("pid=" + process.pid + "\\n");
       let i = 0;
-      setInterval(() => process.${failing}.write("line " + (i += 1) + "\\n"), 20);
+      setInterval(() => {
+        process.${failing}.write("line " + (i += 1) + "\\n");
+        if (i === 30) process.${other}.write("after 30\\n");
+      }, 20);
     `,
   ];
 };
@@ -248,8 +261,8 @@ for (const failing of ["stdout", "stderr"] as const) {
   test(`常駐中に ${failing} の書き込みが失敗すると、子が動いている間に、${other} へ時刻付きの知らせを 1 行だけ書く`, async () => {
     const run = runWrapper(keepsWriting(failing), failing === "stdout" ? { closeStdout: true } : { closeStderr: true });
     await run.waitFor(other, "with-timestamps:", 5000);
-    // 知らせのあとも子は書き続ける。2 回目以降の失敗で知らせが増えないことを見るため、しばらく待つ。
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    // 知らせのあとも子は失敗する側へ書き続ける。2 回目以降の失敗で知らせが増えないことを、印の行まで待って見る。
+    await run.waitFor(other, "after 30\n", 5000);
     const read = other === "stdout" ? run.stdout : run.stderr;
     const pid = readPid(read());
     const alive = isAlive(pid);
