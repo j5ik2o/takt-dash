@@ -4,7 +4,7 @@
 使い方:
     python3 tools/prod-check/prod_log_test.py
 
-設計: docs/design/issue-409.md。確かめる観点:
+設計: docs/design/issue-409.md、docs/design/issue-421.md。確かめる観点:
   1. 時刻の無い Web のログでは、log_excerpts の出力が main `7f986d3` と 1 文字も違わない
      （backend のログがあってもなくても）。
   2. split_stamp は行頭の時刻（ミリ秒・マイクロ秒・小数なし）と空白 1 つだけを外す。
@@ -15,6 +15,13 @@
      切り出せる行が無ければ、最後の Ready からの切り出しに戻る。
   6. 性質 P1: 本文が同じなら、時刻の付け替え・付け足し・外しで結果が変わらない。
   7. 性質 P2: web_error_groups は設計の規則を書き下した参照の実装と一致する。
+  8. #421: 500 は HTTP の状態の形（行頭・空白・`(`・`[`・`"`・`'` の直後、または
+     status=・code= の形）のときだけエラー。500ms・1500ms・5000・500.81・
+     duration_ms=500 などの数の形はエラーにしない。error・Error・ERR_ は今までどおり。
+  9. #421: 性質 P3（数の形だけの行はエラーにしない）と P4（HTTP の 500 の形を含む行は
+     必ずエラー）。残る誤検知（`{"duration_ms": 500}` など）は設計が範囲外と決めているので
+     固定しない。
+  10. #421: 参照の実装（P2）も新しい規則に合わせる。
 
 本物の本番のログは読まない。すべて一時ディレクトリで完結する。
 """
@@ -253,6 +260,123 @@ def test_ready_inside_stamp_is_impossible_and_body_ready_is_used():
     ]
 
 
+# 4b. #421: 500 は HTTP の状態の形のときだけエラー
+
+# 設計 docs/design/issue-421.md の「当たる例」。
+HTTP_500_BODIES = [
+    "GET /api/state 500",
+    "500 Internal Server Error",
+    "HTTP/1.1 500",
+    "HTTP/1.1 500:",
+    "500:",
+    "status=500",
+    "statusCode=500",
+    "http_status=500",
+    "status_code=500",
+    "status: 500",
+    "STATUS=500",
+    "Status: 500",
+    "code=500",
+    '{"status":500}',
+    '"status": "500"',
+    "(500)",
+    "[500]",
+    "(500",
+    "500)",
+    "500]",
+    "500}",
+    '500"',
+    "500'",
+    "500,",
+    "500;",
+    "500, …",
+    "... status 500.",
+    "500.",
+    "500.foo",
+    "\t500",
+    "500",
+    "500 and 500",
+]
+
+# 設計の「当たらない例」と、そこから規則どおりに導ける数の形。
+NON_HTTP_500_BODIES = [
+    "500ms",
+    "1500ms",
+    "5000ms",
+    "5000",
+    "5001",
+    "1500",
+    "500.81",
+    "0.500s",
+    "duration_ms=500",
+    "duration_ms=500.81",
+    "ms=500",
+    "MS=500",
+    "1,500",
+    "x500y",
+    "500件",
+    "500500",
+    "a500",
+    "500a",
+    "500=500",
+    "status=5000",
+    "status=500ms",
+    "status = 5000",
+    '{"duration_ms":500}',
+    '{"count":500}',
+    '{"ms":500}',
+    " ✓ Ready in 500ms",
+    "Ready in 1500ms",
+    "[taktDash][timing] render ms=500",
+    "render duration_ms=500.81",
+    "2026-11-27T00:00:00.500Z",
+]
+
+
+def is_web_error(body):
+    """本文 1 つの行が、Web のエラーとして組に入るか。"""
+    return bool(prod_log.web_error_groups([body])[1])
+
+
+def test_http_500_shapes_are_errors():
+    for body in HTTP_500_BODIES:
+        assert is_web_error(body), body
+
+
+def test_500_lookalikes_are_not_errors():
+    for body in NON_HTTP_500_BODIES:
+        assert not is_web_error(body), body
+
+
+def test_error_words_are_still_errors():
+    for body in [
+        "error", "Error", "ERR_X", "an error occurred",
+        "Error: fetch failed", "http_error=1",
+    ]:
+        assert is_web_error(body), body
+
+
+def test_unstamped_web_log_keeps_http_500_output():
+    assert "GET /api/state 500（2 件）" in excerpts(UNSTAMPED_WEB_LOG)
+
+
+def test_timing_500_lines_after_ready_are_not_errors():
+    text = (
+        " ✓ Ready in 500ms\n"
+        " ✓ Ready in 1500ms\n"
+        "[taktDash][timing] render ms=500\n"
+        "[taktDash][timing] render duration_ms=500.81\n"
+        "GET /api/state 500\n"
+        "GET /api/state 500\n"
+        "Error: fetch failed\n"
+    )
+    assert web_part(excerpts(text)) == [
+        READY_HEADER,
+        "GET /api/state 500（2 件）",
+        "Error: fetch failed",
+    ]
+
+
 # 5. 時刻での切り出し（backend の起動 = 2026-11-26T22:48:01.736884Z）
 
 
@@ -333,7 +457,12 @@ def test_web_error_groups_first_and_last_follow_line_order():
 # 6, 7. 性質（random の種つき）
 
 REF_STAMP_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)(?: |$)")
-REF_ERROR_RE = re.compile(r"error|Error|ERR_|500")
+# #421 の規則。500 は HTTP の状態の形のときだけエラーにする。
+REF_ERROR_RE = re.compile(
+    r"error|Error|ERR_|"
+    r"(?:(?:^|(?<=[\s(\[\"']))|(?i:status|code)[\"']?\s*[:=]\s*)"
+    r"500(?=$|[\s)\]}\"',:;]|\.(?!\d))"
+)
 PIECES = [
     "Error: fetch failed", "error", "ERR_X", "GET /api/state 500", " ✓ Ready in 1s", "Ready",
     "   ▲ Next.js 15.5.0", "", " ", "  ", "ok", "読み取りに失敗しました", "x500y", "readY",
@@ -443,6 +572,72 @@ def test_property_p2_matches_reference_rules():
         assert got == want, "case %d since=%r\n%r\n%r\n%r" % (case, since, lines, got, want)
 
 
+# #421 の性質 P3・P4。埋め草は、数字・=・r・R を使わない（エラーの語と HTTP の
+# 500 の形を偶然に作らないため。性質の定義域で、除外ではない）。
+P3_FILLER = (
+    " abcdefghijklmnopqstuvwxyzABCDEFGHIJKLMNOPQSTUVWXYZ"
+    "あいうえおかきくけこさしすせそ✓▲.-:;[](){}'\"\t"
+)
+P4_FILLER = (
+    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    " あいうえお日本語✓▲.-:;[](){}<>\"'\\/|=,_\t"
+)
+
+
+def p3_number_shape(rng):
+    """数の形を 1 つ作る。単位や小数点以下が付く形では n に 500 を含めてよい。"""
+    kind = rng.randrange(8)
+    if kind == 7:
+        # 裸の数だけは 500 を除く（1500・5000 のように 500 の前後に数字が続く形は含む）。
+        n = rng.choice([0, 1, 12, 999, 1000, 1200, 1500, 5000, 5001, rng.randint(0, 10**6)])
+        if n == 500:
+            n = 1500
+        return str(n)
+    n = rng.choice([500, 0, 1, 12, 999, 1000, 1200, 1500, 5000, 5001, rng.randint(0, 10**6)])
+    d = rng.choice([0, 1, 5, 81, 999, rng.randint(0, 999)])
+    if kind == 0:
+        return "%dms" % n
+    if kind == 1:
+        return "%d.%dms" % (n, d)
+    if kind == 2:
+        return "in %dms" % n
+    if kind == 3:
+        return "%d.%ds" % (n, d)
+    if kind == 4:
+        return "duration_ms=%d" % n
+    if kind == 5:
+        return "duration_ms=%d.%d" % (n, d)
+    return "ms=%d" % n
+
+
+def p3_line(rng):
+    head = "".join(rng.choice(P3_FILLER) for _ in range(rng.randint(0, 12)))
+    tail = "".join(rng.choice(P3_FILLER) for _ in range(rng.randint(0, 12)))
+    return head + p3_number_shape(rng) + tail
+
+
+def p4_line(rng):
+    head = "".join(rng.choice(P4_FILLER) for _ in range(rng.randint(0, 15)))
+    tail = "".join(rng.choice(P4_FILLER) for _ in range(rng.randint(0, 15)))
+    return head + " " + rng.choice(HTTP_500_BODIES) + " " + tail
+
+
+def test_property_p3_number_shapes_never_error():
+    rng = random.Random(PROPERTY_SEED + 3)
+    for case in range(PROPERTY_CASES):
+        lines = [p3_line(rng) for _ in range(rng.randint(1, 20))]
+        got = prod_log.web_error_groups(lines)
+        assert got == (False, []), "case %d\n%r\n%r" % (case, lines, got)
+
+
+def test_property_p4_http_500_always_error():
+    rng = random.Random(PROPERTY_SEED + 4)
+    for case in range(PROPERTY_CASES):
+        line = p4_line(rng)
+        got = prod_log.web_error_groups([line])
+        assert [g[0] for g in got[1]] == [line], "case %d\n%r\n%r" % (case, line, got)
+
+
 def main() -> int:
     tests = [
         test_unstamped_web_log_with_backend_is_unchanged,
@@ -463,6 +658,11 @@ def main() -> int:
         test_group_mixing_stamped_and_unstamped_lines_counts_both,
         test_stamp_digits_do_not_make_error,
         test_ready_inside_stamp_is_impossible_and_body_ready_is_used,
+        test_http_500_shapes_are_errors,
+        test_500_lookalikes_are_not_errors,
+        test_error_words_are_still_errors,
+        test_unstamped_web_log_keeps_http_500_output,
+        test_timing_500_lines_after_ready_are_not_errors,
         test_cut_starts_at_first_line_at_or_after_backend_start,
         test_line_at_exactly_backend_start_is_included,
         test_clock_going_back_after_cut_keeps_lines,
@@ -472,6 +672,8 @@ def main() -> int:
         test_web_error_groups_first_and_last_follow_line_order,
         test_property_p1_stamps_do_not_change_grouping,
         test_property_p2_matches_reference_rules,
+        test_property_p3_number_shapes_never_error,
+        test_property_p4_http_500_always_error,
     ]
     signal.signal(signal.SIGALRM, _on_timeout)
     failures = 0
