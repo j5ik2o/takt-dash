@@ -309,13 +309,35 @@ test("概要の未読時は保存履歴が0でも動的な完了件数を確定�
   assert.doesNotMatch(text(required(document, 'a[href="/projects#project-esa"]')), /完了したタスクは 0件/);
 });
 
+// 初回読み取り前の見出し・集計・空表示で0件を確定しない（上の名前付きテストと同じ期待）。
+// issue #424 で既読の空 run 集合のタイルを「0 / 5 件」に変えるため、0 を確定しない側の
+// 期待（このテストの中身）は変えずに名前だけを分ける。名前の重複を避け、この場合は
+// 最終読み取り時刻を持たない空の一覧で確かめる。
+test("概要は実行上限だけの空の一覧でも0件を確定しない", () => {
+  const document = overview(emptyState(false));
+  const main = required(document, "main");
+  const countText = text(main);
+  assert.doesNotMatch(countText, /(?:^|[^\d])0\s*件|0\s*\/|(?:run|ゴール|判断待ち)はありません/);
+  assert.match(countText, /未読|まだ.*読|不明|分かりません|確認中/);
+  assert.match(text(required(document, '[role="status"]')), /応答がありません/);
+  assertUnreadRunList(main);
+  assertRejectsUnreadEmptyClaim(main);
+  for (const image of main.querySelectorAll('[role="img"]')) {
+    assert.doesNotMatch(image.getAttribute("aria-label") ?? "", /(?:^|[^\d])0\s*件/);
+  }
+});
+
 test("概要の既読で空のrun集合はヘッダー・タイル・一覧・読み上げを通して一度だけ空と示す", () => {
   const document = overview(withCoverage("complete", [0, 0]));
   const scopes = [required(document, ".page-head"), required(document, ".tile"), required(document, '[aria-labelledby="h-runs"]')];
   const content = scopes.map((scope) => `${text(scope)} ${Array.from(scope.querySelectorAll('[aria-label]')).map((item) => item.getAttribute("aria-label")).join(" ")}`).join(" ");
-  assert.equal((content.match(/(?:^|[^\d])0\s*件|0\s*\/|走っている run はありません/g) ?? []).length, 1, content);
+  // 空の表明は、タイルの「0 / 5 件」と一覧の文がそれぞれ1回ずつだけ出る（退行で二重にならない）。
+  assert.equal((content.match(/0\s*\/\s*5\s*件/g) ?? []).length, 1, content);
+  assert.equal((content.match(/走っている run はありません/g) ?? []).length, 1, content);
   assert.match(text(required(document, ".page-head")), /2台のサーバー/);
-  assert.match(text(required(document, ".tile")), /上限\s*5\s*件/);
+  assert.match(text(required(document, ".tile")), /0\s*\/\s*5\s*件/);
+  assert.doesNotMatch(text(required(document, ".tile")), /上限/);
+  assert.equal(required(document, ".tile").querySelectorAll('[role="img"]').length, 0);
 });
 
 test("概要は実行中件数が0でも存在するrunの行と詳細リンクを残す", () => {
