@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Page } from "@playwright/test";
+import type { Page, Response as PlaywrightResponse } from "@playwright/test";
 import { GOAL_TEXT, RUN_SLUG } from "../support/fixture";
 import { expect, test } from "../support/test";
 
@@ -40,11 +40,12 @@ const recordEventSources = (): void => {
 
 // 画面を開く前に /api/state を失敗させ、開いた EventSource も閉じる。以降は状態の通知が
 // 届かないため、router.refresh による要求がボタンの押下と混ざらない。
-const stopStateStream = async (page: Page, url: string): Promise<void> => {
+const stopStateStream = async (page: Page, url: string): Promise<PlaywrightResponse | null> => {
   await page.addInitScript(recordEventSources);
   await page.route(SSE_PATH, (route) => route.abort());
-  await page.goto(url);
+  const response = await page.goto(url);
   await page.evaluate(() => (window as unknown as { __disconnectStateStream: () => void }).__disconnectStateStream());
+  return response;
 };
 
 // status は RunStatus として解釈できない値にし、backend の RunReadFailure::InvalidMeta から
@@ -79,7 +80,10 @@ const countRunRequests = (page: Page): (() => number) => {
 test("もう一度読み込むを1回押すと、run 詳細を取り直して元の画面に戻る", async ({ page, isolatedStack: stack }) => {
   const original = await corruptMeta(stack.projectDir);
 
-  await stopStateStream(page, `${stack.webUrl}${RUN_URL_PATH}`);
+  const response = await stopStateStream(page, `${stack.webUrl}${RUN_URL_PATH}`);
+  // 壊した meta は RunNotFoundError ではなく run-detail-loader が rethrow する失敗なので、
+  // Next は 500 と error.tsx を返す。状態ストリームの要求が混ざるかとは別に、最初の遷移だけで確かめる。
+  expect(response?.status()).toBe(500);
   await expect(page.getByRole("heading", { name: "画面を表示できませんでした", level: 1 })).toBeVisible();
   await expect(reloadButton(page)).toBeVisible();
 
