@@ -29,6 +29,7 @@ import {
   toProjectName,
   toPullRequestNumber,
   toRegistrationRevision,
+  toRunLimit,
   toRunSlug,
   toServerId,
   toSilentMinutes,
@@ -40,6 +41,7 @@ import {
   type ProjectName,
   type PullRequestNumber,
   type RegistrationRevision,
+  type RunLimit,
   type RunSlug,
   type ServerId,
   type TaskCount,
@@ -65,9 +67,10 @@ export type DashboardServer = Omit<ProtoServer, "serverId"> & {
   serverId: ServerId;
 };
 
-export type DashboardProject = Omit<ProtoProject, "name" | "serverId"> & {
+export type DashboardProject = Omit<ProtoProject, "name" | "serverId" | "concurrency"> & {
   name: ProjectName;
   serverId: ServerId;
+  concurrency: RunLimit;
 };
 
 export type DashboardGoal = Omit<
@@ -203,7 +206,8 @@ const toProject = (raw: unknown): DashboardProject => {
     about: String(value.about ?? ""),
     serverId: toServerId(value.serverId),
     completedTasks24h: asNumber(value.completedTasks24h),
-    concurrency: asNumber(value.concurrency),
+    // wire が 0 を省略するため、欠落は 0 として復元する。負数・上限超・非整数は拒否する。
+    concurrency: toRunLimit(value.concurrency ?? 0),
     connected: value.connected === true,
     lastReadAt: toDate(value.lastReadAt),
     connectionState:
