@@ -24,28 +24,28 @@ issue #3（値オブジェクトにドメインプリミティブを徹底する
 
 ## backend
 
-行番号は第2段（backend）完了時点のコードに対応します。第2段で専用型へ置き換えた行は、「対象・対象外」列に「（第2段で置換済み）」と記します。生の型の列は第1段で調査した時点の型で、置換後の型は後述の「第2段（backend）の実施結果」にまとめます。
+行番号は第2段（backend）完了時点のコードに対応します。ただし `backend/src/mcp/tools/` の下の参照だけは、`tools.rs` の分割（3e35498）の後に、#416 で分割後のファイルと行へ直しています（ほかのファイルの行番号は第2段完了時点のままです）。第2段で専用型へ置き換えた行は、「対象・対象外」列に「（第2段で置換済み）」と記します。生の型の列は第1段で調査した時点の型で、置換後の型は後述の「第2段（backend）の実施結果」にまとめます。
 
 | 値の意味 | 第1段時点の生の型 | 代表的な現在の箇所（file:line） | 想定する置き換え型名 | 検証する順序 | 対象・対象外 | 対象外の理由 |
 |----------|--------------------|----------------------------------|----------------------|--------------|--------------|--------------|
 | サーバー ID | `String`（`BTreeMap` のキー） | `backend/src/config.rs:42`、`backend/src/grpc/mod.rs:320`、`backend/src/model.rs:337` | `ServerId` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（設定のキー形式）→ semantics（設定に存在する） | 対象（第2段で置換済み） | - |
-| プロジェクト名 | `String` | `backend/src/config.rs:71`、`backend/src/grpc/mod.rs:320`、`backend/src/model.rs:335` | `ProjectName` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（設定の名前形式）→ semantics（同一サーバー内で一意） | 対象（第2段で置換済み） | - |
+| プロジェクト名 | `String` | `backend/src/config.rs:71`、`backend/src/grpc/mod.rs:320`、`backend/src/model.rs:335` | `ProjectName` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（設定の名前形式）→ semantics（全体で一意） | 対象（第2段で置換済み） | - |
 | ゴール ID | `String` | `backend/src/model.rs:100`、`backend/src/events.rs:59`、`backend/src/grpc/mod.rs:171` | `GoalId` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（ID の書式）→ semantics（対象プロジェクトに存在する） | 対象（第2段で置換済み） | - |
 | ゴール ID（任意） | `Option<String>` | `backend/src/model.rs:117`、`backend/src/model.rs:130`、`backend/src/model.rs:195` | `Option<GoalId>` | 同上（`None` は「ゴールに属さない」として許容） | 対象（第2段で置換済み） | - |
-| タスク名 | `String` | `backend/src/model.rs:116`、`backend/src/events.rs:115`、`backend/src/mcp/tools.rs:465` | `TaskName` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（タスク名の書式）→ semantics（同一ゴール内で一意） | 対象（第2段で置換済み） | - |
-| run slug | `String` / `Option<String>` | `backend/src/model.rs:192`（`RunEntry` は生のまま）、`backend/src/model.rs:120`、`backend/src/mcp/tools.rs:608` | `RunSlug` / `Option<RunSlug>` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（`/`・`\`・`.`・`..` を拒否）→ semantics（実在する run） | 対象（第2段で置換済み。`RunEntry.run_slug` だけ後続） | - |
+| タスク名 | `String` | `backend/src/model.rs:116`、`backend/src/events.rs:115`、`backend/src/mcp/tools/goal.rs:164` | `TaskName` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（タスク名の書式）→ semantics（同一ゴール内で一意） | 対象（第2段で置換済み） | - |
+| run slug | `String` / `Option<String>` | `backend/src/model.rs:192`（`RunEntry` は生のまま）、`backend/src/model.rs:120`、`backend/src/mcp/tools/run.rs:127` | `RunSlug` / `Option<RunSlug>` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（`/`・`\`・`.`・`..` を拒否）→ semantics（実在する run） | 対象（第2段で置換済み。`RunEntry.run_slug` だけ後続） | - |
 | inquiry ID | `String` | `backend/src/model.rs:129`、`backend/src/model.rs:310`、`backend/src/grpc/mod.rs:639` | `InquiryId` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（ID の書式）→ semantics（保留中の問い合わせに一致する） | 対象（第2段で置換済み） | - |
-| プルリクエスト番号 | `Option<i64>` | `backend/src/model.rs:105`、`backend/src/model.rs:306`、`backend/src/mcp/tools.rs:432` | `PullRequestNumber` | size（正の整数）→ lexical content（数字）→ syntax（10進表記）→ semantics（対象ゴールの PR と一致する） | 対象（第2段で置換済み） | - |
+| プルリクエスト番号 | `Option<i64>` | `backend/src/model.rs:105`、`backend/src/model.rs:306`、`backend/src/mcp/tools/goal.rs:141` | `PullRequestNumber` | size（正の整数）→ lexical content（数字）→ syntax（10進表記）→ semantics（対象ゴールの PR と一致する） | 対象（第2段で置換済み） | - |
 | プルリクエストの URL | `Option<String>` | `backend/src/model.rs:106`、`backend/src/model.rs:307`、`backend/src/grpc/mod.rs:216` | 生の `String` を維持 | なし（値の集合は takt 側が決める） | 対象外 | takt が返す URL をそのまま運ぶ値で、taktDash 側では不変条件を確定できない |
 | 承認待ちの revision | `Option<i32>` / `i32` | `backend/src/model.rs:312`、`backend/src/model.rs:318`、`backend/src/grpc/mod.rs:800` | `RegistrationRevision` | size（正の整数）→ lexical content（数字）→ syntax（10進表記）→ semantics（承認待ちの提案と一致する） | 対象（第2段で置換済み） | - |
-| ゴール登録提案のディレクトリ | `String` | `backend/src/mcp/tools.rs:788`、`backend/src/model.rs:319`、`backend/src/grpc/mod.rs:826` | 生の `String` を維持 | なし（値は takt が返す提案値） | 対象外 | takt が返す提案値で、taktDash 側では不変条件を確定できない |
+| ゴール登録提案のディレクトリ | `String` | `backend/src/mcp/tools/goal_registration.rs:95`、`backend/src/model.rs:319`、`backend/src/grpc/mod.rs:826` | 生の `String` を維持 | なし（値は takt が返す提案値） | 対象外 | takt が返す提案値で、taktDash 側では不変条件を確定できない |
 | until（マージの範囲） | `String`（`"prepare"` / `"merge"`） | `backend/src/grpc/mod.rs:705`、`backend/src/grpc/mod.rs:718`、`proto/taktdash.proto:414` | `MergeUntil`（列挙） | size（1文字以上）→ lexical content（ASCII 小文字）→ syntax（既知の2値）→ semantics（対象 PR の状態で実行できる） | 対象（第2段で置換済み） | - |
 | 閾値（判断待ちの滞留・ログの無音） | `u32` | `backend/src/config.rs:80`、`backend/src/config.rs:81`、`backend/src/config.rs:206` | `StaleMinutes` / `SilentMinutes` | size（0 以上、上限 `i32::MAX`）→ lexical content（数字）→ syntax（10進表記）→ semantics（運用上の範囲） | 対象（第2段で置換済み） | - |
 | 読み取り間隔 | `u64` | `backend/src/config.rs:45`、`backend/src/config.rs:202`、`backend/src/poller.rs:97` | `IntervalSeconds` | size（1 以上）→ lexical content（数字）→ syntax（10進表記）→ semantics（ポーリング周期として有効） | 対象（後続。`poller.rs` が生の `u64` を読む） | - |
 | タスクの状態ごとの件数 | `i32` | `backend/src/grpc/mod.rs:198`、`backend/src/grpc/mod.rs:184`、`proto/taktdash.proto:142` | `TaskCount`（`TaskStatusCounts` の各値） | size（0 以上）→ lexical content（数字）→ syntax（10進表記）→ semantics（総数と一致する） | 対象（第2段で置換済み） | - |
 | 日次集計の日付 | `String`（`"YYYY-MM-DD"`） | `backend/src/activity.rs:21`、`backend/src/activity.rs:152` | `DailyDate` | size（10文字）→ lexical content（数字と `-`）→ syntax（`YYYY-MM-DD`）→ semantics（JST の実在日） | 対象（第2段で置換済み） | - |
 | 状態の種別（ゴール・実行・タスク・出来事） | 専用 enum（`GoalStatus` など） | `backend/src/model.rs:12`、`backend/src/model.rs:20`、`backend/src/model.rs:28`、`backend/src/model.rs:39` | 既存 enum を維持 | 変換時に既知の値だけを受ける（既に専用型） | 対象外 | 既に専用の型で、不正な種別を表現できない |
-| run の状態 | 専用 enum（`RunStatus`） | `backend/src/model.rs:151`、`backend/src/mcp/tools.rs:637`、`backend/src/grpc/mapping.rs:55` | `RunStatus`（変換境界で必須化） | 既知の値だけを受ける（第2段で欠落・未知を `ToolError::Parse` に変更） | 対象（第2段で置換済み） | - |
+| run の状態 | 専用 enum（`RunStatus`） | `backend/src/model.rs:151`、`backend/src/mcp/tools/run.rs:166`、`backend/src/grpc/mapping.rs:55` | `RunStatus`（変換境界で必須化） | 既知の値だけを受ける（第2段で欠落・未知を `ToolError::Parse` に変更） | 対象（第2段で置換済み） | - |
 | 時刻 | `DateTime<Utc>` | `backend/src/model.rs:108`、`backend/src/model.rs:135`、`backend/src/model.rs:201` | 既存型を維持 | 既に専用型（範囲を型が持つ） | 対象外 | 既に専用の型で、文字列ではない |
 | 設定のファイルパス | `PathBuf` | `backend/src/config.rs:47`、`backend/src/config.rs:74`、`backend/src/config.rs:186` | 既存型を維持 | 既に専用型（絶対パスの検証は `backend/src/config.rs:186` にある） | 対象外 | 列挙した設定値は既に専用の型（`PathBuf`）で、文字列ではない |
 | 待ち受けアドレス | `SocketAddr` | `backend/src/config.rs:49`、`backend/src/config.rs:216` | 既存型を維持 | 既に専用型（構文検証は `parse` が行う） | 対象外 | 既に専用の型で、不正なアドレスを表現できない |
@@ -58,19 +58,19 @@ backend の値オブジェクトは `backend/src/domain.rs` にまとめ、生�
 
 | 値 | 型名 | 定義 | 検証内容 | 主な変更ファイル |
 |----|------|------|----------|------------------|
-| サーバー ID | `ServerId` | `backend/src/domain.rs:78`（`text_value!` は `:48-76`） | 空 → `DomainError::Size`。空白のみ・ASCII 制御文字 → `DomainError::Lexical` | `config.rs`、`grpc/mod.rs`、`model.rs`、`store.rs`、`activity.rs`、`mcp/tools.rs` |
+| サーバー ID | `ServerId` | `backend/src/domain.rs:78`（`text_value!` は `:48-76`） | 空 → `DomainError::Size`。空白のみ・ASCII 制御文字 → `DomainError::Lexical` | `config.rs`、`grpc/mod.rs`、`model.rs`、`store.rs`、`activity.rs` |
 | プロジェクト名 | `ProjectName` | `backend/src/domain.rs:79` | 同上 | `config.rs`、`grpc/mod.rs`、`model.rs`、`store.rs`、`conversation.rs` |
-| ゴール ID | `GoalId` / `Option<GoalId>` | `backend/src/domain.rs:80` | 同上。`None` はゴールに属さない値を表す | `model.rs`、`events.rs`、`store.rs`、`mcp/tools.rs`、`grpc/mod.rs` |
-| タスク名 | `TaskName` | `backend/src/domain.rs:81` | 同上 | `model.rs`、`events.rs`、`mcp/tools.rs`、`grpc/mod.rs` |
-| inquiry ID | `InquiryId` / `Option<InquiryId>` | `backend/src/domain.rs:82` | 同上。`PendingDecision` では問い合わせ以外を `None` にする | `model.rs`、`store.rs`、`mcp/tools.rs`、`grpc/mod.rs` |
-| run slug | `RunSlug` / `Option<RunSlug>` | `backend/src/domain.rs:86-105` | 上記に加え、`/`・`\`・`.`・`..` を `DomainError::Syntax` で拒否 | `model.rs`、`store.rs`、`events.rs`、`activity.rs`、`mcp/tools.rs`、`grpc/mod.rs` |
-| プルリクエスト番号 | `PullRequestNumber` | `backend/src/domain.rs:115-133` | `TryFrom<i64>`。0 以下を `DomainError::Size` で拒否 | `model.rs`、`mcp/tools.rs`、`grpc/mod.rs` |
-| 承認待ちの revision | `RegistrationRevision` | `backend/src/domain.rs:143-161` | `TryFrom<i32>`。0 以下を `DomainError::Size` で拒否 | `model.rs`、`store.rs`、`mcp/tools.rs`、`grpc/mod.rs` |
+| ゴール ID | `GoalId` / `Option<GoalId>` | `backend/src/domain.rs:80` | 同上。`None` はゴールに属さない値を表す | `model.rs`、`events.rs`、`store.rs`、`mcp/tools/goal.rs`、`mcp/tools/goal_registration.rs`、`mcp/tools/mod.rs`、`mcp/tools/sets.rs`、`mcp/tools/summary_cache.rs`、`grpc/mod.rs` |
+| タスク名 | `TaskName` | `backend/src/domain.rs:81` | 同上 | `model.rs`、`events.rs`、`mcp/tools/goal.rs`、`mcp/tools/mod.rs`、`mcp/tools/sets.rs`、`grpc/mod.rs` |
+| inquiry ID | `InquiryId` / `Option<InquiryId>` | `backend/src/domain.rs:82` | 同上。`PendingDecision` では問い合わせ以外を `None` にする | `model.rs`、`store.rs`、`mcp/tools/goal.rs`、`mcp/tools/mod.rs`、`mcp/tools/sets.rs`、`grpc/mod.rs` |
+| run slug | `RunSlug` / `Option<RunSlug>` | `backend/src/domain.rs:86-105` | 上記に加え、`/`・`\`・`.`・`..` を `DomainError::Syntax` で拒否 | `model.rs`、`store.rs`、`events.rs`、`activity.rs`、`mcp/tools/goal.rs`、`mcp/tools/mod.rs`、`mcp/tools/run.rs`、`mcp/tools/sets.rs`、`grpc/mod.rs` |
+| プルリクエスト番号 | `PullRequestNumber` | `backend/src/domain.rs:115-133` | `TryFrom<i64>`。0 以下を `DomainError::Size` で拒否 | `model.rs`、`mcp/tools/goal.rs`、`mcp/tools/mod.rs`、`mcp/tools/sets.rs`、`grpc/mod.rs` |
+| 承認待ちの revision | `RegistrationRevision` | `backend/src/domain.rs:143-161` | `TryFrom<i32>`。0 以下を `DomainError::Size` で拒否 | `model.rs`、`store.rs`、`mcp/tools/goal_registration.rs`、`mcp/tools/sets.rs`、`grpc/mod.rs` |
 | 閾値（滞留・無音） | `StaleMinutes` / `SilentMinutes` | `backend/src/domain.rs:169-202` | `TryFrom<u32>`。`i32::MAX` 超を `DomainError::Size` で拒否。`get()` は範囲保証済みの `i32` 射影で、切り詰めの `as i32` を持たない | `config.rs`、`store.rs`、`grpc/mod.rs`、テスト fixture |
 | タスクの件数 | `TaskCount` | `backend/src/domain.rs:206-224` | `TryFrom<i64>`。0 未満と `i32::MAX` 超を `DomainError::Size` で拒否 | `activity.rs`、`grpc/mod.rs` |
 | 日次集計の日付 | `DailyDate` | `backend/src/domain.rs:234-281` | size（10文字）→ lexical content（数字と `-`）→ syntax（`YYYY-MM-DD`）→ semantics（`NaiveDate` で実在日）の順。`From<NaiveDate>` は失敗しない | `activity.rs`、`grpc/mod.rs` |
-| until | `MergeUntil` | `backend/src/domain.rs:285-314` | 空 → size、ASCII 小文字以外 → lexical content、`prepare` / `merge` 以外 → syntax | `mcp/tools.rs`、`grpc/mod.rs` |
-| run の状態 | `RunStatus` | `backend/src/model.rs:151-170` | `TryFrom<&str>` は `running` / `completed` / `aborted` / `failed` だけを受け、未知は `DomainError::Semantics` | `model.rs`、`mcp/tools.rs`、テスト fixture |
+| until | `MergeUntil` | `backend/src/domain.rs:285-314` | 空 → size、ASCII 小文字以外 → lexical content、`prepare` / `merge` 以外 → syntax | `mcp/tools/mod.rs`、`mcp/tools/sets.rs`、`grpc/mod.rs` |
+| run の状態 | `RunStatus` | `backend/src/model.rs:151-170` | `TryFrom<&str>` は `running` / `completed` / `aborted` / `failed` だけを受け、未知は `DomainError::Semantics` | `model.rs`、`mcp/tools/run.rs`、テスト fixture |
 | run のレポートの名前（issue #70 で追加） | `ReportFilename` | `backend/src/domain.rs:113-157` | size（1024 バイト以下）→ lexical content（`validate_text`）→ syntax（絶対パス・`\`・空の区切り・`.`・`..` を拒否）→ semantics（`.md` で終わる）。`reports/` の下に収まることは読み取り時に実パスで確かめる（`backend/src/run_log.rs` の `read_report`）。画面側は `toReportFilename`（`frontend/web/src/state/domain-primitives.ts:113`）が同じ順で検証する | `grpc/mod.rs`、`run_log.rs`、`run_progress.rs`、`app/api/runs/[slug]/content/route.ts` |
 | run への指示書の ID（issue #70 で追加） | `InstructionId` | `backend/src/domain.rs:159-194` | `TryFrom<i32>` / `TryFrom<i64>`。0 以下と `i32` の範囲外を `DomainError::Size` で拒否。画面側は `toInstructionId`（`frontend/web/src/state/domain-primitives.ts:132`） | `grpc/mod.rs`、`run_log.rs`、`app/api/runs/[slug]/content/route.ts` |
 
@@ -80,7 +80,7 @@ SQL からの復元では、`ServerCount.server_id`（`backend/src/activity.rs:3
 
 ### run 状態の厳格化（第2段の明示的な挙動変更）
 
-第1段の調査時点では、takt 応答の `status` が欠落または未知のとき `RunStatus::Running` に丸めていました。第2段では `parse_run_status`（`backend/src/mcp/tools.rs:637`）が欠落と未知を `ToolError::Parse` にし、既知の4値だけを受けます。そのため、`status` を持たない run 応答は読み取りエラーになります。これは要求 `R17` で明示された唯一の外部挙動の変更です。既存の run fixture には有効な `"status"` を追加し、欠落・未知の期待を `ToolError::Parse` に更新しました。既知4値の応答と gRPC の射影は従来と同じです。
+第1段の調査時点では、takt 応答の `status` が欠落または未知のとき `RunStatus::Running` に丸めていました。第2段では `parse_run_status`（`backend/src/mcp/tools/run.rs:166`）が欠落と未知を `ToolError::Parse` にし、既知の4値だけを受けます。そのため、`status` を持たない run 応答は読み取りエラーになります。これは要求 `R17` で明示された唯一の外部挙動の変更です。既存の run fixture には有効な `"status"` を追加し、欠落・未知の期待を `ToolError::Parse` に更新しました。既知4値の応答と gRPC の射影は従来と同じです。
 
 ### 詳細モデルの追随（issue #157）
 
@@ -93,7 +93,7 @@ SQL からの復元では、`ServerCount.server_id`（`backend/src/activity.rs:3
 参照先の存在・一意性・一致は外部状態を要するため、型では検証せず、既存の境界に残しています。
 
 - 存在: 設定にサーバーとプロジェクトがあること（`backend/src/config.rs:206` 以降と `backend/src/grpc/mod.rs:320`）、ゴールが snapshot にあること、問い合わせが保留中であること（`backend/src/grpc/mod.rs:616`）、run が状態ストアにあること（`backend/src/grpc/mod.rs:436`）。
-- 一意性: サーバー内のプロジェクト名、ゴール内のタスク名、`(server_id, project, inquiry_id)` で一意な保留項目（`backend/src/grpc/mod.rs:632`）。
+- 一意性: 全体で一意なプロジェクト名、ゴール内のタスク名、`(server_id, project, inquiry_id)` で一意な保留項目（`backend/src/grpc/mod.rs:632`）。
 - 一致: PR 番号とゴールの対応、revision と承認待ち提案の対応（`backend/src/store.rs:203`）、JST の実在日（`DailyDate` が型で検証）。
 
 ### 後続へ送った箇所
@@ -178,7 +178,7 @@ SQL からの復元では、`ServerCount.server_id`（`backend/src/activity.rs:3
 | 段 | 対象 | 概算 | 主に触るファイル |
 |----|------|------|------------------|
 | 1（今回） | 規則の記録と一覧の作成 | 対象2ファイル | `.takt/facets/knowledge/taktdash-rules.md`、`docs/domain-primitives.md` |
-| 2（実施済み） | backend の値の置き換え | 13 種類・約 30 箇所＋`RunStatus` の厳格化 | `backend/src/domain.rs`（新規）、`backend/src/lib.rs`、`backend/src/model.rs`、`backend/src/config.rs`、`backend/src/grpc/mod.rs`、`backend/src/events.rs`、`backend/src/store.rs`、`backend/src/activity.rs`、`backend/src/conversation.rs`、`backend/src/mcp/tools.rs` |
+| 2（実施済み） | backend の値の置き換え | 13 種類・約 30 箇所＋`RunStatus` の厳格化 | `backend/src/domain.rs`（新規）、`backend/src/lib.rs`、`backend/src/model.rs`、`backend/src/config.rs`、`backend/src/grpc/mod.rs`、`backend/src/events.rs`、`backend/src/store.rs`、`backend/src/activity.rs`、`backend/src/conversation.rs`、`backend/src/mcp/tools/` |
 | 3 | frontend/web の値の置き換え | 11 種類・約 15 箇所 | `frontend/web/src/state/restore-state.ts`、`frontend/web/src/state/dashboard.ts`、`frontend/web/src/state/proto-values.ts` |
 | 4 | frontend/cli の値の置き換え | 10 種類・約 12 箇所 | `frontend/cli/src/main.rs` |
 
