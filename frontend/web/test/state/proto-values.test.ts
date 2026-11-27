@@ -40,6 +40,7 @@ import {
   enumFromWireOrUnrecognizedName,
 } from "../../src/state/proto-values.ts";
 import { DomainPrimitiveError } from "../../src/state/domain-primitives.ts";
+import { restoreDashboardState } from "../../src/state/restore-state.ts";
 
 test("proto-values は生成コードの enum と一致する", () => {
   assert.equal(GOAL_STATUS.CREATED, GoalStatus.GOAL_STATUS_CREATED);
@@ -156,4 +157,30 @@ test("enumFromWireOrUnrecognizedName は対象外の列挙の不明挙動を保�
   assert.equal(enumFromWireOrUnrecognizedName("ConversationSpeaker", "CONVERSATION_SPEAKER_UNKNOWN_X"), -1);
   assert.equal(enumFromWireOrUnrecognizedName("ConversationSpeaker", undefined), -1);
   assert.equal(enumFromWireOrUnrecognizedName("ConversationSpeaker", 99), 99);
+});
+
+test("enumFromWire は継承された名前を列挙の値として扱わない", () => {
+  const reject = (value: unknown): void => {
+    assert.throws(
+      () => enumFromWire("GoalStatus", value),
+      (error) => error instanceof DomainPrimitiveError && error.stage === "semantics",
+      `${String(value)} は継承された名前として拒否する`,
+    );
+  };
+
+  reject("toString");
+  reject("constructor");
+
+  // 登録済みの名前は今までどおり数値へ復号する。
+  assert.equal(enumFromWire("GoalStatus", "GOAL_STATUS_CREATED"), GoalStatus.GOAL_STATUS_CREATED);
+});
+
+test("継承された名前の status を持つゴールは、brand された値を状態へ入れずに拒否する", () => {
+  assert.throws(
+    () =>
+      restoreDashboardState({
+        goals: [{ goalId: "goal-1", serverId: "mini", project: "esa", status: "toString" }],
+      }),
+    (error) => error instanceof DomainPrimitiveError && error.stage === "semantics",
+  );
 });
