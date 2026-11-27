@@ -103,8 +103,10 @@ test("ゴール詳細は回答本文が無くても回答の判断と作業の�
       { ...answered, questionId: "q-report", body: "スクリーンショットは撮れましたか。", answerText: undefined, answerDecision: undefined, answerReport: "completed" },
     ],
   });
-  assert.match(html, /回答の判断は allow です。/);
-  assert.match(html, /作業の報告は completed です。/);
+  assert.match(html, /回答の判断は「許可」です。/);
+  assert.match(html, /作業の報告は「実施した」です。/);
+  assert.doesNotMatch(html, /\ballow\b/);
+  assert.doesNotMatch(html, /\bcompleted\b/);
   assert.doesNotMatch(html, /未回答/);
 });
 
