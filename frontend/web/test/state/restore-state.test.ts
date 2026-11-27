@@ -221,6 +221,67 @@ test("閾値は 0 以上 i32::MAX 以下で、wire が省略した 0 は 0 と�
   assert.equal(restored.thresholds?.runLogSilentMinutes, 0);
 });
 
+// issue #224：プロジェクトの concurrency（実行上限）は概要の組み立てで初めて RunLimit
+// として検証され、復元の境界では number のまま負数や小数が通っていた。復元の段階でも
+// RunLimit と同じ検証を通し、不正な上限を画面の状態へ持ち込まないことを固定する。
+test("実行上限は復元の段階で負数と整数でない値を拒否し、概要の組み立てまで進まない", () => {
+  const jsonWithConcurrency = (concurrency: unknown): unknown => {
+    const wire = wireOf(createDashboardState()) as { projects: { concurrency: unknown }[] };
+    wire.projects[0]!.concurrency = concurrency;
+    return wire;
+  };
+  const protoWithConcurrency = (concurrency: number): DashboardState => {
+    const state = createDashboardState();
+    return DashboardState.create({
+      ...state,
+      projects: [{ ...state.projects[0]!, concurrency }],
+    });
+  };
+
+  for (const concurrency of [-1, -4]) {
+    const rejection = (error: unknown): boolean =>
+      error instanceof DomainPrimitiveError && error.stage === "size" && error.field === "run の上限";
+    assert.throws(
+      () => restoreDashboardState(jsonWithConcurrency(concurrency)),
+      rejection,
+      `JSON 経路の負の実行上限 ${concurrency} は復元の段階で拒む`,
+    );
+    assert.throws(
+      () => dashboardStateFromProto(protoWithConcurrency(concurrency)),
+      rejection,
+      `proto 経路の負の実行上限 ${concurrency} は復元の段階で拒む`,
+    );
+  }
+
+  for (const concurrency of [1.5, 0.5]) {
+    const rejection = (error: unknown): boolean =>
+      error instanceof DomainPrimitiveError && error.stage === "syntax" && error.field === "run の上限";
+    assert.throws(
+      () => restoreDashboardState(jsonWithConcurrency(concurrency)),
+      rejection,
+      `JSON 経路の整数でない実行上限 ${concurrency} は復元の段階で拒む`,
+    );
+    assert.throws(
+      () => dashboardStateFromProto(protoWithConcurrency(concurrency)),
+      rejection,
+      `proto 経路の整数でない実行上限 ${concurrency} は復元の段階で拒む`,
+    );
+  }
+
+  for (const concurrency of [0, 2_147_483_647]) {
+    assert.equal(
+      restoreDashboardState(jsonWithConcurrency(concurrency)).projects[0]?.concurrency,
+      concurrency,
+      `型が許す実行上限 ${concurrency} は復元する`,
+    );
+    assert.equal(
+      dashboardStateFromProto(protoWithConcurrency(concurrency)).projects[0]?.concurrency,
+      concurrency,
+      `proto 経路でも型が許す実行上限 ${concurrency} は復元する`,
+    );
+  }
+});
+
 test("状態の種別は known な名称と数値だけを受け、未知の値と UNRECOGNIZED を semantics で拒否する", () => {
   const goalWithStatus = (status: unknown) => ({
     goals: [{ goalId: "goal-1", serverId: "mini", project: "esa", status }],
