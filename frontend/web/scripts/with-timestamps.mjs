@@ -107,17 +107,27 @@ function writeForwardNotice(state, source, sink, text) {
   state.atLineStart = true;
   const out = state.stamper(bytes);
   if (out.length === 0) {
-    return;
+    return Promise.resolve();
   }
-  try {
-    sink.write(out, (error) => {
+  // 知らせの書き込みも、この流れの未完了の件数に入れる。流れが先に
+  // 終わっていても、呼び出し側が返った Promise で完了を待てるようにする。
+  // 書き込みが失敗したら、その失敗を記録して解決する（待つ側は止まらない）。
+  state.pendingCount += 1;
+  return new Promise((resolve) => {
+    const done = (error) => {
+      state.pendingCount -= 1;
       if (error) {
         failForward(state, source, state.onFirstFailure, error);
       }
-    });
-  } catch (error) {
-    failForward(state, source, state.onFirstFailure, error);
-  }
+      finishForward(state);
+      resolve();
+    };
+    try {
+      sink.write(out, done);
+    } catch (error) {
+      done(error);
+    }
+  });
 }
 
 function forward(source, sink, onFirstFailure) {
@@ -282,7 +292,9 @@ async function main() {
   });
 
   // 書き込みの失敗は、流れごとに最初の 1 回だけ、すぐもう一方の流れへ知らせる。
+  // 知らせの書き込みの完了は、終わり方へ進む前に main が待つ。
   const failedStreams = new Set();
+  const noticeWrites = [];
   let forwardEntries = [];
   const notifyFailure = (name, error) => {
     failedStreams.add(name);
@@ -291,16 +303,19 @@ async function main() {
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    other.writeNotice(`with-timestamps: ${name} への書き込みに失敗しました: ${message}\n`);
+    noticeWrites.push(
+      other.writeNotice(`with-timestamps: ${name} への書き込みに失敗しました: ${message}\n`),
+    );
   };
   forwardEntries = createForwardEntries(child, notifyFailure);
   // forward は失敗を reject せず値として返すため、ここで失敗が捨てられることはない。
   const forwardsDone = Promise.all(forwardEntries.map((entry) => entry.result));
 
   const result = await closePromise;
-  // 合図を自分へ送るのと process.exit は、両方の流れの転送の終わりを
-  // 待ったあとに限る（最後の行を落とさない）。
+  // 合図を自分へ送るのと process.exit は、両方の流れの転送の終わりと、
+  // 知らせの書き込みの完了を待ったあとに限る（最後の行を落とさない）。
   await forwardsDone;
+  await Promise.all(noticeWrites);
 
   const { code, signal } = result;
   if (signal !== null && signal !== undefined) {
