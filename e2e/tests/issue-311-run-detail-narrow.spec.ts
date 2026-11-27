@@ -47,7 +47,16 @@ for (const width of WIDTHS) {
 
     const log = page.getByRole("list", { name: "ログの行" });
     await expect(log).toBeVisible();
-    await expect(log.getByRole("listitem").first(), "ログの行が見える").toBeVisible();
+    const firstLogLine = log.getByRole("listitem").first();
+    await expect(firstLogLine, "ログの行が見える").toBeVisible();
+    // body が横のはみ出しを隠すため、document の scrollWidth が 0 でも中身は切れ得る。
+    // 見出しと同じく、先頭のログの行の右端が画面の幅を超えないことを測る。
+    const firstLogBox = await firstLogLine.boundingBox();
+    expect(firstLogBox).not.toBeNull();
+    expect(firstLogBox!.x, "ログの先頭の行の左端が画面の中").toBeGreaterThanOrEqual(0);
+    expect(firstLogBox!.x + firstLogBox!.width, "ログの先頭の行の右端が画面の幅に収まる").toBeLessThanOrEqual(
+      width + 0.5,
+    );
 
     const back = page.locator("main.page > a.back").first();
     await expect(back).toBeVisible();

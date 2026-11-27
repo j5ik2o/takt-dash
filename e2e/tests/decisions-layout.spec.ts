@@ -169,6 +169,24 @@ for (const width of WIDTHS) {
     }
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow).toBeLessThanOrEqual(0);
+
+    // 狭い画面では body が横のはみ出しを隠すため、scrollWidth が 0 でも中身は切れ得る。
+    // 各項目の見出し行・本文・回答ボタンの右端が画面の幅を超えないことを測る。
+    if (width <= 390) {
+      for (const item of items) {
+        for (const [label, rect] of [
+          ["見出し行", item.head],
+          ["本文", item.body],
+          ["回答ボタン", item.actions],
+        ] as const) {
+          expect(rect.x, `${label}の左端が画面の中: ${item.bodyText.slice(0, 20)}`).toBeGreaterThanOrEqual(0);
+          expect(
+            rect.x + rect.width,
+            `${label}の右端が画面の幅に収まる: ${item.bodyText.slice(0, 20)}`,
+          ).toBeLessThanOrEqual(width + 0.5);
+        }
+      }
+    }
   });
 }
 
