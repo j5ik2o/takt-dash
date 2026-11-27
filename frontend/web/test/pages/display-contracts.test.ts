@@ -278,7 +278,15 @@ for (const coverage of ["unread", "partial", "complete"] as const) {
     const tile = required(document, ".tile");
     const visible = text(tile);
     assert.match(visible, /(?:上限\s*5|\/\s*5)\s*件/);
-    assert.match(visible, /不明|読めた分|上限/);
+    if (coverage === "complete") {
+      // #424（オーナーの指摘）: 読み切れて run が0件のときは「0 / 5 件」と出し、上限の語は出さない。
+      // ただし 5 という数は残る（上限が消えたのではなく、0 / 5 件として残っている）。
+      assert.match(visible, /0\s*\/\s*5\s*件/);
+      assert.doesNotMatch(visible, /上限/);
+      assert.match(visible, /5\s*件/);
+    } else {
+      assert.match(visible, /不明|読めた分|上限/);
+    }
     if (coverage !== "complete") {
       assert.equal(tile.querySelectorAll('[role="img"]').length, 0, "未確定の全体使用率を描画しない");
       assert.doesNotMatch(visible, /(?:^|[^\d])0\s*\/\s*5/);
