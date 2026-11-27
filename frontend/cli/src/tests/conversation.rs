@@ -200,6 +200,20 @@ fn conversation_rendering_shows_notice_for_garbled_message() {
     1,
     "注意書きの無い発言には印を出さない: {rendered}"
   );
+
+  let normal_start = rendered.find("正常な発言").expect("正常な発言を表示する必要があります");
+  let garbled_start =
+    rendered.find("文字化けした発言\u{FFFD}\u{FFFD}").expect("文字化けした発言の本文を表示する必要があります");
+  let notice_start = rendered.find("元記録で文字化けしています").expect("注意書きを表示する必要があります");
+
+  assert!(
+    normal_start < garbled_start,
+    "正常な発言のあとに文字化けした発言を並べる必要があります: {rendered}"
+  );
+  assert!(
+    garbled_start < notice_start,
+    "注意書きは文字化けした本文の直後に続ける必要があります: {rendered}"
+  );
 }
 
 #[test]
