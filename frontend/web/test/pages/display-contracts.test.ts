@@ -278,7 +278,15 @@ for (const coverage of ["unread", "partial", "complete"] as const) {
     const tile = required(document, ".tile");
     const visible = text(tile);
     assert.match(visible, /(?:上限\s*5|\/\s*5)\s*件/);
-    assert.match(visible, /不明|読めた分|上限/);
+    if (coverage === "complete") {
+      // #424（オーナーの指摘）: 読み切れて run が0件のときは「0 / 5 件」と出し、上限の語は出さない。
+      // ただし 5 という数は残る（上限が消えたのではなく、0 / 5 件として残っている）。
+      assert.match(visible, /0\s*\/\s*5\s*件/);
+      assert.doesNotMatch(visible, /上限/);
+      assert.match(visible, /5\s*件/);
+    } else {
+      assert.match(visible, /不明|読めた分|上限/);
+    }
     if (coverage !== "complete") {
       assert.equal(tile.querySelectorAll('[role="img"]').length, 0, "未確定の全体使用率を描画しない");
       assert.doesNotMatch(visible, /(?:^|[^\d])0\s*\/\s*5/);
@@ -309,13 +317,37 @@ test("概要の未読時は保存履歴が0でも動的な完了件数を確定�
   assert.doesNotMatch(text(required(document, 'a[href="/projects#project-esa"]')), /完了したタスクは 0件/);
 });
 
+// issue #424（オーナーの指摘：0件のとき「上限 5 件」と出て5件走っているように読めた）で、
+// 既読の空 run 集合のタイルは「0 / 5 件」になり「上限」を出さなくなる。そのため、ループ内の
+// 「概要は初回読み取り前の見出し・集計・空表示で0件を確定しない」と同名のテストを別名で
+// 1本足す（node --test が同名テストを区別できず、どれが落ちたか読めなくなるため）。
+// ここで確かめるのは「初回読み取り前の概要は、run の件数を0件と確定せず、run 一覧も空と
+// 断定しない」だけ。期待は既存の概要ケースと一字も変えない。
+test("概要は読み取り前の空の一覧でrunの件数を0件と確定しない", () => {
+  const document = overview(emptyState(false));
+  const main = required(document, "main");
+  const countText = text(main);
+  assert.doesNotMatch(countText, /(?:^|[^\d])0\s*件|0\s*\/|(?:run|ゴール|判断待ち)はありません/);
+  assert.match(countText, /未読|まだ.*読|不明|分かりません|確認中/);
+  assert.match(text(required(document, '[role="status"]')), /応答がありません/);
+  assertUnreadRunList(main);
+  assertRejectsUnreadEmptyClaim(main);
+  for (const image of main.querySelectorAll('[role="img"]')) {
+    assert.doesNotMatch(image.getAttribute("aria-label") ?? "", /(?:^|[^\d])0\s*件/);
+  }
+});
+
 test("概要の既読で空のrun集合はヘッダー・タイル・一覧・読み上げを通して一度だけ空と示す", () => {
   const document = overview(withCoverage("complete", [0, 0]));
   const scopes = [required(document, ".page-head"), required(document, ".tile"), required(document, '[aria-labelledby="h-runs"]')];
   const content = scopes.map((scope) => `${text(scope)} ${Array.from(scope.querySelectorAll('[aria-label]')).map((item) => item.getAttribute("aria-label")).join(" ")}`).join(" ");
-  assert.equal((content.match(/(?:^|[^\d])0\s*件|0\s*\/|走っている run はありません/g) ?? []).length, 1, content);
+  // 空の表明は、タイルの「0 / 5 件」と一覧の文がそれぞれ1回ずつだけ出る（退行で二重にならない）。
+  assert.equal((content.match(/0\s*\/\s*5\s*件/g) ?? []).length, 1, content);
+  assert.equal((content.match(/走っている run はありません/g) ?? []).length, 1, content);
   assert.match(text(required(document, ".page-head")), /2台のサーバー/);
-  assert.match(text(required(document, ".tile")), /上限\s*5\s*件/);
+  assert.match(text(required(document, ".tile")), /0\s*\/\s*5\s*件/);
+  assert.doesNotMatch(text(required(document, ".tile")), /上限/);
+  assert.equal(required(document, ".tile").querySelectorAll('[role="img"]').length, 0);
 });
 
 test("概要は実行中件数が0でも存在するrunの行と詳細リンクを残す", () => {

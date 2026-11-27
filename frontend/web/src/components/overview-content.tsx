@@ -121,9 +121,10 @@ export function OverviewContent({
         <div className="tile">
           <div className="label">実行中の run（全サーバー）</div>
           <div className="num">
-            {knownEmptyRuns ? <>上限 {view.runLimit}<small>件</small></>
-              : view.coverage === "complete" ? <>{view.runningRuns}<small>/ {view.runLimit} 件</small></>
-                : <>{readCountText(view.runningRuns, view.coverage)}{hasConfiguration ? <small>上限 {view.runLimit} 件</small> : null}</>}
+            {knownEmptyRuns && !partialRead && !disconnected ? <>{view.runningRuns}<small>/ {view.runLimit} 件</small></>
+              : knownEmptyRuns ? <>上限 {view.runLimit}<small>件</small></>
+                : view.coverage === "complete" ? <>{view.runningRuns}<small>/ {view.runLimit} 件</small></>
+                  : <>{readCountText(view.runningRuns, view.coverage)}{hasConfiguration ? <small>上限 {view.runLimit} 件</small> : null}</>}
           </div>
           {view.coverage === "complete" && !knownEmptyRuns ? <div
             className="bar live"

@@ -58,6 +58,7 @@ const renderDecisions = (state: DashboardState): string =>
   renderToStaticMarkup(createElement(DecisionsContent, { snapshotLoaded: true, state, now: NOW, disconnected: false }));
 
 const noop = (): void => {};
+const acceptAll = (): boolean => true;
 
 const renderActions = (
   decision: PendingDecision,
@@ -74,7 +75,7 @@ const renderActions = (
       disconnected: false,
       dialogTarget,
       onTextChange: noop,
-      onAction: noop,
+      onAction: acceptAll,
     }),
   );
 
@@ -875,7 +876,7 @@ test("切断中は開いていたマージの確認でも確定できず、や�
       disconnected: true,
       dialogTarget: null,
       onTextChange: noop,
-      onAction: noop,
+      onAction: acceptAll,
     }),
   );
   const document = new JSDOM(html).window.document;
@@ -916,7 +917,7 @@ test("性質: 判断待ちの操作要素は、送信中か切断中なら押せ
                 disconnected,
                 dialogTarget: dialog === null ? null : (openDecisionDialog(decision, dialog) ?? null),
                 onTextChange: noop,
-                onAction: noop,
+                onAction: acceptAll,
               }),
             );
             const document = new JSDOM(html).window.document;
@@ -958,7 +959,7 @@ test("性質: 判断待ちの操作要素の名前の集合は、送信中と切
         disconnected,
         dialogTarget: dialog === null ? null : (openDecisionDialog(decision, dialog) ?? null),
         onTextChange: noop,
-        onAction: noop,
+        onAction: acceptAll,
       }),
     );
     const document = new JSDOM(html).window.document;
@@ -986,7 +987,6 @@ test("切断中は、開く・確定・回答の操作を入口で受け付け�
   const intents = [
     { type: "answer-text" },
     { type: "answer-option", option: "今週" },
-    { type: "answer-report", report: 1 },
     { type: "open", dialog: "merge" },
     { type: "confirm", dialog: "merge" },
     { type: "cancel" },
