@@ -280,6 +280,27 @@ test("実行上限は復元の段階で負数と整数でない値を拒否し�
       `proto 経路でも型が許す実行上限 ${concurrency} は復元する`,
     );
   }
+
+  // proto の toJSON は concurrency が 0 のときフィールドを省略するため、実際の wire では
+  // 0 が「無い」形で届く。明示した 0 だけでなく、省略された 0 も復元の段階で 0 として
+  // 戻せることを固定する。
+  const zeroLimitState = createDashboardState();
+  const zeroLimitWire = wireOf(
+    DashboardState.create({
+      ...zeroLimitState,
+      projects: [{ ...zeroLimitState.projects[0]!, concurrency: 0 }],
+    }),
+  ) as { projects: Record<string, unknown>[] };
+  assert.equal(
+    "concurrency" in zeroLimitWire.projects[0]!,
+    false,
+    "concurrency が 0 の wire はフィールドを省略する",
+  );
+  assert.equal(
+    restoreDashboardState(zeroLimitWire).projects[0]?.concurrency,
+    0,
+    "省略された実行上限 0 は 0 として復元する",
+  );
 });
 
 test("状態の種別は known な名称と数値だけを受け、未知の値と UNRECOGNIZED を semantics で拒否する", () => {
