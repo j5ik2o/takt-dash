@@ -2,23 +2,46 @@ import type { ReactElement } from "react";
 import type { GetRunDetailResponse } from "../proto/taktdash";
 import { formatClock, formatDateTime, formatDuration } from "../state/format";
 import { LiveRunLog } from "./live-run-log";
+import { projectHref } from "../state/anchors";
 import { RunContentToggle } from "./run-content-toggle";
 
 type RunDetailContentProps = {
   detail: GetRunDetailResponse;
   now: Date;
+  serverName?: string;
 };
+
+const STEP_STATUS_LABELS: Readonly<Record<string, string>> = {
+  done: "完了",
+  blocked: "止まった",
+  error: "エラー",
+  rate_limited: "利用上限",
+  running: "実行中",
+  pending: "未着手",
+};
+export const stepStatusLabel = (status: string): string => STEP_STATUS_LABELS[status] ?? status;
+
+const INSTRUCTION_STATE_LABELS: Readonly<Record<string, string>> = {
+  pending: "未配信",
+  deliveredSameSession: "配信済み（同じセッション）",
+  deliveredNextStep: "配信済み（次のステップ）",
+  unconsumedWarned: "未消費（警告済み）",
+};
+export const instructionStateLabel = (state: string): string => INSTRUCTION_STATE_LABELS[state] ?? state;
 
 // run 詳細は状態ストアと run の保存場所から backend が組み立てた範囲だけを表示する。
 // ログは末尾（logTail）から示し、開いている間は LiveRunLog が追記分を足す。JSONL の生ログは表示しない。レポートと指示書は一覧だけを
 // 描画し、本文は利用者が項目を開いたときに RunContentToggle が取得する。
-export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactElement {
+export function RunDetailContent({ detail, now, serverName }: RunDetailContentProps): ReactElement {
+  const back = detail.goalId
+    ? { text: "ゴール詳細に戻る", href: `/goals/${encodeURIComponent(detail.goalId)}` }
+    : { text: "プロジェクトに戻る", href: projectHref(detail.project) };
   const elapsed =
     detail.startedAt !== undefined ? formatDuration((now.getTime() - detail.startedAt.getTime()) / 1000) : undefined;
   return (
     <main className="page">
-      <a className="back" href="/projects">
-        プロジェクト一覧に戻る
+      <a className="back" href={back.href}>
+        {back.text}
       </a>
       <header className="page-head">
         <div>
@@ -33,7 +56,7 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
         <div className="sum-grid">
           <div className="f">
             <div className="k">サーバー</div>
-            <div className="v mono">{detail.serverId}</div>
+            <div className="v mono">{serverName ?? detail.serverId}</div>
           </div>
           <div className="f">
             <div className="k">開始と経過</div>
@@ -86,19 +109,23 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
         <h2 className="sec" id="h-steps">
           ステップ
         </h2>
+        {detail.stepLogs.length === 0 ? (
+          <p className="note">ステップはまだありません。</p>
+        ) : (
         <ul className="steps">
           {detail.stepLogs.map((step, index) => (
             <li key={`${step.stepName}-${index}`}>
               <div className="step-head">
                 <b>{step.stepName}</b>
                 <span>{step.persona}</span>
-                <span>{step.status}</span>
+                <span>{stepStatusLabel(step.status)}</span>
                 <span>反復 {step.iteration} 回目</span>
               </div>
               <pre className="step-body">{step.content}</pre>
             </li>
           ))}
         </ul>
+        )}
       </section>
 
       <section aria-labelledby="h-log">
@@ -145,7 +172,7 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
               <li key={instruction.instructionId}>
                 <div className="ins-head">
                   <b>#{instruction.instructionId}</b>
-                  <span>{instruction.state}</span>
+                  <span>{instructionStateLabel(instruction.state)}</span>
                   <span>{instruction.issuedAt ? formatDateTime(instruction.issuedAt) : "発行時刻は不明です。"}</span>
                 </div>
                 <RunContentToggle
@@ -158,8 +185,8 @@ export function RunDetailContent({ detail, now }: RunDetailContentProps): ReactE
         )}
       </section>
 
-      <a className="back" href="/projects">
-        プロジェクト一覧に戻る
+      <a className="back" href={back.href}>
+        {back.text}
       </a>
     </main>
   );

@@ -9,7 +9,7 @@ import { normalizeBuildInfo } from "@/src/state/build-info";
 
 export const metadata: Metadata = {
   title: "taktDash",
-  description: "taktDash は、takt manager 群の状態を集約する読み取り用のダッシュボードです。",
+  description: "taktDash は、takt manager 群の状態を集約し、判断待ちを操作するダッシュボードです。",
 };
 
 export const dynamic = "force-dynamic";

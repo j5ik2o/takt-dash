@@ -29,16 +29,18 @@ export type DecisionOutcome = {
 export type DecisionResult = DecisionOutcome & {
   key: string;
   label: string;
+  at?: Date;
 };
 
 // 送信結果を、一覧の表示領域へ渡す結果値へ変換する。key は一覧の React key と同じ
 // decisionKey を使い、SSE の再描画で並び替わっても同じ項目の結果として対応付ける。
-export function toDecisionResult(decision: PendingDecision, outcome: DecisionOutcome): DecisionResult {
+export function toDecisionResult(decision: PendingDecision, outcome: DecisionOutcome, at: Date = new Date()): DecisionResult {
   return {
     key: decisionKey(decision),
     label: decisionLabel(decision),
     ok: outcome.ok,
     message: outcome.message,
+    at,
   };
 }
 
@@ -209,7 +211,7 @@ const ENDPOINTS: Record<DecisionAction["kind"], string> = {
 
 const SUCCESS_MESSAGES: Record<DecisionAction["kind"], string> = {
   answer: "回答を送信しました。",
-  merge: "マージを承認しました。",
+  merge: "マージを依頼しました。",
   "approve-registration": "ゴール登録を承認しました。",
   "reject-registration": "ゴール登録を却下しました。",
 };
@@ -273,7 +275,10 @@ export async function submitDecisionAction(
 
   const body: WriteResponseBody | undefined = await response.json().catch(() => undefined);
   if (response.ok && body?.ok === true) {
-    return { ok: true, message: SUCCESS_MESSAGES[action.kind] };
+    return {
+      ok: true,
+      message: action.kind === "merge" ? `PR #${action.payload.prNumber} のマージを依頼しました。` : SUCCESS_MESSAGES[action.kind],
+    };
   }
   if (typeof body?.error === "string" && body.error !== "") {
     return { ok: false, message: body.error };

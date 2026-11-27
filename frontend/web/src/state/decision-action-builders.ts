@@ -38,15 +38,15 @@ const unavailable = (reason: string): DecisionActionState => ({ kind: "unavailab
 
 const awaitingMergeActionState = (decision: PendingDecision): DecisionActionState => {
   if (!decision.goalId) {
-    return unavailable("ゴール ID が無いため、マージを承認できません。");
+    return unavailable("ゴール ID が無いため、マージできません。");
   }
   if (!isPositiveInteger(decision.pullRequest?.number)) {
-    return unavailable("プルリクエストの番号が無いため、マージを承認できません。");
+    return unavailable("プルリクエストの番号が無いため、マージできません。");
   }
   // 確認ダイアログでプルリクエストの中身を開いて確かめられない項目は、取り違えを防ぐため
   // マージを承認させない（issue #304）。
   if (pullRequestLinkUrl(decision.pullRequest?.url) === undefined) {
-    return unavailable("プルリクエストの URL が無いため、マージを承認できません。");
+    return unavailable("プルリクエストの URL が無いため、マージできません。");
   }
   return { kind: "merge" };
 };

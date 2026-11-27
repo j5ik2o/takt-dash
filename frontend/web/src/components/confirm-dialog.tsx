@@ -11,6 +11,7 @@ import {
   type DecisionDialogTarget,
   type DecisionIntent,
 } from "../state/decision-actions";
+import { goalHeading } from "../state/goal-summary";
 
 export type DialogKind = DecisionDialogKind;
 
@@ -253,7 +254,7 @@ function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, di
           <button type="button" disabled={busy} onClick={cancel}>
             やめる
           </button>
-          <button type="button" disabled={busy || disconnected} onClick={confirm}>
+          <button type="button" className="danger" disabled={busy || disconnected} onClick={confirm}>
             {confirmLabel}
           </button>
         </div>
@@ -276,10 +277,10 @@ type DialogTrigger = {
 };
 
 export const DIALOG_TRIGGERS = {
-  merge: [{ dialog: "merge", label: "マージを承認" }],
+  merge: [{ dialog: "merge", label: "マージする" }],
   goalRegistration: [
-    { dialog: "approve-registration", label: "承認" },
-    { dialog: "reject-registration", label: "却下" },
+    { dialog: "approve-registration", label: "ゴール登録を承認する" },
+    { dialog: "reject-registration", label: "ゴール登録を却下する" },
   ],
   operation: [
     { dialog: "answer-report-completed", label: "実施した" },
@@ -288,6 +289,16 @@ export const DIALOG_TRIGGERS = {
 } as const satisfies Record<string, DialogTrigger[]>;
 
 type DialogGroup = "merge" | "goal-registration" | "operation";
+
+// ゴール登録の対象。登録案の名前は本文の最初の1文（goalHeading）で、本文が空なら行を出さない。
+function registrationDetails(decision: PendingDecision): ConfirmDialogDetail[] {
+  const details: ConfirmDialogDetail[] = [{ label: "プロジェクト", value: decision.project }];
+  const body = typeof decision.body === "string" ? decision.body : "";
+  if (body.trim() !== "") {
+    details.push({ label: "登録案", value: goalHeading(body) });
+  }
+  return details;
+}
 
 // 種別ごとの見出し・対象・本文・確定ボタン名。本文は対象の値（PR 番号・revision）を差し込む。
 // マージは、別のプロジェクトのプルリクエストと取り違えないよう、プロジェクトと、
@@ -307,12 +318,12 @@ export function buildConfirmDialogs(
     return [
       {
         dialog: "merge",
-        title: "マージの承認",
+        title: "プルリクエストのマージ",
         details: [
           { label: "プロジェクト", value: decision.project },
           { label: "プルリクエスト", value: `#${prNumber ?? ""} を開く（新しいタブ）`, href: prUrl },
         ],
-        message: `プルリクエスト #${prNumber ?? ""} のマージを承認します。よろしいですか。`,
+        message: `プルリクエスト #${prNumber ?? ""} をマージします。よろしいですか。`,
         confirmLabel: "マージする",
       },
     ];
@@ -343,16 +354,16 @@ export function buildConfirmDialogs(
     {
       dialog: "approve-registration",
       title: "ゴール登録の承認",
-      details: [],
+      details: registrationDetails(decision),
       message: `revision ${revision ?? ""} のゴール登録を承認します。よろしいですか。`,
-      confirmLabel: "承認",
+      confirmLabel: "ゴール登録を承認する",
     },
     {
       dialog: "reject-registration",
       title: "ゴール登録の却下",
-      details: [],
+      details: registrationDetails(decision),
       message: `revision ${revision ?? ""} のゴール登録を却下します。よろしいですか。`,
-      confirmLabel: "却下",
+      confirmLabel: "ゴール登録を却下する",
     },
   ];
 }

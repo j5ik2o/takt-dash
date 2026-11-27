@@ -85,12 +85,16 @@ export function DecisionsContent({ state, snapshotLoaded, now, disconnected, rea
     setResults((previous) => upsertDecisionResult(previous, next));
   }, []);
 
+  const handleCloseResult = useCallback((closed: DecisionResult) => {
+    setResults((previous) => previous.filter((result) => result.key !== closed.key));
+  }, []);
+
   return (
     <main className="page">
       {disconnected ? <BackendUnavailableNotice situation={unavailableSituation} /> : null}
       <header className="page-head">
         <div>
-          <h1>判断待ち</h1>
+          <h1 tabIndex={-1}>判断待ち</h1>
           {decisions.length > 0 && coverage !== "unread" ? <p>
             {coverage === "partial" ? "読めた範囲で、" : null}
             全サーバーで、人の判断を待っている項目が {decisions.length}件あります。待ち時間の長い順に並べています。
@@ -110,7 +114,7 @@ export function DecisionsContent({ state, snapshotLoaded, now, disconnected, rea
 
       {/* 0件は警告ではないため、橙の容器ではなく通常の線の容器にする（issue #121）。 */}
       <section className={decisions.length === 0 ? "tray tray-empty" : "tray"} aria-label="判断待ちの一覧">
-        <DecisionResults results={results} />
+        <DecisionResults results={results} onClose={handleCloseResult} />
         {decisions.length === 0 ? (
           hasUnread ? (
             <p className="note">サーバーからまだ読めていないため、判断待ちがあるかどうかは分かりません。</p>

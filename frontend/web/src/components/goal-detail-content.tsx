@@ -28,10 +28,20 @@ const answerLines = (question: GoalQuestion): string[] => {
     lines.push(question.answerText);
   }
   if (question.answerDecision !== undefined) {
-    lines.push(`回答の判断は ${question.answerDecision} です。`);
+    const decisionLabel = question.answerDecision === "allow" ? "許可" : question.answerDecision === "deny" ? "拒否" : question.answerDecision;
+    lines.push(
+      decisionLabel === "許可" || decisionLabel === "拒否"
+        ? `回答の判断は「${decisionLabel}」です。`
+        : `回答の判断は ${question.answerDecision} です。`,
+    );
   }
   if (question.answerReport !== undefined) {
-    lines.push(`作業の報告は ${question.answerReport} です。`);
+    const reportLabel = question.answerReport === "completed" ? "実施した" : question.answerReport === "unable" ? "対応できない" : question.answerReport;
+    lines.push(
+      reportLabel === "実施した" || reportLabel === "対応できない"
+        ? `作業の報告は「${reportLabel}」です。`
+        : `作業の報告は ${question.answerReport} です。`,
+    );
   }
   return lines;
 };
@@ -72,6 +82,20 @@ const taskCountsOf = (tasks: readonly GoalTask[]): TaskStatusCounts => {
   }
   return counts;
 };
+
+const QUESTION_KIND_LABELS: Readonly<Record<string, string>> = {
+  question: "質問",
+  operation_request: "作業の依頼",
+  approval: "承認の依頼",
+};
+export const questionKindLabel = (kind: string): string => QUESTION_KIND_LABELS[kind] ?? kind;
+
+const QUESTION_STATUS_LABELS: Readonly<Record<string, string>> = {
+  pending: "回答待ち",
+  answered: "回答済み",
+  withdrawn: "取り下げ済み",
+};
+export const questionStatusLabel = (status: string): string => QUESTION_STATUS_LABELS[status] ?? status;
 
 // ゴール詳細は proto の GetGoalDetailResponse が返す範囲だけを表示する。
 // 開始ブランチは proto にフィールドがないため、値ではなく欠落が分かる表示にする。
@@ -132,10 +156,6 @@ export function GoalDetailContent({ detail }: GoalDetailContentProps): ReactElem
         </h2>
         <ul className="kv">
           <li>
-            <span>開始ブランチ</span>
-            <b>未取得</b>
-          </li>
-          <li>
             <span>統合ブランチ</span>
             <b>{detail.integrationBranch}</b>
           </li>
@@ -179,8 +199,8 @@ export function GoalDetailContent({ detail }: GoalDetailContentProps): ReactElem
               return (
                 <li key={question.questionId}>
                   <div className="ins-head">
-                    <b>{question.kind}</b>
-                    <span>{question.status}</span>
+                    <b>{questionKindLabel(question.kind)}</b>
+                    <span>{questionStatusLabel(question.status)}</span>
                     <span>{question.createdAt === undefined ? "時刻は未取得" : formatDateTime(question.createdAt)}</span>
                   </div>
                   <p>{question.body}</p>

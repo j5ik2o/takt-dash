@@ -1184,6 +1184,24 @@ ol.log-tail li {
   cursor: not-allowed;
 }
 
+.actions button.danger {
+  background: var(--orange-d);
+  color: #fff;
+  border-color: var(--orange-d);
+}
+
+.actions button.danger:hover:not(:disabled) {
+  background: var(--orange-d);
+  color: #fff;
+  border-color: var(--orange-d);
+}
+
+.actions button.danger:disabled {
+  background: var(--surface);
+  color: var(--down);
+  border-color: var(--line);
+}
+
 .actions input[type="text"] {
   font: inherit;
   font-size: var(--font-size-13);
@@ -1214,6 +1232,8 @@ ol.log-tail li {
   display: flex;
   flex-direction: column;
   gap: var(--space-12);
+  max-height: 100%;
+  overflow-y: auto;
 }
 
 .dialog-message {
@@ -1255,6 +1275,7 @@ ol.log-tail li {
 
 .decision-results .result {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-8);
   font-size: var(--font-size-13);
   border-radius: var(--radius-6);
@@ -1273,6 +1294,12 @@ ol.log-tail li {
 
 .decision-results .result-label {
   font-weight: 600;
+}
+
+.decision-results .result button {
+  margin-left: auto;
+  min-height: 44px;
+  min-width: 44px;
 }
 
 /* 概要（issue #75）: 3タイル・異常バナー・判断待ちパネルをコンパクトに並べる。
