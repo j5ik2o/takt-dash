@@ -867,12 +867,19 @@ test("判断待ちのページで送信の途中に例外が出ても、送信�
       assert.equal(page.sent[1]?.body.report, OPERATION_ANSWER_REPORT.COMPLETED);
       assert.equal(page.sent[1]?.body.idempotencyKey, page.sent[0]?.body.idempotencyKey, "やり直しは同じ鍵");
       await page.settle();
+      // 再送の応答も読み終わるまで待つ。受け口はここまで外していないので、再送で新たな未処理の
+      // 拒否が出れば数が増え、次の断言がテストを失敗させる。
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(rejections.length, 1, "再送で新たな未処理の拒否は出ない");
       assert.equal(page.dialog(), null, "2回目の結果が返ったら閉じる");
       assert.match(page.container.textContent ?? "", /回答を送信しました。/);
       assert.equal(page.sent.length, 2);
     } finally {
       await page.unmount();
     }
+    // 後片付け（unmount）でも拒否が出ていないことを、受け口を外す前に見る。
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(rejections.length, 1, "後片付けで新たな未処理の拒否は出ない");
   });
 });
 
@@ -907,6 +914,39 @@ test("判断待ちのページで確認ダイアログの Tab と Shift+Tab は�
     // 最後の操作要素からの Tab は、最初の操作要素へ回すので抑止する。
     assert.equal(await page.preventedKey("Tab"), 1, "末尾からの Tab は抑止する");
     assert.equal(document.activeElement, page.dialogButton("cancel"), "最初の操作要素へ回す");
+  } finally {
+    await page.unmount();
+  }
+});
+
+// 送信中は「やめる」と確定の両方が無効になり、押した確定からフォーカスが外れるので、
+// 見出しへ戻してダイアログの中に保つ。操作要素が1つも無い状態では、見出しからの Tab の
+// 行き先も封じ込めが決めるため、既定動作を抑止する。
+test("判断待ちのページで送信中は、ボタンが無効で見出しにフォーカスが留まり、その Tab は既定動作を抑止する", async () => {
+  const page = await mountOperationPage();
+  try {
+    await page.click(page.trigger("実施した"));
+    const dialog = page.dialog();
+    assert.ok(dialog, "確認ダイアログが出る");
+    const heading = dialog.querySelector("h2");
+    assert.equal(document.activeElement, heading, "開いた直後は見出しにフォーカスがある");
+
+    await page.wait(CONFIRM_DELAY_MS);
+    await page.click(page.dialogButton("confirm"));
+    assert.equal(page.sent.length, 1, "確定で1回送る");
+    assert.ok(page.dialog(), "送信中はダイアログを閉じない");
+    assert.equal(page.dialogButton("cancel")?.disabled, true, "送信中はやめるを押せない");
+    assert.equal(page.dialogButton("confirm")?.disabled, true, "送信中は確定を押せない");
+    assert.equal(document.activeElement, heading, "送信中は見出しにフォーカスが留まる");
+
+    // 見出しは操作要素ではない。操作要素が無いので、封じ込めは行き先を見出しに決め、
+    // 既定動作を抑止する。
+    assert.equal(await page.preventedKey("Tab"), 1, "送信中、見出しからの Tab は抑止する");
+    assert.equal(document.activeElement, heading, "送信中の Tab の後も見出しに留まる");
+
+    await page.settle();
+    assert.equal(page.dialog(), null, "結果が返ったら閉じる");
+    assert.match(page.container.textContent ?? "", /回答を送信しました。/);
   } finally {
     await page.unmount();
   }
