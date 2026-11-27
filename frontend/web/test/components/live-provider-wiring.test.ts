@@ -583,7 +583,8 @@ test("同じライブ画面とサイドバーは未読から空、非空への�
         assert.match(before.querySelector('[role="status"]')?.textContent ?? "", /応答がありません/);
         const emptyRunScopes = [zero.querySelector(".page-head"), zero.querySelector(".tile"), zero.querySelector('[aria-labelledby="h-runs"]')];
         const emptyRunText = emptyRunScopes.map((scope) => `${scope?.textContent} ${Array.from(scope?.querySelectorAll('[aria-label]') ?? []).map((item) => item.getAttribute('aria-label')).join(' ')}`).join(' ');
-        assert.equal((emptyRunText.match(/(?:^|[^\d])0\s*件|0\s*\/|走っている run はありません/g) ?? []).length, 1, emptyRunText);
+        assert.equal((emptyRunText.match(/0\s*\/\s*8\s*件/g) ?? []).length, 1, emptyRunText);
+        assert.equal((emptyRunText.match(/走っている run はありません/g) ?? []).length, 1, emptyRunText);
         assert.ok(filled.querySelector('a[href="/runs/run-aaa"]'));
         assert.match(filled.querySelector(".page-head")?.textContent ?? "", /1件の run/);
       } else if (id === "reading-decisions") {
