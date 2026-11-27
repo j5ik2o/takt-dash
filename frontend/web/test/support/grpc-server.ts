@@ -266,6 +266,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<GetGoalDetailRequest, unknown>,
       callback: grpc.sendUnaryData<GetGoalDetailResponse>,
     ) => {
+      behavior.calls?.push("GetGoalDetail");
       behavior.onGetGoalDetail?.(call.request);
       const result = behavior.goalDetail;
       if (!result) {
@@ -282,6 +283,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<GetTaskDetailRequest, unknown>,
       callback: grpc.sendUnaryData<GetTaskDetailResponse>,
     ) => {
+      behavior.calls?.push("GetTaskDetail");
       behavior.onGetTaskDetail?.(call.request);
       const result = behavior.taskDetail;
       if (!result) {
@@ -298,6 +300,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<GetConversationRequest, unknown>,
       callback: grpc.sendUnaryData<GetConversationResponse>,
     ) => {
+      behavior.calls?.push("GetConversation");
       conversationRequests.push(call.request);
       const result = behavior.conversation;
       if (!result) {
@@ -336,6 +339,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<AnswerInquiryRequest, AnswerInquiryResponse>,
       callback: grpc.sendUnaryData<AnswerInquiryResponse>,
     ) => {
+      behavior.calls?.push("AnswerInquiry");
       requests.push({ method: "answerInquiry", request: call.request });
       respondAfterDelay(behavior.writeDelayMs, call, () => respondUnary(behavior.answerInquiry, callback));
     },
@@ -343,6 +347,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<ApproveGoalMergeRequest, ApproveGoalMergeResponse>,
       callback: grpc.sendUnaryData<ApproveGoalMergeResponse>,
     ) => {
+      behavior.calls?.push("ApproveGoalMerge");
       requests.push({ method: "approveGoalMerge", request: call.request });
       respondAfterDelay(behavior.writeDelayMs, call, () =>
         respondUnary(behavior.approveGoalMerge, callback),
@@ -352,6 +357,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<ApproveGoalRegistrationRequest, ApproveGoalRegistrationResponse>,
       callback: grpc.sendUnaryData<ApproveGoalRegistrationResponse>,
     ) => {
+      behavior.calls?.push("ApproveGoalRegistration");
       requests.push({ method: "approveGoalRegistration", request: call.request });
       respondAfterDelay(behavior.writeDelayMs, call, () =>
         respondUnary(behavior.approveGoalRegistration, callback),
@@ -361,6 +367,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       call: grpc.ServerUnaryCall<RejectGoalRegistrationRequest, RejectGoalRegistrationResponse>,
       callback: grpc.sendUnaryData<RejectGoalRegistrationResponse>,
     ) => {
+      behavior.calls?.push("RejectGoalRegistration");
       requests.push({ method: "rejectGoalRegistration", request: call.request });
       respondAfterDelay(behavior.writeDelayMs, call, () =>
         respondUnary(behavior.rejectGoalRegistration, callback),
