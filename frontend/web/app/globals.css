@@ -1010,6 +1010,27 @@ a {
   color: var(--orange-d);
 }
 
+/* アクティビティの日ごとのまとまり（issue #315 の D20）。包む div を縦積みの flex にし、
+   中の ul.events がまとまりの幅いっぱいに伸びるようにする。幅が伸びないと .ev の grid の
+   auto 列（種類の列）が潰れて、種類の文字が描画されなくなる。 */
+.events-day {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  width: 100%;
+  min-width: 0;
+}
+
+.events-day + .events-day {
+  margin-top: var(--space-24);
+}
+
+/* 日の見出しは、ほかの節の見出し（.sec）と同じ大きさと下の余白に揃える。 */
+.day-head {
+  font-size: var(--font-size-16);
+  margin-bottom: var(--space-12);
+}
+
 .ev {
   display: grid;
   grid-template-columns: 56px auto minmax(0, 1fr) 200px;
