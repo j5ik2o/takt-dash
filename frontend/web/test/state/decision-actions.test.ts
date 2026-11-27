@@ -598,9 +598,9 @@ test("回答の送信は回答の Route Handler へ payload を POST する", as
   assert.equal(outcome.message, "回答を送信しました。");
 });
 
-test("マージ承認・ゴール登録の承認と却下も種類ごとの Route Handler へ送る", async () => {
+test("マージ・ゴール登録の承認と却下も種類ごとの Route Handler へ送る", async () => {
   const cases: Array<[DecisionAction, string, string]> = [
-    [buildMergeAction(merge())!, "/api/decisions/merge", "マージを承認しました。"],
+    [buildMergeAction(merge())!, "/api/decisions/merge", "PR #418 のマージを依頼しました。"],
     [
       buildGoalRegistrationAction(registration(), "approve")!,
       "/api/decisions/goal-registration/approve",

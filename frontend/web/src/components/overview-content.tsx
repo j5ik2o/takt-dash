@@ -254,7 +254,7 @@ export function OverviewContent({
                   <th scope="col">プロジェクト</th>
                   <th scope="col">ゴール</th>
                   <th scope="col">ステップ</th>
-                  <th scope="col">経過</th>
+                  <th scope="col">最後のログ</th>
                   <th scope="col">状態</th>
                 </tr>
               </thead>
@@ -300,7 +300,7 @@ export function OverviewContent({
                         ) : null}
                         {runView.model ? <div className="model">モデルは {formatModel(runView.model)} です。</div> : null}
                       </td>
-                      <td className="run-elapsed" data-label="経過">
+                      <td className="run-elapsed" data-label="最後のログ">
                         <span className={runView.state === "warn" ? "warn" : undefined}>{lastLogText}</span>
                       </td>
                       <td className="run-status" data-label="状態">

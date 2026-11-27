@@ -205,7 +205,7 @@ test("サーバーの1行はサーバー別の集計と run を持たず、run �
   assert.match(runsSection(html), /href="\/runs\/run-aaa"/, "run は実行中の run の節に出す");
 });
 
-test("実行中の run は見出し付きの独立した節で、全幅の表にプロジェクト・ゴール・ステップ・経過・状態の列を持つ", () => {
+test("実行中の run は見出し付きの独立した節で、全幅の表にプロジェクト・ゴール・ステップ・最後のログ・状態の列を持つ", () => {
   const html = renderOverview(createDashboardState());
   const heading = elementWithAttribute(html, "id", "h-runs");
   assert.equal(heading.name, "h2", "実行中の run の見出しは h2");
@@ -215,7 +215,7 @@ test("実行中の run は見出し付きの独立した節で、全幅の表に
   const table = elementsWithClass(section, "l-table")[0];
   assert.ok(table !== undefined, "表は部品の .l-table で組む");
   assert.match(table.outer, /<table\b/, ".l-table の中に table がある");
-  assert.deepEqual(tableHeaders(section), ["プロジェクト", "ゴール", "ステップ", "経過", "状態"]);
+  assert.deepEqual(tableHeaders(section), ["プロジェクト", "ゴール", "ステップ", "最後のログ", "状態"]);
 });
 
 test("実行中の run の表は run 1件を1行にし、先頭の列のプロジェクト名から run の詳細へ移動できる", () => {
@@ -239,7 +239,7 @@ test("実行中の run の表は run 1件を1行にし、先頭の列のプロ�
   assert.match(normalize(textOf(cellFor(section, rows[1]!, "ゴール"))), /v2\.4\.0 を公開する/, "ゴールの列にその run のゴール名を出す");
 });
 
-test("run の行はゴール・ステップ・経過・状態をそれぞれの列のセルに分けて出す", () => {
+test("run の行はゴール・ステップ・最後のログ・状態をそれぞれの列のセルに分けて出す", () => {
   const html = renderOverview(createDashboardState());
   const section = runsSection(html);
   const row = runRows(section)[0];
@@ -247,7 +247,7 @@ test("run の行はゴール・ステップ・経過・状態をそれぞれの�
 
   const goal = normalize(textOf(cellFor(section, row, "ゴール")));
   const step = cellFor(section, row, "ステップ");
-  const elapsed = normalize(textOf(cellFor(section, row, "経過")));
+  const elapsed = normalize(textOf(cellFor(section, row, "最後のログ")));
   const status = cellFor(section, row, "状態");
 
   assert.match(goal, /採用ページのレイアウトを直す/, "ゴールの列にゴール名を出す");
@@ -255,7 +255,7 @@ test("run の行はゴール・ステップ・経過・状態をそれぞれの�
   assert.match(step, /ステップ\s*<b>implement<\/b>/, "ステップの列に今のステップ名を出す");
   assert.match(normalize(textOf(step)), /5 ステップ中 2 つ目/, "ステップの列に位置を出す");
   assert.doesNotMatch(goal, /implement|ステップ中/, "ゴールの列にステップの表示を混ぜない");
-  assert.match(elapsed, /最後のログは 1分前/, "経過の列に最後のログからの経過を出す");
+  assert.match(elapsed, /最後のログは 1分前/, "最後のログの列に最後のログからの経過を出す");
   assert.match(status, /class="st live"/, "状態の列に状態のラベルを出す");
   assert.equal(normalize(textOf(status)), "実行中", "状態の列は状態のラベルだけを出す");
 });

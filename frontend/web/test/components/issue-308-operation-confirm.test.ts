@@ -515,9 +515,20 @@ test("判断待ちのページで作業の依頼の確認を開いたまま切�
 const CONFIRM_FLOWS: { name: string; decision: () => PendingDecision; trigger: string; url: string }[] = [
   { name: "作業の依頼（実施した）", decision: operation, trigger: "実施した", url: "/api/decisions/answer" },
   { name: "作業の依頼（対応できない）", decision: operation, trigger: "対応できない", url: "/api/decisions/answer" },
-  { name: "マージ", decision: merge, trigger: "マージを承認", url: "/api/decisions/merge" },
-  { name: "ゴール登録の承認", decision: registration, trigger: "承認", url: "/api/decisions/goal-registration/approve" },
-  { name: "ゴール登録の却下", decision: registration, trigger: "却下", url: "/api/decisions/goal-registration/reject" },
+  // マージとゴール登録の一覧のボタン名は issue #315（D4・D5）の呼び名（docs/design/issue-315.md）。
+  { name: "マージ", decision: merge, trigger: "マージする", url: "/api/decisions/merge" },
+  {
+    name: "ゴール登録の承認",
+    decision: registration,
+    trigger: "ゴール登録を承認する",
+    url: "/api/decisions/goal-registration/approve",
+  },
+  {
+    name: "ゴール登録の却下",
+    decision: registration,
+    trigger: "ゴール登録を却下する",
+    url: "/api/decisions/goal-registration/reject",
+  },
 ];
 
 // 一覧のボタンを2回すばやく押すと、1回目で確認ダイアログが開き、2回目のクリックが、同じ座標に

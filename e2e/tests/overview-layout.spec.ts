@@ -176,7 +176,7 @@ for (const width of NARROW_WIDTHS) {
       .evaluate((element) => element.scrollWidth - element.clientWidth);
     expect(tableOverflow, "run の表が枠の中で横スクロールしない").toBeLessThanOrEqual(0);
 
-    for (const label of ["プロジェクト", "ゴール", "ステップ", "経過", "状態"]) {
+    for (const label of ["プロジェクト", "ゴール", "ステップ", "最後のログ", "状態"]) {
       await expect(page.locator(`.run-row td[data-label="${label}"]`), `列「${label}」の名前が各セルに付く`).toHaveCount(1);
     }
 

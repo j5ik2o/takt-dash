@@ -46,10 +46,10 @@ const loadTask = (task = TASK_NAME, goal?: string): Promise<ReactElement> =>
 
 const countOf = (html: string, needle: string): number => html.split(needle).length - 1;
 
-test("タスク詳細は状態・目的・要約を表示する", () => {
+test("タスク詳細は状態・要約を表示し、h1 を繰り返すだけの目的の欄は出さない", () => {
   const html = renderDetail();
   assert.match(html, /完了/);
-  assert.match(html, /目的/);
+  assert.doesNotMatch(html, /<div class="k">目的<\/div>/);
   assert.match(html, new RegExp(TASK_NAME));
   assert.match(html, /要約/);
   assert.match(html, /レイアウトを直して、確認を待っています。/);
