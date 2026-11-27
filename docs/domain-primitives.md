@@ -29,7 +29,7 @@ issue #3（値オブジェクトにドメインプリミティブを徹底する
 | 値の意味 | 第1段時点の生の型 | 代表的な現在の箇所（file:line） | 想定する置き換え型名 | 検証する順序 | 対象・対象外 | 対象外の理由 |
 |----------|--------------------|----------------------------------|----------------------|--------------|--------------|--------------|
 | サーバー ID | `String`（`BTreeMap` のキー） | `backend/src/config.rs:42`、`backend/src/grpc/mod.rs:320`、`backend/src/model.rs:337` | `ServerId` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（設定のキー形式）→ semantics（設定に存在する） | 対象（第2段で置換済み） | - |
-| プロジェクト名 | `String` | `backend/src/config.rs:71`、`backend/src/grpc/mod.rs:320`、`backend/src/model.rs:335` | `ProjectName` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（設定の名前形式）→ semantics（同一サーバー内で一意） | 対象（第2段で置換済み） | - |
+| プロジェクト名 | `String` | `backend/src/config.rs:71`、`backend/src/grpc/mod.rs:320`、`backend/src/model.rs:335` | `ProjectName` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（設定の名前形式）→ semantics（全体で一意） | 対象（第2段で置換済み） | - |
 | ゴール ID | `String` | `backend/src/model.rs:100`、`backend/src/events.rs:59`、`backend/src/grpc/mod.rs:171` | `GoalId` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（ID の書式）→ semantics（対象プロジェクトに存在する） | 対象（第2段で置換済み） | - |
 | ゴール ID（任意） | `Option<String>` | `backend/src/model.rs:117`、`backend/src/model.rs:130`、`backend/src/model.rs:195` | `Option<GoalId>` | 同上（`None` は「ゴールに属さない」として許容） | 対象（第2段で置換済み） | - |
 | タスク名 | `String` | `backend/src/model.rs:116`、`backend/src/events.rs:115`、`backend/src/mcp/tools.rs:465` | `TaskName` | size（1文字以上）→ lexical content（空白のみ・ASCII 制御文字を拒否）→ syntax（タスク名の書式）→ semantics（同一ゴール内で一意） | 対象（第2段で置換済み） | - |
@@ -93,7 +93,7 @@ SQL からの復元では、`ServerCount.server_id`（`backend/src/activity.rs:3
 参照先の存在・一意性・一致は外部状態を要するため、型では検証せず、既存の境界に残しています。
 
 - 存在: 設定にサーバーとプロジェクトがあること（`backend/src/config.rs:206` 以降と `backend/src/grpc/mod.rs:320`）、ゴールが snapshot にあること、問い合わせが保留中であること（`backend/src/grpc/mod.rs:616`）、run が状態ストアにあること（`backend/src/grpc/mod.rs:436`）。
-- 一意性: サーバー内のプロジェクト名、ゴール内のタスク名、`(server_id, project, inquiry_id)` で一意な保留項目（`backend/src/grpc/mod.rs:632`）。
+- 一意性: 全体で一意なプロジェクト名、ゴール内のタスク名、`(server_id, project, inquiry_id)` で一意な保留項目（`backend/src/grpc/mod.rs:632`）。
 - 一致: PR 番号とゴールの対応、revision と承認待ち提案の対応（`backend/src/store.rs:203`）、JST の実在日（`DailyDate` が型で検証）。
 
 ### 後続へ送った箇所
