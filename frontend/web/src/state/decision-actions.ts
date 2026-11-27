@@ -58,7 +58,6 @@ export type DecisionDialogKind =
 export type DecisionIntent =
   | { type: "answer-text" }
   | { type: "answer-option"; option: string }
-  | { type: "answer-report"; report: number }
   | { type: "open"; dialog: DecisionDialogKind }
   | { type: "cancel" }
   | { type: "confirm"; dialog: DecisionDialogKind };
@@ -142,15 +141,6 @@ export function resolveDecisionIntent(
       return { kind: "submit", action: buildAnswerAction(decision, { text: input.text }) };
     case "answer-option":
       return { kind: "submit", action: buildAnswerAction(decision, { text: intent.option }) };
-    case "answer-report":
-      // 作業の依頼の2択は、押してもすぐには送らず確認ダイアログを開く（issue #308）。
-      if (intent.report === OPERATION_ANSWER_REPORT.COMPLETED) {
-        return { kind: "open", dialog: "answer-report-completed" };
-      }
-      if (intent.report === OPERATION_ANSWER_REPORT.UNABLE) {
-        return { kind: "open", dialog: "answer-report-unable" };
-      }
-      return { kind: "submit", action: buildAnswerAction(decision, { report: intent.report }) };
     case "open":
       return { kind: "open", dialog: intent.dialog };
     case "cancel":
