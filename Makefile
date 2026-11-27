@@ -29,6 +29,7 @@ test:
 	python3 tools/coverage/coverage_wiring_test.py
 	python3 .takt/scripts/notify_orca_test.py
 	python3 tools/project-status/task_context_test.py
+	python3 tools/prod-check/prod_log_test.py
 
 typecheck:
 	npm --prefix frontend/web run typecheck
