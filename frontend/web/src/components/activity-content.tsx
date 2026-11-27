@@ -198,7 +198,7 @@ export function ActivityContent({ state, response, now }: ActivityContentProps):
         <h2 className="sec" id="h-daily">
           日ごとの出来事
         </h2>
-        {dailySummaries.length === 0 || dailySummaries.every((day) => day.total === 0) ? (
+        {dailySummaries.every((day) => day.total === 0) ? (
           <p className="note">この 7 日間の出来事はまだありません。</p>
         ) : (
           <ul className="daily">
