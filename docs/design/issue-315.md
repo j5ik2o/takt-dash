@@ -74,9 +74,9 @@ backend の ApproveGoalMerge は、takt の `takt_merge_goal_pr` でマージの
 ### D6：確定ボタンを「やめる」と見分けられる色にする
 
 - いま：ダイアログの「やめる」と確定ボタンは、どちらも `.actions button`（白地に灰色の線）で、見た目が同じ。
-- 直した後：ダイアログの確定ボタン（マージする・ゴール登録を承認する・ゴール登録を却下する、#404 で入った作業の依頼の `実施した`・`対応できない`）に `class="danger"` を付ける。`.actions button.danger` は地色を `var(--orange-d)`、文字色を白（`#fff`）、線を `var(--orange-d)` にする。
+- 直した後：ダイアログの確定ボタン（マージする・ゴール登録を承認する・ゴール登録を却下する、#404 で入った作業の依頼の `実施した`・`対応できない`）に `class="danger"` を付ける。`.actions button.danger` は地色を `var(--orange-d)`、文字色を `var(--on-danger)`（`:root` に `--on-danger: #fff` を足し、直書きを :root に閉じる）、線を `var(--orange-d)` にする。
 - hover と無効は、セレクタの詳細度で既存の規則に負けないよう、明示する：
-  - `.actions button:hover:not(:disabled)`（`globals.css:1177-1180`）は `.actions button.danger` より詳細度が高く、そのままでは hover で文字が teal（`--accent`）になり、白地でない地色の上で読めなくなる。`.actions button.danger:hover:not(:disabled)` を足し、地色・文字色を danger のまま（地色 `var(--orange-d)`、文字色 `#fff`）にする。線の色だけ変えてよい。
+  - `.actions button:hover:not(:disabled)`（`globals.css:1177-1180`）は `.actions button.danger` より詳細度が高く、そのままでは hover で文字が teal（`--accent`）になり、白地でない地色の上で読めなくなる。`.actions button.danger:hover:not(:disabled)` を足し、地色・文字色を danger のまま（地色 `var(--orange-d)`、文字色 `var(--on-danger)`）にする。線の色だけ変えてよい。
   - `.actions button:disabled`（`:1182-1185`）は文字色だけを変えるので、danger の無効は橙の地色のまま押せる見た目に残る。`.actions button.danger:disabled` を足し、地色を `var(--surface)`、文字色を `var(--down)`、線を `var(--line)` にする（ほかの無効のボタンと同じ見た目）。
 - 理由：5 つの確定はどれも画面から取り消せない書き込みです。「やめる」と同じ見た目だと、押し間違いに気づけない。赤のトークンは無いので、警告に使っている `--orange-d` を使う（白との比は 4.5:1 以上）。
 - 一覧のボタン（ダイアログを開くだけ）には付けない。開くだけでは書き込まない。
