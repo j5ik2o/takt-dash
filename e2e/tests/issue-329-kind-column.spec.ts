@@ -68,13 +68,27 @@ test("1920px でアクティビティの種類の文字が列の中に収まる"
 
   // 種類の要素の文字が、その要素の内側の幅に収まっていること。長い種類名でも
   // scrollWidth が clientWidth を超えない（超えるなら文字が列からはみ出している）。
+  // あわせて、種類の箱そのものが隣の本文（.msg）へ広がっていないことを、行の中の
+  // getBoundingClientRect の右端と左端で測る。内側の scrollWidth だけでは、箱が
+  // 本文へ重なっても通ってしまうため。右端と左端が同じ位置で接するのは許す。
   for (let index = 0; index < count; index += 1) {
     const kind = rows.nth(index).locator(".kl");
-    const metrics = await kind.evaluate((element) => ({
-      text: element.textContent ?? "",
-      scrollWidth: element.scrollWidth,
-      clientWidth: element.clientWidth,
-    }));
+    const metrics = await kind.evaluate((element) => {
+      const row = element.closest("li.ev");
+      const message = row?.querySelector(".msg");
+      if (!message) {
+        throw new Error("種類の行に本文（.msg）が見つからない");
+      }
+      const kindRect = element.getBoundingClientRect();
+      const messageRect = message.getBoundingClientRect();
+      return {
+        text: element.textContent ?? "",
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+        kindRight: kindRect.right,
+        messageLeft: messageRect.left,
+      };
+    });
     testInfo.attach(`kind-column-${index}`, {
       body: JSON.stringify(metrics),
       contentType: "application/json",
@@ -83,5 +97,9 @@ test("1920px でアクティビティの種類の文字が列の中に収まる"
       metrics.scrollWidth,
       `種類「${metrics.text}」の文字幅 ${metrics.scrollWidth} が列の内側の幅 ${metrics.clientWidth} を超える`,
     ).toBeLessThanOrEqual(metrics.clientWidth);
+    expect(
+      metrics.kindRight,
+      `種類「${metrics.text}」の右端 ${metrics.kindRight} が本文の左端 ${metrics.messageLeft} を超える`,
+    ).toBeLessThanOrEqual(metrics.messageLeft);
   }
 });
