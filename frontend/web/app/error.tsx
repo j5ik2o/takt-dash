@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactElement } from "react";
+import Link from "next/link";
 
 export default function ErrorPage({ reset }: { error: Error & { digest?: string }; reset: () => void }): ReactElement {
   return (
@@ -10,7 +11,7 @@ export default function ErrorPage({ reset }: { error: Error & { digest?: string 
       <button type="button" onClick={() => reset()}>
         もう一度読み込む
       </button>
-      <a href="/">概要に戻る</a>
+      <Link href="/">概要に戻る</Link>
     </main>
   );
 }
