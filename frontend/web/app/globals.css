@@ -12,6 +12,7 @@
   --track: #e9eef0;
   --orange: #d9661a;
   --orange-d: #9a4510;
+  --on-danger: #fff;
   --orange-soft: #fdf1e7;
   --orange-line: #f2c39d;
   --gray-soft: #f0f2f3;
@@ -1009,6 +1010,27 @@ a {
   color: var(--orange-d);
 }
 
+/* アクティビティの日ごとのまとまり（issue #315 の D20）。包む div を縦積みの flex にし、
+   中の ul.events がまとまりの幅いっぱいに伸びるようにする。幅が伸びないと .ev の grid の
+   auto 列（種類の列）が潰れて、種類の文字が描画されなくなる。 */
+.events-day {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  width: 100%;
+  min-width: 0;
+}
+
+.events-day + .events-day {
+  margin-top: var(--space-24);
+}
+
+/* 日の見出しは、ほかの節の見出し（.sec）と同じ大きさと下の余白に揃える。 */
+.day-head {
+  font-size: var(--font-size-16);
+  margin-bottom: var(--space-12);
+}
+
 .ev {
   display: grid;
   grid-template-columns: 56px auto minmax(0, 1fr) 200px;
@@ -1184,6 +1206,24 @@ ol.log-tail li {
   cursor: not-allowed;
 }
 
+.actions button.danger {
+  background: var(--orange-d);
+  color: var(--on-danger);
+  border-color: var(--orange-d);
+}
+
+.actions button.danger:hover:not(:disabled) {
+  background: var(--orange-d);
+  color: var(--on-danger);
+  border-color: var(--orange-d);
+}
+
+.actions button.danger:disabled {
+  background: var(--surface);
+  color: var(--down);
+  border-color: var(--line);
+}
+
 .actions input[type="text"] {
   font: inherit;
   font-size: var(--font-size-13);
@@ -1214,6 +1254,8 @@ ol.log-tail li {
   display: flex;
   flex-direction: column;
   gap: var(--space-12);
+  max-height: 100%;
+  overflow-y: auto;
 }
 
 .dialog-message {
@@ -1255,6 +1297,7 @@ ol.log-tail li {
 
 .decision-results .result {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-8);
   font-size: var(--font-size-13);
   border-radius: var(--radius-6);
@@ -1273,6 +1316,12 @@ ol.log-tail li {
 
 .decision-results .result-label {
   font-weight: 600;
+}
+
+.decision-results .result button {
+  margin-left: auto;
+  min-height: 44px;
+  min-width: 44px;
 }
 
 /* 概要（issue #75）: 3タイル・異常バナー・判断待ちパネルをコンパクトに並べる。

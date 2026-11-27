@@ -9,6 +9,7 @@ import {
 import type { GetRunDetailResponse } from "../proto/taktdash";
 import { createLastLoaded } from "../state/last-loaded";
 import { BackendUnavailableOver } from "./backend-unavailable-notice";
+import { loadServerState } from "../state/server-state";
 import { RunDetailContent } from "./run-detail-content";
 
 type RunDetailLoaderProps = {
@@ -49,9 +50,16 @@ export async function RunDetailLoader({ params }: RunDetailLoaderProps): Promise
     );
   }
   lastRunDetails.remember(slug, result.detail);
+  let serverName: string | undefined;
+  try {
+    const loaded = await loadServerState();
+    serverName = loaded.state.servers.find((server) => server.serverId === result.detail.serverId)?.name;
+  } catch {
+    serverName = undefined;
+  }
   return (
     <BackendUnavailableOver>
-      <RunDetailContent detail={result.detail} now={new Date()} />
+      <RunDetailContent detail={result.detail} now={new Date()} serverName={serverName} />
     </BackendUnavailableOver>
   );
 }
