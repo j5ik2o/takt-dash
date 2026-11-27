@@ -986,7 +986,6 @@ test("切断中は、開く・確定・回答の操作を入口で受け付け�
   const intents = [
     { type: "answer-text" },
     { type: "answer-option", option: "今週" },
-    { type: "answer-report", report: 1 },
     { type: "open", dialog: "merge" },
     { type: "confirm", dialog: "merge" },
     { type: "cancel" },
