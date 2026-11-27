@@ -180,8 +180,9 @@ fn conversation_rendering_shows_notice_for_garbled_message() {
         "文字化けした発言\u{FFFD}\u{FFFD}",
         "元記録で文字化けしています（置換文字 12 個）",
       ),
+      conversation_message(3, secs + 120, v1::ConversationSpeaker::User, "後続の発言"),
     ],
-    2,
+    3,
     false,
   );
 
@@ -205,14 +206,21 @@ fn conversation_rendering_shows_notice_for_garbled_message() {
   let garbled_start =
     rendered.find("文字化けした発言\u{FFFD}\u{FFFD}").expect("文字化けした発言の本文を表示する必要があります");
   let notice_start = rendered.find("元記録で文字化けしています").expect("注意書きを表示する必要があります");
+  let follow_start = rendered.find("後続の発言").expect("後続の発言を表示する必要があります");
 
-  assert!(
-    normal_start < garbled_start,
-    "正常な発言のあとに文字化けした発言を並べる必要があります: {rendered}"
-  );
-  assert!(
-    garbled_start < notice_start,
-    "注意書きは文字化けした本文の直後に続ける必要があります: {rendered}"
+  assert!(normal_start < garbled_start, "正常な発言のあとに文字化けした発言を並べる必要があります: {rendered}");
+  assert!(garbled_start < notice_start, "注意書きは文字化けした本文の直後に続ける必要があります: {rendered}");
+  assert!(notice_start < follow_start, "注意書きは後続の発言より前に出す必要があります: {rendered}");
+
+  let lines: Vec<&str> = rendered.lines().collect();
+  let garbled_line = lines
+    .iter()
+    .position(|line| line.contains("文字化けした発言\u{FFFD}\u{FFFD}"))
+    .expect("文字化けした本文の行が必要です");
+  assert_eq!(
+    lines.get(garbled_line + 1).copied(),
+    Some("  注意: 元記録で文字化けしています（置換文字 12 個）"),
+    "注意書きの行は文字化けした本文の行の直後に置く必要があります: {rendered}"
   );
 }
 
