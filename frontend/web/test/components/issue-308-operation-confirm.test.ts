@@ -287,8 +287,14 @@ const installDomEnvironment = (): void => {
 // 送った書き込み。disconnected は、送った時点で画面が切断中だったか。
 type SentWrite = { url: string; body: Record<string, unknown>; disconnected: boolean };
 
-// 書き込みへの応答。ok は成功、throw は fetch の例外（通信の失敗）、not-ok は backend の失敗の応答。
-type WriteResponse = { kind: "ok" } | { kind: "throw" } | { kind: "not-ok"; error: string };
+// 書き込みへの応答。ok は成功、throw は fetch の例外（通信の失敗）、not-ok は backend の失敗の応答、
+// no-json は応答を読む口（json）を持たない応答。no-json は submitDecisionAction が失敗の結果へ
+// 変換できず、例外を投げる（docs/design/issue-415.md）。
+type WriteResponse =
+  | { kind: "ok" }
+  | { kind: "throw" }
+  | { kind: "not-ok"; error: string }
+  | { kind: "no-json" };
 
 // 判断待ちのページを判断待ち1件（既定は作業の依頼）でマウントし、書き込みを fetch の差し替えで受ける。
 // 書き込みの応答は settle を呼ぶまで返さない（送信中を作る）。応答は respond が、書き込みの順番
@@ -319,6 +325,10 @@ const mountOperationPage = async (
             return;
           case "not-ok":
             resolve({ ok: false, json: async () => ({ ok: false, error: response.error }) } as unknown as Response);
+            return;
+          case "no-json":
+            // json を持たないので、submitDecisionAction の response.json() が TypeError になる。
+            resolve({ ok: false } as unknown as Response);
             return;
         }
       });
@@ -388,6 +398,20 @@ const mountOperationPage = async (
       await act(async () => {
         document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Tab", shiftKey: shift, bubbles: true }));
       });
+    },
+    // キーを document へ送り、キー処理が既定動作の抑止（preventDefault）を呼んだ回数を返す。
+    // jsdom は Tab でフォーカスを移さず、合成イベントの既定動作も取り消せないため、
+    // 実際に preventDefault が呼ばれたかだけを、イベントの preventDefault を差し替えて見る。
+    preventedKey: async (key: string, shift = false): Promise<number> => {
+      let prevented = 0;
+      await act(async () => {
+        const event = new window.KeyboardEvent("keydown", { key, shiftKey: shift, bubbles: true });
+        event.preventDefault = () => {
+          prevented += 1;
+        };
+        document.dispatchEvent(event);
+      });
+      return prevented;
     },
     // フォーカスのある要素からフォーカスを外す（body へ移す）。
     blur: async (): Promise<void> => {
@@ -780,6 +804,149 @@ test("判断待ちのページで1つの act の中で選択肢を2回押して�
     await page.settle();
     assert.match(page.container.textContent ?? "", /回答を送信しました。/);
     assert.equal(page.sent.length, 1);
+  } finally {
+    await page.unmount();
+  }
+});
+
+// ---- issue #422: 例外で中断した後の送信ロックと、Tab の既定動作の抑止 ----
+
+// 送信の途中で例外が出ると、run は結果を出さずに Promise を拒否する。node:test は、テストの
+// 実行中に起きた未処理の拒否をそのテストの失敗にするので、このテストの間だけ受け口を外して
+// 拒否を受け取り、例外が出たこと自体を断言する（本番のコードは変えない）。
+const withCapturedRejections = async (body: (rejections: unknown[]) => Promise<void>): Promise<void> => {
+  const saved = process.listeners("unhandledRejection");
+  process.removeAllListeners("unhandledRejection");
+  const rejections: unknown[] = [];
+  const capture = (reason: unknown): void => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", capture);
+  try {
+    await body(rejections);
+  } finally {
+    process.off("unhandledRejection", capture);
+    for (const listener of saved) {
+      process.on("unhandledRejection", listener);
+    }
+  }
+};
+
+// 通信エラーと失敗の応答は submitDecisionAction が失敗の結果に変換するので、run の finally を
+// 通るかどうかを分けて見られない。ここでは、応答を読む口（json）を持たない応答で
+// submitDecisionAction を例外にし、run が結果を出さずに中断しても、送信中フラグ（submitting）と
+// busy が解け、もう一度確定できることを確かめる（docs/design/issue-415.md）。
+test("判断待ちのページで送信の途中に例外が出ても、送信中の守りは解け、ダイアログを閉じずにもう一度確定できる", async () => {
+  await withCapturedRejections(async (rejections) => {
+    const page = await mountOperationPage(operation(), (index) => (index === 0 ? { kind: "no-json" } : { kind: "ok" }));
+    try {
+      await page.click(page.trigger("実施した"));
+      await page.wait(CONFIRM_DELAY_MS);
+      assert.ok(page.dialog(), "確認ダイアログが出る");
+      await page.click(page.dialogButton("confirm"));
+      assert.equal(page.sent.length, 1, "確定で1回送る");
+      await page.settle();
+      // 拒否はマイクロタスクの終わりに届く。1巡待ってから数える。
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(rejections.length, 1, "応答の読み取りで例外が出て送信が中断する");
+      const rejection = rejections[0];
+      assert.ok(rejection instanceof TypeError, `例外は TypeError: ${String(rejection)}`);
+      assert.match(rejection.message, /json/);
+
+      // 送信中フラグか busy が残っていれば、ボタンは無効のままか、押しても handleAction に
+      // 捨てられて書き込みが増えない。ボタンの disabled と、もう一度送れることの両方を見る。
+      assert.ok(page.dialog(), "結果が返っていないのでダイアログは開いたまま");
+      assert.equal(page.dialogButton("cancel")?.disabled, false, "例外の後、やめるは押せる");
+      assert.equal(page.dialogButton("confirm")?.disabled, false, "例外の後、確定は押せる");
+      for (const { trigger } of CHOICES) {
+        assert.equal(page.trigger(trigger).disabled, false, `例外の後、${trigger} は押せる`);
+      }
+
+      await page.click(page.dialogButton("confirm"));
+      assert.equal(page.sent.length, 2, "例外の後、もう一度確定すると送る");
+      assert.equal(page.sent[1]?.body.report, OPERATION_ANSWER_REPORT.COMPLETED);
+      assert.equal(page.sent[1]?.body.idempotencyKey, page.sent[0]?.body.idempotencyKey, "やり直しは同じ鍵");
+      await page.settle();
+      // 再送の応答も読み終わるまで待つ。受け口はここまで外していないので、再送で新たな未処理の
+      // 拒否が出れば数が増え、次の断言がテストを失敗させる。
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(rejections.length, 1, "再送で新たな未処理の拒否は出ない");
+      assert.equal(page.dialog(), null, "2回目の結果が返ったら閉じる");
+      assert.match(page.container.textContent ?? "", /回答を送信しました。/);
+      assert.equal(page.sent.length, 2);
+    } finally {
+      await page.unmount();
+    }
+    // 後片付け（unmount）でも拒否が出ていないことを、受け口を外す前に見る。
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(rejections.length, 1, "後片付けで新たな未処理の拒否は出ない");
+  });
+});
+
+// jsdom は Tab でフォーカスを移さず、合成イベントの既定動作も取り消せないので、今までのテストは
+// preventDefault が消えても落ちない。イベントの preventDefault を差し替え、キー処理が抑止を
+// 呼んだことを直接確かめる。抑止するのは、封じ込めがフォーカスを動かす（端から端へ回す・
+// 見出しから中へ入れる）ときだけ。
+test("判断待ちのページで確認ダイアログの Tab と Shift+Tab は、フォーカスを回すときだけ既定動作を抑止する", async () => {
+  const page = await mountOperationPage();
+  try {
+    // ダイアログが無いときは、Tab の既定動作を抑止しない。
+    assert.equal(await page.preventedKey("Tab"), 0, "閉じているときの Tab は抑止しない");
+
+    await page.click(page.trigger("実施した"));
+    const dialog = page.dialog();
+    assert.ok(dialog, "確認ダイアログが出る");
+    const heading = dialog.querySelector("h2");
+    assert.equal(document.activeElement, heading, "開いた直後は見出しにフォーカスがある");
+
+    // 見出し（ダイアログの外側）からの Tab は、最初の操作要素へ移すので抑止する。
+    assert.equal(await page.preventedKey("Tab"), 1, "見出しからの Tab は抑止する");
+    assert.equal(document.activeElement, page.dialogButton("cancel"), "最初の操作要素へ移す");
+
+    // 最初の操作要素からの Tab は、次の要素へブラウザに任せるので抑止しない。
+    assert.equal(await page.preventedKey("Tab"), 0, "中ほどの Tab は抑止しない");
+    assert.equal(document.activeElement, page.dialogButton("cancel"), "jsdom は既定動作で移さない");
+
+    // 最初の操作要素からの Shift+Tab は、最後の操作要素へ回すので抑止する。
+    assert.equal(await page.preventedKey("Tab", true), 1, "先頭からの Shift+Tab は抑止する");
+    assert.equal(document.activeElement, page.dialogButton("confirm"), "最後の操作要素へ回す");
+
+    // 最後の操作要素からの Tab は、最初の操作要素へ回すので抑止する。
+    assert.equal(await page.preventedKey("Tab"), 1, "末尾からの Tab は抑止する");
+    assert.equal(document.activeElement, page.dialogButton("cancel"), "最初の操作要素へ回す");
+  } finally {
+    await page.unmount();
+  }
+});
+
+// 送信中は「やめる」と確定の両方が無効になり、押した確定からフォーカスが外れるので、
+// 見出しへ戻してダイアログの中に保つ。操作要素が1つも無い状態では、見出しからの Tab の
+// 行き先も封じ込めが決めるため、既定動作を抑止する。
+test("判断待ちのページで送信中は、ボタンが無効で見出しにフォーカスが留まり、その Tab は既定動作を抑止する", async () => {
+  const page = await mountOperationPage();
+  try {
+    await page.click(page.trigger("実施した"));
+    const dialog = page.dialog();
+    assert.ok(dialog, "確認ダイアログが出る");
+    const heading = dialog.querySelector("h2");
+    assert.equal(document.activeElement, heading, "開いた直後は見出しにフォーカスがある");
+
+    await page.wait(CONFIRM_DELAY_MS);
+    await page.click(page.dialogButton("confirm"));
+    assert.equal(page.sent.length, 1, "確定で1回送る");
+    assert.ok(page.dialog(), "送信中はダイアログを閉じない");
+    assert.equal(page.dialogButton("cancel")?.disabled, true, "送信中はやめるを押せない");
+    assert.equal(page.dialogButton("confirm")?.disabled, true, "送信中は確定を押せない");
+    assert.equal(document.activeElement, heading, "送信中は見出しにフォーカスが留まる");
+
+    // 見出しは操作要素ではない。操作要素が無いので、封じ込めは行き先を見出しに決め、
+    // 既定動作を抑止する。
+    assert.equal(await page.preventedKey("Tab"), 1, "送信中、見出しからの Tab は抑止する");
+    assert.equal(document.activeElement, heading, "送信中の Tab の後も見出しに留まる");
+
+    await page.settle();
+    assert.equal(page.dialog(), null, "結果が返ったら閉じる");
+    assert.match(page.container.textContent ?? "", /回答を送信しました。/);
   } finally {
     await page.unmount();
   }
