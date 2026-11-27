@@ -12,6 +12,7 @@
   --track: #e9eef0;
   --orange: #d9661a;
   --orange-d: #9a4510;
+  --on-danger: #fff;
   --orange-soft: #fdf1e7;
   --orange-line: #f2c39d;
   --gray-soft: #f0f2f3;
@@ -1186,13 +1187,13 @@ ol.log-tail li {
 
 .actions button.danger {
   background: var(--orange-d);
-  color: #fff;
+  color: var(--on-danger);
   border-color: var(--orange-d);
 }
 
 .actions button.danger:hover:not(:disabled) {
   background: var(--orange-d);
-  color: #fff;
+  color: var(--on-danger);
   border-color: var(--orange-d);
 }
 
