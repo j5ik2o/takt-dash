@@ -30,15 +30,20 @@ import {
   toStaleMinutes,
   toTaskCount,
   toTaskName,
+  type ExecutionStatus,
   type GoalId,
+  type GoalStatus,
   type InquiryId,
+  type PendingDecisionType,
   type ProjectName,
   type PullRequestNumber,
   type RegistrationRevision,
   type RunLimit,
+  type RunStatus,
   type RunSlug,
   type ServerId,
   type TaskCount,
+  type TaskStatus,
   type TaskName,
   type ValidatedAnomalyThresholds,
 } from "./domain-primitives";
@@ -72,11 +77,14 @@ export type DashboardProject = Omit<ProtoProject, "name" | "serverId" | "concurr
 
 export type DashboardGoal = Omit<
   ProtoGoal,
-  "goalId" | "serverId" | "project" | "taskCounts" | "pullRequest"
+  "goalId" | "serverId" | "project" | "taskCounts" | "pullRequest" | "status" | "executionStatus" | "mergeTaskLast"
 > & {
   goalId: GoalId;
   serverId: ServerId;
   project: ProjectName;
+  status: GoalStatus;
+  executionStatus: ExecutionStatus;
+  mergeTaskLast: TaskStatus | undefined;
   taskCounts: ValidatedTaskStatusCounts | undefined;
   pullRequest: DashboardPullRequest | undefined;
 };
@@ -85,19 +93,21 @@ export type DashboardGoal = Omit<
 // 空文字または欠落になるため、未指定を undefined で表す。
 export type DashboardRun = Omit<
   ProtoRun,
-  "runSlug" | "serverId" | "project" | "goalId" | "taskName"
+  "runSlug" | "serverId" | "project" | "goalId" | "taskName" | "status"
 > & {
   runSlug: RunSlug;
   serverId: ServerId;
   project: ProjectName;
   goalId: GoalId | undefined;
   taskName: TaskName;
+  status: RunStatus;
 };
 
 export type DashboardPendingDecision = Omit<
   ProtoPendingDecision,
-  "serverId" | "project" | "goalId" | "pullRequest" | "inquiryId" | "revision"
+  "serverId" | "project" | "goalId" | "pullRequest" | "inquiryId" | "revision" | "type"
 > & {
+  type: PendingDecisionType;
   serverId: ServerId;
   project: ProjectName;
   goalId: GoalId | undefined;
@@ -203,6 +213,14 @@ const toProject = (raw: unknown): DashboardProject => {
   };
 };
 
+const goalStatusFromWire = (value: unknown): GoalStatus => enumFromWire("GoalStatus", value) as GoalStatus;
+const executionStatusFromWire = (value: unknown): ExecutionStatus =>
+  enumFromWire("ExecutionStatus", value) as ExecutionStatus;
+const taskStatusFromWire = (value: unknown): TaskStatus => enumFromWire("TaskStatus", value) as TaskStatus;
+const runStatusFromWire = (value: unknown): RunStatus => enumFromWire("RunStatus", value) as RunStatus;
+const pendingDecisionTypeFromWire = (value: unknown): PendingDecisionType =>
+  enumFromWire("PendingDecisionType", value) as PendingDecisionType;
+
 const toGoal = (raw: unknown): DashboardGoal => {
   const value = recordOf(raw);
   return {
@@ -211,8 +229,8 @@ const toGoal = (raw: unknown): DashboardGoal => {
     project: toProjectName(value.project),
     name: String(value.name ?? ""),
     nameTruncated: value.nameTruncated === true, // 欠落（古い backend）と true 以外は false
-    status: enumFromWire("GoalStatus", value.status),
-    executionStatus: enumFromWire("ExecutionStatus", value.executionStatus),
+    status: goalStatusFromWire(value.status),
+    executionStatus: executionStatusFromWire(value.executionStatus),
     taskCounts: toTaskCounts(value.taskCounts),
     pausedReason: typeof value.pausedReason === "string" ? value.pausedReason : undefined,
     pullRequest: toPullRequest(value.pullRequest),
@@ -220,7 +238,7 @@ const toGoal = (raw: unknown): DashboardGoal => {
     mergeTaskLast:
       value.mergeTaskLast === undefined || value.mergeTaskLast === null
         ? undefined
-        : enumFromWire("TaskStatus", value.mergeTaskLast),
+        : taskStatusFromWire(value.mergeTaskLast),
   };
 };
 
@@ -257,7 +275,7 @@ const toRun = (raw: unknown): DashboardRun => {
     currentStepStartedAt: toDate(value.currentStepStartedAt),
     lastLogAt: toDate(value.lastLogAt),
     reports: arrayOf(value.reports).map(toReportSummary),
-    status: enumFromWire("RunStatus", value.status),
+    status: runStatusFromWire(value.status),
     logSilent: value.logSilent === true,
     currentStepNumber: asOptionalNumber(value.currentStepNumber),
     totalSteps: asOptionalNumber(value.totalSteps),
@@ -269,7 +287,7 @@ const toRun = (raw: unknown): DashboardRun => {
 const toPendingDecision = (raw: unknown): DashboardPendingDecision => {
   const value = recordOf(raw);
   return {
-    type: enumFromWire("PendingDecisionType", value.type),
+    type: pendingDecisionTypeFromWire(value.type),
     serverId: toServerId(value.serverId),
     project: toProjectName(value.project),
     goalId: optionalGoalId(value.goalId),

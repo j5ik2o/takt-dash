@@ -179,11 +179,11 @@ export function enumFromWire(enumName: keyof typeof ENUM_NAME_TO_NUMBER, value: 
     if (value === "UNRECOGNIZED") {
       throw semanticsError(enumName);
     }
-    const mapped = ENUM_NAME_TO_NUMBER[enumName][value];
-    if (mapped === undefined) {
+    const mapping = ENUM_NAME_TO_NUMBER[enumName];
+    if (!Object.hasOwn(mapping, value)) {
       throw semanticsError(enumName);
     }
-    return mapped;
+    return mapping[value];
   }
   throw semanticsError(enumName);
 }
@@ -199,8 +199,11 @@ export function enumFromWireOrUnrecognizedName(
     return value;
   }
   if (typeof value === "string") {
-    const mapped = ENUM_NAME_TO_NUMBER[enumName][value];
-    return mapped === undefined ? -1 : mapped;
+    const mapping = ENUM_NAME_TO_NUMBER[enumName];
+    if (!Object.hasOwn(mapping, value)) {
+      return -1;
+    }
+    return mapping[value];
   }
   return -1;
 }
