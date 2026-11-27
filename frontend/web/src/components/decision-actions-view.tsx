@@ -3,29 +3,36 @@
 // 判断待ち1件分の操作 UI。送信内容の組み立てと送信そのものは DecisionActions が担う。
 // この分離により、DOM を持たないテスト環境でもサーバー描画した HTML として操作要素を
 // 検証でき、フォーカス管理はブラウザでのマウント後にだけ働く。
-import { useCallback, useEffect, useId, useRef, type ReactElement, type RefObject } from "react";
+// 確認ダイアログ本体は confirm-dialog.tsx に分け、このファイルはテストと他の部品が
+// これまでどおり import できるよう、名前をそのまま再公開する。
+import { useEffect, useId, useRef, type ReactElement } from "react";
 import type { PendingDecision } from "../proto/taktdash";
-import { OPERATION_ANSWER_REPORT } from "../state/proto-values";
 import {
   INITIAL_DECISION_DIALOG_STATE,
   decisionActionState,
   decisionTargetDescription,
   decisionTargetLabel,
   openDecisionDialogState,
-  pullRequestLinkUrl,
   resolveDecisionIntent,
   toDecisionResult,
   type DecisionAction,
-  type DecisionDialogKind,
   type DecisionDialogState,
   type DecisionDialogTarget,
   type DecisionIntent,
   type DecisionResult,
 } from "../state/decision-actions";
+import {
+  DIALOG_TRIGGERS,
+  DecisionTargetDescription,
+  DialogActionSection,
+  OfflineNote,
+  buildConfirmDialogs,
+  type DecisionActionsIntent,
+  type DialogKind,
+} from "./confirm-dialog";
 
-export type DialogKind = DecisionDialogKind;
-
-export type DecisionActionsIntent = DecisionIntent;
+export { decideDialogKey } from "./confirm-dialog";
+export type { DecisionActionsIntent, DialogKeyDecision, DialogKind } from "./confirm-dialog";
 
 type DecisionActionsViewProps = {
   decision: PendingDecision;
@@ -38,65 +45,6 @@ type DecisionActionsViewProps = {
   onTextChange: (text: string) => void;
   onAction: (intent: DecisionActionsIntent) => void;
 };
-
-// 切断中に操作要素へ添える理由。再接続すると disconnected が戻り、操作も戻る。
-function OfflineNote({ disconnected }: { disconnected: boolean }): ReactElement | null {
-  return disconnected ? <p className="note">再接続するまで操作できません。</p> : null;
-}
-
-// 確認ダイアログに出す対象の1行。href があれば、値を新しいタブで開くリンクにする。
-type ConfirmDialogDetail = {
-  label: string;
-  value: string;
-  href?: string;
-};
-
-type ConfirmDialogProps = {
-  dialog: DialogKind;
-  title: string;
-  message: string;
-  details: ConfirmDialogDetail[];
-  confirmLabel: string;
-  busy: boolean;
-  disconnected: boolean;
-  onAction: (intent: DecisionActionsIntent) => void;
-};
-
-export type DialogKeyDecision =
-  | { kind: "cancel" }
-  | { kind: "none" }
-  | { kind: "focus"; target: "first" | "last" | "heading" };
-
-// ダイアログ表示中の Tab / Shift+Tab / Escape を、キーとフォーカスの現在位置だけから決める。
-// DOM に依存しないため、ダイアログ外フォーカス時の Tab 先を単体テストで確認できる。
-export function decideDialogKey(input: {
-  key: string;
-  /** 送信中は「やめる」が無効なので、Escape でも取り消さない（不変条件2）。 */
-  busy: boolean;
-  shiftKey: boolean;
-  tabbableCount: number;
-  activeIndex: number;
-}): DialogKeyDecision {
-  if (input.key === "Escape") {
-    return input.busy ? { kind: "none" } : { kind: "cancel" };
-  }
-  if (input.key !== "Tab") {
-    return { kind: "none" };
-  }
-  if (input.tabbableCount === 0) {
-    return { kind: "focus", target: "heading" };
-  }
-  if (input.activeIndex < 0) {
-    return { kind: "focus", target: input.shiftKey ? "last" : "first" };
-  }
-  if (input.shiftKey && input.activeIndex === 0) {
-    return { kind: "focus", target: "last" };
-  }
-  if (!input.shiftKey && input.activeIndex === input.tabbableCount - 1) {
-    return { kind: "focus", target: "first" };
-  }
-  return { kind: "none" };
-}
 
 export type DialogRestoreDecision =
   | { kind: "clear" }
@@ -112,7 +60,7 @@ export function decideDialogRestore(input: {
   dialog: DialogKind | null;
   previousDialog: DialogKind | null;
   pendingRestore: DialogKind | null;
-  triggers: Record<DialogKind, { disabled: boolean } | null>;
+  triggers: Partial<Record<DialogKind, { disabled: boolean } | null>>;
   /** 復帰を待つ間に、利用者が別の要素へフォーカスを移していたら true。上書きせず、待ちをやめる。 */
   focusElsewhere: boolean;
 }): DialogRestoreDecision {
@@ -124,7 +72,7 @@ export function decideDialogRestore(input: {
     return { kind: "none" };
   }
   const trigger = input.triggers[target];
-  if (trigger === null || trigger.disabled) {
+  if (trigger === null || trigger === undefined || trigger.disabled) {
     return { kind: "wait", target };
   }
   if (input.focusElsewhere) {
@@ -176,307 +124,6 @@ export function decideDecisionTransition(input: {
   }
 }
 
-function ConfirmDialog({ dialog, title, message, details, confirmLabel, busy, disconnected, onAction }: ConfirmDialogProps): ReactElement {
-  const headingId = useId();
-  const headingRef = useRef<HTMLHeadingElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  // close を送出したら封じ込めを止める。閉じる途中の focusout で消えゆくダイアログへ
-  // フォーカスを戻し、トリガーへの復帰と競合させない。
-  const released = useRef(false);
-  // キー処理は document に一度だけ登録するため、送信中かどうかは ref で読む。
-  const busyRef = useRef(busy);
-  useEffect(() => {
-    busyRef.current = busy;
-  }, [busy]);
-  const cancel = useCallback((): void => {
-    released.current = true;
-    onAction({ type: "cancel" });
-  }, [onAction]);
-
-  // 開いた直後にダイアログの見出しへフォーカスを移し、読み上げとキーボード操作の起点にする。
-  useEffect(() => {
-    headingRef.current?.focus();
-  }, []);
-
-  // 送信中はボタンが無効になり、押したボタンからフォーカスが外れる。見出しへ戻して
-  // ダイアログ内にフォーカスを保つ。切断で確定ボタンが無効になったときも、そこに
-  // フォーカスがあれば見出しへ移す。押せる「やめる」やリンクにあるフォーカスは動かさない。
-  useEffect(() => {
-    const active = document.activeElement;
-    const lostFocus =
-      active === null ||
-      !(dialogRef.current?.contains(active) ?? false) ||
-      (active instanceof HTMLButtonElement && active.disabled);
-    if (busy || (disconnected && lostFocus)) {
-      headingRef.current?.focus();
-    }
-  }, [busy, disconnected]);
-
-  // キー処理と逸脱検知はダイアログの子孫ではなく document に置く。本文や背景のクリックで
-  // フォーカスが body へ移っても Tab/Escape を捕まえ、背景操作へ抜けさせない。
-  useEffect(() => {
-    const dialogElement = dialogRef.current;
-    if (dialogElement === null) {
-      return;
-    }
-    const tabbableElements = (): HTMLElement[] =>
-      Array.from(dialogElement.querySelectorAll<HTMLElement>("a[href], button:not([disabled])"));
-    const inside = (target: EventTarget | null): boolean =>
-      target instanceof Node && dialogElement.contains(target);
-
-    const focusInside = (target: "first" | "last" | "heading"): void => {
-      if (target !== "heading") {
-        const elements = tabbableElements();
-        const element = target === "first" ? elements[0] : elements[elements.length - 1];
-        if (element !== undefined) {
-          element.focus();
-          return;
-        }
-      }
-      headingRef.current?.focus();
-    };
-
-    const handleKeyDown = (event: globalThis.KeyboardEvent): void => {
-      if (released.current) {
-        return;
-      }
-      const active = document.activeElement as HTMLElement | null;
-      const elements = tabbableElements();
-      const decision = decideDialogKey({
-        key: event.key,
-        busy: busyRef.current,
-        shiftKey: event.shiftKey,
-        tabbableCount: elements.length,
-        activeIndex: active === null ? -1 : elements.indexOf(active),
-      });
-      switch (decision.kind) {
-        case "cancel":
-          event.preventDefault();
-          cancel();
-          return;
-        case "focus":
-          event.preventDefault();
-          focusInside(decision.target);
-          return;
-        case "none":
-          return;
-      }
-    };
-
-    const handleFocusOut = (event: FocusEvent): void => {
-      if (released.current || inside(event.relatedTarget)) {
-        return;
-      }
-      focusInside("heading");
-    };
-
-    const handleFocusIn = (event: FocusEvent): void => {
-      if (released.current || inside(event.target)) {
-        return;
-      }
-      focusInside("heading");
-    };
-
-    document.addEventListener("keydown", handleKeyDown);
-    document.addEventListener("focusout", handleFocusOut);
-    document.addEventListener("focusin", handleFocusIn);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-      document.removeEventListener("focusout", handleFocusOut);
-      document.removeEventListener("focusin", handleFocusIn);
-    };
-  }, [cancel]);
-
-  return (
-    <div className="dialog-backdrop">
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
-        className="dialog"
-      >
-        <h2 id={headingId} ref={headingRef} tabIndex={-1}>
-          {title}
-        </h2>
-        {details.length === 0 ? null : (
-          <dl className="dialog-target">
-            {details.map((detail) => (
-              <div key={detail.label}>
-                <dt>{detail.label}</dt>
-                <dd>
-                  {detail.href === undefined ? (
-                    detail.value
-                  ) : (
-                    <a href={detail.href} target="_blank" rel="noopener noreferrer">
-                      {detail.value}
-                    </a>
-                  )}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        )}
-        <p className="dialog-message">{message}</p>
-        <OfflineNote disconnected={disconnected} />
-        <div className="actions">
-          <button type="button" disabled={busy} onClick={cancel}>
-            やめる
-          </button>
-          <button type="button" disabled={busy || disconnected} onClick={() => onAction({ type: "confirm", dialog })}>
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-type ConfirmDialogConfig = {
-  dialog: DialogKind;
-  title: string;
-  message: string;
-  details: ConfirmDialogDetail[];
-  confirmLabel: string;
-};
-
-type DialogTrigger = {
-  dialog: DialogKind;
-  label: string;
-};
-
-const DIALOG_TRIGGERS = {
-  merge: [{ dialog: "merge", label: "マージを承認" }],
-  goalRegistration: [
-    { dialog: "approve-registration", label: "承認" },
-    { dialog: "reject-registration", label: "却下" },
-  ],
-} as const satisfies Record<string, DialogTrigger[]>;
-
-type DialogGroup = "merge" | "goal-registration";
-
-// 種別ごとの見出し・対象・本文・確定ボタン名。本文は対象の値（PR 番号・revision）を差し込む。
-// マージは、別のプロジェクトのプルリクエストと取り違えないよう、プロジェクトと、
-// プルリクエストを新しいタブで開くリンクを対象として出す（issue #304）。
-// 確認ダイアログを開いた時点の値を dialogTarget に保っている場合、開いた後に SSE で
-// 一覧が更新されても、確認する対象は開いた時点の値を表示する。
-function buildConfirmDialogs(
-  group: DialogGroup,
-  decision: PendingDecision,
-  dialogTarget: DecisionDialogTarget | null,
-): ConfirmDialogConfig[] {
-  if (group === "merge") {
-    const prNumber =
-      dialogTarget?.kind === "merge" ? dialogTarget.prNumber : decision.pullRequest?.number;
-    const prUrl =
-      dialogTarget?.kind === "merge" ? dialogTarget.url : pullRequestLinkUrl(decision.pullRequest?.url);
-    return [
-      {
-        dialog: "merge",
-        title: "マージの承認",
-        details: [
-          { label: "プロジェクト", value: decision.project },
-          { label: "プルリクエスト", value: `#${prNumber ?? ""} を開く（新しいタブ）`, href: prUrl },
-        ],
-        message: `プルリクエスト #${prNumber ?? ""} のマージを承認します。よろしいですか。`,
-        confirmLabel: "マージする",
-      },
-    ];
-  }
-  const revision =
-    dialogTarget?.kind === "approve-registration" || dialogTarget?.kind === "reject-registration"
-      ? dialogTarget.revision
-      : decision.revision;
-  return [
-    {
-      dialog: "approve-registration",
-      title: "ゴール登録の承認",
-      details: [],
-      message: `revision ${revision ?? ""} のゴール登録を承認します。よろしいですか。`,
-      confirmLabel: "承認",
-    },
-    {
-      dialog: "reject-registration",
-      title: "ゴール登録の却下",
-      details: [],
-      message: `revision ${revision ?? ""} のゴール登録を却下します。よろしいですか。`,
-      confirmLabel: "却下",
-    },
-  ];
-}
-
-// 一覧に同じ操作名のボタンが複数並んでも、読み上げだけで操作と対象の対応が取れるよう、
-// 対象の説明をボタン外の要素に置き、各ボタンから aria-describedby で参照する。
-// ボタンの読み上げ名は操作の文言だけにする（issue #324、候補1を採用）。
-function DecisionTargetDescription({ id, targetLabel }: { id: string; targetLabel: string }): ReactElement {
-  return (
-    <span id={id} className="visually-hidden">
-      対象: {targetLabel}
-    </span>
-  );
-}
-
-type DialogActionSectionProps = {
-  triggers: DialogTrigger[];
-  configs: ConfirmDialogConfig[];
-  active: DialogKind | null;
-  descriptionId: string;
-  targetLabel: string;
-  busy: boolean;
-  disconnected: boolean;
-  triggerRefs: RefObject<Record<DialogKind, HTMLButtonElement | null>>;
-  onAction: (intent: DecisionActionsIntent) => void;
-};
-
-// 確認ダイアログを開くトリガー群と、いま開いている種別のダイアログをまとめて描画する。
-// ボタン名は操作の文言だけにし、対象の識別子は aria-describedby で補う。
-function DialogActionSection({
-  triggers,
-  configs,
-  active,
-  descriptionId,
-  targetLabel,
-  busy,
-  disconnected,
-  triggerRefs,
-  onAction,
-}: DialogActionSectionProps): ReactElement {
-  const current = configs.find((config) => config.dialog === active);
-  return (
-    <div className="actions">
-      <DecisionTargetDescription id={descriptionId} targetLabel={targetLabel} />
-      {triggers.map(({ dialog, label }) => (
-        <button
-          key={dialog}
-          type="button"
-          disabled={busy || disconnected}
-          ref={(element) => {
-            triggerRefs.current[dialog] = element;
-          }}
-          aria-label={label}
-          aria-describedby={descriptionId}
-          onClick={() => onAction({ type: "open", dialog })}
-        >
-          {label}
-        </button>
-      ))}
-      {current === undefined ? null : (
-        <ConfirmDialog
-          dialog={current.dialog}
-          title={current.title}
-          message={current.message}
-          details={current.details}
-          confirmLabel={current.confirmLabel}
-          busy={busy}
-          disconnected={disconnected}
-          onAction={onAction}
-        />
-      )}
-      <OfflineNote disconnected={disconnected} />
-    </div>
-  );
-}
-
 export function DecisionActionsView({
   decision,
   text,
@@ -502,6 +149,8 @@ export function DecisionActionsView({
     merge: null,
     "approve-registration": null,
     "reject-registration": null,
+    "answer-report-completed": null,
+    "answer-report-unable": null,
   });
   const previousDialog = useRef<DialogKind | null>(null);
   const pendingRestore = useRef<DialogKind | null>(null);
@@ -596,37 +245,18 @@ export function DecisionActionsView({
       );
 
     case "operation":
-      return (
-        <div className="actions">
-          <DecisionTargetDescription id={descriptionId} targetLabel={descriptionLabel} />
-          <button
-            type="button"
-            disabled={busy || disconnected}
-            aria-label="実施した"
-            aria-describedby={descriptionId}
-            onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.COMPLETED })}
-          >
-            実施した
-          </button>
-          <button
-            type="button"
-            disabled={busy || disconnected}
-            aria-label="対応できない"
-            aria-describedby={descriptionId}
-            onClick={() => onAction({ type: "answer-report", report: OPERATION_ANSWER_REPORT.UNABLE })}
-          >
-            対応できない
-          </button>
-          <OfflineNote disconnected={disconnected} />
-        </div>
-      );
-
     case "merge":
     case "goal-registration": {
-      const group = state.kind;
+      const group = state.kind === "operation" ? "operation" : state.kind;
       return (
         <DialogActionSection
-          triggers={group === "merge" ? DIALOG_TRIGGERS.merge : DIALOG_TRIGGERS.goalRegistration}
+          triggers={
+            group === "merge"
+              ? DIALOG_TRIGGERS.merge
+              : group === "operation"
+                ? DIALOG_TRIGGERS.operation
+                : DIALOG_TRIGGERS.goalRegistration
+          }
           configs={buildConfirmDialogs(group, decision, dialogTarget)}
           active={dialog}
           descriptionId={descriptionId}
