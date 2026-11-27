@@ -703,7 +703,7 @@ test("D17: エラーの画面は日本語で、もう一度読み込む操作と
 });
 
 test("D17: 読み込み中の画面は日本語の文を status として出す", async () => {
-  const document = await renderAppModule("loading.tsx");
+  const document = await renderAppModule("activity/loading.tsx");
   const status = document.querySelector('[role="status"]');
   assert.ok(status, "status の要素がある");
   assert.equal(normalize(status.textContent), "読み込んでいます…");
