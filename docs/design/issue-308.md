@@ -8,6 +8,7 @@
 - 作業の依頼（operation_request）の「実施した」「対応できない」は、押してもすぐには送らず、マージやゴール登録と同じ `ConfirmDialog`（`frontend/web/src/components/decision-actions-view.tsx`）を開く。確定したときだけ、押した方の report で回答を送る。
 - 確認の種別を足して、`DialogActionSection` と `ConfirmDialog` を使い回す。種別の名前と数（2択で1つか2つか）は実装が決める。テストは名前を書かず、2択の意図から開いた状態をそのまま使う。
 - 2択のボタンが出す意図 `{ type: "answer-report", report }` は、作業の依頼では送信（`submit`）ではなく、ダイアログを開く（`resolveDecisionIntent` は `open`、`decideDecisionTransition` は開いた状態）に解決する。ボタンが `{ type: "open", dialog }` を出す形に変えてもよいが、`answer-report` も送らずに開くこと。
+  - 注記（[j5ik2o/takt-dash#415](https://github.com/j5ik2o/takt-dash/issues/415)）：`answer-report` の意図は #415 で消し、2択から確認を開く道は `{ type: "open", dialog }` の1つにした（`docs/design/issue-415.md`）。
 
 ## 守る不変条件
 
