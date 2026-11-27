@@ -252,8 +252,9 @@ test("実行の権限の無いファイルなら、時刻付きの行を標準�
 });
 
 // 子は pid を「知らせを受ける側」の流れへ書き、そのあと「失敗する側」の流れへ書き続ける。
-// 失敗する側へ 30 回書いても印の行 "after 30" は書かず、テストが標準入力へ 1 行書く合図を
-// 待ってから書く（知らせを見てから合図する順を、印の位置で確かめられるようにする）。
+// 合図の前の書き込みは数えず、テストが標準入力へ 1 行書く合図のあとに失敗する側へ 30 回書いて、
+// そのあとで印の行 "after 30" を書く（知らせのあとの書き込みで知らせが増えないことを、
+// 印の位置で確かめられるようにする）。
 // nodeChild と同じく、固まらないよう 10 秒で自分から終わる。
 const keepsWriting = (failing: "stdout" | "stderr"): string[] => {
   const other = failing === "stdout" ? "stderr" : "stdout";
@@ -264,17 +265,17 @@ const keepsWriting = (failing: "stdout" | "stderr"): string[] => {
       setTimeout(() => process.exit(99), 10000);
       process.${other}.write("pid=" + process.pid + "\\n");
       let i = 0;
-      let signaled = false;
+      let signaledAt = -1;
       let wroteMarker = false;
       const writeMarker = () => {
-        if (!signaled || i < 30 || wroteMarker) return;
+        if (signaledAt < 0 || i - signaledAt < 30 || wroteMarker) return;
         wroteMarker = true;
         process.${other}.write("after 30\\n");
       };
       process.stdin.setEncoding("utf8");
       process.stdin.on("data", () => {
-        signaled = true;
-        writeMarker();
+        if (signaledAt >= 0) return;
+        signaledAt = i;
       });
       setInterval(() => {
         process.${failing}.write("line " + (i += 1) + "\\n");
@@ -292,8 +293,8 @@ for (const failing of ["stdout", "stderr"] as const) {
       stdin: true,
     });
     await run.waitFor(other, "with-timestamps:", 5000);
-    // 知らせを見てから合図する。子は合図まで印を書かず、合図のあとも失敗する側へ書き続ける。
-    // 2 回目以降の失敗で知らせが増えないことを、印の行まで待って見る。
+    // 知らせを見てから合図する。子は合図の前の書き込みを数えず、合図のあとに失敗する側へ
+    // 30 回書いてから印を書く。30 回の書き込みでも知らせが増えないことを、印の行まで待って見る。
     run.writeStdin("go\n");
     await run.waitFor(other, "after 30\n", 5000);
     const read = other === "stdout" ? run.stdout : run.stderr;
