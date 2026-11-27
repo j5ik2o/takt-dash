@@ -20,7 +20,7 @@ type Run = {
   stderr: () => Buffer;
   closed: Promise<Ended>;
   isClosed: () => boolean;
-  waitForStderr: (text: string, timeoutMs: number) => Promise<void>;
+  waitFor: (stream: "stdout" | "stderr", text: string, timeoutMs: number) => Promise<void>;
   kill: (signal: NodeJS.Signals) => void;
 };
 
@@ -41,7 +41,11 @@ const runWrapper = (args: string[], options: RunOptions = {}): Run => {
   const waiters: (() => void)[] = [];
   const wake = () => waiters.splice(0).forEach((resolve) => resolve());
   if (options.closeStdout) child.stdout.destroy();
-  else child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+  else
+    child.stdout.on("data", (chunk: Buffer) => {
+      out.push(chunk);
+      wake();
+    });
   if (options.closeStderr) child.stderr.destroy();
   else
     child.stderr.on("data", (chunk: Buffer) => {
@@ -58,15 +62,17 @@ const runWrapper = (args: string[], options: RunOptions = {}): Run => {
   });
   const stdout = () => Buffer.concat(out);
   const stderr = () => Buffer.concat(err);
-  const waitForStderr = async (text: string, timeoutMs: number) => {
+  const waitFor = async (stream: "stdout" | "stderr", text: string, timeoutMs: number) => {
+    const read = stream === "stdout" ? stdout : stderr;
     const deadline = Date.now() + timeoutMs;
-    while (!stderr().toString("utf8").includes(text)) {
+    while (!read().toString("utf8").includes(text)) {
+      const seen = `stdout: ${stdout().toString("utf8")} stderr: ${stderr().toString("utf8")}`;
       if (done) {
-        assert.fail(`標準エラーに ${JSON.stringify(text)} が出る前にラッパーが終わりました。stderr: ${stderr().toString("utf8")}`);
+        assert.fail(`${stream} に ${JSON.stringify(text)} が出る前にラッパーが終わりました。${seen}`);
       }
       if (Date.now() > deadline) {
         child.kill("SIGKILL");
-        assert.fail(`${timeoutMs}ms 待っても標準エラーに ${JSON.stringify(text)} が出ません。stderr: ${stderr().toString("utf8")}`);
+        assert.fail(`${timeoutMs}ms 待っても ${stream} に ${JSON.stringify(text)} が出ません。${seen}`);
       }
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 50);
@@ -77,7 +83,7 @@ const runWrapper = (args: string[], options: RunOptions = {}): Run => {
       });
     }
   };
-  return { stdout, stderr, closed, isClosed: () => done, waitForStderr, kill: (signal) => child.kill(signal) };
+  return { stdout, stderr, closed, isClosed: () => done, waitFor, kill: (signal) => child.kill(signal) };
 };
 
 // 子が自分へ合図 S を送って終わる。node の子だと SIGPIPE・SIGXFSZ は無視され、SIGUSR1 は
@@ -90,16 +96,42 @@ const signalNumber = (signal: NodeJS.Signals): number => {
   return n;
 };
 
-// 子が合図 S で終わったときの、ラッパーの終わり方として認めるもの：S で終わるか、128 + n で終わる。
+// 自分へ送ってよい合図（既定の動作が core を作らずに終わり、Node が無視も別の用途にも使わないもの）。
+// これらで子が終わったら、ラッパーは同じ合図か 128 + 番号で終わる。それ以外は 128 + 番号で終わり、合図では終わらない。
+const SELF_SENDABLE: readonly NodeJS.Signals[] = ["SIGHUP", "SIGINT", "SIGTERM", "SIGKILL", "SIGALRM", "SIGUSR2", "SIGVTALRM", "SIGPROF"];
+
 const assertEndedLikeSignal = (ended: Ended, signal: NodeJS.Signals, where: string, stderr: string) => {
-  const ok = ended.signal === signal || (ended.signal === null && ended.code === 128 + signalNumber(signal));
+  const exitCode = 128 + signalNumber(signal);
+  const sendable = SELF_SENDABLE.includes(signal);
+  const ok = (sendable && ended.signal === signal) || (ended.signal === null && ended.code === exitCode);
   assert.ok(
     ok,
-    `${where}: 子が ${signal} で終わったら、ラッパーは ${signal} か ${128 + signalNumber(signal)} で終わる。` +
+    `${where}: 子が ${signal} で終わったら、ラッパーは ${sendable ? `${signal} か ` : ""}${exitCode} で終わる。` +
       `実際は code=${ended.code} signal=${ended.signal}。stderr: ${stderr}`,
   );
   assert.notEqual(ended.code, 0, `${where}: 0 では終わらない`);
 };
+
+const isAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const readPid = (output: Buffer): number => {
+  const pid = Number(/pid=(\d+)/.exec(output.toString("utf8"))?.[1]);
+  assert.ok(Number.isInteger(pid) && pid > 0, "子の pid を読めた");
+  return pid;
+};
+
+const noticeLines = (body: Buffer): string[] =>
+  body
+    .toString("utf8")
+    .split("\n")
+    .filter((line) => line.includes("with-timestamps:"));
 
 const withTempDir = async (body: (dir: string) => Promise<void>) => {
   const dir = await mkdtemp(join(tmpdir(), "with-timestamps-413-"));
@@ -117,13 +149,13 @@ const writeSighupListener = async (dir: string): Promise<string> => {
   return path;
 };
 
-test("子が SIGPIPE で終わると、ラッパーは 0 で終わらない（SIGPIPE か 128 + 13）", async () => {
+test("子が SIGPIPE で終わると、ラッパーは 0 で終わらず、128 + 13 で終わる", async () => {
   const run = runWrapper(shKillsItself("SIGPIPE"));
   const ended = await run.closed;
   assertEndedLikeSignal(ended, "SIGPIPE", "SIGPIPE", run.stderr().toString("utf8"));
 });
 
-test("子が SIGUSR1 で終わると、ラッパーは Inspector を起こさず、0 で終わらない", async () => {
+test("子が SIGUSR1 で終わると、ラッパーは Inspector を起こさず、128 + 番号で終わる", async () => {
   const run = runWrapper(shKillsItself("SIGUSR1"));
   const ended = await run.closed;
   const stderr = run.stderr().toString("utf8");
@@ -140,8 +172,10 @@ test("親が SIGHUP を無視している状態で子が SIGHUP で終わると�
   });
 });
 
-test("性質（総当たり）: どの合図で子が終わっても、親の SIGHUP の受け手の有無によらず、合図か 128 + 番号で終わり、Inspector を起こさない", async () => {
-  const signals: NodeJS.Signals[] = ["SIGHUP", "SIGINT", "SIGTERM", "SIGUSR1", "SIGUSR2", "SIGPIPE", "SIGXFSZ", "SIGKILL"];
+test("性質（総当たり）: どの合図で子が終わっても、親の SIGHUP の受け手の有無によらず、送ってよい合図は合図か 128 + 番号、それ以外は 128 + 番号で終わり、Inspector を起こさない", async () => {
+  const signals: NodeJS.Signals[] = ["SIGHUP", "SIGINT", "SIGTERM", "SIGKILL", "SIGALRM", "SIGUSR1", "SIGUSR2", "SIGPIPE", "SIGXFSZ"];
+  // core とクラッシュレポートを作る合図。macOS では子（sh）のクラッシュレポートが手元に溜まるので、CI（Linux）で確かめる。
+  if (process.platform !== "darwin") signals.push("SIGABRT", "SIGQUIT", "SIGSEGV", "SIGTRAP");
   await withTempDir(async (dir) => {
     const listener = await writeSighupListener(dir);
     for (const withListener of [false, true]) {
@@ -178,35 +212,83 @@ test("プログラムが空の文字列なら、時刻付きの行を標準エ�
   assert.ok(err.stamps.length >= 1);
 });
 
-test("常駐中に標準出力の書き込みが失敗すると、子が動いている間に、標準エラーへ時刻付きの知らせを 1 行だけ書く", async () => {
-  // 子は pid を標準エラーへ書き、そのあと標準出力へ書き続ける。nodeChild と同じく、固まらないよう 10 秒で自分から終わる。
+test("実行の権限の無いファイルなら、時刻付きの行を標準エラーに書いて 127 で終わる", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "not-executable.sh");
+    await writeFile(path, "#!/bin/sh\necho hi\n", { mode: 0o644 });
+    const run = runWrapper([path]);
+    const ended = await run.closed;
+    const stderr = run.stderr();
+    assert.equal(ended.signal, null);
+    assert.equal(ended.code, 127, `stderr: ${stderr.toString("utf8")}`);
+    assert.equal(run.stdout().length, 0);
+    const err = unstamp(stderr, "stderr");
+    assert.ok(err.body.toString("utf8").includes(path), "起こせなかったプログラムを名指す");
+  });
+});
+
+// 子は pid を「知らせを受ける側」の流れへ書き、そのあと「失敗する側」の流れへ書き続ける。
+// nodeChild と同じく、固まらないよう 10 秒で自分から終わる。
+const keepsWriting = (failing: "stdout" | "stderr"): string[] => {
+  const other = failing === "stdout" ? "stderr" : "stdout";
+  return [
+    process.execPath,
+    "-e",
+    `
+      setTimeout(() => process.exit(99), 10000);
+      process.${other}.write("pid=" + process.pid + "\\n");
+      let i = 0;
+      setInterval(() => process.${failing}.write("line " + (i += 1) + "\\n"), 20);
+    `,
+  ];
+};
+
+for (const failing of ["stdout", "stderr"] as const) {
+  const other = failing === "stdout" ? "stderr" : "stdout";
+  test(`常駐中に ${failing} の書き込みが失敗すると、子が動いている間に、${other} へ時刻付きの知らせを 1 行だけ書く`, async () => {
+    const run = runWrapper(keepsWriting(failing), failing === "stdout" ? { closeStdout: true } : { closeStderr: true });
+    await run.waitFor(other, "with-timestamps:", 5000);
+    // 知らせのあとも子は書き続ける。2 回目以降の失敗で知らせが増えないことを見るため、しばらく待つ。
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const read = other === "stdout" ? run.stdout : run.stderr;
+    const pid = readPid(read());
+    const alive = isAlive(pid);
+    const wrapperRunning = !run.isClosed();
+    const snapshot = read();
+    run.kill("SIGTERM");
+    await run.closed;
+    if (isAlive(pid)) process.kill(pid, "SIGKILL");
+    assert.ok(alive, "知らせは子が終わる前に出る");
+    assert.ok(wrapperRunning, "知らせは子が終わる前に出る（ラッパーはまだ動いている）");
+    const notices = noticeLines(unstamp(snapshot, other).body);
+    assert.equal(notices.length, 1, `知らせは 1 行だけ。${other}: ${snapshot.toString("utf8")}`);
+    assert.ok(notices[0]!.includes(failing), `知らせは失敗した流れ（${failing}）を名指す: ${notices[0]}`);
+  });
+}
+
+test("標準エラーの改行の無い行の途中で標準出力が失敗しても、知らせは独立した行になり、子の行の続きにも時刻が付く", async () => {
+  // 子は標準エラーへ改行なしで書き、少し待ってから標準出力へ書き（ここで失敗する）、さらに待ってから標準エラーの行を終える。
   const childSource = `
     setTimeout(() => process.exit(99), 10000);
-    process.stderr.write("pid=" + process.pid + "\\n");
-    let i = 0;
-    setInterval(() => process.stdout.write("line " + (i += 1) + "\\n"), 20);
+    process.stderr.write("pid=" + process.pid + "\\npartial");
+    setTimeout(() => {
+      const timer = setInterval(() => process.stdout.write("line\\n"), 20);
+      setTimeout(() => {
+        clearInterval(timer);
+        process.stderr.write(" rest\\n", () => process.exit(0));
+      }, 1000);
+    }, 300);
   `;
   const run = runWrapper([process.execPath, "-e", childSource], { closeStdout: true });
-  await run.waitForStderr("with-timestamps:", 5000);
-  // 知らせのあとも子は書き続ける。2 回目以降の失敗で知らせが増えないことを見るため、しばらく待つ。
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  const pid = Number(/pid=(\d+)/.exec(run.stderr().toString("utf8"))?.[1]);
-  assert.ok(Number.isInteger(pid) && pid > 0, "子の pid を読めた");
-  let alive = true;
-  try {
-    process.kill(pid, 0);
-  } catch {
-    alive = false;
-  }
-  assert.ok(alive, "知らせは子が終わる前に出る");
-  assert.equal(run.isClosed(), false, "知らせは子が終わる前に出る（ラッパーはまだ動いている）");
-  const snapshot = run.stderr();
-  run.kill("SIGTERM");
-  await run.closed;
-  const err = unstamp(snapshot, "stderr");
-  const notices = err.body
-    .toString("utf8")
-    .split("\n")
-    .filter((line) => line.includes("with-timestamps:"));
-  assert.equal(notices.length, 1, `知らせは 1 行だけ。stderr: ${snapshot.toString("utf8")}`);
+  await run.waitFor("stderr", "with-timestamps:", 5000);
+  const ended = await run.closed;
+  const stderr = run.stderr();
+  assert.equal(ended.code, 0, `stderr: ${stderr.toString("utf8")}`);
+  // 全部の行が時刻で始まる（知らせのあとの子の行の続きにも時刻が付く）。
+  const lines = unstamp(stderr, "stderr").body.toString("utf8").split("\n");
+  assert.equal(lines.filter((line) => line.includes("with-timestamps:")).length, 1, `stderr: ${stderr.toString("utf8")}`);
+  const noticeAt = lines.findIndex((line) => line.includes("with-timestamps:"));
+  assert.ok(lines[noticeAt]!.startsWith("with-timestamps:"), `知らせは行の頭から始まる: ${JSON.stringify(lines[noticeAt])}`);
+  assert.equal(lines[noticeAt - 1], "partial", "知らせの前に、子の行の途中までを独立した行として書く");
+  assert.equal(lines[noticeAt + 1], " rest", "子の行の続きは、知らせのあとの別の行になる");
 });
