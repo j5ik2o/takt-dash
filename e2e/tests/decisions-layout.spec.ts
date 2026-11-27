@@ -8,7 +8,10 @@ import { buildMockState, SERVER_ID, SERVER_NAME } from "../support/fixture";
 // 位置がそろうこと、待ち時間が見出し行の右端に来ること、本文の上限が 80ch 前後であること、
 // 改行が保たれること、サーバーの ID と表示名が項目に出ないことを boundingBox() で観測する。
 const HEIGHT = 900;
-const WIDTHS = [1280, 1920, 2560] as const;
+const WIDTHS = [360, 390, 1280, 1920, 2560] as const;
+// 待ち時間をプロジェクトと同じ行に置けることと、本文を 80ch の上限まで広げられることは、
+// 見出し行と本文に十分な幅がある広い画面でだけ測る。狭い画面では折り返しと画面幅が正しい。
+const WIDE_WIDTHS = [1280, 1920, 2560] as const;
 
 const SHORT_BODY = "判断待ちの配置確認用の短い本文";
 const MULTILINE_BODY = "判断待ちの配置確認用の改行を含む本文\n2行目の文です。\n3行目の文です。";
@@ -155,6 +158,21 @@ for (const width of WIDTHS) {
     }
   });
 
+  test(`幅 ${width}px で判断待ちの項目にサーバーの ID も表示名も出ず、横にはみ出さない`, async ({ page, decisionsLayoutStack }) => {
+    await openDecisions(page, decisionsLayoutStack.webUrl, width);
+    const items = await itemGeometries(page);
+
+    for (const item of items) {
+      expect(item.text).not.toContain(SERVER_ID);
+      expect(item.text).not.toContain(SERVER_NAME);
+      expect(item.text).not.toContain("サーバー");
+    }
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+}
+
+for (const width of WIDE_WIDTHS) {
   test(`幅 ${width}px で待ち時間と滞留の印は見出し行の右端に、プロジェクトと同じ行に並ぶ`, async ({ page, decisionsLayoutStack }) => {
     await openDecisions(page, decisionsLayoutStack.webUrl, width);
     const items = await itemGeometries(page);
@@ -190,18 +208,5 @@ for (const width of WIDTHS) {
       multiline.firstParagraph!.height,
       "3行の本文は改行が保たれて1行の本文の3行分の高さになる",
     ).toBeGreaterThanOrEqual(short.firstParagraph!.height * 2.5);
-  });
-
-  test(`幅 ${width}px で判断待ちの項目にサーバーの ID も表示名も出ず、横にはみ出さない`, async ({ page, decisionsLayoutStack }) => {
-    await openDecisions(page, decisionsLayoutStack.webUrl, width);
-    const items = await itemGeometries(page);
-
-    for (const item of items) {
-      expect(item.text).not.toContain(SERVER_ID);
-      expect(item.text).not.toContain(SERVER_NAME);
-      expect(item.text).not.toContain("サーバー");
-    }
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-    expect(overflow).toBeLessThanOrEqual(0);
   });
 }
