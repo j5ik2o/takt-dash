@@ -1,8 +1,9 @@
 // issue #315 の契約：画面の文言とラベルを、操作の内容と日本語の表示に合わせる。
 //
 // 設計は docs/design/issue-315.md。指摘 D4〜D7、D13〜D19、D21、D22 の「テストで固定すること」を、
-// サーバー描画した HTML を jsdom で読んで観測する。D7 の成功の表示の消し方と D20 は
-// 「判断が要る」として、ここでは固定しない。
+// サーバー描画した HTML を jsdom で読んで観測する。D7 の「閉じる」は
+// test/components/issue-315-decision-results.test.ts、D20 は test/components/issue-315-activity-days.test.ts、
+// 狭い幅の見た目は e2e/tests/issue-315-narrow.spec.ts が固定する。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -61,6 +62,8 @@ const findDecision = (predicate: (decision: PendingDecision) => boolean): Pendin
 
 const merge = (): PendingDecision =>
   findDecision((decision) => decision.type === PendingDecisionType.PENDING_DECISION_TYPE_AWAITING_MERGE);
+// #404（issue #308）で確認ダイアログが入った作業の依頼。
+const operation = (): PendingDecision => findDecision((decision) => decision.inquiryId === "inquiry-operation");
 const registration = (): PendingDecision =>
   findDecision(
     (decision) =>
@@ -75,7 +78,12 @@ const stateWith = (items: PendingDecision[]): DashboardState => ({
 const renderDecisions = (state: DashboardState): string =>
   renderToStaticMarkup(createElement(DecisionsContent, { snapshotLoaded: true, state, now: NOW, disconnected: false }));
 
-type DialogKind = "merge" | "approve-registration" | "reject-registration";
+type DialogKind =
+  | "merge"
+  | "approve-registration"
+  | "reject-registration"
+  | "answer-report-completed"
+  | "answer-report-unable";
 
 const renderActions = (decision: PendingDecision, dialog: DialogKind | null): string =>
   renderToStaticMarkup(
@@ -196,6 +204,9 @@ test("D6: 確認ダイアログの確定ボタンだけが danger の見た目�
     [merge(), "merge"],
     [registration(), "approve-registration"],
     [registration(), "reject-registration"],
+    // #404 で入った作業の依頼の2択の確定も、取り消せない書き込みなので danger にする（不変条件4）。
+    [operation(), "answer-report-completed"],
+    [operation(), "answer-report-unable"],
   ];
   for (const [decision, kind] of cases) {
     const dialog = dialogOf(renderActions(decision, kind));
@@ -206,7 +217,7 @@ test("D6: 確認ダイアログの確定ボタンだけが danger の見た目�
     assert.equal(confirm.classList.contains("danger"), true, `${kind} の確定ボタンは danger を持つ`);
   }
   // 一覧のボタンは開くだけなので、danger を付けない。
-  const list = documentOf(renderDecisions(stateWith([merge(), registration()])));
+  const list = documentOf(renderDecisions(stateWith([merge(), registration(), operation()])));
   assert.equal(list.querySelectorAll(".tray-item button.danger").length, 0);
 });
 
@@ -256,6 +267,48 @@ test("D6: danger の確定ボタンは白地の「やめる」と違う地色で
   assert.match(background, /^var\(--[a-z0-9-]+\)$/, "地色はトークンを使う");
   const ratio = contrastRatio(resolveColor(css, color), resolveColor(css, background));
   assert.ok(ratio >= 4.5, `文字色と地色の比 ${ratio.toFixed(2)} が 4.5 以上`);
+});
+
+test("D6: danger の確定ボタンは hover でも teal にならず、danger の地色と文字色のまま読める", async () => {
+  const css = await readFile(cssPath, "utf8");
+  const rules = cssRules(css);
+  // .actions button:hover:not(:disabled) は .actions button.danger より詳細度が高いので、danger の hover を明示する。
+  const selector = ".actions button.danger:hover:not(:disabled)";
+  const background = declarationOf(rules, selector, "background");
+  const color = declarationOf(rules, selector, "color");
+  assert.ok(background, `${selector} に地色がある`);
+  assert.ok(color, `${selector} に文字色がある`);
+  assert.notEqual(color, "var(--accent)", "hover で文字を teal にしない");
+  assert.notEqual(background, "var(--surface)", "hover で白地に戻さない");
+  const ratio = contrastRatio(resolveColor(css, color), resolveColor(css, background));
+  assert.ok(ratio >= 4.5, `hover の文字色と地色の比 ${ratio.toFixed(2)} が 4.5 以上`);
+});
+
+test("D6: 無効の danger の確定ボタンは、ほかの無効のボタンと同じ押せない見た目に戻す", async () => {
+  const css = await readFile(cssPath, "utf8");
+  const rules = cssRules(css);
+  const selector = ".actions button.danger:disabled";
+  assert.equal(declarationOf(rules, selector, "background"), "var(--surface)", `${selector} の地色`);
+  const disabledColor = declarationOf(rules, ".actions button:disabled", "color");
+  assert.ok(disabledColor, ".actions button:disabled に文字色がある");
+  assert.equal(declarationOf(rules, selector, "color"), disabledColor, `${selector} の文字色はほかの無効と同じ`);
+});
+
+test("D5: 確認ダイアログは高さに上限を持ち、長い対象でも中を縦にスクロールして確定と「やめる」に届く", async () => {
+  const css = await readFile(cssPath, "utf8");
+  const rules = cssRules(css);
+  const maxHeight = declarationOf(rules, ".dialog", "max-height");
+  assert.ok(maxHeight !== undefined && maxHeight !== "none", ".dialog に max-height がある");
+  assert.equal(declarationOf(rules, ".dialog", "overflow-y"), "auto");
+});
+
+test("D7: 結果の行は狭い幅で折り返し、「閉じる」の押す場所は 44px 以上", async () => {
+  const css = await readFile(cssPath, "utf8");
+  const rules = cssRules(css);
+  assert.equal(declarationOf(rules, ".decision-results .result", "flex-wrap"), "wrap");
+  // 「閉じる」は .actions の外にあるので、.actions button の 44px は当たらない。
+  assert.equal(declarationOf(rules, ".decision-results .result button", "min-height"), "44px");
+  assert.equal(declarationOf(rules, ".decision-results .result button", "min-width"), "44px");
 });
 
 test("D7: 操作の結果は、結果が出た時刻を持つ", () => {
