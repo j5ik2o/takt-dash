@@ -31,6 +31,9 @@ export function DecisionActions({ decision, disconnected, onResult }: DecisionAc
   const [text, setText] = useState("");
   const [dialogState, setDialogState] = useState<DecisionDialogState>(INITIAL_DECISION_DIALOG_STATE);
   const [busy, setBusy] = useState(false);
+  // 送信中かどうかを、描き直しを待たずに見るための守り。busy の state は描画に使い、
+  // この ref は同じ同期の区間での二重の送信と、送信中の意図の受け付けを止める。
+  const submitting = useRef(false);
   // 成功していない直前の送信。同じ操作のやり直しを、同じ鍵で backend へ送るために持つ。
   const unsettledAttempt = useRef<DecisionAttempt | undefined>(undefined);
   // 切断中は送らない。ボタンの disabled だけに頼らず、操作の入口でも最新の接続状態を見る。
@@ -43,37 +46,48 @@ export function DecisionActions({ decision, disconnected, onResult }: DecisionAc
     if (action === undefined || disconnectedRef.current) {
       return;
     }
-    setBusy(true);
-    const attempt = decisionAttempt(action, unsettledAttempt.current);
-    unsettledAttempt.current = attempt;
-    const outcome = await submitDecisionAction(action, fetch, attempt.idempotencyKey);
-    if (outcome.ok) {
-      unsettledAttempt.current = undefined;
+    if (submitting.current) {
+      return;
     }
-    setBusy(false);
-    setDialogState(INITIAL_DECISION_DIALOG_STATE);
-    onResult(toDecisionResult(decision, outcome));
-    if (outcome.ok && action.kind === "answer") {
-      setText("");
+    submitting.current = true;
+    setBusy(true);
+    try {
+      const attempt = decisionAttempt(action, unsettledAttempt.current);
+      unsettledAttempt.current = attempt;
+      const outcome = await submitDecisionAction(action, fetch, attempt.idempotencyKey);
+      if (outcome.ok) {
+        unsettledAttempt.current = undefined;
+      }
+      setDialogState(INITIAL_DECISION_DIALOG_STATE);
+      onResult(toDecisionResult(decision, outcome));
+      if (outcome.ok && action.kind === "answer") {
+        setText("");
+      }
+    } finally {
+      submitting.current = false;
+      setBusy(false);
     }
   };
 
-  const handleAction = (intent: DecisionActionsIntent): void => {
+  const handleAction = (intent: DecisionActionsIntent): boolean => {
     if (!acceptsDecisionIntent(intent, disconnectedRef.current)) {
-      return;
+      return false;
+    }
+    if (submitting.current) {
+      return false;
     }
     const transition = decideDecisionTransition({ decision, intent, text, state: dialogState });
     switch (transition.kind) {
       case "state":
         setDialogState(transition.state);
-        return;
+        return true;
       case "result":
         setDialogState(transition.state);
         onResult(transition.result);
-        return;
+        return true;
       case "submit":
         void run(transition.action);
-        return;
+        return true;
     }
   };
 
