@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { register } from "node:module";
 import { fileURLToPath } from "node:url";
 import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -659,6 +660,20 @@ test("D19: 概要の実行中の run の表は、中身に合わせて列名を�
 // ---------------------------------------------------------------------------
 // 404・エラー・読み込み中（D17）
 // ---------------------------------------------------------------------------
+
+// issue #437: error.tsx は useRouter() を呼ぶが、renderToStaticMarkup には App Router が無く、
+// 「invariant expected app router to be mounted」で落ちる。このファイルが error.tsx を読むときだけ、
+// refresh が何もしないルータを返す next/navigation に差し替える。ほかの画面の import には影響させない。
+const routerStub = "export const useRouter = () => ({ refresh: () => {} });";
+const routerHook = `
+export async function resolve(specifier, context, nextResolve) {
+  if (specifier === "next/navigation" && context.parentURL?.endsWith("/app/error.tsx")) {
+    return { url: ${JSON.stringify(`data:text/javascript,${encodeURIComponent(routerStub)}`)}, shortCircuit: true };
+  }
+  return nextResolve(specifier, context);
+}
+`;
+register(`data:text/javascript,${encodeURIComponent(routerHook)}`);
 
 // まだ無いファイルを静的に import すると型検査が通らないため、パスを値として読み込む。
 const loadAppModule = async (name: string): Promise<{ default: ComponentType<Record<string, unknown>> }> => {

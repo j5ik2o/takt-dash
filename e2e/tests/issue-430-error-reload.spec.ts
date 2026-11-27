@@ -95,11 +95,15 @@ test("もう一度読み込むを1回押すと、run 詳細を取り直して元
 
   await reloadButton(page).click();
   await refetchRequest;
-  await refetchResponse;
+  const refetched = await refetchResponse;
+  await refetched.finished();
 
   expect(runRequests()).toBe(1);
   await expect(page.getByRole("heading", { name: GOAL_TEXT, level: 1 })).toBeVisible();
   await expect(page.getByRole("heading", { name: "画面を表示できませんでした", level: 1 })).toHaveCount(0);
+  // 正常な画面に戻ったあとも、追加の要求が無いこと。
+  await page.waitForTimeout(1_000);
+  expect(runRequests()).toBe(1);
 });
 
 test("失敗が続くときも、1回のクリックで再取得は1回までで、無限ループにも二重送信にもならない", async ({
@@ -111,7 +115,7 @@ test("失敗が続くときも、1回のクリックで再取得は1回までで
   await stopStateStream(page, `${stack.webUrl}${RUN_URL_PATH}`);
   await expect(page.getByRole("heading", { name: "画面を表示できませんでした", level: 1 })).toBeVisible();
 
-  // 壊れたまま押す。1回の再取得の要求と応答を待ってから、追加の要求が無いことを見る。
+  // 壊れたまま押す。1回の再取得の要求と応答を待ち、応答の完了まで見てから、追加の要求が無いことを見る。
   // 固定の待ち時間だけで判定すると、応答が遅いときにそのあとの二重送信を見逃す。
   const runRequests = countRunRequests(page);
   const refetchRequest = page.waitForRequest((request) => isRunRequest(request.url()), { timeout: 10_000 });
@@ -119,7 +123,8 @@ test("失敗が続くときも、1回のクリックで再取得は1回までで
 
   await reloadButton(page).click();
   await refetchRequest;
-  await refetchResponse;
+  const refetched = await refetchResponse;
+  await refetched.finished();
 
   expect(runRequests()).toBe(1);
   // 応答のあとに遅れて届く二重送信も見る。
