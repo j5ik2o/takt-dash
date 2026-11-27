@@ -1,13 +1,14 @@
 // -*- mode: Bluespec; -*-
-// offlineActions.qnt の筋書きテスト。issue #307 の筋書きを修正前と修正後の遷移でたどる。
+// offlineActions.qnt の筋書きテスト。issue #307 と #308 の筋書きを修正前と修正後の遷移でたどる。
 module offlineActions_test {
-  import offlineActions(GUARD = false, FOCUS_GUARD = false) as before from "./offlineActions"
-  import offlineActions(GUARD = true, FOCUS_GUARD = true) as after from "./offlineActions"
-  import offlineActions(GUARD = true, FOCUS_GUARD = false) as unguarded from "./offlineActions"
+  import offlineActions(GUARD = false, FOCUS_GUARD = false, CONFIRM_REPORT = false) as before from "./offlineActions"
+  import offlineActions(GUARD = true, FOCUS_GUARD = true, CONFIRM_REPORT = true) as after from "./offlineActions"
+  import offlineActions(GUARD = true, FOCUS_GUARD = false, CONFIRM_REPORT = true) as unguarded from "./offlineActions"
+  import offlineActions(GUARD = true, FOCUS_GUARD = true, CONFIRM_REPORT = false) as noConfirm from "./offlineActions"
 
   // 修正前。切断中でも、最後に読めた判断待ちから確認を開いて確定でき、書き込みが送られる。
   run sendWhileDisconnectedBeforeFixTest =
-    before::init
+    before::initWith("merge")
       .then(before::disconnect)
       .then(before::open)
       .then(before::confirm)
@@ -85,21 +86,28 @@ module offlineActions_test {
         after::disconnect,
       })
 
-  // 修正後。リンクにあるフォーカスは、切断しても動かさない。
+  // 修正後。マージの確認のリンクにあるフォーカスは、切断しても動かさない。リンクはマージの確認に
+  // だけある。
   run linkFocusKeptOnDisconnectTest =
-    after::init
+    after::initWith("merge")
       .then(after::open)
-      .then(all {
-        after::focus' = "link",
-        after::connected' = after::connected, after::busy' = after::busy, after::dialog' = after::dialog,
-        after::pendingRestore' = after::pendingRestore, after::sent' = after::sent, after::stolen' = after::stolen,
-      })
+      .then(after::focusInDialogTo("link"))
       .then(after::disconnect)
       .then(all {
         assert(after::focus == "link"),
         assert(after::safety),
         after::cancel,
       })
+
+  // 作業の依頼の確認にはリンクが無い（対象の行はプロジェクト名だけ）。リンクへは移れない。
+  run reportDialogHasNoLinkTest =
+    after::initWith("report")
+      .then(after::open)
+      .then(all {
+        assert(not(after::hasLink)),
+        after::focusInDialogTo("link"),
+      })
+      .fail()
 
   // 修正後。ダイアログの外で、フォーカスのあるトリガーが切断で無効になったら、body へ外す。
   run triggerFocusDroppedOnDisconnectTest =
@@ -151,4 +159,74 @@ module offlineActions_test {
         after::cancel,
       })
       .fail()
+
+  // issue #308 の前（main 54b10a6）。作業の依頼の2択は、押すと確認を開かずにすぐ送る。
+  // 確定を1回も押していないのに書き込みが出る。
+  run reportSendsWithoutConfirmBeforeFixTest =
+    noConfirm::initWith("report")
+      .then(noConfirm::pressReport)
+      .then(all {
+        assert(noConfirm::sent == List({ connected: true })),
+        assert(noConfirm::confirms == 0),
+        assert(not(noConfirm::sendOnlyOnConfirm)),
+        assert(noConfirm::noSendWhileDisconnected),
+        noConfirm::settle,
+      })
+
+  // issue #308 の前でも、マージは確認を開く。破れるのは作業の依頼だけ。
+  run mergeStillConfirmsBeforeFixTest =
+    noConfirm::initWith("merge")
+      .then(noConfirm::pressReport)
+      .fail()
+
+  // 修正後。作業の依頼の2択は、すぐには送らず確認を開く。
+  run reportOpensDialogAfterFixTest =
+    after::initWith("report")
+      .then(all {
+        assert(after::opensDialog),
+        after::pressReport,
+      })
+      .fail()
+
+  // 修正後。作業の依頼の確認をやめれば送らず、押したボタンへフォーカスが戻る。
+  run reportCancelSendsNothingTest =
+    after::initWith("report")
+      .then(after::open)
+      .then(after::cancel)
+      .then(all {
+        assert(after::sent == List()),
+        assert(after::focus == "trigger"),
+        assert(after::safety),
+        after::open,
+      })
+
+  // 修正後。作業の依頼の確定は1回だけ送り、送信中は確定をもう一度押せない。
+  run reportConfirmSendsOnceTest =
+    after::initWith("report")
+      .then(after::open)
+      .then(after::confirm)
+      .then(all {
+        assert(after::sent == List({ connected: true })),
+        assert(after::confirms == 1),
+        assert(after::safety),
+        after::confirm,
+      })
+      .fail()
+
+  // 修正後。作業の依頼の確認を開いたまま切れたら確定できず、再接続すれば確定できる。
+  run reportConfirmLockedWhileDisconnectedTest =
+    after::initWith("report")
+      .then(after::open)
+      .then(after::disconnect)
+      .then(all {
+        assert(not(after::confirmEnabled)),
+        assert(after::cancelEnabled),
+        after::reconnect,
+      })
+      .then(after::confirm)
+      .then(all {
+        assert(after::sent == List({ connected: true })),
+        assert(after::safety),
+        after::settle,
+      })
 }
