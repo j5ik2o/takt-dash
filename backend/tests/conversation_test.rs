@@ -1458,7 +1458,7 @@ fn two_digit_replacements_are_marked_as_garbled() {
   assert_eq!(
     notices(&page),
     vec![Some("元記録で文字化けしています（置換文字 10 個）".to_owned())],
-    "本文全体が読めなくなる二桁の置換文字には印を付ける必要があります（issue #111 の実測: 文字化けした seq 8 は 87 個、正常な seq 22 は 0 個）"
+    "運用の目安の 10 個に達した置換文字には印を付ける必要があります（issue #111 の観測: 文字化けした seq 8 は 87 個、正常な seq 22 は 0 個。読みやすさの境界を実証した値ではない）"
   );
 }
 
@@ -1475,7 +1475,7 @@ fn single_digit_replacements_are_not_marked_as_garbled() {
   assert_eq!(
     notices(&page),
     vec![None],
-    "短い断片の破損（一桁）では本文が読めるため印を付けない必要があります（しきい値 10 の下側境界）"
+    "置換文字が運用の目安の 10 個未満（9 個）なら印を付けない必要があります（しきい値 10 の下側境界）"
   );
   assert_eq!(page.messages[0].text.matches('\u{FFFD}').count(), 9);
 }
