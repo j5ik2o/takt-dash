@@ -31,7 +31,7 @@
 
 200 のときは、fallback（読み込み中）が先に同じ応答へ流れ、そのあとに not-found の画面が stream で入る。利用者には「読み込んでいます…」のあと 404 の画面が見えるが、HTTP は 200 のままなので、ブラウザ・監視・クローラからは「存在する URL」に見える。404 のときは、`notFound()` が応答の開始前に走るので、本文に読み込み中の画面は入らない。
 
-一覧側の置き場所も確かめた。ルートの `loading.tsx` を外した状態で `frontend/web/app/activity/loading.tsx` だけを置き、モックの応答を 3 秒遅らせて `/activity` を `waitUntil: "commit"` で開くと、**200 のまま** `role="status"` の「読み込んでいます…」が先に見え、そのあと見出し「アクティビティ」に置き換わった。セグメントに置いた `loading.tsx` は期待どおり動く。
+一覧側の置き場所も確かめた。ルートの `loading.tsx` を外した状態で `frontend/web/app/activity/loading.tsx` だけを置き、モックの応答を 3 秒遅らせて `/activity` を `waitUntil: "commit"` で開くと、**200 のまま** `role="status"` の「読み込んでいます…」が先に見え、そのあと見出し「アクティビティ」に置き換わった。セグメントに置いた `loading.tsx` は期待どおり動く。この測定は使い捨てで、e2e には置かない（下記）。
 
 一時的に外した `loading.tsx` と、実測用の spec はコミットしていない。
 
@@ -46,20 +46,37 @@
    - どちらも子のセグメントを持たず、`notFound()` を呼ばない（`notFound()` を呼ぶのは詳細の 3 つの loader だけ）。
 4. `frontend/web/test/pages/issue-315-wording.test.ts:705-710`（D17 の読み込み中のテスト）の読み込み先を `loading.tsx` から `activity/loading.tsx` に変える。文言の検査は変えない。
 5. `e2e/tests/issue-429-status.spec.ts` を新設する（下記）。
-6. 詳細ページ、3 つの loader、`frontend/web/app/not-found.tsx`、`frontend/web/app/error.tsx`、proto、backend は変えない。
+6. 詳細ページ、3 つの loader、`frontend/web/app/not-found.tsx`、`frontend/web/app/error.tsx`、proto、backend、gRPC の deadline（`frontend/web/src/grpc/client.ts` の定数）は変えない。
 
 `/goals` に `loading.tsx` を置かない理由：`app/goals/page.tsx`（一覧）と `app/goals/[goalId]/page.tsx`（詳細）が同じセグメントの下にある。`app/goals/loading.tsx` は `[goalId]` も包む（上の公式の「any children below」）ので、ゴール詳細の 404 が 200 に戻る。一覧に読み込み中の画面が要るなら `app/goals/(list)/` のような route group に分ける必要があるが、一覧は layout が読んだ状態から即座に描くので要らない。
 
 `/`、`/projects`、`/decisions` に置かない理由：page 自身が RPC を await しない（`LiveOverview`、`ProjectsLoader` は要求内で共有した `loadServerState()`、`LiveDecisions` は client component）。layout の GetOverview は `loading.js` では包めないので、置いても効かない。`/runs` と `/tasks` は詳細だけ。
 
-### 詳細の読み込み中の画面をどうするか
+### 詳細を開いた直後に何が出るか、空白の上限
 
-詳細では読み込み中の画面を出さない。これは意図した代償で、次の 2 つは両立しない。
+詳細には `loading.tsx` も `<Suspense>` も置かない。したがって、応答の最初のバイトは、存在チェック（`getRunDetail`・`getGoalDetail`・`getTaskDetail`）が終わるまで来ない。待っている間に出るものは、開き方で変わる。
 
-- 存在チェック（`getRunDetail`・`getGoalDetail`・`getTaskDetail`）より前に fallback を流す → 200 になる（いまの不具合）。
-- 存在チェックのあとに fallback を流す → その時点で詳細のデータは取得済みで、待つものが無い。
+| 開き方 | 待っている間に出るもの |
+| --- | --- |
+| クライアント遷移（一覧・概要からリンクを踏む） | 前の画面がそのまま残る（Next は新しい RSC が届くまで前の画面を保つ）。リンク内の pending 表示は出さない。 |
+| 直リンク・再読み込み | ブラウザ自身の読み込み表示（タブのスピナー）だけ。本文は空白。 |
+| 取得が終わった後 | 存在すれば内容、無ければ日本語の not-found（404）、想定外の例外なら error.tsx（500）、期限超過なら「backend が応答しません」の 200。 |
 
-存在チェックそのものが詳細のデータ取得なので、詳細では fallback を出す余地が無い。HTTP の状態を正しくすることを優先する（issue の「存在しないものを 404 で返すは変えない」）。詳細の TTFB は gRPC の完了まで遅れるが、内容が届く時刻はほぼ変わらない。クライアント側の遷移では、Next が前の画面を残したまま新しい RSC を待つ。
+**空白の上限**は deadline で決まる。詳細の取得だけで、run は最大 50 秒、goal/task は最大 30 秒（`frontend/web/src/grpc/client.ts` の `RUN_DETAIL_DEADLINE_MS = 50_000` と `DEFAULT_UNARY_DEADLINE_MS = 30_000`）。期限を過ぎると `BackendUnavailableError`（`failure: "no-response"`）になり、ローダーが「backend が応答しません。読み取りが遅れている可能性があります。」を返すので、空白はそこで終わる（500 にはしない。下の「不正な ID・例外・期限超過の状態」）。これに、ルート layout の `loadServerState()`（GetOverview、同じ 30 秒）の待ちが直列に重なる。backend が接続を受け付けたまま応答しない病的な場合は、run 80 秒・goal/task 60 秒。layout の待ちは変更前から同じで、`loading.js` では包めない（この issue では変えない）。
+
+deadline は変えない。根拠は次の 3 つ。
+
+- 50 秒は backend の総上限 45 秒（`backend/src/grpc/mod.rs` の `RUN_DETAIL_BUDGET`、回り道 3 回 × 15 秒）より後に切れるように決めた値。短くすると、#59 で直した「遅いが成功する取得」を Web が先に切り、成功するはずの詳細が失敗になる。
+- 30 秒も、backend の 1 回 15 秒の読み取りに余裕を持たせた値。goal/task の詳細だけ別の値にする根拠が無い。
+- ふだんの保存場所から読める run の待ちは小さい（backend の計測では、大きい本体ログの初回でも 10 回の最大が 2 秒未満。`backend/tests/run_detail_test.rs:250-273`）。50 秒は、backend が応答を返さない病的な場合の上限で、正常時は数秒以内に終わる。
+
+したがって「利用者の体感」を優先して 10 秒に縮める案は採らない。縮めると #59・#180 の期限の設計をやり直すことになり、この issue の範囲を超える。期限超過の再試行は、ブラウザの再読み込みか、一覧から開き直す。error.tsx の「もう一度読み込む」は想定外の例外のときだけで、期限超過は #152 の「応答しません」に出す（この表示に再試行ボタンは無い。足すなら別 issue）。
+
+この上限を短くするには、応答を始める前に存在を安く確かめる手段（軽い existence RPC か proxy）が要る。採らなかった案 (b') と同じで、この issue の範囲を超える。上限が問題になるなら、別 issue で existence RPC を足し、存在する詳細にだけ読み込み表示を戻す。
+
+**日本語の待ち表示は、`notFound()` を使わないページにだけ置く。** 具体的には `/activity` と `/conversations` のセグメントにだけ `loading.tsx` を置き、詳細には置かない。詳細に局所の `<Suspense>` を置くと、fallback が存在チェックより先に同じ応答へ流れ、HTTP が 200 に戻る（ルートの `loading.tsx` で実測したのと同じ仕組み）。存在チェックの後に置いても、その時点で詳細のデータは取得済みで、待つものが無い。存在チェックそのものが詳細のデータ取得なので、詳細では fallback を出す余地が無い。HTTP の状態を正しくすることを優先する（issue の「存在しないものを 404 で返すは変えない」）。
+
+**測り方**：上限は上の定数から決まる。実装後、backend の応答を遅らせた状態（モックの takt-mcp を遅らせる、または応答しない backend）で詳細 URL を直リンクし、ブラウザに最初のバイトが届くまでの時間と、期限後に「backend が応答しません」へ切り替わることを手で 1 回見る。時間の e2e はこの issue では置かない（下記）。
 
 ## 採らなかった案と理由
 
@@ -70,11 +87,19 @@
 - **存在チェックを `app/runs/[slug]/layout.tsx` に移す**：同じセグメントの `loading.tsx` は layout を包まないので 404 は保てるが、layout の await が応答を止めるので読み込み表示は出ず、詳細を page へ渡す手段（context か二重取得）も要る。採らない。
 - **ルートの `loading.tsx` を残し、route group で詳細だけ外す**：ルート直下の `loading.tsx` は route group の下も含め、`app/` のすべての children を包む。詳細を外すにはルートの `loading.tsx` を消すしかない。
 
+## 不正な ID・例外・期限超過の状態（main との比較）
+
+ここでの「main」は、この issue が戻そうとしている #315 より前の main（ルートの `loading.tsx` が無い状態）を指す。いまの `origin/main` は #315 の後で `loading.tsx` があり、不正 ID と例外は fallback が先に流れて 200、期限超過は fallback の有無にかかわらず 200 になる。前者の 200 はこの issue が直す回帰で、後者の 200 は正しい。
+
+- **不正なゴール ID**（`/goals/not-a-uuid`）：backend が INVALID_ARGUMENT を返し、`unary.ts` はそれを写さずに投げ、ローダーも捕まえないので error.tsx（500）に落ちる。#315 より前の main と同じで、この issue では変えない。ID を 400 や 404 にする検証は範囲の外。
+- **想定外の例外**：同じく error.tsx（500）。#315 より前の main は Next の既定のエラー画面で 500 だった。状態は同じで、画面だけ日本語の error.tsx になる（#315 で入った）。この issue では変えない。最小の Next 16.4.6 アプリで、ルートの `loading.tsx` があると 200、無いと 500 になることを実測した（リポジトリの実装そのものでは未実測）。
+- **DEADLINE_EXCEEDED**：500 にはならない（main と同じ）。`unary.ts` が `BackendUnavailableError`（`failure: "no-response"`）に写し、3 つの詳細ローダーが捕まえて「backend が応答しません。読み取りが遅れている可能性があります。」を 200 で出す。deadline 超過は空白の終わりで、error.tsx の「もう一度読み込む」には落ちない。
+
 ## 確かめ方（e2e）
 
-新規 `e2e/tests/issue-429-status.spec.ts`。`../support/test` の `test`・`expect` と、`../support/fixture` の `PROJECT_NAME` を使う。
+新規 `e2e/tests/issue-429-status.spec.ts` に、**1 本だけ**置く。`../support/test` の `test`・`expect` と、`../support/fixture` の `PROJECT_NAME` を使う。
 
-### 1. 存在しない詳細は 404（共有の `stack`）
+### 存在しない詳細は 404（共有の `stack`）
 
 ```ts
 const targets = [
@@ -87,28 +112,16 @@ for (const path of targets) {
   expect(response?.status(), path).toBe(404);
   await expect(page.getByRole("heading", { name: "ページが見つかりません" })).toBeVisible();
   await expect(page.getByRole("link", { name: "概要に戻る" })).toBeVisible();
-  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(page.getByText("読み込んでいます…", { exact: true })).toHaveCount(0);
 }
 ```
 
-- 確かめること：存在しない run・ゴール・タスクの詳細 URL が **404** を返す。画面はアプリの日本語の not-found（見出しと「概要に戻る」）で、読み込み中の表示は出ていない。状態の検査が本体で、見出しとリンクは、Next の既定の英語の 404 ではなくアプリの画面であることを固定する。
+- 確かめること：存在しない run・ゴール・タスクの詳細 URL が **404** を返す。画面はアプリの日本語の not-found（見出しと「概要に戻る」）で、読み込み中の文言は出ていない。状態の検査が本体で、見出しとリンクは、Next の既定の英語の 404 ではなくアプリの画面であることを固定する。
 - 識別子：run とタスクは fixture に無い名前、ゴールは UUID の形で存在しない ID。ルートの `loading.tsx` を外した状態で 3 つとも 404 になることを実測済み。
 - `page.goto` は読み込みの完了まで待つ。Suspense 境界が無いので、返った時点で本文は描き終わっている。
+- 読み込み表示は `getByRole("status")` ではなく「読み込んでいます…」の文言で見る。文言の方が、何を検査しているかが残る。
 
-### 2. 読み込み中の画面は残る（`isolatedStack`）
-
-```ts
-await stack.setMockDelay(3000);
-const response = await page.goto(`${stack.webUrl}/activity`, { waitUntil: "commit" });
-expect(response?.status()).toBe(200);
-await expect(page.getByRole("status")).toHaveText("読み込んでいます…");
-await expect(page.getByRole("heading", { name: "アクティビティ", level: 1 })).toBeVisible({ timeout: 15_000 });
-await expect(page.getByRole("status")).toHaveCount(0);
-```
-
-- 確かめること：読み込み中の画面（日本語）が `/activity` で先に出て、内容に置き換わる。ページは存在するので 200 が正しい。
-- `waitUntil: "commit"` が要る。既定の `load` は stream の終わりまで待つので、fallback はもう消えている。
-- `setMockDelay` は共有のモックの遅延を変えるため、`isolatedStack` を使う。3 秒は実測で使った値で、layout の GetOverview と `getActivity` がそれぞれ遅れる。内容の到着に備えて待ち時間は 15 秒にする。
+**読み込み表示の e2e は、この issue では置かない。** `/activity` の `loading.tsx` が先に出ることは実測済み（上の「実測したこと」）で、この issue の変更対象は詳細の状態だから。時間を含む読み込み表示の e2e は別件にする。
 
 実行は `make e2e-build` のあと `npm --prefix e2e test -- tests/issue-429-status.spec.ts`（`cd e2e && npx playwright test tests/issue-429-status.spec.ts` でも同じ）。
 
@@ -118,8 +131,9 @@ await expect(page.getByRole("status")).toHaveCount(0);
 
 - **直リンク・クローラ・監視**：存在しない詳細は 404 に戻る。200 の soft 404 が消え、`noindex` に頼らず状態で区別できる。`notFound()` の `noindex` は残る。
 - **存在する詳細**：200 のまま。fallback を先に送らないので TTFB は詳細 RPC の完了まで遅れるが、内容の到着時刻はほぼ変わらない。クライアント遷移では前の画面が残り、「読み込んでいます…」は出ない。リンク内の pending 表示が必要なら、`useLinkStatus`（`loading.js` の無い動的な行き先に公式が勧めている）を別 issue で足せる。今回は扱わない。
+- **詳細の待ち**：直リンク・再読み込みでは、取得が終わるまで本文が無い（ブラウザ自身の読み込み表示だけ）。空白の上限は、詳細の取得だけで run 50 秒・goal/task 30 秒。layout の GetOverview が応答しない病的な場合は、それぞれ 80 秒・60 秒。クライアント遷移では前の画面が残る。
 - **一覧**：`/activity` と `/conversations` は今までどおり「読み込んでいます…」を出す。`/`、`/goals`、`/projects`、`/decisions` は layout の状態から即座に描くので `loading.tsx` を置かない。layout の GetOverview が遅いときはどのページも読み込み中の画面が出ないが、これは今も同じ（`loading.js` は layout を包めない）。
-- **404・エラーの画面**：`not-found.tsx` と `error.tsx` はルートのまま変えない。詳細で想定外の例外が出たとき、いまは fallback が先に流れて 200 になるが、変更後は応答の開始前に落ちれば 500 になり得る（未確認）。
+- **404・エラーの画面**：`not-found.tsx` と `error.tsx` はルートのまま変えない。詳細で想定外の例外が出たときは、ルートの fallback が先に流れないので 500 になり、error.tsx の日本語の画面になる（コードで確認。最小の Next 16.4.6 アプリでも 500 を実測）。期限超過（DEADLINE_EXCEEDED）は 500 にならず、200 の「backend が応答しません」になる（main と同じ）。
 - **既存の撮影 spec**：`e2e/screenshot/capture.spec.ts:43` は 0 件の状態の詳細に 404 を期待している。いまの 200 とは食い違う（実行はしていない）。変更後は期待どおりになる。
 - **範囲の外**：proto、backend、API、保存データ、監視の設定は変えない。`measurePage` の計測点も変えない。
 
@@ -130,7 +144,10 @@ await expect(page.getByRole("status")).toHaveCount(0);
 ## 未確認
 
 - `next dev` での同じ挙動（実測は `next build` + `next start`）。
-- 詳細で想定外の例外が 500 になるか。
+- リポジトリの実装そのもので、詳細の例外が 500 になることの実測（コードでは error.tsx に落ちることを確認。最小の Next 16.4.6 アプリでは 500 を実測）。
+- 不正なゴール ID の 200/500 の実測（INVALID_ARGUMENT が throw と同じ経路であることから推定。最小アプリの throw では、loading あり 200・なし 500 を確認）。
 - どのルートにも一致しない URL の状態が、`loading.tsx` の有無で変わるか。
+- 直リンクの空白の実時間（deadline の定数から上限を出しただけで、時間は測っていない）。
+- `error.tsx` の「もう一度読み込む」は `reset` で、サーバーの取得をやり直すか（Next 16 の `retry` との違い）。この issue では変えず、#430 で確かめる。
 - 撮影 spec の現状の成否（実行していない）。
 - TTFB の実際の差（状態だけを実測し、時間は測っていない）。
