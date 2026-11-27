@@ -45,15 +45,19 @@ const runWrapper = (args: string[], options: RunOptions = {}): Run => {
   const err: Buffer[] = [];
   const waiters: (() => void)[] = [];
   const wake = () => waiters.splice(0).forEach((resolve) => resolve());
-  if (options.closeStdout) child.stdout.destroy();
+  const childStdout = child.stdout;
+  const childStderr = child.stderr;
+  assert.ok(childStdout, "標準出力の読み口がある");
+  assert.ok(childStderr, "標準エラーの読み口がある");
+  if (options.closeStdout) childStdout.destroy();
   else
-    child.stdout.on("data", (chunk: Buffer) => {
+    childStdout.on("data", (chunk: Buffer) => {
       out.push(chunk);
       wake();
     });
-  if (options.closeStderr) child.stderr.destroy();
+  if (options.closeStderr) childStderr.destroy();
   else
-    child.stderr.on("data", (chunk: Buffer) => {
+    childStderr.on("data", (chunk: Buffer) => {
       err.push(chunk);
       wake();
     });
