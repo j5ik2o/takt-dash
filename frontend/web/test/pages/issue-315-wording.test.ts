@@ -49,7 +49,7 @@ const documentOf = (html: string): Document => new JSDOM(html).window.document;
 const normalize = (text: string | null | undefined): string => (text ?? "").replace(/\s+/g, " ").trim();
 const noop = (): void => {};
 // 操作の意図を受けて受理する。DecisionActionsView の onAction は boolean を返す。
-const acceptAction = (_intent: DecisionIntent): boolean => true;
+const acceptAction: (intent: DecisionIntent) => boolean = () => true;
 
 // ---------------------------------------------------------------------------
 // 判断待ち（D4〜D7）
