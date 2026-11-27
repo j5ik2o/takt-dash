@@ -69,29 +69,60 @@ open PR 15 件のコメントとレビューを取得し、v1 の判定とこの
 
 1. `a` は対象より後である（`a.createdAt > c.updatedAt`。対象の最終編集より後）。
 2. `a` は承認できる人による。作成者（`pr_author`）、または Codex の確認コメント、または作成者が Bot のときの OWNER / MEMBER / COLLABORATOR。**作成者以外の第三者のコメントは承認に数えない**（いまも数えていない）。
-3. `a` は自動投稿ではない。既知の自動投稿パターン（`ignored_auto_report`）に当たるコメントは、項目にも承認にも数えない。**いまは作成者名義の自動投稿が承認として通るので、ここを塞ぐ。**
-4. `a` は**確認の語**を含む。`確認しました` / `確認済み` / `承知しました` / `了解しました` / `対応しました` / `修正しました` / `対応済み` / `acknowledged` / `addressed` / `fixed`（英語は単語境界、大小文字を問わない）。コードフェンス（3 つのバッククォートで囲んだ部分）の中の語は数えない。
+3. `a` は自動報告ではない。自動報告は判定の前に候補から外す（「判定の順序」）。確認の語や 20 文字以上の引用を含んでいても、承認にしない。**いまは作成者名義の自動投稿が承認として通るので、ここを塞ぐ。**
+4. `a` は**確認の語**を含む。`確認しました` / `確認いたしました` / `確認済み` / `承知しました` / `了解しました` / `対応しました` / `対応いたしました` / `対応済み` / `対処しました` / `修正しました` / `直しました` / `acknowledged` / `addressed` / `fixed`（英語は単語境界、大小文字を問わない）。ただし、確認の語の**直前**に否定の語（`未`、`まだ`、`未だに`、`not`、`not yet`、`un-`）が付く場合と、直後が疑問（`か` のあとに `?`・`？`・`。` が続く場合、または文末の `か`）の場合は数えない。`未確認しました`、`確認しましたか？`、`未対応済み`、`not fixed` は承認にならない。`対処しました`、`直しました`、`対応いたしました`、`確認いたしました` は v1 が受けていた正当な語なので一覧に残す。コードフェンス（バッククォート 3 つ、またはチルダ 3 つで囲んだ部分）の中の語は数えない。
 5. `a` は**対象を指す参照**を含む。次のいずれか。
-   - 対象の URL（`https://github.com/o/r/pull/N#issuecomment-123` や `#pullrequestreview-4`）そのもの、またはそのアンカー（`#issuecomment-123` / `#pullrequestreview-4`）。
-   - 対象本文の正規化後の連続部分で **20 文字以上**。引用符の有無は問わない。実装は、`a` の正規化後の 20 文字の窓をすべて取り、`c` の正規化後の本文に含まれる窓が 1 つでもあれば一致とする。
+   - 対象の URL（`https://github.com/o/r/pull/N#issuecomment-123` や `#pullrequestreview-4`）そのもの、またはそのアンカー（`#issuecomment-123` / `#pullrequestreview-4`）。**URL とアンカーは本文の長さを問わず、そのまま承認に使える。**
+   - 対象本文の正規化後の連続部分で **20 文字以上**。引用符の有無は問わない。実装は、`a` の正規化後の 20 文字の窓をすべて取り、`c` の正規化後の本文に含まれる窓が 1 つでもあれば一致とする。**20 文字の下限は、この本文の引用のときにだけ掛かる。**
 
-正規化は、HTML コメント（`<!-- ... -->`）と HTML タグを空白にし、行頭の `>` を外し、Markdown の強調・見出し・表の記号（`*`、`_`、バッククォート、`#`、`>`、`|`）を空白にし、空白を 1 つに畳んで前後を除き、ASCII を小文字にする。コードフェンスは残す（コードの引用は正当な参照なので消さない）。確認の語の判定だけは、先にコードフェンスを空白にする。
+正規化は、HTML コメント（`<!--` から `-->` まで。途中に `>` があってもそこで切らない）と HTML タグを空白にし、行頭の `>` を外し、Markdown の強調・見出し・表の記号（`*`、`_`、バッククォート、`#`、`>`、`|`）を空白にし、空白を 1 つに畳んで前後を除き、ASCII を小文字にする。コードフェンス（バッククォート 3 つ、またはチルダ 3 つ）は残す（コードの引用は正当な参照なので消さない）。確認の語の判定だけは、先に両方のフェンスを空白にする。**URL とアンカーはこの正規化を通さない。** `#` を空白に落とす正規化を通すと、`#issuecomment-123` が本文側で消えて一致しなくなるため、正規化前の本文（大小文字だけ揃えたもの）に対して照合する。
 
-補足すると、この条件は「明示の印」と「対象への参照」の連言である。参照だけでは #131 の失敗報告が通り、確認の語だけでは対象を指せない（後述）。20 文字は、実測で観測した最短の正当な引用（`Action not completed` の 20 文字）に合わせた。これより短いと、一般的な語が偶然一致しやすくなる。
+補足すると、この条件は「明示の印」と「対象への参照」の連言である。参照だけでは #131 の失敗報告が通り、確認の語だけでは対象を指せない（後述）。20 文字は、実測で観測した最短の正当な引用（`Action not completed` の 20 文字）に合わせた。これより短いと、一般的な語が偶然一致しやすくなる。URL・アンカーにはこの下限がないので、対象本文が 20 文字未満でも、URL かアンカーを貼れば承認できる。
+
+### 判定の順序（自動報告を先に外す）
+
+自動報告は、承認の条件を 1 つずつ当てる前の**候補選別**で外す。順序を固定しないと、確認の語と引用を含む失敗報告が自動報告の除外を通り抜け、条件 4 と 5 を満たして通ってしまう。
+
+1. 取得したトップレベルコメントとレビュー本文のすべてから、自動報告を除く。
+2. 自動報告は、既存の `ignored_auto_report`（v1 の著者＋本文パターン。CodeRabbit の要約など）に、**TAKT の失敗報告の種別**を足したものである。既存のパターン一覧は、いまの項目の選び方を変えないためにそのまま使う。新しく足すのは次の 2 つの種別だけで、どちらも本文の語句（`対応しました`、`確認しました` など）では判定しない。
+   - `<!-- takt:auto-report -->` のマーカーを持つ投稿。TAKT が付ける種別マーカーで決まる。
+   - 著者が作成者（`pr_author`）で、本文全体が 1 つのコードフェンスだけの投稿（#131 の実測形）。著者と本文の形で決まる。
+3. 残った候補から、項目（`is_item`）と承認の候補（`is_acknowledger`）を選ぶ。
+4. 承認は、残った候補のうち条件 1〜5 をすべて満たすものだけを数える。
+
+自動報告は項目にも承認にもならない（I3）。TAKT の失敗報告が将来フェンスの外に文を足すときは、`<!-- takt:auto-report -->` を付けることを TAKT 側の移行条件にする（「適用と移行」）。Codex の利用上限の通知は `ignored_auto_report` に当たらないので、これまでどおり未承認の項目として残り、人が確認するまで赤になる。
 
 ### 判定の式（jq の形）
 
 ````jq
+def ack_words:
+  "確認しました|確認いたしました|確認済み|承知しました|了解しました|対応しました|対応いたしました|対応済み|対処しました|修正しました|直しました|\\backnowledged\\b|\\baddressed\\b|\\bfixed\\b";
+
+def ack_hits($s):
+  [ $s | match("(?i)(" + ack_words + ")"; "g") ];
+
+# 確認の語の直前の否定と、直後の疑問。直前だけを見るので、
+# 「Action not completed」を引用した正当な確認まで巻き込まない。
+def negated($s; $m):
+  ($s[([0, ($m.offset - 12)] | max):$m.offset]
+   | test("(?i)(未|まだ|未だに?|\\bnot\\b|\\bnot\\s+yet\\b|\\bun-?)\\s*$"))
+  or ($s[($m.offset + ($m.string | length)):($m.offset + ($m.string | length) + 3)]
+      | test("^\\s*(か\\s*[?？。]|[?？]|か\\s*$)"));
+
 def ack_phrase:
   (.body // "")
   | gsub("(?s)```.*?```"; " ")
-  | test("(?i)(確認しました|確認済み|承知しました|了解しました|対応しました|修正しました|対応済み|\\backnowledged\\b|\\baddressed\\b|\\bfixed\\b)");
+  | gsub("(?s)~~~.*?~~~"; " ")
+  | ascii_downcase as $s
+  | (ack_hits($s)) as $hits
+  | (($hits | length) > 0)
+    and ([ $hits[] | select(negated($s; .) | not) ] | length > 0);
 
 def norm_text($body):
   $body
+  | gsub("(?s)<!--.*?-->"; " ")
   | split("\n")
   | map(gsub("^\\s*>\\s?"; ""))
-  | map(gsub("<!--[^>]*-->"; " "))
   | map(gsub("<[^>]+>"; " "))
   | map(gsub("[*_`#>|]+"; " "))
   | map(gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; ""))
@@ -99,35 +130,53 @@ def norm_text($body):
   | join("\n")
   | ascii_downcase;
 
+def raw_body:
+  (.body // "") | ascii_downcase;
+
 def windows($n):
   . as $s | [range(0; (($s | length) - $n + 1)) as $i | $s[$i:$i + $n]];
 
 def anchor($u):
   ($u // "" | split("#") | if length > 1 then "#" + .[-1] else "" end);
 
+# TAKT の失敗報告の種別。本文の語句ではなく、マーカーと著者・本文の形で決める。
+def takt_report:
+  (.body // "") as $b
+  | ($b | test("(?i)^\\s*<!--\\s*takt:auto-report\\s*-->"))
+    or (((.author.login // "") == ($pr_author // ""))
+        and ($b | test("(?s)^\\s*```[^\\n]*\\n.*\\n```\\s*$")));
+
+# 自動報告か。v1 の ignored_auto_report（著者＋本文パターン）に、
+# TAKT の失敗報告の種別を足す。既存の項目の選び方は変えない。
+def is_auto_report:
+  ignored_auto_report or takt_report;
+
 def references($target; $ack):
   norm_text($target.body) as $tb
   | norm_text($ack.body) as $b
+  | ($ack | raw_body) as $raw
   | (($target.url // "") as $u
-     | ($u != "" and ($b | contains($u | ascii_downcase)))
-       or (anchor($u) as $an | $an != "" and ($b | contains($an | ascii_downcase)))
+     | ($u != "" and ($raw | contains($u | ascii_downcase)))
+       or (anchor($u) as $an | $an != "" and ($raw | contains($an | ascii_downcase)))
        or ($b | any(windows(20)[]; . as $w | $tb | contains($w))));
 
-# 項目ごとの承認の探し方
-[ $items[]
-  | select(is_item)
-  | . as $item
-  | [ $items[]
-      | select(is_acknowledger)
-      | select(.createdAt > ($item.updatedAt // $item.createdAt))
-      | select(ignored_auto_report | not)
-      | select(ack_phrase and references($item; .))
-    ] as $acks
-  | select($acks | length == 0)
-]
+# 判定の順序: 先に自動報告を外し、残った候補だけで項目と承認を数える。
+$items as $all
+| ($all | map(select(is_auto_report))) as $reports
+| ($all - $reports) as $candidates
+| [ $candidates[]
+    | select(is_item)
+    | . as $item
+    | [ $candidates[]
+        | select(is_acknowledger)
+        | select(.createdAt > ($item.updatedAt // $item.createdAt))
+        | select(ack_phrase and references($item; .))
+      ] as $acks
+    | select($acks | length == 0)
+  ]
 ````
 
-`is_item` と `is_acknowledger` は v1 の `select` を分けただけである。`trusted_acknowledgement` は「Codex のコメントを項目から外す」ためだけに残し、**ほかの項目の承認としては、上の 4 と 5 を満たすときだけ**数える。これで「Codex の 1 つの `Acknowledged.` が全項目を承認する」穴も塞がる。
+`is_item` と `is_acknowledger` は v1 の `select` を分けただけである（自動報告の除外は `is_item` の中ではなく、その手前の `$candidates` で済ませる）。`trusted_acknowledgement` は「Codex のコメントを項目から外す」ためだけに残し、**ほかの項目の承認としては、上の 4 と 5 を満たすときだけ**数える。これで「Codex の 1 つの `Acknowledged.` が全項目を承認する」穴も塞がる。`is_auto_report` は v1 の `ignored_auto_report` に TAKT の種別判定を足しただけなので、Codex の明示の確認は自動報告に落ちない。
 
 ### 赤のときの案内
 
@@ -137,19 +186,19 @@ def references($target; $ack):
 ### 未承認のトップレベルコメント／レビュー要約
 - by <author> updated at <time>: <url>
   確認するには、返信にこの URL を含めるか、本文を 20 文字以上引用し、
-  「確認しました」などの語を添えてください。
+  「確認しました」などの語を添えてください（URL は長さを問いません）。
 
 自動投稿（TAKT の失敗報告など）は確認として数えません。
 ```
 
-URL をそのまま貼れるので、人が迷わない。TAKT の失敗報告に確認の語を入れない規約も、この案内と対で運用する（後述）。
+URL をそのまま貼れるので、人が迷わない。TAKT の失敗報告は種別で外れるので、失敗報告に確認の語を入れないという規約は要らない（後述）。
 
 ### 変えないこと
 
 - 未解決スレッドの判定（`isResolved`）は変えない。スレッドの返信は承認ではなく、解決（resolve）だけが関門を外す。
 - ステータスの context 名（`Check unresolved comments`）、公開方法、branch protection / ruleset は変えない。
 - GitHub API の呼び出しは増やさない。コメントとレビューはすでに取得しており、判定は手元の jq だけで完結する。
-- 自動投稿の既知パターン（CodeRabbit の要約など）の一覧は、この設計では変えない。Codex の利用上限の除外（`0a7037b`）は main で revert 済みなので、v2 には入れない。再投入するかは別 issue で決める。
+- 自動投稿として外す対象（CodeRabbit の要約、Codex の利用上限、TAKT の失敗報告など）は変えない。既存の `ignored_auto_report`（著者＋本文パターン）もそのまま使う。変えるのは当て方の一部で、TAKT の失敗報告は文面パターンではなく種別（`<!-- takt:auto-report -->` か、本文全体がコードフェンス）で外す（「判定の順序」）。Codex の利用上限の除外（`0a7037b`）は main で revert 済みなので、v2 には入れない。再投入するかは別 issue で決める。
 
 ## 採らなかった案と理由
 
@@ -160,7 +209,7 @@ URL をそのまま貼れるので、人が迷わない。TAKT の失敗報告�
 | URL だけ（引用を認めない） | #131 の実際の確認は URL を含まず、引用と「確認しました」だけだった。いまの緑を赤に戻す。運用も「必ず URL を貼る」に変わり、移行の負担が大きい。 |
 | スレッド返信があること | 対象はトップレベルの issue コメントとレビュー本文で、これらにスレッドは無い（レビューのスレッドは別の `reviewThreads` で、未解決ならすでに赤）。スレッド返信は解決（resolve）を意味しないので、承認の代わりにもならない。 |
 | 作成者のコメントを一切承認に数えない | Bot の要約や通知は解決（resolve）できないため、正当に確認しても永久に赤になる。除外リストを編集するしか解消手段が無くなる。 |
-| 自動投稿だけをパターンで除外する（TAKT の失敗報告を `ignored_auto_report` に足す） | 文面が変わると壊れる許可リストで、「内容によらず数えない」という要求に答えていない。リポジトリごとに TAKT の文面が違い、j5ik2o/ci の既定に入れると他リポジトリに副作用が出る。 |
+| 自動投稿の文面パターンに TAKT の失敗報告を足す | 文面が変わると壊れる許可リストで、「内容によらず数えない」という要求に答えていない。リポジトリごとに TAKT の文面が違い、j5ik2o/ci の既定に入れると他リポジトリに副作用が出る。種別（マーカー・全体フェンス）で外すのが本設計である。 |
 | リアクション（👍 など）を承認にする | 対象を指す情報が無く、誤クリックでも通る。GraphQL の `reactions` を新たに取る必要があり、API 呼び出しも増える。 |
 
 ## 適用と移行
@@ -188,14 +237,14 @@ v1 を直さない理由は、22 のすべてが `Check unresolved comments` を
 
 ### 移行の順
 
-1. **j5ik2o/ci の main に実装を入れる。** スクリプト、スモークテスト、README の例、`v2` 用の `ci_ref` 既定値。`quint` はこのリポジトリの対象外なので、モデルは takt-dash 側の設計に置く。
+1. **j5ik2o/ci の main に実装を入れる。** スクリプト、スモークテスト、README の例。`ci_ref` の既定は **v1 のまま**にし、v2 は明示されたときだけ使う。`quint` はこのリポジトリの対象外なので、モデルは takt-dash 側の設計に置く。
 2. **タグを切る前に、open PR の新旧比較を回す。** 22 リポジトリの open PR について、v1 の判定と提案の判定を並べ、差が 0 件であることを確認する（この文書の実測と同じ手順）。差があれば、その PR のコメントを読んで、引用の長さ・URL・確認の語のどれで落ちたかを分類し、誤って赤にしない条件を直してからタグを切る。
 3. **`v2` を切る。** `git tag -a v2 -m "review-thread-resolution: require an explicit acknowledgement" <main のコミット>`、`git push origin v2`。`uses: ...@v2` が解決できることを、砂場の 1 本で確かめる。
 4. **ci-gate-sandbox を v2 に上げる。** すでに機能ブランチを指している砂場で、無関係コメント・URL・引用・失敗報告の 4 例を実際の PR で流す。
-5. **takt-dash を v2 に上げる。** #134 の出所であり、TAKT の自動 PR が最も多い。1 週間（日次の schedule を 1 回以上含む）観察する。赤になった PR があれば、その理由が「本当に未承認」か「誤って赤」かを分類する。
+5. **takt-dash を v2 に上げる。** #134 の出所であり、TAKT の自動 PR が最も多い。先に TAKT が失敗報告へ `<!-- takt:auto-report -->` を付ける変更を入れる（付け忘れても、本文全体がコードフェンスなら種別で外れるが、フェンスの外に文を足す形に備える）。1 週間（日次の schedule を 1 回以上含む）観察する。赤になった PR があれば、その理由が「本当に未承認」か「誤って赤」かを分類する。
 6. **自動化の多い 1 リポジトリ（cqrs-es-example-java）を上げる。** 3 日観察する。
-7. **残りを 5 本ずつ上げる。** 各 PR は 2 行。マージ後に open PR のステータスが再評価されることを確認する。
-8. **最後に ci の README と v2 ワークフローの既定値を整え、v1 を「フォールバック」として案内する。** v1 の削除や廃止は、22 が v2 に移ってから別途決める。
+7. **残りを 5 本ずつ上げる。** 各 PR は 2 行で、`uses` と `ci_ref` を**同じ PR で** v2 に上げる。マージ後に open PR のステータスが再評価されることを確認する。
+8. **最後に ci の README を整え、v1 を「フォールバック」として案内する。** v2 ワークフローの `ci_ref` の既定が v1 のままであることも、ここで確認する。v1 の削除や廃止は、22 が v2 に移ってから別途決める。
 
 ### 呼び出し側の変更（各リポジトリ 2 行）
 
@@ -205,8 +254,8 @@ uses: j5ik2o/ci/.github/workflows/review-thread-resolution.yml@v2
 ci_ref: v2
 ```
 
-- 2 行は同じコミットで変える。`uses` だけ v2 にして `ci_ref: v1` のままだと、v2 のワークフローが v1 のスクリプトを checkout し、**古い判定のまま黙って動く**。`ci_ref` だけ v2 にすると、v1 のワークフローが v2 のスクリプトを動かす。どちらも避ける。
-- v2 のワークフローでは `ci_ref` の既定値を `v2` にする。`ci_ref` を書かない呼び出し側は v2 のスクリプトになる。
+- 2 行は**同じ PR** で変える。`uses` だけ v2 にして `ci_ref: v1` のままだと、v2 のワークフローが v1 のスクリプトを checkout し、**古い判定のまま黙って動く**。`ci_ref` だけ v2 にすると、v1 のワークフローが v2 のスクリプトを動かす。どちらも避ける。
+- `ci_ref` の既定は **v1 のまま**にする。v2 は明示的に `ci_ref: v2` を書いたときだけ使う。既定を v2 に動かすと、`uses` だけを上げたリポジトリがどちらの判定で動いたかを PR から読めなくなるため、既定は動かさない。`uses` と `ci_ref` を同じ PR で上げることを移行の必須手順にする。
 - 移行後に、`uses` の ref と `ci_ref` が一致しているかを 22 リポジトリについて監査する小さなスクリプトを ci に置く（GraphQL でファイルを読み、2 つの値を比べるだけ）。これは実装時の追加候補で、この設計では必須にしない。
 
 ### 戻し方
@@ -222,24 +271,30 @@ ci_ref: v2
 
 ## テストの観点
 
-`tests/review-thread-resolution-smoke.sh` の偽 `gh` を広げ、コメントの配列（作成者・本文・`createdAt`・`updatedAt`）を環境変数で差し替えられるようにする。既存の検査はそのまま残す。足す観点は次の 14 である。
+`tests/review-thread-resolution-smoke.sh` の偽 `gh` を広げ、コメントの配列（作成者・本文・`createdAt`・`updatedAt`）を環境変数で差し替えられるようにする。既存の検査はそのまま残す。足す観点は次の 20 である。
 
 1. 無関係な作成者コメント（「ありがとう」「別件です」）では通らない（#134 の核心）。
 2. TAKT の失敗報告（本文を引用し、コードフェンスで囲んだもの）では通らない。
-3. 対象の URL と確認の語で通る。
-4. 対象のアンカー（`#issuecomment-N` / `#pullrequestreview-N`）と確認の語で通る。
+3. 対象の URL と確認の語で通る（対象本文が 20 文字未満でも通る。URL は正規化前の本文で照合するので `#issuecomment-N` の `#` が消えない）。
+4. 対象のアンカー（`#issuecomment-N` / `#pullrequestreview-N`）と確認の語で通る（本文の長さを問わない）。
 5. 対象本文の 20 文字以上の引用と確認の語で通る（`Action not completed` の実例）。
 6. 確認の語だけで、参照が無ければ通らない。
 7. 参照だけで、確認の語が無ければ通らない。
 8. 別のコメントの URL では通らない（対象の URL / アンカーだけ）。
 9. 対象より前に投稿された確認では通らない。
 10. 対象の最終編集より前の確認では通らない。編集後に確認し直すと通る。
-11. コードフェンスの中の確認の語は数えない（`unacknowledged` のような部分一致もしない）。
-12. 作成者以外の第三者の確認は数えない。作成者が Bot の PR では、OWNER / MEMBER / COLLABORATOR の人間の確認だけ数える。
-13. #131 の実データをそのまま固定し、02:49:20 を含むと通り、02:48 までだと通らない（失敗報告だけでは通らない）。
-14. いま緑の PR が赤に戻らない。`event-store-adapter-java#871` の実データで緑を維持し、いま赤の `event-store-adapter-kotlin#926` と `event-store-adapter-rs#381` は赤のまま。open PR 15 件の新旧比較で差が 0 件。
+11. コードフェンス（3 つのバッククォート）の中の確認の語は数えない（`unacknowledged` のような部分一致もしない）。
+12. `~~~` のフェンスの中の確認の語も数えない。
+13. HTML コメントの除去は `<!--` から `-->` まで。コメントの中に `>` が含まれていても、そこで切れて引用の照合が崩れない。
+14. 確認の語の直前に否定（未・まだ・not・not yet・un-）が付く場合と、直後が疑問（`確認しましたか？`）の場合は通らない。`未確認しました` / `未対応済み` / `not fixed` を固定する。
+15. v1 が受けていた `対処しました` / `直しました` / `対応いたしました` / `確認いたしました` で通る（正当な緑を赤にしない）。
+16. TAKT の失敗報告の形（`<!-- takt:auto-report -->`、または本文全体が 1 つのコードフェンス）に確認の語と 20 文字以上の引用を足しても通らない。自動報告を先に外してから承認を数える順序を、作成者名義の「対応しました」＋引用で確かめる。
+17. 作成者以外の第三者の確認は数えない。作成者が Bot の PR では、OWNER / MEMBER / COLLABORATOR の人間の確認だけ数える。
+18. #131 の実データをそのまま固定し、02:49:20 を含むと通り、02:48 までだと通らない（失敗報告だけでは通らない）。
+19. いま緑の PR が赤に戻らない。`event-store-adapter-java#871` の実データで緑を維持し、いま赤の `event-store-adapter-kotlin#926` と `event-store-adapter-rs#381` は赤のまま。open PR 15 件の新旧比較で差が 0 件。
+20. `ci_ref` を省略した呼び出しは v1 のスクリプトを使い、`ci_ref: v2` を明示したときだけ v2 を使う。
 
-補足すると、14 はスモークテストに実データを置くというより、タグを切る前の使い捨ての比較スクリプトで確かめるのが向いている。固定のフィクスチャとしては 1〜13 を置き、14 は移行手順のチェックリストに残す。
+補足すると、19 はスモークテストに実データを置くというより、タグを切る前の使い捨ての比較スクリプトで確かめるのが向いている。固定のフィクスチャとしては 1〜18 と 20 を置き、19 は移行手順のチェックリストに残す。
 
 ## 影響と戻し方
 
@@ -248,8 +303,8 @@ ci_ref: v2
 上の 22 リポジトリ。すべてで `Check unresolved comments` が必須。v2 に上げたリポジトリは、次の評価から新しい判定になる。
 
 - 既存の open PR で、内容によらない作成者コメントだけに頼って緑だったものは、赤に戻る可能性がある。2026-11-27 の 15 件では 0 件だったが、将来の PR では起こり得る。
-- 新しく赤になった PR は、作成者が URL か 20 文字以上の引用に「確認しました」を添えて返信すれば緑になる。関門の要約にその案内を出す。
-- TAKT の失敗報告は承認に数えられなくなる。TAKT が失敗報告を投稿しても、関門は赤のまま人を待つ。これは #134 の意図どおりだが、TAKT の merge-prepare が同じ PR を再試行し続けるなら、失敗報告に確認の語を入れない・赤のまま止まる、という規約を TAKT 側のワークフローに足す必要がある（別 PR、未確認）。
+- 新しく赤になった PR は、作成者が URL（長さを問わない）か 20 文字以上の引用に「確認しました」を添えて返信すれば緑になる。関門の要約にその案内を出す。
+- TAKT の失敗報告は、種別（`<!-- takt:auto-report -->` か、本文全体がコードフェンス）で自動報告として外れるので承認に数えられない。TAKT が失敗報告を投稿しても、関門は赤のまま人を待つ。これは #134 の意図どおりである。失敗報告に確認の語を入れない規約は要らなくなった。代わりに、フェンスの外に文を足す形にするときは `<!-- takt:auto-report -->` を付ける必要がある（別 PR、未確認）。
 - SHA 固定の 2 つ（fraktor-rs、g2g）とブランチ固定の 1 つ（ci-gate-sandbox）は、v2 に上げるまで変わらない。同じ穴が残る。
 - 追加の API 呼び出し、保存データ、公開 API、ブランチ保護の設定変更は無い。GitHub のレート制限への影響も無い。
 
@@ -261,10 +316,10 @@ ci_ref: v2
 
 - I1（緑の意味）：関門が緑になるのは、未解決スレッドが 0 件で、かつすべての未承認項目に有効な承認があるときだけ。
 - I2（#134 の修正）：確認の語も対象への参照も無い作成者コメントは、決して承認にならない。
-- I3（自動投稿）：既知の自動投稿パターンに当たるコメントは、項目にも承認にもならない。TAKT の失敗報告は、引用を含んでいても承認にならない。
+- I3（自動報告）：自動報告（既知の自動投稿、`<!-- takt:auto-report -->` 付きの投稿、本文全体がコードフェンスだけの TAKT の失敗報告）は、項目にも承認の候補にもならない。確認の語や引用を含んでいても承認にならない。TAKT の失敗報告かどうかは著者と種別で決め、本文の語句では決めない。
 - I4（順序）：対象の最終編集より前のコメントは承認にならない。承認のあとで対象が編集されたら、承認し直しが必要。
 - I5（純関数）：判定は取得済みのコメントとレビューの集合だけで決まる。実行順、並行性、リトライ、ページ取得の順に依存しない。同じ入力なら同じ結論。
-- I6（正当な確認）：対象の URL / アンカーと確認の語、または 20 文字以上の引用と確認の語がそろえば、緑になる。
+- I6（正当な確認）：対象の URL / アンカーと確認の語（URL・アンカーは長さを問わない）、または 20 文字以上の引用と確認の語がそろえば、緑になる。
 - I7（API 不増）：判定のために新しい GitHub API 呼び出しをしない。
 - I8（設定不変）：ステータスの context 名と公開方法を変えない。branch protection / ruleset を触らない。
 
@@ -288,14 +343,16 @@ ci_ref: v2
 // コメントの投稿・編集という入力の並びに対して、公開される関門の結論が赤と緑の間を動くことだけ。
 //
 // STRICT = false はいまの v1（作成者名義のコメントが後ろにあれば内容によらず承認）。
-// STRICT = true が提案（対象への参照と確認の語の両方を要求）。
+// STRICT = true が提案（対象への参照と確認の語の両方を要求し、自動報告と否定付きの語は候補から外す）。
 module reviewThreadAck {
   const STRICT: bool
 
   type ItemId = int
-  // Unrelated: 無関係な一言。MarkerOnly: 確認の語だけ。QuoteOnly: 引用だけ（TAKT の失敗報告）。
+  // Unrelated: 無関係な一言。MarkerOnly: 確認の語だけ。QuoteOnly: 引用だけで確認の語がない投稿。
   // UrlAndMarker / QuoteAndMarker: 参照と確認の語の両方。
-  type AckKind = Unrelated | MarkerOnly | QuoteOnly | UrlAndMarker | QuoteAndMarker
+  // AutoReport: 自動報告（確認の語と引用を含むが、著者・種別で候補から外れる）。
+  // NegatedMarker: 否定付きの確認の語（未確認しました等）。
+  type AckKind = Unrelated | MarkerOnly | QuoteOnly | UrlAndMarker | QuoteAndMarker | AutoReport | NegatedMarker
   type Item = { updatedAt: int }
   type Ack = { item: ItemId, kind: AckKind, at: int }
 
@@ -306,6 +363,8 @@ module reviewThreadAck {
   pure val QUOTE_ONLY: AckKind = QuoteOnly
   pure val URL_AND_MARKER: AckKind = UrlAndMarker
   pure val QUOTE_AND_MARKER: AckKind = QuoteAndMarker
+  pure val AUTO_REPORT: AckKind = AutoReport
+  pure val NEGATED_MARKER: AckKind = NegatedMarker
 
   var clock: int
   var items: ItemId -> Item
@@ -331,9 +390,12 @@ module reviewThreadAck {
     postAck(1, QUOTE_ONLY),
     postAck(1, URL_AND_MARKER),
     postAck(1, QUOTE_AND_MARKER),
+    postAck(1, AUTO_REPORT),
+    postAck(1, NEGATED_MARKER),
     postAck(2, UNRELATED),
     postAck(2, QUOTE_ONLY),
     postAck(2, URL_AND_MARKER),
+    postAck(2, AUTO_REPORT),
     editItem(1),
     editItem(2),
   }
@@ -348,6 +410,7 @@ module reviewThreadAck {
   pure def isAfter(i: Item, a: Ack): bool = a.at > i.updatedAt
 
   // 提案: 対象への参照（URL か 20 文字以上の引用）と確認の語の両方がある。
+  // 自動報告と否定付きの確認の語は MARKED に入れない（候補選別で先に外れる）。
   pure def isStrictAck(i: Item, a: Ack): bool =
     isAfter(i, a) and MARKED.contains(a.kind)
 
@@ -434,6 +497,26 @@ module reviewThreadAck_test {
         after::postAck(1, after::URL_AND_MARKER),
       })
 
+  // 提案。自動報告は確認の語と引用を含んでいても、種別で先に外れて緑にならない。
+  run strictAutoReportStaysRedTest =
+    after::init
+      .then(after::postAck(2, after::URL_AND_MARKER))
+      .then(after::postAck(1, after::AUTO_REPORT))
+      .then(all {
+        assert(not(after::gateGreen)),
+        after::postAck(1, after::URL_AND_MARKER),
+      })
+
+  // 提案。否定付きの確認の語（未確認しました等）では緑にならない。
+  run strictNegatedMarkerStaysRedTest =
+    after::init
+      .then(after::postAck(2, after::URL_AND_MARKER))
+      .then(after::postAck(1, after::NEGATED_MARKER))
+      .then(all {
+        assert(not(after::gateGreen)),
+        after::postAck(1, after::URL_AND_MARKER),
+      })
+
   // 提案。URL と確認の語がそろえば緑になる。
   run strictUrlAndMarkerTurnsGreenTest =
     after::init
@@ -482,17 +565,31 @@ module reviewThreadAck_test {
 実行結果（quint 0.32.0）。
 
 - `quint typecheck reviewThreadAck.qnt` と `quint typecheck reviewThreadAck_test.qnt`: 成功。
-- `quint test reviewThreadAck_test.qnt`: 8 passing。
+- `quint test reviewThreadAck_test.qnt`: 10 passing。
 - `quint run reviewThreadAck.qnt --main=strict --invariant=noFalseGreen --max-steps=8 --max-samples=300`: 違反なし。
 - `quint run reviewThreadAck.qnt --main=legacy --invariant=noFalseGreen --max-steps=8 --max-samples=300`: 違反あり。反例は、項目 1 に引用だけ、項目 2 に無関係な一言を投稿した時点で `gateGreen` が真になる、という #134 と同じ形。
 
-モデルが表さないもの：GitHub のイベント配信、ステータスの公開遅れ（新しいコメントが来てから再評価されるまでの数秒）、API の失敗、ページ取得の順。これらはこの変更で変えない（v1 と同じ）ので、モデルの範囲外にした。
+モデルが表さないもの：GitHub のイベント配信、ステータスの公開遅れ（新しいコメントが来てから再評価されるまでの数秒）、API の失敗、ページ取得の順。これらはこの変更で変えない（v1 と同じ）ので、モデルの範囲外にした。文字列の正規化（URL の `#`、HTML コメントの `-->`、`~~~` のフェンス）と 20 文字の下限も、モデルではなく jq の実装とスモークテストで確かめる。
+
+## 改訂の記録（レビュー 2 回目で直した 7 点）
+
+| 指摘 | 直した場所 | どう直したか |
+| --- | --- | --- |
+| 高1. URL・アンカーが正規化で一致しない | 「採用する承認の条件」5、正規化の段落、判定の式の `raw_body` / `references` | URL とアンカーは正規化前の本文（大小文字だけ揃える）で照合する。`#` を空白に落とす `norm_text` を通さない。 |
+| 高2. 失敗報告が確認の語＋引用で承認になる | 条件 3、「判定の順序」、jq の `$candidates`、I3 | 自動報告を先に候補から外し、残った候補だけで項目と承認を数える。TAKT の失敗報告は文面ではなく、`<!-- takt:auto-report -->` か「著者が作成者で本文全体がコードフェンス」という種別で決める。Codex の利用上限は従来どおり項目に残す。 |
+| 中1. 否定文が確認語に当たる | 条件 4、`ack_phrase` / `negated` | 確認の語の直前に `未` / `まだ` / `not` / `un-` などが付く場合と、直後が疑問（`確認しましたか？`）の場合は数えない。`対処しました` / `直しました` / `対応いたしました` / `確認いたしました` を一覧に足す。 |
+| 中2. 本文が 20 文字未満だと承認できない | 条件 5、正規化の段落、赤のときの案内、I6 | URL・アンカーは長さを問わず承認に使えると明記。20 文字の下限は本文の引用だけに掛ける。 |
+| 中3. `ci_ref` の既定を v2 にすると黙って v1 判定になる | 移行の順 1・5・7・8、呼び出し側の変更 | `ci_ref` の既定は v1 のまま。v2 は明示したときだけ。`uses` と `ci_ref` を同じ PR で上げることを必須手順にした。 |
+| 低1. `>` を含む HTML コメントで除去が崩れる | 正規化の段落、`norm_text` | 除去の規則を `<!--` から `-->` までに直した（途中の `>` で切らない）。 |
+| 低2. `~~~` のフェンスを除去していない | 条件 4、`ack_phrase` | 3 連バッククォートに加えて `~~~` のフェンスも空白にする。 |
+
+テストの観点には、3・4（URL / アンカーの長さと `#`）、12・13（`~~~` と HTML コメント）、14・15（否定と v1 の語）、16（自動報告の順序）、20（`ci_ref` の既定）を足した。Quint には `AutoReport` と `NegatedMarker` の種別を足し、どちらも緑にならないことを 2 本のテストで確かめた。
 
 ## 未確認のこと
 
 - 手元の clone のタグ `v1` が `db3bfd0` を指す理由。リモートの `v1` が過去に付け替えられたのか、手元だけで付けたのかは分からない。
-- TAKT の merge-prepare が、赤のまま止まる挙動を受け入れられるか。失敗報告に確認の語を入れない規約を、どのワークフロー（takt-dash の `.takt/` か、takt 本体か）に足すかは未確認。
+- TAKT の merge-prepare が、赤のまま止まる挙動を受け入れられるか。失敗報告へ `<!-- takt:auto-report -->` を付ける変更を、どのワークフロー（takt-dash の `.takt/` か、takt 本体か）に入れるかは未確認。マーカーが付くまでは、本文全体がコードフェンスの旧来の形だけを種別で外せる。
 - 22 リポジトリのすべてを v2 に上げるか、SHA 固定の 2 つも同時に上げるかは、オーナーの判断。
 - レビューの `updatedAt` が、レビュー本文の編集でコメントと同じように進むかは、GraphQL の実データで確認していない（コメントでは確認済み）。
 - 2026-11-27 の open PR 15 件は、その日のスナップショットである。タグを切る前に同じ比較をもう一度回す。
-- `ignored_auto_report` の既知パターンが、今後も Codex / CodeRabbit の通知を十分に覆うかは、別 issue の範囲。
+- 既存の `ignored_auto_report` の本文パターンが、今後も Codex / CodeRabbit の通知を十分に覆うかは、別 issue の範囲である。
