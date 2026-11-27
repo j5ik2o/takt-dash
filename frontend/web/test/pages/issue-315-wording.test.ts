@@ -40,6 +40,7 @@ import {
   buildMergeAction,
   submitDecisionAction,
   toDecisionResult,
+  type DecisionIntent,
   type DecisionResult,
 } from "../../src/state/decision-actions.ts";
 import { formatClock } from "../../src/state/format.ts";
@@ -47,6 +48,8 @@ import { formatClock } from "../../src/state/format.ts";
 const documentOf = (html: string): Document => new JSDOM(html).window.document;
 const normalize = (text: string | null | undefined): string => (text ?? "").replace(/\s+/g, " ").trim();
 const noop = (): void => {};
+// 操作の意図を受けて受理する。DecisionActionsView の onAction は boolean を返す。
+const acceptAction = (_intent: DecisionIntent): boolean => true;
 
 // ---------------------------------------------------------------------------
 // 判断待ち（D4〜D7）
@@ -95,7 +98,7 @@ const renderActions = (decision: PendingDecision, dialog: DialogKind | null): st
       disconnected: false,
       dialogTarget: null,
       onTextChange: noop,
-      onAction: noop,
+      onAction: acceptAction,
     }),
   );
 
