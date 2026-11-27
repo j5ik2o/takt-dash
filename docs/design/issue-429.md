@@ -52,17 +52,18 @@
 
 `/`、`/projects`、`/decisions` に置かない理由：page 自身が RPC を await しない（`LiveOverview`、`ProjectsLoader` は要求内で共有した `loadServerState()`、`LiveDecisions` は client component）。layout の GetOverview は `loading.js` では包めないので、置いても効かない。`/runs` と `/tasks` は詳細だけ。
 
-### 詳細を開いた直後に何が出るか、空白の上限
+### 詳細を開いた直後に何が出るか、待ち時間の上限
 
 詳細には `loading.tsx` も `<Suspense>` も置かない。したがって、応答の最初のバイトは、存在チェック（`getRunDetail`・`getGoalDetail`・`getTaskDetail`）が終わるまで来ない。待っている間に出るものは、開き方で変わる。
 
 | 開き方 | 待っている間に出るもの |
 | --- | --- |
-| クライアント遷移（一覧・概要からリンクを踏む） | 前の画面がそのまま残る（Next は新しい RSC が届くまで前の画面を保つ）。リンク内の pending 表示は出さない。 |
+| 一覧・概要のリンクを踏む（ふだんの操作） | 詳細への入り口のリンクは Next の `Link` ではなく `<a>` である（概要の run 詳細は `frontend/web/src/components/overview-content.tsx:277`。ゴール一覧・プロジェクト・ゴール詳細・タスク詳細の run へのリンクも `<a>`）。クライアント遷移にならないので前の画面は残らず、ブラウザ自身の読み込み表示（タブのスピナー）だけが出て、本文は空白。 |
+| クライアント遷移（Next の `Link` で詳細を開く） | 前の画面がそのまま残る（Next は新しい RSC が届くまで前の画面を保つ）。リンク内の pending 表示は出さない。タスク詳細の「ゴール詳細に戻る」は `Link`（`frontend/web/src/components/task-detail-content.tsx:27`）なので、ゴール詳細へ戻るときはこちらになる。 |
 | 直リンク・再読み込み | ブラウザ自身の読み込み表示（タブのスピナー）だけ。本文は空白。 |
-| 取得が終わった後 | 存在すれば内容、無ければ日本語の not-found（404）、想定外の例外なら error.tsx（500）、期限超過なら「backend が応答しません」の 200。 |
+| 取得が終わった後 | 存在すれば内容、無ければ日本語の not-found（404）、想定外の例外なら error.tsx（500）、期限超過なら「backend が応答しません」の 200（前に読めたゴール・タスクでは、前回の内容に切断の通知。下の「不正な ID・例外・期限超過の状態」）。 |
 
-**空白の上限**は deadline で決まる。詳細の取得だけで、run は最大 50 秒、goal/task は最大 30 秒（`frontend/web/src/grpc/client.ts` の `RUN_DETAIL_DEADLINE_MS = 50_000` と `DEFAULT_UNARY_DEADLINE_MS = 30_000`）。期限を過ぎると `BackendUnavailableError`（`failure: "no-response"`）になり、ローダーが「backend が応答しません。読み取りが遅れている可能性があります。」を返すので、空白はそこで終わる（500 にはしない。下の「不正な ID・例外・期限超過の状態」）。これに、ルート layout の `loadServerState()`（GetOverview、同じ 30 秒）の待ちが直列に重なる。backend が接続を受け付けたまま応答しない病的な場合は、run 80 秒・goal/task 60 秒。layout の待ちは変更前から同じで、`loading.js` では包めない（この issue では変えない）。
+**待ち時間の上限**は deadline で決まる。詳細の取得だけで、run は最大 50 秒、goal/task は最大 30 秒（`frontend/web/src/grpc/client.ts` の `RUN_DETAIL_DEADLINE_MS = 50_000` と `DEFAULT_UNARY_DEADLINE_MS = 30_000`）。期限を過ぎると `BackendUnavailableError`（`failure: "no-response"`）になり、ローダーが「backend が応答しません。読み取りが遅れている可能性があります。」を返すので、取得の待ちはそこで終わる（500 にはしない。下の「不正な ID・例外・期限超過の状態」）。これに、ルート layout の `loadServerState()`（GetOverview、同じ 30 秒）の待ちが直列に重なる。backend が接続を受け付けたまま応答しない病的な場合は、run 80 秒・goal/task 60 秒。ここで言う 80 秒・60 秒は gRPC の期限の合計で、描画の時間と、ブラウザから Web サーバーまでの通信は含まない。利用者が見る空白時間の上限は、この合計に描画と通信の分だけ加わる（実時間は測っていない。下の「未確認」）。layout の待ちは変更前から同じで、`loading.js` では包めない（この issue では変えない）。
 
 deadline は変えない。根拠は次の 3 つ。
 
@@ -76,7 +77,7 @@ deadline は変えない。根拠は次の 3 つ。
 
 **日本語の待ち表示は、`notFound()` を使わないページにだけ置く。** 具体的には `/activity` と `/conversations` のセグメントにだけ `loading.tsx` を置き、詳細には置かない。詳細に局所の `<Suspense>` を置くと、fallback が存在チェックより先に同じ応答へ流れ、HTTP が 200 に戻る（ルートの `loading.tsx` で実測したのと同じ仕組み）。存在チェックの後に置いても、その時点で詳細のデータは取得済みで、待つものが無い。存在チェックそのものが詳細のデータ取得なので、詳細では fallback を出す余地が無い。HTTP の状態を正しくすることを優先する（issue の「存在しないものを 404 で返すは変えない」）。
 
-**測り方**：上限は上の定数から決まる。実装後、backend の応答を遅らせた状態（モックの takt-mcp を遅らせる、または応答しない backend）で詳細 URL を直リンクし、ブラウザに最初のバイトが届くまでの時間と、期限後に「backend が応答しません」へ切り替わることを手で 1 回見る。時間の e2e はこの issue では置かない（下記）。
+**測り方**：上限は上の定数から決まる。実装後、backend の応答を遅らせた状態（モックの takt-mcp を遅らせる、または応答しない backend）で、まだ取得していない詳細の URL を直リンクし、ブラウザに最初のバイトが届くまでの時間と、期限後に「backend が応答しません」へ切り替わることを手で 1 回見る（一度開いた詳細では、前回の内容に切断の通知が出る側になる）。時間の e2e はこの issue では置かない（下記）。
 
 ## 採らなかった案と理由
 
@@ -93,7 +94,7 @@ deadline は変えない。根拠は次の 3 つ。
 
 - **不正なゴール ID**（`/goals/not-a-uuid`）：backend が INVALID_ARGUMENT を返し、`unary.ts` はそれを写さずに投げ、ローダーも捕まえないので error.tsx（500）に落ちる。#315 より前の main と同じで、この issue では変えない。ID を 400 や 404 にする検証は範囲の外。
 - **想定外の例外**：同じく error.tsx（500）。#315 より前の main は Next の既定のエラー画面で 500 だった。状態は同じで、画面だけ日本語の error.tsx になる（#315 で入った）。この issue では変えない。最小の Next 16.4.6 アプリで、ルートの `loading.tsx` があると 200、無いと 500 になることを実測した（リポジトリの実装そのものでは未実測）。
-- **DEADLINE_EXCEEDED**：500 にはならない（main と同じ）。`unary.ts` が `BackendUnavailableError`（`failure: "no-response"`）に写し、3 つの詳細ローダーが捕まえて「backend が応答しません。読み取りが遅れている可能性があります。」を 200 で出す。deadline 超過は空白の終わりで、error.tsx の「もう一度読み込む」には落ちない。
+- **DEADLINE_EXCEEDED**：500 にはならない（main と同じ）。`unary.ts` が `BackendUnavailableError`（`failure: "no-response"`）に写し、3 つの詳細ローダーが捕まえて 200 で出す。run は、前回の取得結果があればその内容の上に「backend が応答しません。読み取りが遅れている可能性があります。」を出す（`run-detail-loader.tsx:44-50`）。ゴールとタスクは通知が異なり、前回の取得結果があれば「最新の状態を取得できません。前回取得した内容を表示しています。」を付けてその内容を表示する（`goal-detail-loader.tsx:44-49`、`task-detail-loader.tsx:55-63`、`live-goal-detail.tsx:56-60`）。前回の結果が無いときだけ「backend が応答しません。読み取りが遅れている可能性があります。」を出す。この文面を手で確かめるときは、まだ取得していない詳細を開く（前回の結果は Web サーバーのプロセスが覚えており、一度開いた詳細では切断の通知の側になる）。deadline 超過は取得の待ちの終わりで、error.tsx の「もう一度読み込む」には落ちない。
 
 ## 確かめ方（e2e）
 
@@ -130,10 +131,10 @@ for (const path of targets) {
 ## 影響
 
 - **直リンク・クローラ・監視**：存在しない詳細は 404 に戻る。200 の soft 404 が消え、`noindex` に頼らず状態で区別できる。`notFound()` の `noindex` は残る。
-- **存在する詳細**：200 のまま。fallback を先に送らないので TTFB は詳細 RPC の完了まで遅れるが、内容の到着時刻はほぼ変わらない。クライアント遷移では前の画面が残り、「読み込んでいます…」は出ない。リンク内の pending 表示が必要なら、`useLinkStatus`（`loading.js` の無い動的な行き先に公式が勧めている）を別 issue で足せる。今回は扱わない。
-- **詳細の待ち**：直リンク・再読み込みでは、取得が終わるまで本文が無い（ブラウザ自身の読み込み表示だけ）。空白の上限は、詳細の取得だけで run 50 秒・goal/task 30 秒。layout の GetOverview が応答しない病的な場合は、それぞれ 80 秒・60 秒。クライアント遷移では前の画面が残る。
+- **存在する詳細**：200 のまま。fallback を先に送らないので TTFB は詳細 RPC の完了まで遅れるが、内容の到着時刻はほぼ変わらない。Next の `Link` で開くクライアント遷移では前の画面が残り、「読み込んでいます…」は出ないが、一覧・概要から詳細を開くリンクは `<a>` なので、ふだんの操作はこれではない（タスク詳細からゴール詳細へ戻るときは `Link`）。リンク内の pending 表示が必要なら、`useLinkStatus`（`loading.js` の無い動的な行き先に公式が勧めている）を別 issue で足せる。今回は扱わない。
+- **詳細の待ち**：直リンク・再読み込みと、一覧・概要の `<a>` のリンクでは、取得が終わるまで本文が無い（ブラウザ自身の読み込み表示だけ）。gRPC の期限は、詳細の取得だけで run 50 秒・goal/task 30 秒。layout の GetOverview が応答しない病的な場合は、それぞれ 80 秒・60 秒（gRPC の期限の合計で、描画とブラウザから Web サーバーまでの通信は含まない）。
 - **一覧**：`/activity` と `/conversations` は今までどおり「読み込んでいます…」を出す。`/`、`/goals`、`/projects`、`/decisions` は layout の状態から即座に描くので `loading.tsx` を置かない。layout の GetOverview が遅いときはどのページも読み込み中の画面が出ないが、これは今も同じ（`loading.js` は layout を包めない）。
-- **404・エラーの画面**：`not-found.tsx` と `error.tsx` はルートのまま変えない。詳細で想定外の例外が出たときは、ルートの fallback が先に流れないので 500 になり、error.tsx の日本語の画面になる（コードで確認。最小の Next 16.4.6 アプリでも 500 を実測）。期限超過（DEADLINE_EXCEEDED）は 500 にならず、200 の「backend が応答しません」になる（main と同じ）。
+- **404・エラーの画面**：`not-found.tsx` と `error.tsx` はルートのまま変えない。詳細で想定外の例外が出たときは、ルートの fallback が先に流れないので 500 になり、error.tsx の日本語の画面になる（コードで確認。最小の Next 16.4.6 アプリでも 500 を実測）。期限超過（DEADLINE_EXCEEDED）は 500 にならず、200 の「backend が応答しません」になる（前に読めたゴール・タスクでは前回の内容に切断の通知。main と同じ）。
 - **既存の撮影 spec**：`e2e/screenshot/capture.spec.ts:43` は 0 件の状態の詳細に 404 を期待している。いまの 200 とは食い違う（実行はしていない）。変更後は期待どおりになる。
 - **範囲の外**：proto、backend、API、保存データ、監視の設定は変えない。`measurePage` の計測点も変えない。
 
