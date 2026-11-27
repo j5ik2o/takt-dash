@@ -19,7 +19,7 @@ const expectMergeDialogTarget = async (page: Page, webUrl: string): Promise<void
   await expect(listLink).toHaveAttribute("href", PULL_REQUEST_URL);
   await expect(listLink).toHaveAttribute("target", "_blank");
 
-  await item.getByRole("button", { name: "マージする" }).first().click();
+  await item.getByRole("button", { name: "マージする" }).click();
 
   const dialog = page.getByRole("dialog", { name: "プルリクエストのマージ" });
   await expect(dialog).toBeVisible();

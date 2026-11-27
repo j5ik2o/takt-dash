@@ -35,7 +35,7 @@ test("切断中は判断待ちの回答ボタンを押せず、再接続する�
     .getByRole("region", { name: "判断待ちの一覧" })
     .getByRole("listitem")
     .filter({ hasText: "人のマージ待ち" });
-  const trigger = item.getByRole("button", { name: "マージする" }).first();
+  const trigger = item.getByRole("button", { name: "マージする" });
   await expect(trigger).toBeEnabled();
   await expect(page.getByText("再接続するまで操作できません。")).toHaveCount(0);
 
@@ -77,6 +77,7 @@ test("切断中に確認を閉じて別の要素へフォーカスを移した�
     .getByRole("region", { name: "判断待ちの一覧" })
     .getByRole("listitem")
     .filter({ hasText: "人のマージ待ち" });
+  // ダイアログを開いたまま trigger を確かめるので、確定ボタン（同じ「マージする」。D4）と区別するため .first() を残す。
   const trigger = item.getByRole("button", { name: "マージする" }).first();
   await trigger.click();
   const dialog = page.getByRole("dialog", { name: "プルリクエストのマージ" });
