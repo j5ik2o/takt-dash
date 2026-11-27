@@ -23,6 +23,7 @@ type Run = {
   closed: Promise<Ended>;
   isClosed: () => boolean;
   waitFor: (stream: "stdout" | "stderr", text: string, timeoutMs: number) => Promise<void>;
+  writeStdin: (line: string) => void;
   kill: (signal: NodeJS.Signals) => void;
 };
 
@@ -32,11 +33,13 @@ type RunOptions = {
   // 起こした直後に、テストの側で読み口を閉じる流れ。ラッパーから見ると閉じたパイプになる。
   closeStdout?: boolean;
   closeStderr?: boolean;
+  // 子の標準入力へ合図を書けるようにする（ラッパーは子の標準入力をそのまま引き継ぐ）。
+  stdin?: boolean;
 };
 
 const runWrapper = (args: string[], options: RunOptions = {}): Run => {
   const child = spawn(process.execPath, [...(options.nodeArgs ?? []), WRAPPER, ...args], {
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [options.stdin ? "pipe" : "ignore", "pipe", "pipe"],
   });
   const out: Buffer[] = [];
   const err: Buffer[] = [];
@@ -91,7 +94,19 @@ const runWrapper = (args: string[], options: RunOptions = {}): Run => {
       });
     }
   };
-  return { stdout, stderr, closed, isClosed: () => done, waitFor, kill: (signal) => child.kill(signal) };
+  const writeStdin = (line: string) => {
+    assert.ok(options.stdin && child.stdin, "標準入力へ書くには options.stdin が要ります");
+    child.stdin.write(line);
+  };
+  return {
+    stdout,
+    stderr,
+    closed,
+    isClosed: () => done,
+    waitFor,
+    writeStdin,
+    kill: (signal) => child.kill(signal),
+  };
 };
 
 // 子が自分へ合図 S を送って終わる。node の子だと SIGPIPE・SIGXFSZ は無視され、SIGUSR1 は
@@ -237,7 +252,8 @@ test("実行の権限の無いファイルなら、時刻付きの行を標準�
 });
 
 // 子は pid を「知らせを受ける側」の流れへ書き、そのあと「失敗する側」の流れへ書き続ける。
-// 失敗する側へ 30 回書いたら、知らせを受ける側へ印の行 "after 30" を書く。
+// 失敗する側へ 30 回書いても印の行 "after 30" は書かず、テストが標準入力へ 1 行書く合図を
+// 待ってから書く（知らせを見てから合図する順を、印の位置で確かめられるようにする）。
 // nodeChild と同じく、固まらないよう 10 秒で自分から終わる。
 const keepsWriting = (failing: "stdout" | "stderr"): string[] => {
   const other = failing === "stdout" ? "stderr" : "stdout";
@@ -248,9 +264,21 @@ const keepsWriting = (failing: "stdout" | "stderr"): string[] => {
       setTimeout(() => process.exit(99), 10000);
       process.${other}.write("pid=" + process.pid + "\\n");
       let i = 0;
+      let signaled = false;
+      let wroteMarker = false;
+      const writeMarker = () => {
+        if (!signaled || i < 30 || wroteMarker) return;
+        wroteMarker = true;
+        process.${other}.write("after 30\\n");
+      };
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", () => {
+        signaled = true;
+        writeMarker();
+      });
       setInterval(() => {
         process.${failing}.write("line " + (i += 1) + "\\n");
-        if (i === 30) process.${other}.write("after 30\\n");
+        writeMarker();
       }, 20);
     `,
   ];
@@ -259,9 +287,14 @@ const keepsWriting = (failing: "stdout" | "stderr"): string[] => {
 for (const failing of ["stdout", "stderr"] as const) {
   const other = failing === "stdout" ? "stderr" : "stdout";
   test(`常駐中に ${failing} の書き込みが失敗すると、子が動いている間に、${other} へ時刻付きの知らせを 1 行だけ書く`, async () => {
-    const run = runWrapper(keepsWriting(failing), failing === "stdout" ? { closeStdout: true } : { closeStderr: true });
+    const run = runWrapper(keepsWriting(failing), {
+      ...(failing === "stdout" ? { closeStdout: true } : { closeStderr: true }),
+      stdin: true,
+    });
     await run.waitFor(other, "with-timestamps:", 5000);
-    // 知らせのあとも子は失敗する側へ書き続ける。2 回目以降の失敗で知らせが増えないことを、印の行まで待って見る。
+    // 知らせを見てから合図する。子は合図まで印を書かず、合図のあとも失敗する側へ書き続ける。
+    // 2 回目以降の失敗で知らせが増えないことを、印の行まで待って見る。
+    run.writeStdin("go\n");
     await run.waitFor(other, "after 30\n", 5000);
     const read = other === "stdout" ? run.stdout : run.stderr;
     const pid = readPid(read());
@@ -276,6 +309,16 @@ for (const failing of ["stdout", "stderr"] as const) {
     const notices = noticeLines(unstamp(snapshot, other).body);
     assert.equal(notices.length, 1, `知らせは 1 行だけ。${other}: ${snapshot.toString("utf8")}`);
     assert.ok(notices[0]!.includes(failing), `知らせは失敗した流れ（${failing}）を名指す: ${notices[0]}`);
+    // 子は知らせを見たあとの合図で印を書く。バイトの位置でも、印が知らせの行の終端より後ろにあることを確かめる。
+    const noticeStart = snapshot.indexOf("with-timestamps:");
+    assert.ok(noticeStart >= 0, `知らせがある。${other}: ${snapshot.toString("utf8")}`);
+    const noticeLineEnd = snapshot.indexOf(0x0a, noticeStart);
+    assert.ok(noticeLineEnd >= 0, `知らせの行は改行で終わる。${other}: ${snapshot.toString("utf8")}`);
+    const markerStart = snapshot.indexOf("after 30\n");
+    assert.ok(
+      markerStart > noticeLineEnd,
+      `印は知らせの行の終端より後ろにある。${other}: ${snapshot.toString("utf8")}`,
+    );
   });
 }
 
