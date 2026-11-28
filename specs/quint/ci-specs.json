@@ -141,6 +141,20 @@
       ]
     },
     {
+      "dir": "refresh-demand",
+      "spec": "refreshDemand.qnt",
+      "test": "refreshDemand_test.qnt",
+      "test_modules": ["refreshDemand_test"],
+      "runs": [
+        {
+          "main": "fixed",
+          "invariant": "safety",
+          "max_steps": 60,
+          "max_samples": 10000
+        }
+      ]
+    },
+    {
       "dir": "review-thread-ack",
       "spec": "reviewThreadAck.qnt",
       "test": "reviewThreadAck_test.qnt",
