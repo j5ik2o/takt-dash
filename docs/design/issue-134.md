@@ -191,25 +191,25 @@ b808a29 の規則は、確認の語を「本文のどこかにあるか」で見
 確認の本文を、行の種別で単位に分ける。フェンスの境界は「フェンスの境界」の規則のまま（`fence_split` と同じ開きと閉じ）。
 
 - 行の種別：フェンスの中、引用（フェンスの外で、行頭の空白 3 つまでのあとが `>`）、空行、見出し（`#` が 1〜6 個と空白）、リストの項目の頭（`-`・`*`・`+`・`1.`・`1)` と空白）、それ以外の文。
-- **散文の単位**は、段落（空行・見出し・引用・フェンス・リストの項目の頭で切れる、文の行の続き）、リストの項目（頭の行と、それに続く文の行）、見出しの行の 3 つ。見出しで節が切れるので、別の見出しの節の語は効かない。
-- **かたまり**は、続く引用の行の並びと、1 つのフェンス。かたまりは次の順で 1 つの散文の単位に付く。(1) 空行を挟まずにすぐ上にある段落かリストの項目（すぐ上がかたまりなら、その付く先）、(2) なければ下にある最初の段落かリストの項目（GitHub の「Quote reply」は引用を先に置く）、(3) なければ上にある最後の段落かリストの項目、(4) どれも無ければどこにも付かない。付いたかたまりの本文は、付く先の単位の参照（id と断片）にだけ使い、確認の語は数えない。
+- **散文の単位**は、段落（空行・見出し・引用・フェンス・リストの項目の頭で切れる、文の行の続き）、リストの項目（頭の行と、それに続く文の行。空行のあとでも、空白 2 つ以上で字下げした文の行は項目の続き。GitHub の表示と同じ）、見出しの行の 3 つ。見出しで節が切れるので、別の見出しの節の語は効かない。
+- **かたまり**は、続く引用の行の並びと、1 つのフェンス。かたまりは次の順で、**同じ見出しの節の中の** 1 つの散文の単位に付く（見出しを越えて付かない。`確認しました。\n\n## B\n> #10` の引用は、どの単位にも付かない）。(1) 空行を挟まずにすぐ上にある段落かリストの項目（すぐ上がかたまりなら、その付く先）、(2) なければ下にある最初の段落かリストの項目（GitHub の「Quote reply」は引用を先に置く）、(3) なければ上にある最後の段落かリストの項目、(4) どれも無ければどこにも付かない。付いたかたまりの本文は、付く先の単位の参照（id と断片）にだけ使い、確認の語は数えない。
 - CommonMark の怠惰な続き（`>` の行のすぐ下の、`>` の無い行も引用に含める規則）は採らない。`> 引用\n確認しました` の 2 行目は作成者の文として数える。画面では引用の中に見えるが、作成者が書いた文なので、赤にしない側に倒す。
 
 #### 節に分けて極性を決める
 
-散文の単位を、句点・感嘆符・疑問符（全角と半角）・読点（`、`・`，`・`,`）・セミコロン・改行と、空白か終わりが続くピリオドで節に分ける。「」『』“”（）() の中と、インラインのコードの中では切らない（`「You have reached your Codex usage limits for code reviews.」` のピリオドで切らない）。
+散文の単位を、句点・感嘆符・疑問符（全角と半角）・読点（`、`・`，`・`,`）・セミコロン・改行と、空白か終わりが続くピリオドで節に分ける。読点の無い逆接（`ましたが`・`ですが`・`でしたが`・`ませんが`・`けれども`・`けど`・`ものの`、英語の `but`・`however`・`although`・`whereas` の前）でも切る（`#10 は確認しましたが #11 は未対応です`、`#10 is fixed but #11 is not fixed`）。「」『』“”（）() の中と、インラインのコードの中では切らない（`「You have reached your Codex usage limits for code reviews.」` のピリオドで切らない）。インラインのコードは CommonMark と同じく、同じ長さのバッククォートの列で開いて閉じる（``` ``fixed`` ``` も 2 つの列で囲んだコード）。閉じる列の無いバッククォートは、ただの文字として扱う。
 
 節ごとに、確認の語を探す文字列（masked）を作る。「」『』“” の中身とインラインのコードを空白にし、さらに**項目の本文を写した部分**を空白にする。写しは、単位の本文（小文字）の 20 文字の窓のうち、項目のどれかの `quote_text` に含まれるものとする（単位の全体で印を付けてから節に分ける。読点で切ってから見ると、`Once this is fixed,` のような 20 文字未満の断片を写しと認められない）。`Action not completed / Review rate limited\n確認しました。` のように項目の文を括弧なしで写しても、写しの中の `not` を作成者の打ち消しと読まず、写しの中の `fixed` を作成者の確認と読まない。
 
 節の極性は 3 つ。
 
-- **肯定**：masked に、打ち消されない確認の語がある。
-- **打ち消し**：肯定でなく、打ち消された確認の語があるか、「まだ」の表明がある。「まだ」の表明は閉じた一覧で、`未対応`・`未確認`・`未修正`・`未対処`・`未解決`・`未反映`・`未着手`・`未完了`・`まだ`・`ていません`／`ていない`／`てません`／`でいない`・`できません`／`できない`・`ではありません`／`じゃない`、英語の `not`・`never`・`cannot`・`pending`・`todo`・`tbd`・`n't`・`no longer`。`問題ありません`・`ない` 単独・`ません` 単独は入れない（`影響がないことを確認しました` を打ち消しにしない）。
+- **打ち消し**：masked に、打ち消された確認の語があるか、「まだ」の表明がある。打ち消されない確認の語と同じ節にあっても打ち消しにする（`#10 is fixed and #11 is not fixed` は、どの参照がどちらかを決められないので、節の全体を打ち消しにして赤の側に倒す）。
+- **肯定**：打ち消しでなく、masked に打ち消されない確認の語がある。「まだ」の表明は閉じた一覧で、`未対応`・`未確認`・`未修正`・`未対処`・`未解決`・`未反映`・`未着手`・`未完了`・`まだ`・`ていません`／`ていない`／`てません`／`でいない`・`できません`／`できない`・`ではありません`／`じゃない`、英語の `not`・`never`・`cannot`・`pending`・`todo`・`tbd`・`n't`・`no longer`。`問題ありません`・`ない` 単独・`ません` 単独は入れない（`影響がないことを確認しました` を打ち消しにしない）。直後が `こと`・`の`・`と`・`旨` の一致も数えない（`エラーが出ていないことを確認しました` の `ていない` は確認した内容で、まだの表明ではない）。
 - **どちらでもない**：それ以外。
 
 確認の語の打ち消しは、語ごとに次のどれかで決める。
 
-1. **直前の否定**（いまの規則のまま）：語の前 12 文字が `未`・`まだ`・`未だに`・`not`・`not yet`・`un-` で終わる（`未確認しました`、`not fixed`）。
+1. **直前の否定**（いまの規則のまま）：語の前 12 文字が `未`・`まだ`・`未だに`・`not`・`not yet`・`un-` で終わる（`未確認しました`、`not fixed`）。3 と 4 も含め、語と否定の間の強調の記号（`*`・`_`・`~`）は飛ばして見る（`**確認済み**ではありません`）。
 2. **英語の語（`acknowledged`・`addressed`・`fixed`）だけ**：同じ節の、語より前に `not`・`never`・`cannot`・`no longer`・`n't` があるか（`has not been fixed`、`hasn't been fixed`、`isn't fixed`、`was not actually addressed`）、条件・未来の `if`・`once`・`until`・`unless`・`whether`・`will`・`'ll`・`going to` がある（`once this is fixed`、`will be fixed in a follow-up`）。日本語の語には当てない（`Action not completed を確認しました` の `確認しました` を打ち消さない）。節は読点とピリオドで切れるので、`Not a bug, but fixed` や `No regressions; fixed` は打ち消さない。
 3. **日本語の後ろに付く否定**：語の直後が `ではありません`・`ではない`・`でない`・`じゃない`・`ではなく`・`ではなかった`・`とは言えません` など（`確認済みではありません`、`対応済みでない`）。`確認しました` などの過去形には後ろから付く否定が無いので、実際に効くのは `済み` の語である。
 4. **疑問**：節が `?`・`？` で終わるか、語の直後が `か`（`です`・`でした`・`でしょう` を挟んでもよい。`から` は除く）である（`確認しましたか？`、`確認済みですか`、`Is #10 fixed?`）。b808a29 の規則は語の直後 3 文字だけを見ていたので、`確認済みですか` を承認していた。
@@ -226,7 +226,7 @@ b808a29 の規則は、確認の語を「本文のどこかにあるか」で見
 - **混在の単位**：肯定の節の本文が項目を指す（付いたかたまりは使わない）。`#10 は確認しましたが、#11 は未対応です。` は 10 だけを承認する。
 - **前置きに続くリストの項目**：どちらでもないリストの項目は、項目の並び（間の空行とかたまりは許す）のすぐ上の段落（前置き）が肯定なら、項目の本文と付いたかたまりで指した項目を承認する（`次の 2 件を確認しました。\n- #10\n- #11`）。項目に打ち消しがあれば前置きは効かない（`- #11 はまだです`）。リストのあとの締めの文（`以上を確認しました。`）は効かない。
 
-そのうえで、**打ち消しの節が触れた項目は承認しない**（拒否）。触れるとは、打ち消しの節の本文が項目の id を含むか、URL を外した本文の 20 文字の窓が項目の本文にあること（その項目だけが持つ断片でなくてよい）。`#10 と #11 を確認しました。ただし #11 はまだ直していません。` は 10 だけを承認する。定型文に打ち消しで触れると、その定型文を持つ項目はどれもその確認では承認されない（どの項目のことか定まらないので、赤の側に倒す）。
+そのうえで、**打ち消しの節が触れた項目は承認しない**（拒否）。触れるとは、打ち消しの節の本文が項目の id を含むか、URL を外した本文の 20 文字の窓が項目の本文にあること（その項目だけが持つ断片でなくてよい）。打ち消しの節を含む単位（打ち消しか混在）に付いたかたまりが触れた項目も拒否する（`この件はまだです。\n> <項目の引用>` のあとに、その項目の URL を確認しても承認しない）。`#10 と #11 を確認しました。ただし #11 はまだ直していません。` は 10 だけを承認する。定型文に打ち消しで触れると、その定型文を持つ項目はどれもその確認では承認されない（どの項目のことか定まらないので、赤の側に倒す）。
 
 #### 誤って赤にする側
 
@@ -234,7 +234,7 @@ b808a29 の規則は、確認の語を「本文のどこかにあるか」で見
 
 - 確認の語の無い単位で項目を指す（`対象: <URL>\n\n指摘はありません。`、`<URL>: I noted it.`）。実データでは modern-ddd-book#695 と event-store-adapter-java#871 の 2 件（「一意に指す値として何を使うか」の測り直し）。その単位に `確認しました` を足せば緑になる。
 - リストのあとの締めの文だけに確認の語がある（`- #10\n- #11\n\n以上を確認しました。`）。30 件の標本には無かった。
-- 1 つの節で、英語の否定のあとに別の英語の確認を続ける（`This doesn't affect X and is fixed`）。30 件の標本には無かった。
+- 1 つの節で、英語の否定のあとに別の英語の確認を続ける（`This doesn't affect X and is fixed`）。1 つの節で肯定と打ち消しを `and` でつなぐ（`#10 is fixed and #11 is not fixed` は 10 も承認しない）。30 件の標本には無かった。
 - 1 つの確認で、承認した項目の文を打ち消しの節でも写す（矛盾する返信）。拒否が勝つ。
 
 逆に、この規則でも見逃す形（偽の緑の側）は「未確認のこと」に書く。
@@ -371,16 +371,20 @@ def line_kinds:
   | .out;
 
 # 単位の列。散文の単位（para・item・heading）と、引用・フェンスのかたまり（block）。
-# gap: 直前に空行があるか。
+# gap: 直前に空行があるか。sec: 見出しで区切った節の番号（見出しの行から新しい節）。
 def units:
   reduce line_kinds[] as $l (
-    { us: [], gap: false };
+    { us: [], gap: false, sec: 0 };
     (.us | length) as $n
     | (if $n > 0 then .us[$n - 1] else null end) as $last
+    | (if $l.k == "heading" then .sec += 1 else . end)
     | if $l.k == "blank" then .gap = true
       elif $l.k == "text" and $last != null and (.gap | not)
            and ($last.type == "para" or $last.type == "item") then
         .us[$n - 1].text += "\n" + $l.t
+      # 空行のあとでも、字下げ（空白 2 つ以上）した文の行はリストの項目の続き（GitHub の表示と同じ）。
+      elif $l.k == "text" and $last != null and $last.type == "item" and ($l.t | test("^ {2,}\\S")) then
+        .us[$n - 1].text += "\n" + $l.t | .gap = false
       elif $l.k == "quote" and $last != null and (.gap | not) and $last.type == "block" and $last.q then
         .us[$n - 1].text += "\n" + $l.t
       elif $l.k == "fence" and ($l.start | not) and $last != null and $last.type == "block" and ($last.q | not) then
@@ -391,13 +395,14 @@ def units:
                  elif $l.k == "heading" then "heading" else "block" end),
           q: ($l.k == "quote"),
           text: $l.t,
-          gap: .gap
+          gap: .gap,
+          sec: .sec
         }]
         | .gap = false
       end)
   | .us;
 
-# かたまりの付く先（散文の単位の位置）。
+# かたまりの付く先（散文の単位の位置）。探すのは同じ見出しの節の中だけ。
 # 1. 空行を挟まずすぐ上にある散文の単位（すぐ上がかたまりなら、その付く先）
 # 2. なければ、下にある最初の para か item
 # 3. なければ、上にある最後の para か item
@@ -412,8 +417,10 @@ def attach_targets($us):
       elif $j > 0 and ($us[$j].gap | not) and $us[$j - 1].type == "block" and $acc[$j - 1] != null
            and $acc[$j - 1] < $j then $acc + [$acc[$j - 1]]
       else
-        ([range($j + 1; $us | length) | select($us[.].type == "para" or $us[.].type == "item")] | first) as $next
-        | ([range(0; $j) | select($us[.].type == "para" or $us[.].type == "item")] | last) as $prev
+        ([range($j + 1; $us | length)
+          | select(($us[.].type == "para" or $us[.].type == "item") and $us[.].sec == $us[$j].sec)] | first) as $next
+        | ([range(0; $j)
+          | select(($us[.].type == "para" or $us[.].type == "item") and $us[.].sec == $us[$j].sec)] | last) as $prev
         | $acc + [($next // $prev)]
       end);
 
@@ -427,16 +434,32 @@ def lead_of($us; $j):
 # 「」『』“”（）() の中と、インラインのコードの中では切らない。
 # raw: 照合に使う元の文字列。masked: 確認の語を探す文字列（「」『』“” の中身、インラインのコード、
 # $cover が印を付けた項目の写しを空白にする）。
+# インラインのコードは CommonMark と同じく、同じ長さのバッククォートの列で開いて閉じる
+# （``fixed`` も 2 つの列で囲んだコード）。閉じる列が無い列は、ただの文字として扱う。
+def backtick_runs($cs):
+  ($cs | length) as $len
+  | [ range(0; $len) as $i
+      | select($cs[$i] == 96 and ($i == 0 or $cs[$i - 1] != 96))
+      | { start: $i,
+          len: ([ range($i; $len) as $k | select($cs[$k] != 96) | $k ] | first // $len) - $i } ];
+
 def clauses($cover):
   explode as $cs
   | ($cs | length) as $len
+  | backtick_runs($cs) as $runs
+  | ($runs | map({key: (.start | tostring), value: .len}) | from_entries) as $runat
   | reduce range(0; $len) as $i (
-      { out: [], raw: [], masked: [], depth: 0, qdepth: 0, code: false };
+      { out: [], raw: [], masked: [], depth: 0, qdepth: 0, code: null };
       ($cs[$i]) as $c
       | ([$c] | implode) as $ch
       | (if $i + 1 < $len then ([$cs[$i + 1]] | implode) else "" end) as $nx
-      | if $ch == "`" then .code = (.code | not) | .raw += [$c] | .masked += [32]
-        elif .code then .raw += [$c] | .masked += [32]
+      | ($runat[$i | tostring]) as $run
+      | if $run != null and .code == null
+           and any($runs[]; .start > $i and .len == $run) then
+          .code = $run | .raw += [$c] | .masked += [32]
+        elif $run != null and .code == $run then .code = null | .raw += [$c] | .masked += [32]
+        elif .code != null then .raw += [$c] | .masked += [32]
+        elif $ch == "`" then .raw += [$c] | .masked += [32]
         else
           (if ($ch | test("^[「『“]$")) then .qdepth += 1 | .depth += 1
            elif ($ch | test("^[」』”]$")) then .qdepth = ([0, .qdepth - 1] | max) | .depth = ([0, .depth - 1] | max)
@@ -462,14 +485,14 @@ def negated2($s; $m):
   | ($s[($m.offset + ($m.string | length)):]) as $after
   # 直前の否定（いまの規則のまま）
   | ($s[([0, ($m.offset - 12)] | max):$m.offset]
-     | test("(未|まだ|未だに?|\\bnot\\b|\\bnot\\s+yet\\b|\\bun-?)\\s*$"))
+     | test("(未|まだ|未だに?|\\bnot\\b|\\bnot\\s+yet\\b|\\bun-?)[\\s*_~]*$"))
   # 英語：同じ節の前に否定・条件・未来の語（has not been fixed / hasn't been fixed / once this is fixed）
   or (($m.string | test(en_ack_words))
       and ($before | test("\\b(not|never|cannot|no longer|unless|until|if|once|whether|will|going to)\\b|n['’]t\\b|['’]ll\\b")))
   # 日本語：後ろに付く否定（確認済みではありません / 対応済みでない / とは言えません）
-  or ($after | test("^\\s*((では|じゃ|で)は?\\s*(ありません|ない|なく|なかった)|とは(言え|いえ)(ません|ない))"))
+  or ($after | test("^[\\s*_~]*((では|じゃ|で)は?\\s*(ありません|ない|なく|なかった)|とは(言え|いえ)(ません|ない))"))
   # 疑問（確認しましたか / 確認済みですか / Is it fixed?）
-  or ($after | test("^\\s*(です|でした|でしょう)?\\s*か(?!ら)"))
+  or ($after | test("^[\\s*_~]*(です|でした|でしょう)?\\s*か(?!ら)"))
   or ($s | test("[?？]\\s*$"));
 
 # まだの表明（確認の語が無くても、その節は「打ち消し」になる）。
@@ -486,14 +509,33 @@ def cover_flags($s; $texts):
       [range(0; $len) | false];
       if any($texts[]; contains($s[$i:$i + 20])) then reduce range($i; $i + 20) as $k (.; .[$k] = true) else . end));
 
-# 節の極性：pos（打ち消されない確認の語がある）/ neg（打ち消された語か、まだの表明がある）/ none。
+# まだの表明の一致。直後が `こと`・`の`・`と`・`旨` の一致は数えない（`エラーが出ていないことを確認しました` の
+# `ていない` は、確認した内容であって、まだの表明ではない）。
+def pending_hits($s):
+  [ $s | match(pending_cue; "g")
+    | select(($s[(.offset + (.string | length)):] | test("^\\s*(こと|の|と|旨)")) | not) ];
+
+# 節の極性：pos（打ち消されない確認の語があり、打ち消しもまだの表明も無い）/
+# neg（打ち消された語かまだの表明がある。打ち消されない語と同じ節にあっても neg）/ none。
+# 同じ節に肯定と打ち消しが並ぶとき（`#10 is fixed and #11 is not fixed`）は、どの参照がどちらかを
+# 決められないので、節の全体を打ち消しにして赤の側に倒す。
 # 語・打ち消し・まだの表明は masked（引用・インラインのコード・項目の写しを空白にしたもの）で見る。
 def polarity:
   (.masked | ascii_downcase) as $s
   | [ $s | match("(" + ack_words + ")"; "g") ] as $hits
-  | if any($hits[]; negated2($s; .) | not) then "pos"
-    elif ($hits | length) > 0 or ($s | test(pending_cue)) then "neg"
+  | ([ $hits[] | select(negated2($s; .) | not) ] | length) as $pos
+  | (($hits | length) - $pos) as $negw
+  | (pending_hits($s) | length) as $cue
+  | if $negw > 0 or $cue > 0 then "neg"
+    elif $pos > 0 then "pos"
     else "none" end;
+
+# 節を切る前に、逆接の接続（`ましたが`・`ですが`・`けど`・`ものの`、英語の `but`・`however`・`although`・
+# `whereas`）の位置に改行を入れる。読点の無い `#10 は確認しましたが #11 は未対応です` や
+# `#10 is fixed but #11 is not fixed` を 2 つの節に分ける。参照の照合は元の本文で行う。
+def split_contrast:
+  gsub("(?<a>(ました|です|でした|ません)が|けれども|けれど|けど|ものの)(?![、，,])"; "\(.a)\n")
+  | gsub("(?i)(?<a>[ \\t])(?<b>but|however|although|whereas)\\b"; "\(.a)\n\(.b)");
 
 # 文字列 $t が指す項目の位置（$its の key）。id か、その項目だけが持つ 20 文字の断片。
 def refs_in($t; $its):
@@ -526,14 +568,17 @@ def acked_keys($its):
   | attach_targets($us) as $tg
   | [ range(0; $us | length) as $j
       | select($us[$j].type != "block")
-      | ($us[$j].text | clauses(cover_flags($us[$j].text | ascii_downcase; $texts)) | map(. + {pol: polarity})) as $cl
+      | ($us[$j].text | split_contrast) as $st
+      | ($st | clauses(cover_flags($st | ascii_downcase; $texts)) | map(. + {pol: polarity})) as $cl
       | { j: $j, type: $us[$j].type, cl: $cl,
           pol: (if any($cl[]; .pol == "pos") and any($cl[]; .pol == "neg") then "mixed"
                 elif any($cl[]; .pol == "pos") then "pos"
                 elif any($cl[]; .pol == "neg") then "neg" else "none" end),
           blocks: [ range(0; $us | length) as $b | select($tg[$b] == $j) | $us[$b].text ] } ] as $segs
   | ($segs | map({key: (.j | tostring), value: .pol}) | from_entries) as $polof
-  | ([ $segs[] | .cl[] | select(.pol == "neg") | mentions_in(.raw; $its)[] ] | unique) as $veto
+  # 拒否：打ち消しの節が触れた項目と、打ち消しの節を含む単位（neg・mixed）に付いたかたまりが触れた項目。
+  | ([ ($segs[] | .cl[] | select(.pol == "neg") | mentions_in(.raw; $its)[]),
+       ($segs[] | select(.pol == "neg" or .pol == "mixed") | .blocks[] | mentions_in(.; $its)[]) ] | unique) as $veto
   | [ $segs[]
       | if .pol == "pos" then refs_in(([$us[.j].text] + .blocks) | join("\n"); $its)[]
         elif .pol == "mixed" then (.cl[] | select(.pol == "pos") | refs_in(.raw; $its)[])
@@ -797,13 +842,13 @@ ci_ref: v2
 
 23. 1 つの確認で、指していない項目を承認しない（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）。同じ見出し（`Codex Review: Here are some automated review suggestions`）を持つ Codex の要約が 2 つあり、確認がその見出しだけを引用するとき、どちらの項目も未承認のまま。同じ利用上限の通知が 2 回あり、確認がその文を引用するときも、どちらも未承認のまま（それぞれの URL を貼れば通る）。項目が 1 つだけなら、同じ引用で通る（#131 の実際の確認）。
 24. 1 つの確認が、項目ごとの id か、項目ごとに固有の断片を並べれば、複数の項目を承認できる（`次の 2 件を確認しました。\n- #issuecomment-10\n- #issuecomment-11`。前置きの段落の語がリストの項目に効く）。
-25. **確認の語の効く範囲（穴 1）。** 1 つの確認が複数の項目に触れるとき、語は同じ単位の参照にだけ効く。(a) リストの項目ごとに書き分けた `- #10 は未対応です\n- #11 は対応しました` は 11 だけを承認する（Devin の例）。(b) 同じ段落の 2 文 `#10 は確認しました。#11 は未対応です。` と、読点でつないだ 1 文 `#10 は確認しましたが、#11 は未対応です。` は 10 だけを承認する。(c) 前置き＋リストは、項目に打ち消しが無ければ前置きの語が効き、`- #11 はまだです` の項目には効かない。(d) 肯定で触れた項目でも、同じ確認の打ち消しの節が触れれば承認しない（`ただし #11 はまだ直していません`）。(e) 見出しで分かれた節の語は、別の節の参照に効かない（modern-ddd-book#695 の形）。(f) 確認の文に付いた引用・フェンス（`確認しました\n> …`、`> …\n\n確認しました。`、`確認しました\n```\n…\n``` `）は、付く先の単位の参照として通る。
-26. **引用の中の語（穴 2）。** 行頭 `>` の引用、「」『』“” の中、インラインのコード、項目の本文を写した部分の中の確認の語は数えない。(a) `> Once this is fixed, please rerun the integration tests.\n\nWhich tests should I run?` は通らない（Devin の例）。(b) 同じ引用の外に `確認しました。` を添えると通る。(c) 項目の文を括弧なしで写した確認（`Action not completed / Review rate limited\n確認しました。`）は、写しの中の `not` を打ち消しと読まずに通る。(d) `> 引用\n確認しました` の 2 行目（CommonMark では引用の続き）は作成者の文として数え、通る。
+25. **確認の語の効く範囲（穴 1）。** 1 つの確認が複数の項目に触れるとき、語は同じ単位の参照にだけ効く。(a) リストの項目ごとに書き分けた `- #10 は未対応です\n- #11 は対応しました` は 11 だけを承認する（Devin の例）。(b) 同じ段落の 2 文 `#10 は確認しました。#11 は未対応です。` と、読点でつないだ 1 文 `#10 は確認しましたが、#11 は未対応です。` は 10 だけを承認する。(c) 前置き＋リストは、項目に打ち消しが無ければ前置きの語が効き、`- #11 はまだです` の項目には効かない。(d) 肯定で触れた項目でも、同じ確認の打ち消しの節が触れれば承認しない（`ただし #11 はまだ直していません`）。(e) 見出しで分かれた節の語は、別の節の参照に効かない（modern-ddd-book#695 の形）。(g) 同じ節で肯定と打ち消しを並べる形：`but` や読点の無い `ましたが` で切れれば肯定の側だけを承認し、`and` でつなげば節の全体を承認しない。(h) 引用は見出しを越えて付かない。(i) まだの文に付いた引用が触れた項目は、別の単位でその URL を確認しても承認しない。(j) 空行のあとに字下げして続けた確認の文は、リストの項目に入る。(f) 確認の文に付いた引用・フェンス（`確認しました\n> …`、`> …\n\n確認しました。`、`確認しました\n```\n…\n``` `）は、付く先の単位の参照として通る。
+26. **引用の中の語（穴 2）。** 行頭 `>` の引用、「」『』“” の中、インラインのコード（``` ``fixed`` ``` のような 2 つ以上の列で囲んだものを含む。閉じる列の無いバッククォートは文字）、項目の本文を写した部分の中の確認の語は数えない。(a) `> Once this is fixed, please rerun the integration tests.\n\nWhich tests should I run?` は通らない（Devin の例）。(b) 同じ引用の外に `確認しました。` を添えると通る。(c) 項目の文を括弧なしで写した確認（`Action not completed / Review rate limited\n確認しました。`）は、写しの中の `not` を打ち消しと読まずに通る。(d) `> 引用\n確認しました` の 2 行目（CommonMark では引用の続き）は作成者の文として数え、通る。
 27. **英語の否定（穴 3）。** 同じ節の前の否定・条件・未来で、英語の語を数えない。`This has not been fixed.`（Devin の例）、`hasn't been fixed yet`、`isn't fixed`、`was not actually addressed`、`will be fixed in a follow-up`、`Once this is fixed` は通らない。`Fixed #10 in abc123.`、`Not a bug, but fixed`、`No regressions; fixed`、`should be fixed now` は通る。日本語の語には当てない（`Action not completed を確認しました` は通る）。誤って赤にする形 `doesn't affect X and is fixed` も固定する（赤）。
-28. **日本語の否定（穴 4）。** 語の直後の否定と疑問を見る。`確認済みではありません #issuecomment-108`（CodeRabbit の例）、`対応済みでない`、`確認済みですか？`、`確認済みかどうか分かりません` は通らない。`確認済みです`、`問題がないことを確認しました`、`確認しましたから大丈夫です` は通る。
+28. **日本語の否定（穴 4）。** 語の直後の否定と疑問を見る。`確認済みではありません #issuecomment-108`（CodeRabbit の例）、`対応済みでない`、`確認済みですか？`、`確認済みかどうか分かりません`、`**確認済み**ではありません` は通らない。`確認済みです`、`**確認済み**です`、`問題がないことを確認しました`、`エラーが出ていないことを確認しました`、`確認しましたから大丈夫です` は通る。
 29. 27・28 は、同じ参照を付けた肯定と否定の対で固定する（CodeRabbit の推奨）。
 
-25〜29 の入力と期待（この文書の jq を切り出して流した結果。項目は `#issuecomment-10`＝`Once this is fixed, please rerun the integration tests.`、`#issuecomment-11`＝`Action not completed / Review rate limited`、`#issuecomment-108`＝`You have reached your Codex usage limits for code reviews.` の 3 つ。b808a29 の列は 1 回目の直しの jq で流した結果で、穴の再現になる）。
+25〜29 の入力と期待（この文書の jq を切り出して流した結果。7a〜7n は PR #452 のレビューで足した。項目は `#issuecomment-10`＝`Once this is fixed, please rerun the integration tests.`、`#issuecomment-11`＝`Action not completed / Review rate limited`、`#issuecomment-108`＝`You have reached your Codex usage limits for code reviews.` の 3 つ。b808a29 の列は 1 回目の直しの jq で流した結果で、穴の再現になる）。
 
 | 例 | 確認の本文 | b808a29 で承認する項目 | この規則で承認する項目 |
 | --- | --- | --- | --- |
@@ -815,7 +860,7 @@ ci_ref: v2
 | 1f | `#issuecomment-10 と #issuecomment-11 を確認しました。ただし #issuecomment-11 はまだ直していません。` | 10・11 | 10 |
 | 1g | `確認しました\n> Action not completed / Review rate limited` | 11 | 11 |
 | 1h | `> Action not completed / Review rate limited\n\n確認しました。` | 11 | 11 |
-| 1i | `` 確認しました\n```\nAction not completed\n``` `` | 11 | 11 |
+| 1i | ```` 確認しました\n```\nAction not completed\n``` ```` | 11 | 11 |
 | 1j | `Fixed. See #issuecomment-10.` | 10 | 10 |
 | 2a | `> Once this is fixed, please rerun the integration tests.\n\nWhich tests should I run?` | 10 | なし |
 | 2b | `> Once this is fixed, please rerun the integration tests.\n\n確認しました。` | 10 | 10 |
@@ -848,6 +893,20 @@ ci_ref: v2
 | 6f | `#issuecomment-10 doesn't affect X and is fixed` | 10 | なし |
 | 6g | `> Action not completed / Review rate limited\n確認しました` | 11 | 11 |
 | 6h | `#issuecomment-108 が確認済みかどうか分かりません` | 108 | なし |
+| 7a | `#issuecomment-10 is fixed but #issuecomment-11 is not fixed.` | 10・11 | 10 |
+| 7b | `#issuecomment-10 is fixed and #issuecomment-11 is not fixed.` | 10・11 | なし |
+| 7c | `#issuecomment-10 は確認しましたが #issuecomment-11 は未対応です` | 10・11 | 10 |
+| 7d | `#issuecomment-10 でエラーが出ていないことを確認しました。` | 10 | 10 |
+| 7e | `確認しました。\n\n## B\n> #issuecomment-10` | 10 | なし |
+| 7f | `## 未対応\n> Action not completed / Review rate limited\n\n## 対応済み\n#issuecomment-10 を確認しました。` | 10・11 | 10 |
+| 7g | `この件はまだです。\n> Action not completed / Review rate limited\n\n#issuecomment-10 と #issuecomment-11 を確認しました。` | 10・11 | 10 |
+| 7h | ``` ``fixed`` #issuecomment-10 ``` | 10 | なし |
+| 7i | `` `fixed` #issuecomment-10 `` | 10 | なし |
+| 7j | `fixed #issuecomment-10` | 10 | 10 |
+| 7k | `` `foo を確認しました #issuecomment-10 `` | 10 | 10 |
+| 7l | `**確認済み**ではありません #issuecomment-108` | 108 | なし |
+| 7m | `**確認済み**です #issuecomment-108` | 108 | 108 |
+| 7n | `- #issuecomment-10\n\n  確認しました。` | 10 | 10 |
 
 
 補足すると、19 はスモークテストに実データを置くというより、タグを切る前の使い捨ての比較スクリプトで確かめるのが向いている。固定のフィクスチャとしては 1〜18、20〜29 を置き、19 は移行手順のチェックリストに残す。25〜29 は上の表の行をそのままフィクスチャにできる。19 の差 0 件は、8(b)・23 の偽の緑を見つけない（新旧の両方が緑になるため。「タグを切る条件」）。8(b) と 23 はフィクスチャで固定する。
@@ -997,6 +1056,7 @@ Quint が通ったことだけを合格の根拠にはしない。モデルが�
 - **誤って赤にする側**：同じ 5 リポジトリで標本を取り直し（30 件。前の 17 件はそろえ直せなかった）、#131 と event-store-adapter-java#871 も流した。赤に戻るのは modern-ddd-book#695（マージ済み）と event-store-adapter-java#871（open）の 2 件で、どちらも確認の語の無い単位で項目を指す形（穴 1 の直しによる）。「いまの状態」の下見、「一意に指す値として何を使うか」の測り直し、テストの観点 19、影響を直した。
 - **Quint**：確認を単位に分け、単位ごとの語の現れ方（`Word`）を持たせた。規則 `unique`（b808a29）を足して穴 4 つの反例を固定し、この設計の規則を `scoped` とした。わざと壊した版を 14 にし（穴 4 つを 1 つずつ開けた版を含む）、witness と実物の対応表と範囲を更新した（「Quint の要否」と README）。
 - **v2**：「タグを切る条件」に 4 件目として、この 4 つの穴を足した。v1 は動かさない、v2 は元帥が新旧の比較を見てから切る、は変えていない。
+- **PR #452 のレビューで直した 6 点**（Devin 6 件、Cursor Bugbot 1 件、CodeRabbit 2 件。重なりを除いて 6 点）：(1) 同じ節に肯定と打ち消しが並ぶと肯定が勝っていた（`#10 is fixed but #11 is not fixed`）。逆接で節を切り、それでも同じ節に並ぶときは節の全体を打ち消しにした。まだの表明のうち、直後が `こと` などのものは数えない。(2) 引用が見出しを越えて別の節の確認の文に付いていた。付く先を同じ見出しの節に限った。(3) まだの文に付いた引用が拒否に使われていなかった。打ち消しの節を含む単位に付いたかたまりも拒否に使う。(4) ``` ``fixed`` ``` のような 2 つ以上のバッククォートのコードを、1 文字ごとに出入りしていた。CommonMark と同じく、同じ長さの列で開いて閉じる。(5) `**確認済み**ではありません` で、強調の記号が否定の判定を妨げていた。強調の記号を飛ばして見る。(6) 空行のあとに字下げした続きの行を、リストの項目から切っていた。字下げした文の行は項目の続きにした。テストの観点 25・26・28 の表に 7a〜7n の 14 行を足した（全 55 行。14 行のうち 9 行で、b808a29 は指していない項目かまだと書いた項目まで承認する）。30 件の標本と #131・#871 の結果は変わらない。Quint のモデルは変えていない（同じ節の肯定と打ち消しは、文字列の水準で打ち消しの単位になるので、モデルの `Word` の与え方の内側）。
 
 ## 未確認のこと
 
