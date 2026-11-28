@@ -10,6 +10,8 @@ import { createDashboardState, NOW } from "../support/fixtures.ts";
 import { startTaktDashServer } from "../support/grpc-server.ts";
 import { closeBackendClient, getBackendClient } from "../../src/grpc/client.ts";
 import { GET, HEAD } from "../../app/api/state/route.ts";
+import { DashboardState } from "../../src/proto/taktdash.ts";
+import { restoreDashboardState } from "../../src/state/restore-state.ts";
 
 const readEvents = async (stream: ReadableStream<Uint8Array>, count: number): Promise<string[]> => {
   const decoder = new TextDecoder();
@@ -389,4 +391,29 @@ test("HEAD は本文を持たず、登録も backend の購読もしない", asy
     await server.shutdown();
   }
   assert.equal(calls.filter((call) => call === "WatchState").length, 1, "HEAD は backend を購読しない");
+});
+
+// issue #40 の PR 1a：BFF は backend の applied をそのまま SSE へ載せ、画面はそれを復元する。
+// 0（要求なし、または applied を送らない古い backend）は JSON の鍵ごと省かれ、画面は 0 として読む。
+// refresh_ms の無い /api/state は、backend へ要求なし（レート 0・画面は空・試行 0）で購読する。
+test("SSE は backend の applied を載せ、0 は省いて、画面の復元はどちらも読める", async () => {
+  const server = await startTaktDashServer({
+    watch: [DashboardState.create({ ...createDashboardState(), appliedRefreshIntervalMs: 1000 }), createDashboardState()],
+  });
+  try {
+    await withServerEnv(server.address, async () => {
+      const response = await GET(new NextRequest("http://localhost/api/state"));
+      assert.ok(response.body);
+      const events = await readEvents(response.body, 2);
+      const payloads = events.map((event) => JSON.parse(event.replace(/^data: /, "")) as Record<string, unknown>);
+
+      assert.equal(payloads[0]?.appliedRefreshIntervalMs, 1000);
+      assert.equal(restoreDashboardState(payloads[0]).appliedRefreshIntervalMs, 1000);
+      assert.equal("appliedRefreshIntervalMs" in payloads[1]!, false);
+      assert.equal(restoreDashboardState(payloads[1]).appliedRefreshIntervalMs, 0);
+    });
+    assert.deepEqual(server.watchRequests, [{ refreshRate: 0, screen: "", attempt: 0 }]);
+  } finally {
+    await server.shutdown();
+  }
 });

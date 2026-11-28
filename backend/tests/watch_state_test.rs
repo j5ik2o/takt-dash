@@ -55,7 +55,7 @@ async fn watch_state_sends_the_current_state_immediately_then_follows_changes_on
   let mut client = client(server.address).await;
 
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
 
   // 接続直後に、現在の全件を即時に返す。
   let first = timeout(Duration::from_secs(5), stream.message())
@@ -96,7 +96,7 @@ async fn watch_state_does_not_resend_when_a_cycle_leaves_the_state_unchanged() {
   let mut client = client(server.address).await;
 
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
   let _first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("初回の全件は即時に届きます")
@@ -127,7 +127,7 @@ async fn watch_state_stream_ends_when_the_server_stops() {
   let mut client = client(server.address).await;
 
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
   let _first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("初回の全件は即時に届きます")
@@ -160,7 +160,7 @@ async fn watch_state_sends_the_current_thresholds_after_a_config_change() {
   let mut client = client(server.address).await;
 
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
   let first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("初回の全件は即時に届きます")
@@ -214,7 +214,7 @@ async fn watch_state_sends_the_current_server_meta_after_a_config_change() {
   let mut client = client(server.address).await;
 
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
   let first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("初回の全件は即時に届きます")
@@ -257,7 +257,7 @@ async fn watch_state_task_ends_when_the_client_disconnects() {
   let mut client = client(server.address).await;
 
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
   let _first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("初回の全件は即時に届きます")
@@ -308,7 +308,7 @@ async fn watch_state_task_ends_when_the_server_stops_while_a_send_is_waiting() {
     registry: harness.registry.clone(),
   });
 
-  let response = service.watch_state(Request::new(WatchStateRequest {})).await.expect("購読を開始できます");
+  let response = service.watch_state(Request::new(WatchStateRequest::default())).await.expect("購読を開始できます");
   // クライアントをまだ読まず、送信タスクの送信をバッファで詰まらせる。変化通知を送り続けて
   // 送信が待ちに入るのを確実にする。
   let stream = response.into_inner();
@@ -344,7 +344,7 @@ async fn watch_state_resends_the_current_state_when_the_deadline_elapses_without
   let mut client = client(server.address).await;
 
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
   let first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("初回の全件は即時に届きます")
@@ -373,7 +373,7 @@ async fn watch_state_sends_added_server_metadata_after_a_config_change() {
   let mut client = client(server.address).await;
 
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
   let first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("初回の全件は即時に届きます")
@@ -440,7 +440,7 @@ async fn watch_state_reassembles_and_returns_the_new_run_log_silent() {
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
 
   let first = timeout(Duration::from_secs(5), stream.message())
     .await
@@ -500,7 +500,7 @@ async fn watch_state_sends_the_write_only_change_when_only_the_write_server_chan
   let server = start_server(&harness).await;
   let mut client = client(server.address).await;
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
   let first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("初回の全件は即時に届きます")

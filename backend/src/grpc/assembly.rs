@@ -227,16 +227,17 @@ pub(super) fn assemble_state_for(
   let servers = store.servers();
   let thresholds = store.thresholds();
   DashboardState {
-    read_at:           optional_timestamp(views.iter().filter_map(|view| view.last_read_at).max()),
-    servers:           assemble_servers(&servers, &views),
-    projects:          assemble_projects(&views, activity, now),
-    goals:             assemble_goals(&views),
-    runs:              assemble_runs(&views, store, now),
+    read_at: optional_timestamp(views.iter().filter_map(|view| view.last_read_at).max()),
+    servers: assemble_servers(&servers, &views),
+    projects: assemble_projects(&views, activity, now),
+    goals: assemble_goals(&views),
+    runs: assemble_runs(&views, store, now),
     pending_decisions: assemble_pending_decisions(store, now),
-    thresholds:        Some(v1::AnomalyThresholds {
+    thresholds: Some(v1::AnomalyThresholds {
       pending_decision_stale_minutes: thresholds.pending_decision_stale_minutes.get(),
       run_log_silent_minutes:         thresholds.run_log_silent_minutes.get(),
     }),
-    build_info:        Some(crate::build_info::current()),
+    build_info: Some(crate::build_info::current()),
+    applied_refresh_interval_ms: 0,
   }
 }

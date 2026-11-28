@@ -246,3 +246,81 @@ fn run_content_request_selects_either_a_report_or_an_instruction() {
   assert!(matches!(instruction.target, Some(v1::get_run_content_request::Target::InstructionId(2))));
   assert_eq!(response.content, "本文");
 }
+
+/// `header`（例 `enum RefreshRate`）の本文を、行末の注釈を外し、空白を 1 つに詰めた宣言の列で返す。
+/// 本文は最初の `}` までとする（入れ子の定義を持たない enum と message に使う）。
+fn block_declarations(source: &str, header: &str) -> Vec<String> {
+  let start = source
+    .lines()
+    .position(|line| {
+      let trimmed = line.trim();
+      trimmed == format!("{header} {{") || trimmed == format!("{header} {{}}")
+    })
+    .unwrap_or_else(|| panic!("{header} の宣言が見つかりません"));
+  let mut declarations = Vec::new();
+  for line in source.lines().skip(start) {
+    let code = line.split("//").next().unwrap_or("");
+    let body = code.split_once('{').map_or(code, |(_, rest)| rest);
+    let (body, closed) = match body.split_once('}') {
+      | Some((inside, _)) => (inside, true),
+      | None => (body, false),
+    };
+    let declaration = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !declaration.is_empty() {
+      declarations.push(declaration);
+    }
+    if closed {
+      break;
+    }
+  }
+  declarations
+}
+
+#[test]
+fn proto_declares_refresh_rate_enum_in_milliseconds() {
+  // issue #40 の設計 D5：選択肢と受ける範囲は proto の enum 1 か所に置き、値はミリ秒、0
+  // は要求なし。
+  assert_eq!(
+    block_declarations(PROTO_SOURCE, "enum RefreshRate"),
+    vec![
+      "REFRESH_RATE_UNSPECIFIED = 0;",
+      "REFRESH_RATE_ONE_SECOND = 1000;",
+      "REFRESH_RATE_TWO_SECONDS = 2000;",
+      "REFRESH_RATE_FIVE_SECONDS = 5000;",
+      "REFRESH_RATE_TEN_SECONDS = 10000;",
+    ],
+    "RefreshRate は 0 と 1 秒・2 秒・5 秒・10 秒のミリ秒の値をこの順で持つ必要があります"
+  );
+}
+
+#[test]
+fn proto_declares_the_watch_state_request_demand_fields() {
+  // issue #40 の設計 PR 1a：WatchStateRequest に要求の欄（レート・画面の識別子・試行番号）を足す。
+  assert_eq!(
+    block_declarations(PROTO_SOURCE, "message WatchStateRequest"),
+    vec!["RefreshRate refresh_rate = 1;", "string screen = 2;", "uint64 attempt = 3;"],
+    "WatchStateRequest は refresh_rate・screen・attempt をこの番号で持つ必要があります"
+  );
+}
+
+#[test]
+fn proto_declares_applied_refresh_interval_after_build_info_on_dashboard_state() {
+  // issue #40 の設計 PR 1a・D6：DashboardState の 9 番に、送信で予定した間隔（0
+  // は要求なし）を足す。 既存の 1〜8 番は番号も型も変えない（古い画面と古い backend
+  // が読み続けられるため）。
+  assert_eq!(
+    block_declarations(PROTO_SOURCE, "message DashboardState"),
+    vec![
+      "google.protobuf.Timestamp read_at = 1;",
+      "repeated Server servers = 2;",
+      "repeated Project projects = 3;",
+      "repeated Goal goals = 4;",
+      "repeated Run runs = 5;",
+      "repeated PendingDecision pending_decisions = 6;",
+      "AnomalyThresholds thresholds = 7;",
+      "BuildInfo build_info = 8;",
+      "uint32 applied_refresh_interval_ms = 9;",
+    ],
+    "DashboardState は既存の 1〜8 番を保ち、9 番に uint32 applied_refresh_interval_ms を持つ必要があります"
+  );
+}

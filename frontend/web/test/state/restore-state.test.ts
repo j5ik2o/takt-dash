@@ -483,3 +483,33 @@ test("タスク詳細の任意項目が省略された JSON は undefined のま
   assert.equal(restored.runSlug, undefined);
   assert.deepEqual(restored.linkedRunSlugs, []);
 });
+// issue #40 の E30：画面の型は backend が送信で予定した間隔（applied）を持つ。0 は「要求なし」で、
+// 欄の無い古い backend の状態も 0 として読む（設計の D6・D18・PR 1a）。
+test("JSON 経路は appliedRefreshIntervalMs を返し、欄が無ければ 0 にする", () => {
+  const withApplied = restoreDashboardState(
+    wireOf(DashboardState.create({ ...createDashboardState(), appliedRefreshIntervalMs: 2000 })),
+  );
+  assert.equal(withApplied.appliedRefreshIntervalMs, 2000);
+
+  // 古い backend（9 番の欄を送らない）と、要求なしの接続（0 は wire で省かれる）は同じ形になる。
+  const wire = wireOf(createDashboardState()) as Record<string, unknown>;
+  assert.equal("appliedRefreshIntervalMs" in wire, false, "0 の applied は JSON の鍵ごと省かれる");
+  assert.equal(restoreDashboardState(wire).appliedRefreshIntervalMs, 0);
+  assert.equal(restoreDashboardState({}).appliedRefreshIntervalMs, 0);
+});
+
+test("proto 経路は appliedRefreshIntervalMs をそのまま返し、指定が無ければ 0 にする", () => {
+  const withApplied = dashboardStateFromProto(
+    DashboardState.create({ ...createDashboardState(), appliedRefreshIntervalMs: 5000 }),
+  );
+  assert.equal(withApplied.appliedRefreshIntervalMs, 5000);
+  assert.equal(dashboardStateFromProto(createDashboardState()).appliedRefreshIntervalMs, 0);
+  assert.equal(dashboardStateFromProto(DashboardState.create()).appliedRefreshIntervalMs, 0);
+});
+
+test("applied のある状態も JSON 経路と proto 経路で同じ内部状態へ復元する", () => {
+  const state = DashboardState.create({ appliedRefreshIntervalMs: 10000 });
+
+  assert.deepEqual(restoreDashboardState(wireOf(state)), dashboardStateFromProto(state));
+  assert.equal(restoreDashboardState(wireOf(state)).appliedRefreshIntervalMs, 10000);
+});

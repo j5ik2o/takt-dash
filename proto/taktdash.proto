@@ -150,6 +150,15 @@ enum ConversationSpeaker {
   CONVERSATION_SPEAKER_DIRECTOR = 4;
 }
 
+// 画面が選べる更新間隔。値はミリ秒。0 は要求なし。
+enum RefreshRate {
+  REFRESH_RATE_UNSPECIFIED = 0;
+  REFRESH_RATE_ONE_SECOND = 1000;
+  REFRESH_RATE_TWO_SECONDS = 2000;
+  REFRESH_RATE_FIVE_SECONDS = 5000;
+  REFRESH_RATE_TEN_SECONDS = 10000;
+}
+
 // 集約対象のサーバーを表す。
 message Server {
   string server_id = 1;                        // 識別子
@@ -285,6 +294,7 @@ message DashboardState {
   repeated PendingDecision pending_decisions = 6;  // 判断待ち
   AnomalyThresholds thresholds = 7;         // 異常判定の基準
   BuildInfo build_info = 8;                 // backend 自身のビルド元
+  uint32 applied_refresh_interval_ms = 9;   // その送信で予定した間隔（0 は要求なし）
 }
 
 // 概要の取得を要求する。
@@ -577,7 +587,11 @@ message GetConversationResponse {
 }
 
 // 状態ストリーミングの接続を要求する。
-message WatchStateRequest {}
+message WatchStateRequest {
+  RefreshRate refresh_rate = 1;  // 画面が選んだ更新間隔（0 は要求なし）
+  string screen = 2;             // 画面の識別子
+  uint64 attempt = 3;            // 試行番号
+}
 
 // operation_request への回答の種類を表す。
 enum OperationAnswerReport {

@@ -27,6 +27,9 @@ import {
   type BackendClient,
 } from "../../src/grpc/client.ts";
 import type { GetGoalDetailRequest, GetTaskDetailRequest } from "../../src/proto/taktdash.ts";
+// 生成物に無い名前を名前つきで import するとファイル全体が読み込みで落ちるため、issue #40 で
+// 足す RefreshRate は名前空間で読む。
+import * as proto from "../../src/proto/taktdash.ts";
 
 const withServer = async (
   behavior: Parameters<typeof startTaktDashServer>[0],
@@ -676,4 +679,60 @@ test("backend の応答を受けると接続履歴が残り、表示用の状況
       await client.close();
     }
   });
+});
+
+// issue #40 の PR 1a：watchState は省略可能な要求を受け、生成物の fromPartial を通して backend へ送る。
+// 既存の呼び方（引数なし）は要求なし（レート 0・画面は空・試行 0）のまま通る。
+const readWatchedStates = (stream: grpc.ClientReadableStream<proto.DashboardState>) =>
+  new Promise<proto.DashboardState[]>((resolve, reject) => {
+    const states: proto.DashboardState[] = [];
+    stream.on("data", (state: proto.DashboardState) => states.push(state));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(states));
+  });
+
+test("引数なしの watchState は要求なしを送り、applied の無い古い backend の状態を 0 として受け取る", async () => {
+  const server = await startTaktDashServer({ watch: [createDashboardState()] });
+  const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: server.address } });
+  try {
+    const states = await readWatchedStates(client.watchState());
+
+    assert.deepEqual(server.watchRequests, [{ refreshRate: 0, screen: "", attempt: 0 }]);
+    assert.equal(states.length, 1);
+    assert.equal(states[0]?.appliedRefreshIntervalMs, 0);
+  } finally {
+    await client.close();
+    await server.shutdown();
+  }
+});
+
+test("watchState に渡した要求の欄は backend へそのまま届き、backend の applied を受け取る", async () => {
+  const server = await startTaktDashServer({
+    watch: [proto.DashboardState.create({ ...createDashboardState(), appliedRefreshIntervalMs: 1000 })],
+  });
+  const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: server.address } });
+  try {
+    const states = await readWatchedStates(
+      client.watchState({ refreshRate: proto.RefreshRate.REFRESH_RATE_TWO_SECONDS, screen: "s", attempt: 2 }),
+    );
+
+    assert.deepEqual(server.watchRequests, [{ refreshRate: 2000, screen: "s", attempt: 2 }]);
+    assert.equal(states[0]?.appliedRefreshIntervalMs, 1000);
+  } finally {
+    await client.close();
+    await server.shutdown();
+  }
+});
+
+test("watchState は一部だけの要求を既定値で埋めて送る", async () => {
+  const server = await startTaktDashServer({ watch: [] });
+  const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: server.address } });
+  try {
+    await readWatchedStates(client.watchState({ screen: "s" }));
+
+    assert.deepEqual(server.watchRequests, [{ refreshRate: 0, screen: "s", attempt: 0 }]);
+  } finally {
+    await client.close();
+    await server.shutdown();
+  }
 });

@@ -23,7 +23,7 @@ import {
   type GetTaskDetailResponse,
   type RejectGoalRegistrationRequest,
   type RejectGoalRegistrationResponse,
-  type WatchStateRequest,
+  WatchStateRequest,
 } from "../proto/taktdash";
 import type { TimingSink } from "../telemetry/timing";
 import type { InstructionId, ReportFilename, RunSlug } from "../state/domain-primitives";
@@ -107,7 +107,7 @@ export type BackendClient = {
   getConversation(request: GetConversationRequest, timing?: TimingSink): Promise<GetConversationResponse>;
   getGoalDetail(goalId: string, timing?: TimingSink): Promise<GetGoalDetailResponse>;
   getTaskDetail(project: string, taskName: string, goalId?: string, timing?: TimingSink): Promise<GetTaskDetailResponse>;
-  watchState(): ClientReadableStream<DashboardState>;
+  watchState(request?: Partial<WatchStateRequest>): ClientReadableStream<DashboardState>;
   answerInquiry(request: AnswerInquiryRequest): Promise<AnswerInquiryResponse>;
   approveGoalMerge(request: ApproveGoalMergeRequest): Promise<ApproveGoalMergeResponse>;
   approveGoalRegistration(request: ApproveGoalRegistrationRequest): Promise<ApproveGoalRegistrationResponse>;
@@ -354,7 +354,8 @@ export function createBackendClient(options: CreateBackendClientOptions = {}): B
     ...createReadOperations(client, readOptions),
     ...createRunOperations(client, readOptions, runDetailOptions),
     ...createDetailOperations(client, readOptions),
-    watchState: () => client.watchState({} satisfies WatchStateRequest),
+    watchState: (request: Partial<WatchStateRequest> = {}) =>
+      client.watchState(WatchStateRequest.fromPartial(request)),
     ...createWriteOperations(client, writeOptions),
     close: () =>
       new Promise<void>((resolve) => {

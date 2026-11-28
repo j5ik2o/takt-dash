@@ -116,7 +116,8 @@ async fn overview_and_watch_state_expose_the_same_embedded_build_info() {
     "GetOverview の build_info はバイナリへ埋め込んだ値と一致する必要があります"
   );
 
-  let mut stream = client.watch_state(WatchStateRequest {}).await.expect("WatchState へ接続できます").into_inner();
+  let mut stream =
+    client.watch_state(WatchStateRequest::default()).await.expect("WatchState へ接続できます").into_inner();
   let first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("WatchState の初回状態は即時に届きます")

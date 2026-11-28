@@ -341,6 +341,7 @@ export function restoreDashboardState(payload: unknown): DashboardState {
     pendingDecisions: arrayOf(raw.pendingDecisions).map(toPendingDecision),
     thresholds: toThresholds(raw.thresholds),
     buildInfo: toBuildInfo(raw.buildInfo),
+    appliedRefreshIntervalMs: asNumber(raw.appliedRefreshIntervalMs),
   };
 }
 
@@ -356,5 +357,6 @@ export function dashboardStateFromProto(state: ProtoDashboardState): DashboardSt
     pendingDecisions: state.pendingDecisions.map(toPendingDecision),
     thresholds: toThresholds(state.thresholds),
     buildInfo: toBuildInfo(state.buildInfo),
+    appliedRefreshIntervalMs: state.appliedRefreshIntervalMs,
   };
 }
