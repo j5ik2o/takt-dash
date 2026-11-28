@@ -263,6 +263,9 @@ const renderGoalsWithInitialFailure = (
 };
 
 const countOccurrences = (html: string, text: string): number => html.split(text).length - 1;
+// 要素の境界をまたいで文字がつながらないよう、テキストノードを改行で区切って並べる（#444）。
+// textContent では「状態 2」の次の段落の「0件」が「20件」と読め、空の表明を取りこぼす。
+const textByNode = (node: Node): string => node.nodeType === node.TEXT_NODE ? node.nodeValue ?? "" : Array.from(node.childNodes, textByNode).join("\n");
 
 test("初期読み込みが失敗した場合は Provider が切断状態で始まる", () => {
   const initial = renderInitialValue({ initialFailure: "unreachable", initialRespondedBefore: false });
@@ -582,7 +585,10 @@ test("同じライブ画面とサイドバーは未読から空、非空への�
         assertRejectsUnreadEmptyClaim(before);
         assert.match(before.querySelector('[role="status"]')?.textContent ?? "", /応答がありません/);
         const emptyRunScopes = [zero.querySelector(".page-head"), zero.querySelector(".tile"), zero.querySelector('[aria-labelledby="h-runs"]')];
-        const emptyRunText = emptyRunScopes.map((scope) => `${scope?.textContent} ${Array.from(scope?.querySelectorAll('[aria-label]') ?? []).map((item) => item.getAttribute('aria-label')).join(' ')}`).join(' ');
+        const emptyRunText = emptyRunScopes.map((scope) => `${scope ? textByNode(scope) : ""} ${(scope ? [scope, ...Array.from(scope.querySelectorAll('[aria-label]'))] : []).map((item) => item.getAttribute('aria-label')).join(' ')}`).join(' ');
+        // 「0件」「0 /」「ありません」の類をまとめて拾い、タイルの「0 / 8 件」と一覧の文のほかに空の表明が無いことを確かめる（#444）。
+        const emptyRunClaims = (emptyRunText.match(/(?<!\d)0\s*\/(?:\s*\d+\s*件)?|(?<!\d)0\s*件|ありません/g) ?? []).map((claim) => claim.replace(/\s+/g, ""));
+        assert.deepEqual(emptyRunClaims, ["0/8件", "ありません"], emptyRunText);
         assert.equal((emptyRunText.match(/0\s*\/\s*8\s*件/g) ?? []).length, 1, emptyRunText);
         assert.equal((emptyRunText.match(/走っている run はありません/g) ?? []).length, 1, emptyRunText);
         assert.ok(filled.querySelector('a[href="/runs/run-aaa"]'));

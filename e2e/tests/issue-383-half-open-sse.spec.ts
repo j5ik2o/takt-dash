@@ -55,7 +55,7 @@ test("半開きで無音になった接続を 40 秒で切断として扱い、�
     .getByRole("region", { name: "判断待ちの一覧" })
     .getByRole("listitem")
     .filter({ hasText: "人のマージ待ち" });
-  const trigger = item.getByRole("button", { name: "マージを承認" });
+  const trigger = item.getByRole("button", { name: "マージする" });
   await expect(trigger).toBeEnabled();
   await expect(page.getByText("再接続するまで操作できません。")).toHaveCount(0);
   // サーバー描画の初期状態でもボタンは有効なため、SSE の最初の受信が画面へ届いてから

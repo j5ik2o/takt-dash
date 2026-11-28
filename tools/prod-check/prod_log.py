@@ -12,7 +12,9 @@ from datetime import datetime, timedelta, timezone
 JST = timezone(timedelta(hours=9))
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 STAMP_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)(?: |$)")
-WEB_ERROR_RE = re.compile(r"error|Error|ERR_|500")
+WEB_ERROR_RE = re.compile(
+    r"error|Error|ERR_|(?:(?:^|(?<=[\s(\[\"']))|(?i:status|code)[\"']?\s*[:=]\s*)500(?=$|[\s)\]}\"',:;]|\.(?!\d))"
+)
 CYCLE_RE = re.compile(
     r"定期読み取りの1サイクルを終えました。\s+"
     r"cycle_ms=(\d+)\s+projects=(\d+)\s+projects_read=(\d+)\s+projects_failed=(\d+)\s+"

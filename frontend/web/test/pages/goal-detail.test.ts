@@ -58,10 +58,9 @@ test("ゴール詳細は空の対象外・受け入れ条件・制約も、空�
   assert.match(html, /制約はありません/);
 });
 
-test("ゴール詳細は開始ブランチ・統合ブランチ・ゴールブランチを表示する", () => {
+test("ゴール詳細は統合ブランチ・ゴールブランチを表示し、proto に無い開始ブランチの行は出さない", () => {
   const html = renderDetail();
-  assert.match(html, /開始ブランチ/);
-  assert.match(html, /未取得/);
+  assert.doesNotMatch(html, /開始ブランチ/);
   assert.match(html, /統合ブランチ/);
   assert.match(html, /main/);
   assert.match(html, /ゴールブランチ/);
@@ -104,8 +103,10 @@ test("ゴール詳細は回答本文が無くても回答の判断と作業の�
       { ...answered, questionId: "q-report", body: "スクリーンショットは撮れましたか。", answerText: undefined, answerDecision: undefined, answerReport: "completed" },
     ],
   });
-  assert.match(html, /回答の判断は allow です。/);
-  assert.match(html, /作業の報告は completed です。/);
+  assert.match(html, /回答の判断は「許可」です。/);
+  assert.match(html, /作業の報告は「実施した」です。/);
+  assert.doesNotMatch(html, /\ballow\b/);
+  assert.doesNotMatch(html, /\bcompleted\b/);
   assert.doesNotMatch(html, /未回答/);
 });
 

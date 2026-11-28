@@ -91,12 +91,15 @@ test("390px で現在のページのナビ項目が画面の横方向に収ま�
 });
 
 test("1280px でアクティビティの種類の列の文字が隣の本文の列へ重ならない", async ({ page, isolatedStack: stack }) => {
-  // 長い種類名（人のマージ待ち・blocked 通知）と短い種類名（run の開始・タスク完了）を
-  // 同じ一覧に並べるため、マージ待ちの問い合わせと作業の依頼を状態ファイルへ足す。
+  // 種類の列には長い種類名（blocked 通知）と短い種類名（問い合わせ）を同じ一覧に並べる。
+  // 長い種類名は blocked 通知で作るため、状態ファイルへ blocked 通知と作業の依頼（問い合わせ）を足す。
   const goalId = "11111111-1111-4111-8111-111111111111";
   await stack.updateState((state) => {
     const goalQuestions = (state.goalQuestions as Record<string, unknown[]>) ?? {};
     const existing = goalQuestions[goalId] ?? [];
+    const notifications = (state.notifications as Record<string, unknown[]>) ?? {};
+    const existingNotifications = notifications[goalId] ?? [];
+    const at = new Date().toISOString();
     return {
       ...state,
       goalQuestions: {
@@ -109,7 +112,19 @@ test("1280px でアクティビティの種類の列の文字が隣の本文の�
             kind: "operation_request",
             body: "blocked 通知を確認するための作業依頼です。",
             options: [],
-            createdAt: new Date().toISOString(),
+            createdAt: at,
+          },
+        ],
+      },
+      notifications: {
+        ...notifications,
+        [goalId]: [
+          ...existingNotifications,
+          {
+            id: "e2e-blocked-notification",
+            kind: "blocked",
+            body: "blocked 通知を確認するための通知です。",
+            recordedAt: at,
           },
         ],
       },
@@ -119,8 +134,15 @@ test("1280px でアクティビティの種類の列の文字が隣の本文の�
   await page.setViewportSize(DESKTOP);
   await page.goto(`${stack.webUrl}/activity`);
 
-  const rows = page.locator("ul.events > li.ev");
+  // 可視のシェル配下に限定する。ストリーミングの複製（body > div[hidden]）の行は
+  // display:none で boundingBox が null になるため、測る対象にしない。
+  const rows = page.locator(".shell ul.events > li.ev");
   await expect(rows.first()).toBeVisible();
+  // 足した問い合わせと blocked 通知が届き、起動時の行と合わせて3行になるまで待つ。
+  // 先頭の1行だけを測って通ることを防ぐため、母数を固定する。
+  await expect(rows).toHaveCount(3);
+  // 長い種類名が実際に出ていることを確かめる（この列幅の検証の前提）。
+  await expect(rows.locator(".kl").filter({ hasText: "blocked 通知" })).toHaveCount(1);
   const count = await rows.count();
   expect(count).toBeGreaterThan(0);
 

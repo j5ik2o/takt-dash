@@ -84,6 +84,29 @@ const toNewestFirst = (events: readonly ActivityEvent[]): ActivityEvent[] =>
 const toNewestDayFirst = (days: readonly DailySummary[]): DailySummary[] =>
   [...days].sort((a, b) => b.date.localeCompare(a.date));
 
+const JST_MS = 9 * 3600_000;
+const jstParts = (date: Date) => {
+  const jst = new Date(date.getTime() + JST_MS);
+  return { year: jst.getUTCFullYear(), month: jst.getUTCMonth() + 1, day: jst.getUTCDate() };
+};
+const sameJstDay = (a: Date, b: Date): boolean => {
+  const x = jstParts(a); const y = jstParts(b);
+  return x.year === y.year && x.month === y.month && x.day === y.day;
+};
+const pad2 = (v: number): string => String(v).padStart(2, "0");
+const dayHeading = (date: Date | undefined, now: Date): string => {
+  if (date === undefined) return "日付不明";
+  const d = jstParts(date); const n = jstParts(now);
+  const year = d.year === n.year ? "" : `${d.year}年`;
+  const today = sameJstDay(date, now) ? "（今日）" : "";
+  return `${year}${d.month}月${d.day}日${today}`;
+};
+const dayKey = (date: Date | undefined): string => {
+  if (date === undefined) return "unknown";
+  const d = jstParts(date);
+  return `${d.year}-${d.month}-${d.day}`;
+};
+
 export function ActivityContent({ state, response, now }: ActivityContentProps): ReactElement {
   const serverNames = new Map(state.servers.map((server) => [server.serverId, server.name]));
   const events = toNewestFirst(response.events);
@@ -103,39 +126,71 @@ export function ActivityContent({ state, response, now }: ActivityContentProps):
         {groups.length === 0 ? (
           <p className="note">出来事はありません。</p>
         ) : (
-          <ul className="events">
-            {groups.map((group, index) => {
-              const newest = group.newest;
-              const single = group.count === 1;
-              const rowState = kindState(newest.kind);
-              const attention = rowState === "warn";
-              const clockOf = (event: ActivityEvent): string =>
-                event.occurredAt ? formatClock(event.occurredAt) : "—";
-              const timeText = single ? clockOf(newest) : `${clockOf(group.oldest)} 〜 ${clockOf(newest)}`;
-              return (
-                <li className={`ev ${attention ? "warn" : ""}`} key={`${newest.serverId}-${index}`}>
-                  <time>{timeText}</time>
-                  <span className={attention ? "kl warn" : "kl"}>
-                    <span className={`dot ${rowState}`} aria-hidden="true" />
-                    {single ? kindLabel(newest.kind) : `${kindLabel(newest.kind)}（${group.count}件）`}
-                  </span>
-                  <span className="msg">
-                    {newest.project ? <b>{newest.project}：</b> : null}
-                    {/* グループは同種・同一サーバー・同一プロジェクトの接続イベントだけを
-                        集めるため、最新の出来事の本文がグループ全体の具体的な文言になる */}
-                    {/* 本文の改行は、エスケープされた「\n」と実際の改行のどちらも改行として出す */}
-                    {activityBodyLines(newest.body).map((line, lineIndex) => (
-                      <Fragment key={lineIndex}>
-                        {lineIndex > 0 ? <br /> : null}
-                        {line}
-                      </Fragment>
-                    ))}
-                  </span>
-                  <span className="sv">{serverLabel(serverNames, newest.serverId)}</span>
-                </li>
-              );
-            })}
-          </ul>
+          (() => {
+            type G = (typeof groups)[number];
+            const dayGroups: Array<{ key: string; heading: string; items: G[] }> = [];
+            for (const group of groups) {
+              const key = dayKey(group.newest.occurredAt);
+              const last = dayGroups.at(-1);
+              if (last !== undefined && last.key === key) {
+                last.items.push(group);
+              } else {
+                dayGroups.push({ key, heading: dayHeading(group.newest.occurredAt, now), items: [group] });
+              }
+            }
+            return dayGroups.map((dayGroup) => (
+              <div className="events-day" key={dayGroup.key}>
+                <h2 className="day-head">{dayGroup.heading}</h2>
+                <ul className="events">
+                  {dayGroup.items.map((group, index) => {
+                    const newest = group.newest;
+                    const single = group.count === 1;
+                    const rowState = kindState(newest.kind);
+                    const attention = rowState === "warn";
+                    const clockOf = (event: ActivityEvent): string =>
+                      event.occurredAt ? formatClock(event.occurredAt) : "—";
+                    let timeText: string;
+                    if (single) {
+                      timeText = clockOf(newest);
+                    } else if (newest.occurredAt === undefined) {
+                      timeText = "— 〜 —";
+                    } else if (group.oldest.occurredAt === undefined) {
+                      timeText = `— 〜 ${clockOf(newest)}`;
+                    } else if (sameJstDay(group.oldest.occurredAt, newest.occurredAt)) {
+                      timeText = `${clockOf(group.oldest)} 〜 ${clockOf(newest)}`;
+                    } else {
+                      const from = jstParts(group.oldest.occurredAt);
+                      const to = jstParts(newest.occurredAt);
+                      const datePart =
+                        from.year === to.year
+                          ? `${pad2(from.month)}-${pad2(from.day)}`
+                          : `${from.year}-${pad2(from.month)}-${pad2(from.day)}`;
+                      timeText = `${datePart} ${clockOf(group.oldest)} 〜 ${clockOf(newest)}`;
+                    }
+                    return (
+                      <li className={`ev ${attention ? "warn" : ""}`} key={`${newest.serverId}-${index}`}>
+                        <time dateTime={newest.occurredAt ? newest.occurredAt.toISOString() : undefined}>{timeText}</time>
+                        <span className={attention ? "kl warn" : "kl"}>
+                          <span className={`dot ${rowState}`} aria-hidden="true" />
+                          {single ? kindLabel(newest.kind) : `${kindLabel(newest.kind)}（${group.count}件）`}
+                        </span>
+                        <span className="msg">
+                          {newest.project ? <b>{newest.project}：</b> : null}
+                          {activityBodyLines(newest.body).map((line, lineIndex) => (
+                            <Fragment key={lineIndex}>
+                              {lineIndex > 0 ? <br /> : null}
+                              {line}
+                            </Fragment>
+                          ))}
+                        </span>
+                        <span className="sv">{serverLabel(serverNames, newest.serverId)}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ));
+          })()
         )}
       </section>
 
@@ -143,29 +198,37 @@ export function ActivityContent({ state, response, now }: ActivityContentProps):
         <h2 className="sec" id="h-daily">
           日ごとの出来事
         </h2>
-        <ul className="daily">
-          {dailySummaries.map((day) => (
-            <li key={day.date} className={day.attention > 0 ? "warn" : ""}>
-              <span className="day">{day.date}</span>
-              <span className="total">{day.total}件</span>
-              {day.attention > 0 ? <span className="attention">うち {day.attention}件</span> : null}
-            </li>
-          ))}
-        </ul>
+        {dailySummaries.every((day) => day.total === 0) ? (
+          <p className="note">この 7 日間の出来事はまだありません。</p>
+        ) : (
+          <ul className="daily">
+            {dailySummaries.map((day) => (
+              <li key={day.date} className={day.attention > 0 ? "warn" : ""}>
+                <span className="day">{day.date}</span>
+                <span className="total">{day.total}件</span>
+                {day.attention > 0 ? <span className="attention">うち要対応 {day.attention}件</span> : null}
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section aria-labelledby="h-today">
         <h2 className="sec" id="h-today">
           今日の出来事（サーバー別）
         </h2>
-        <ul className="counts">
-          {response.todayCountsByServer.map((count) => (
-            <li key={count.serverId}>
-              <span>{serverNames.get(count.serverId) ?? count.serverId}</span>
-              <b>{count.count}件</b>
-            </li>
-          ))}
-        </ul>
+        {response.todayCountsByServer.length === 0 ? (
+          <p className="note">今日の出来事はまだありません。</p>
+        ) : (
+          <ul className="counts">
+            {response.todayCountsByServer.map((count) => (
+              <li key={count.serverId}>
+                <span>{serverNames.get(count.serverId) ?? count.serverId}</span>
+                <b>{count.count}件</b>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     </main>
   );

@@ -10,43 +10,47 @@
 import type {
   BuildInfo,
   DashboardState as ProtoDashboardState,
-  GetGoalDetailResponse,
-  GetTaskDetailResponse,
   Goal as ProtoGoal,
-  GoalQuestion,
-  GoalTask,
-  GoalWorkLog,
   PendingDecision as ProtoPendingDecision,
   Project as ProtoProject,
   PullRequest as ProtoPullRequest,
   Run as ProtoRun,
   Server as ProtoServer,
 } from "../proto/taktdash";
-import { Timestamp } from "../proto/google/protobuf/timestamp";
 import {
   toGoalId,
   toInquiryId,
   toProjectName,
   toPullRequestNumber,
   toRegistrationRevision,
+  toRunLimit,
   toRunSlug,
   toServerId,
   toSilentMinutes,
   toStaleMinutes,
   toTaskCount,
   toTaskName,
+  type ExecutionStatus,
   type GoalId,
+  type GoalStatus,
   type InquiryId,
+  type PendingDecisionType,
   type ProjectName,
   type PullRequestNumber,
   type RegistrationRevision,
+  type RunLimit,
+  type RunStatus,
   type RunSlug,
   type ServerId,
   type TaskCount,
+  type TaskStatus,
   type TaskName,
   type ValidatedAnomalyThresholds,
 } from "./domain-primitives";
 import { enumFromWire, enumFromWireOrUnrecognizedName } from "./proto-values";
+import { arrayOf, toDate } from "./restore-detail";
+
+export { restoreGoalDetail, restoreTaskDetail } from "./restore-detail";
 
 export type ValidatedTaskStatusCounts = {
   pending: TaskCount;
@@ -65,18 +69,22 @@ export type DashboardServer = Omit<ProtoServer, "serverId"> & {
   serverId: ServerId;
 };
 
-export type DashboardProject = Omit<ProtoProject, "name" | "serverId"> & {
+export type DashboardProject = Omit<ProtoProject, "name" | "serverId" | "concurrency"> & {
   name: ProjectName;
   serverId: ServerId;
+  concurrency: RunLimit;
 };
 
 export type DashboardGoal = Omit<
   ProtoGoal,
-  "goalId" | "serverId" | "project" | "taskCounts" | "pullRequest"
+  "goalId" | "serverId" | "project" | "taskCounts" | "pullRequest" | "status" | "executionStatus" | "mergeTaskLast"
 > & {
   goalId: GoalId;
   serverId: ServerId;
   project: ProjectName;
+  status: GoalStatus;
+  executionStatus: ExecutionStatus;
+  mergeTaskLast: TaskStatus | undefined;
   taskCounts: ValidatedTaskStatusCounts | undefined;
   pullRequest: DashboardPullRequest | undefined;
 };
@@ -85,19 +93,21 @@ export type DashboardGoal = Omit<
 // 空文字または欠落になるため、未指定を undefined で表す。
 export type DashboardRun = Omit<
   ProtoRun,
-  "runSlug" | "serverId" | "project" | "goalId" | "taskName"
+  "runSlug" | "serverId" | "project" | "goalId" | "taskName" | "status"
 > & {
   runSlug: RunSlug;
   serverId: ServerId;
   project: ProjectName;
   goalId: GoalId | undefined;
   taskName: TaskName;
+  status: RunStatus;
 };
 
 export type DashboardPendingDecision = Omit<
   ProtoPendingDecision,
-  "serverId" | "project" | "goalId" | "pullRequest" | "inquiryId" | "revision"
+  "serverId" | "project" | "goalId" | "pullRequest" | "inquiryId" | "revision" | "type"
 > & {
+  type: PendingDecisionType;
   serverId: ServerId;
   project: ProjectName;
   goalId: GoalId | undefined;
@@ -117,17 +127,6 @@ export type DashboardState = Omit<
   runs: DashboardRun[];
   pendingDecisions: DashboardPendingDecision[];
   thresholds: ValidatedAnomalyThresholds | undefined;
-};
-
-const toDate = (value: unknown): Date | undefined => {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (value instanceof Date) {
-    return value;
-  }
-  const timestamp = Timestamp.fromJSON(value);
-  return new Date(timestamp.seconds * 1_000 + Math.round(timestamp.nanos / 1_000_000));
 };
 
 const asNumber = (value: unknown): number => (typeof value === "number" ? value : Number(value ?? 0));
@@ -203,7 +202,8 @@ const toProject = (raw: unknown): DashboardProject => {
     about: String(value.about ?? ""),
     serverId: toServerId(value.serverId),
     completedTasks24h: asNumber(value.completedTasks24h),
-    concurrency: asNumber(value.concurrency),
+    // wire が 0 を省略するため、欠落は 0 として復元する。負数・上限超・非整数は拒否する。
+    concurrency: toRunLimit(value.concurrency ?? 0),
     connected: value.connected === true,
     lastReadAt: toDate(value.lastReadAt),
     connectionState:
@@ -213,6 +213,14 @@ const toProject = (raw: unknown): DashboardProject => {
   };
 };
 
+const goalStatusFromWire = (value: unknown): GoalStatus => enumFromWire("GoalStatus", value) as GoalStatus;
+const executionStatusFromWire = (value: unknown): ExecutionStatus =>
+  enumFromWire("ExecutionStatus", value) as ExecutionStatus;
+const taskStatusFromWire = (value: unknown): TaskStatus => enumFromWire("TaskStatus", value) as TaskStatus;
+const runStatusFromWire = (value: unknown): RunStatus => enumFromWire("RunStatus", value) as RunStatus;
+const pendingDecisionTypeFromWire = (value: unknown): PendingDecisionType =>
+  enumFromWire("PendingDecisionType", value) as PendingDecisionType;
+
 const toGoal = (raw: unknown): DashboardGoal => {
   const value = recordOf(raw);
   return {
@@ -221,8 +229,8 @@ const toGoal = (raw: unknown): DashboardGoal => {
     project: toProjectName(value.project),
     name: String(value.name ?? ""),
     nameTruncated: value.nameTruncated === true, // 欠落（古い backend）と true 以外は false
-    status: enumFromWire("GoalStatus", value.status),
-    executionStatus: enumFromWire("ExecutionStatus", value.executionStatus),
+    status: goalStatusFromWire(value.status),
+    executionStatus: executionStatusFromWire(value.executionStatus),
     taskCounts: toTaskCounts(value.taskCounts),
     pausedReason: typeof value.pausedReason === "string" ? value.pausedReason : undefined,
     pullRequest: toPullRequest(value.pullRequest),
@@ -230,7 +238,7 @@ const toGoal = (raw: unknown): DashboardGoal => {
     mergeTaskLast:
       value.mergeTaskLast === undefined || value.mergeTaskLast === null
         ? undefined
-        : enumFromWire("TaskStatus", value.mergeTaskLast),
+        : taskStatusFromWire(value.mergeTaskLast),
   };
 };
 
@@ -267,7 +275,7 @@ const toRun = (raw: unknown): DashboardRun => {
     currentStepStartedAt: toDate(value.currentStepStartedAt),
     lastLogAt: toDate(value.lastLogAt),
     reports: arrayOf(value.reports).map(toReportSummary),
-    status: enumFromWire("RunStatus", value.status),
+    status: runStatusFromWire(value.status),
     logSilent: value.logSilent === true,
     currentStepNumber: asOptionalNumber(value.currentStepNumber),
     totalSteps: asOptionalNumber(value.totalSteps),
@@ -279,7 +287,7 @@ const toRun = (raw: unknown): DashboardRun => {
 const toPendingDecision = (raw: unknown): DashboardPendingDecision => {
   const value = recordOf(raw);
   return {
-    type: enumFromWire("PendingDecisionType", value.type),
+    type: pendingDecisionTypeFromWire(value.type),
     serverId: toServerId(value.serverId),
     project: toProjectName(value.project),
     goalId: optionalGoalId(value.goalId),
@@ -321,52 +329,6 @@ const toBuildInfo = (raw: unknown): BuildInfo | undefined => {
   };
 };
 
-const arrayOf = (value: unknown): Record<string, unknown>[] =>
-  Array.isArray(value) ? value.map((item) => item as Record<string, unknown>) : [];
-
-const toStringArray = (value: unknown): string[] =>
-  Array.isArray(value) ? value.map((item) => String(item)) : [];
-
-const toOptionalString = (value: unknown): string | undefined =>
-  typeof value === "string" ? value : undefined;
-
-const toOptionalNumber = (value: unknown): number | undefined =>
-  value === undefined || value === null ? undefined : asNumber(value);
-
-const toSpecifications = (value: unknown): { [key: string]: string } => {
-  if (value === null || typeof value !== "object") {
-    return {};
-  }
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, String(item)]),
-  );
-};
-
-const toGoalWorkLog = (raw: Record<string, unknown>): GoalWorkLog => ({
-  workLogId: String(raw.workLogId ?? ""),
-  recordedAt: toDate(raw.recordedAt),
-  summary: String(raw.summary ?? ""),
-});
-
-const toGoalQuestion = (raw: Record<string, unknown>): GoalQuestion => ({
-  questionId: String(raw.questionId ?? ""),
-  kind: String(raw.kind ?? ""),
-  status: String(raw.status ?? ""),
-  body: String(raw.body ?? ""),
-  options: toStringArray(raw.options),
-  answerText: toOptionalString(raw.answerText),
-  answerDecision: toOptionalString(raw.answerDecision),
-  answerReport: toOptionalString(raw.answerReport),
-  createdAt: toDate(raw.createdAt),
-  answeredAt: toDate(raw.answeredAt),
-});
-
-const toGoalTask = (raw: Record<string, unknown>): GoalTask => ({
-  taskName: String(raw.taskName ?? ""),
-  status: enumFromWire("TaskStatus", raw.status),
-  runSlug: toOptionalString(raw.runSlug),
-});
-
 // proto の JSON 表現（文字列の時刻を含む）を、内部の DashboardState へ復元する。
 export function restoreDashboardState(payload: unknown): DashboardState {
   const raw = recordOf(payload);
@@ -379,48 +341,6 @@ export function restoreDashboardState(payload: unknown): DashboardState {
     pendingDecisions: arrayOf(raw.pendingDecisions).map(toPendingDecision),
     thresholds: toThresholds(raw.thresholds),
     buildInfo: toBuildInfo(raw.buildInfo),
-  };
-}
-
-// ゴール詳細の Route Handler が返す JSON を、画面の内部型へ復元する。
-export function restoreGoalDetail(payload: unknown): GetGoalDetailResponse {
-  const raw = (payload ?? {}) as Record<string, unknown>;
-  return {
-    goalId: String(raw.goalId ?? ""),
-    serverId: String(raw.serverId ?? ""),
-    project: String(raw.project ?? ""),
-    status: enumFromWire("GoalStatus", raw.status),
-    executionStatus: enumFromWire("ExecutionStatus", raw.executionStatus),
-    objective: String(raw.objective ?? ""),
-    outOfScope: toStringArray(raw.outOfScope),
-    acceptanceCriteria: toStringArray(raw.acceptanceCriteria),
-    constraints: toStringArray(raw.constraints),
-    specifications: toSpecifications(raw.specifications),
-    branch: String(raw.branch ?? ""),
-    integrationBranch: String(raw.integrationBranch ?? ""),
-    workLog: arrayOf(raw.workLog).map(toGoalWorkLog),
-    questions: arrayOf(raw.questions).map(toGoalQuestion),
-    tasks: arrayOf(raw.tasks).map(toGoalTask),
-  };
-}
-
-// タスク詳細の Route Handler が返す JSON を、画面の内部型へ復元する。
-export function restoreTaskDetail(payload: unknown): GetTaskDetailResponse {
-  const raw = (payload ?? {}) as Record<string, unknown>;
-  return {
-    project: String(raw.project ?? ""),
-    taskName: String(raw.taskName ?? ""),
-    goalId: toOptionalString(raw.goalId),
-    status: enumFromWire("TaskStatus", raw.status),
-    summary: String(raw.summary ?? ""),
-    createdAt: toDate(raw.createdAt),
-    startedAt: toDate(raw.startedAt),
-    completedAt: toDate(raw.completedAt),
-    runSlug: toOptionalString(raw.runSlug),
-    pullRequestNumber: toOptionalNumber(raw.pullRequestNumber),
-    linkedRunSlugs: toStringArray(raw.linkedRunSlugs),
-    branch: toOptionalString(raw.branch),
-    pullRequestUrl: toOptionalString(raw.pullRequestUrl),
   };
 }
 

@@ -3,6 +3,7 @@ import Link from "next/link";
 import type { GetTaskDetailResponse } from "../proto/taktdash";
 import { taskStatusLabel } from "../state/dashboard";
 import { formatDateTime } from "../state/format";
+import { projectHref } from "../state/anchors";
 
 type TaskDetailContentProps = {
   detail: GetTaskDetailResponse;
@@ -12,6 +13,9 @@ type TaskDetailContentProps = {
 // 作成・開始・完了の時刻は takt_list_tasks の createdAt / startedAt / completedAt に対応し、
 // 値が無い時刻は「未取得」と示す。
 export function TaskDetailContent({ detail }: TaskDetailContentProps): ReactElement {
+  const back = detail.goalId
+    ? { text: "ゴール詳細に戻る", href: `/goals/${encodeURIComponent(detail.goalId)}` }
+    : { text: "プロジェクトに戻る", href: projectHref(detail.project) };
   const runSlugs = Array.from(
     new Set([
       ...detail.linkedRunSlugs,
@@ -20,8 +24,8 @@ export function TaskDetailContent({ detail }: TaskDetailContentProps): ReactElem
   );
   return (
     <main className="page">
-      <Link className="back" href="/goals">
-        ゴール一覧に戻る
+      <Link className="back" href={back.href}>
+        {back.text}
       </Link>
       <header className="page-head">
         <div>
@@ -37,10 +41,6 @@ export function TaskDetailContent({ detail }: TaskDetailContentProps): ReactElem
           <div className="f">
             <div className="k">状態</div>
             <div className="v">{taskStatusLabel(detail.status)}</div>
-          </div>
-          <div className="f wide">
-            <div className="k">目的</div>
-            <div className="v">{detail.taskName}</div>
           </div>
           <div className="f wide">
             <div className="k">要約</div>
@@ -112,8 +112,8 @@ export function TaskDetailContent({ detail }: TaskDetailContentProps): ReactElem
         )}
       </section>
 
-      <Link className="back" href="/goals">
-        ゴール一覧に戻る
+      <Link className="back" href={back.href}>
+        {back.text}
       </Link>
     </main>
   );

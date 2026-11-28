@@ -220,7 +220,7 @@ test("ゴール詳細・タスク詳細をダミーサーバーから取得で�
       goalDetail: createGoalDetailResponse(),
       taskDetail: createTaskDetailResponse(),
     },
-    async ({ address }) => {
+    async ({ address, calls }) => {
       const client = createBackendClient({ env: { TAKTDASH_BACKEND_ADDR: address } });
       try {
         const detail = await client.getGoalDetail("goal-1");
@@ -228,6 +228,7 @@ test("ゴール詳細・タスク詳細をダミーサーバーから取得で�
 
         const task = await client.getTaskDetail("corporate-site", "採用ページのレイアウトを直す", "goal-1");
         assert.equal(task.summary, "レイアウトを直して、確認を待っています。");
+        assert.deepEqual(calls, ["GetGoalDetail", "GetTaskDetail"], "詳細の RPC も呼ばれた名前を記録する");
       } finally {
         await client.close();
       }

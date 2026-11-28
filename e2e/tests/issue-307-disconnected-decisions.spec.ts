@@ -35,12 +35,12 @@ test("切断中は判断待ちの回答ボタンを押せず、再接続する�
     .getByRole("region", { name: "判断待ちの一覧" })
     .getByRole("listitem")
     .filter({ hasText: "人のマージ待ち" });
-  const trigger = item.getByRole("button", { name: "マージを承認" });
+  const trigger = item.getByRole("button", { name: "マージする" });
   await expect(trigger).toBeEnabled();
   await expect(page.getByText("再接続するまで操作できません。")).toHaveCount(0);
 
   await trigger.click();
-  const dialog = page.getByRole("dialog", { name: "マージの承認" });
+  const dialog = page.getByRole("dialog", { name: "プルリクエストのマージ" });
   await expect(dialog).toBeVisible();
   const confirm = dialog.getByRole("button", { name: "マージする" });
   await confirm.focus();
@@ -51,7 +51,7 @@ test("切断中は判断待ちの回答ボタンを押せず、再接続する�
 
   await expect(confirm).toBeDisabled();
   // 無効になった確定ボタンからフォーカスが落ちても、ダイアログの見出しに留まる。
-  await expect(dialog.getByRole("heading", { name: "マージの承認" })).toBeFocused();
+  await expect(dialog.getByRole("heading", { name: "プルリクエストのマージ" })).toBeFocused();
   await expect(dialog).toContainText("再接続するまで操作できません。");
   await dialog.getByRole("button", { name: "やめる" }).click();
   await expect(dialog).toBeHidden();
@@ -77,9 +77,10 @@ test("切断中に確認を閉じて別の要素へフォーカスを移した�
     .getByRole("region", { name: "判断待ちの一覧" })
     .getByRole("listitem")
     .filter({ hasText: "人のマージ待ち" });
-  const trigger = item.getByRole("button", { name: "マージを承認" });
+  // ダイアログを開いたまま trigger を確かめるので、確定ボタン（同じ「マージする」。D4）と区別するため .first() を残す。
+  const trigger = item.getByRole("button", { name: "マージする" }).first();
   await trigger.click();
-  const dialog = page.getByRole("dialog", { name: "マージの承認" });
+  const dialog = page.getByRole("dialog", { name: "プルリクエストのマージ" });
   await expect(dialog).toBeVisible();
 
   await page.route(SSE_PATH, (route) => route.abort());
