@@ -4,8 +4,8 @@
 関連：[j5ik2o/takt-dash#130](https://github.com/j5ik2o/takt-dash/issues/130)（毎秒の全ページ再取得の負荷）、[j5ik2o/takt-dash#383](https://github.com/j5ik2o/takt-dash/issues/383)（SSE の無音の見張り）、[j5ik2o/takt-dash#385](https://github.com/j5ik2o/takt-dash/issues/385)（見捨てられた SSE の後始末）
 大きさの基準：[j5ik2o/takt-dash#361](https://github.com/j5ik2o/takt-dash/pull/361) = 1（+23 −2、1 ファイル）、[j5ik2o/takt-dash#362](https://github.com/j5ik2o/takt-dash/pull/362) = 5（+1147 −122、18 ファイル）
 
-確かめたコード：`7917195`（`main`）。前の版が見た `d7e6d5b` からの差分は `tools/prod-check/prod_log_test.py` だけで、この設計が参照するコードの行は変わっていない。その後に付け直した `a49595b` までの差分も `.github/workflows/review-thread-resolution.yml` だけ。
-この版は、前の版（`bbc7fe0`）を 2 回目の敵対的な読み（22 件）で読み直した結果と、takt-dash中将の採否（すべて採る）で直したもの。どの指摘をどこで直したかは末尾の「2 回目の読みとの対応表」にある。1 回目の読み（20 件）の対応表もその下に残した。
+確かめたコード：`7917195`（`main`）。前の版が見た `d7e6d5b` からの差分は `tools/prod-check/prod_log_test.py` だけで、この設計が参照するコードの行は変わっていない。その後に付け直した `a49595b` までの差分も `.github/workflows/review-thread-resolution.yml` だけ。この版で付け直した `a59ca97` までの差分は `docs/design/issue-134.md` と `specs/quint/review-thread-ack/` だけで、参照する行は変わっていない（3 回目の読みが足した `frontend/cli` の 2 か所、`client.ts:26`、`grpc/mod.rs:80,233,598-665`、`lib.rs:11-25`、`last-loaded.ts:43-44`、`poller.rs:384-393` も `a59ca97` で読み直した）。
+この版は、前の版（`584bd07`）への 3 回目の敵対的な読み（A〜O）と、takt-dash中将の採否（すべて採る）と決め 1〜6 を入れたもの。どれをどこに入れたかは末尾の「3 回目の読みとの対応表」にある。2 回目（22 件）と 1 回目（20 件）の対応表もその下に残した。
 
 ## 先頭のまとめ
 
@@ -17,15 +17,16 @@
 | 公開 API（HTTP） | **はい** | `/api/state` に省略可能な `refresh_ms` を足す。BFF に `/api/activity` と `/api/runs/[slug]` を足す。どれも画面専用で、既存の URL と引数の意味は変えない。新しい Route Handler は既存と同じく `dynamic = "force-dynamic"` と `Cache-Control: no-store`。 |
 | 保存データ | **いいえ** | DB の表・列・索引・保存形式、設定以外のファイルを変えない。画面の選択は `localStorage`（origin ごと）だけに置く。設定ファイルに任意の `minReadIntervalMs` を足す（無ければ既定 1000）。 |
 | 秘密 | **いいえ** | 秘密・認証・接続元の制限を増やさない。LAN・Tailscale・SoftEther VPN の中は信頼する範囲、というオーナーの決定のまま。`refresh_ms`・`screen`・`attempt` は秘密ではない。 |
-| 守りの仕組み | **一部** | CI・関門・ルールセット・`make done` の定義は変えない。この設計の PR で `specs/quint/refresh-demand/` を足し、`specs/quint/ci-specs.json` に 1 件登録するので、既存の `quint` ジョブ（`scripts/quint-check-specs.sh`）がこの仕様も検査する（`fixed` を 100 ステップ・10,000 サンプル。CI と同じスクリプトで約 5 秒）。実装の PR はテストを足すだけ。 |
+| 守りの仕組み | **一部** | CI・関門・ルールセット・`make done` の定義は変えない。この設計の PR で `specs/quint/refresh-demand/` を足し、`specs/quint/ci-specs.json` に 1 件登録するので、既存の `quint` ジョブ（`scripts/quint-check-specs.sh`）がこの仕様も検査する（`fixed` を 150 ステップ・10,000 サンプル。手元で約 7 秒）。変異を流し直す `specs/quint/refresh-demand/mutants.sh` も置くが、CI には載せない（手元で流す道具。`review-thread-ack/mutants.sh` と同じ扱い）。実装の PR はテストを足すだけ。 |
 
 ### 大きさ
 
-**合わせて 25。8 を超えるので 6 本に分ける（1a：2、1b：5、2a：5、2b：3、3：8、4：2）。** 分け方と、それぞれが単独でマージできる理由は「分け方」の節にある。
+**合わせて 30 を見込みとする。8 を超えるので 7 本に分ける（1a：2、1b：5、2a：5、2b：3、読みを減らす PR：5、3：8、4：2）。** 分け方と、それぞれが単独でマージできる理由は「分け方」の節にある。
 
-- 前の版の 20 から増えたのは、2 回目の読みで足した作業のため：PR 1 の型の追従（`applied` のフィールドを PR 1 に前倒しし、`assembly.rs`・試験の literal 13 か所・`restore-state.ts`・`client.ts` を直す）、内容の部品を画面の型へ移す変更とそのテスト 5 ファイル（7 か所）、ローダーを Provider の外で描くテスト 5 ファイルの描き方と Context の literal 2 ファイル、組み立ての後の寿命の確かめ、時計の一本化、#130 の合格線の実測。
-- PR 1 は 8 になるので 1a（proto と型の追従）と 1b（backend の要求）に分けた。PR 2 は 8 を超えるので、前の版で「小さくしたい場合」としていた 2a・2b を既定の分け方にした。PR 3 は変えるファイルが 28 前後で #362 の 18 より多いので 8 に直した（前の版の 5 は少なく見ていた）。
-- **合格線を外れたときの追加**：#130 の実測（「負荷の合格線」の節）が合格線を外れたら、PR 3 の前に「速い読みの対象を減らす」PR（大きさ 5 の見込み。設計は別に書く）を入れる。そのときは合わせて 30。**今の本番の実測では外れる見込みが高い**（1 周期の所要が p50 9.4 秒）。
+- 読みを減らす PR は、#130 の実測（「負荷の合格線」の節）が合格線を外れたときだけ入れる（決め 1）。**今の本番の実測では外れる見込みが高い**（1 周期の所要が p50 9.4 秒）ので、見込みには入れて 30 とする（決め 1 の最後）。合格線を満たせば 25。
+- 2 回目の読みで 20 から 25 に増えたのは、PR 1 の型の追従（`applied` のフィールドを PR 1 に前倒しし、`assembly.rs`・試験の literal・`restore-state.ts`・`client.ts` を直す）、内容の部品を画面の型へ移す変更とそのテスト、ローダーを Provider の外で描くテストの描き方と Context の literal、組み立ての後の寿命の確かめ、時計の一本化、#130 の合格線の実測のため。
+- 3 回目の読みで足した作業（PR 1a の `frontend/cli` の literal 2 か所と `client.ts` の import、PR 1b の組み立てを差し替える口、PR 3 の「読み取りに N 秒かかっています」）は、どれも各 PR の段の中に収まり、段を変えない（理由は「分け方」の節）。
+- PR 1 は 8 になるので 1a（proto と型の追従）と 1b（backend の要求）に分けた。PR 2 は 8 を超えるので 2a・2b に分けた。PR 3 は変えるファイルが 28 前後で #362 の 18 より多いので 8。
 
 ## 目的
 
@@ -143,13 +144,19 @@ enum RefreshRate {
   - `0`：その接続には要求が掛かっていない。要求なしの接続、unary の応答、この機能の無い古い backend のどれか。
   - `1000〜10000`：その接続が、この状態を送ったときに**予定した**送信間隔。`max(要求, minReadIntervalMs)`。次の組み立ては、この送信の完了から `applied` の後に始まる。実際の間隔は、これに組み立てと送信の時間が足される（不変条件 8）。
   - 15000 は使わない。要求なしの接続の 15 秒の再送は `applied` に出さない。
-  - `applied` はデータの新しさではない。poller の 1 周期が `applied` より長いと、`applied = 1000` の状態が毎秒届いても、中身（`read_at`）は周期ごとにしか変わらない（「決まっていない点 2」）。
+  - `applied` はデータの新しさではない。poller の 1 周期が `applied` より長いと、`applied = 1000` の状態が毎秒届いても、中身（`read_at`）は周期ごとにしか変わらない。そのときは画面が読み取りの遅さを知らせる（下の「画面の通知」の 3 つ目。決め 2）。
 - **毎回再計算する**。送るたびに `RefreshDemand` が持つ今の `minReadIntervalMs` で計算し直し、その値を `applied` に入れ、次の期限と寿命もその値から決める。接続の開始で固定しない。
 - **`minReadIntervalMs` を変えたとき**：poller が設定を読み直した周期（`read_cycle_once_at`）で `RefreshDemand::set_min_read` を呼ぶ。開いている接続は、その後の最初の送信から新しい下限で送り、`applied` も変わる。効くまでの遅れは「poller の 1 周期＋その接続の前の間隔」以内。
 - **起動直後と設定の失敗**：`RefreshDemand` の下限の初期値は既定の 1000。設定の読み込みに失敗した周期は、前に読めた値のまま（下げも上げもしない）。失敗した周期の待ちは `refresh_demand.effective(DEFAULT_INTERVAL_SECONDS, now)` を通す（要求があれば要求に従う）。
 - **画面の通知**（サイドバーの「更新間隔」の下）。SSE の最初の受信の後にだけ出す。
   - `applied` が選んだ値より大きい：「状態の配信は 5 秒ごとです（backend の下限。選んだ間隔は 1 秒）。概要・判断待ち・プロジェクト・ゴール・アクティビティの内容はこの間隔で変わります。」
   - 要求を出したのに `applied` が 0：「backend が更新間隔の指定に対応していません。状態の配信は、変化のときと 15 秒ごとです。」
+  - 読み取りの周期が選んだ間隔より長い（決め 2。PR 3）：「読み取りに N 秒かかっています。概要・判断待ち・プロジェクト・ゴール・アクティビティの内容は、およそ N 秒ごとに変わります。」
+    - N は、プロジェクトごとの `lastReadAt`（`DashboardState.projects[].last_read_at`、`assembly.rs:74`）が前の値から進んだ間隔の、全プロジェクトでの最大を秒に丸めたもの。読めていないプロジェクト（`connected` が false）は数えない（応答なしは既存の表示が受け持つ）。`lastReadAt` は読み取りが成功するたびに、中身の変化の有無によらず進む（`store.rs:169-183` の `record_success`）。全体の `read_at`（`assembly.rs:230`）はプロジェクトの最大なので 1 周期の中で何度も進み、周期の長さを表さないので使わない。
+    - 間隔は、画面が状態を受けた時刻（ブラウザの時計）どうしの差で測る。backend の時刻とブラウザの時計を比べない（LAN の端末は時計がずれうる）。進んでから次に進むまでの間も、受けた時刻で経過を数え、それが前の間隔より長ければ N に使う（周期が止まっても数字が増える）。精度は送信の間隔（`applied`）の 1 回分。
+    - 起点はストリームを開くたびに捨てる（hidden → visible、レート変更、中の再接続。D8 の開き直しの経路のどれでも）。開き直した後の最初の受信は起点を作るだけで、N を出さない。捨てないと、hidden や切断の間の時間が最初の受信で N に出てしまう。
+    - 出す条件は `N ≥ 2 × max(選んだ間隔, applied)`。消すのは、それを下回る間隔を 1 回受けたとき。SSE の最初の受信より前と、`applied` が 0（要求なし）のときは出さない。
+    - 判定は純粋関数 `readLag(previous, received, nowMs)`（`src/state/refresh-rate.ts`）に置き、`live-sidebar.tsx` が受信ごとに呼ぶ。proto は変えない（PR 1a を開き直さない）。
   - 通知は SSE の配信と poller に従う内容のことだけを言う。タスク詳細・ゴール詳細・会話・run 詳細・run ログは画面の要求のたびに takt を読むので、`minReadIntervalMs` に関わらず選んだレートで変わる（通知の対象に書かない）。
 
 ### D7. 要求の寿命（TTL）は「最後の送信の完了から max(3 × applied, 15 秒)」
@@ -169,7 +176,7 @@ enum RefreshRate {
   - 組み立てが寿命より長い（1 秒の要求で 14 秒を超える）のは backend がひどく詰まったときで、そのときストリームを閉じて画面に開き直させるのは正しい（poller はもうその要求を数えていない）。
 - **寿命切れでしたこと**：登録簿から外し、**送信タスクも閉じる**（`select!` の `sleep_until(guard.deadline())` の分岐、または組み立ての後の確かめで `return`）。ストリームが終わるので、Next の中継が終わり、画面の EventSource は `onerror` から再接続し、次の試行で要求が戻る。寿命切れの後も要求なしとして送り続けて `applied` を偽る経路は無い（Quint の `expiryKeepsTask` と `noPostAssemblyCheck` が違反を返す）。
 - **初期の組み立てとの順序**：要求は初期状態を送り終えてから登録する（`acquire` は初期送信の後）。組み立てがどれだけ長くても、最初の送信の前に寿命は切れない。その間、poller はまだ速くならないが、初期状態は組み立てた時点の最新なので困らない（Quint の `acquireEarly` が、受け付けで登録すると最初の送信の前に切れることを示す）。
-- **寿命で捕まえられないもの**：画面と Next の間の半開き（上のとおり backend の列は詰まらない）。画面が生きていれば見張り（40 秒）で開き直して置き換わり、画面が消えていれば Next の TCP が再送をあきらめたときに中継が閉じ、backend の `sender.closed()` で外れる（OS の再送の上限まで、分の単位で残りうる）。タブが hidden になれば D9 で画面が先に閉じる。残りの危険は「決まっていない点 5」。
+- **寿命で捕まえられないもの**：画面と Next の間の半開き（上のとおり backend の列は詰まらない）。画面が生きていれば見張り（40 秒）で開き直して置き換わり、画面が消えていれば Next の TCP が再送をあきらめたときに中継が閉じ、backend の `sender.closed()` で外れる（OS の再送の上限まで、分の単位で残りうる）。タブが hidden になれば D9 で画面が先に閉じる。**残る要求は既知の制限として受け入れる**（決め 5。寿命が効くのは backend の列が詰まったときだけ、と書いたまま）。Next の中継が「画面へ送れない時間」を見て閉じる案は #385 の作りに触れるので、この issue では入れない。
 
 ### D8. 画面の識別子と試行番号は Provider が持ち、開き直しでも戻さない
 
@@ -238,7 +245,7 @@ enum RefreshRate {
 
 ### D15. run ログの読み位置は取り合わない
 
-run ログの追記は `/api/runs/[slug]/updates` が画面の持つ cursor（`GetRunUpdatesRequest.epoch`・`after_sequence`、`proto/taktdash.proto:426-428`）を送って取る。読み位置は画面ごとなので、複数のタブや詳細のポーリングと取り合わない。backend の `RunLogHandles`（`run_progress.rs:643-675`）はプロジェクトごとに積み上げた集計で、`GetRunDetail` の呼び出しは同じ集計を `Mutex` で順に読むだけ。1 秒の詳細のポーリングが増やすのは、この `Mutex` の待ちと組み立ての費用（負荷の節と決まっていない点 3）。`LiveRunLog` は詳細の応答の `logTail` で積んだ行を初期化しない（`live-run-log.tsx:40-43,58-76` の今の契約）。
+run ログの追記は `/api/runs/[slug]/updates` が画面の持つ cursor（`GetRunUpdatesRequest.epoch`・`after_sequence`、`proto/taktdash.proto:426-428`）を送って取る。読み位置は画面ごとなので、複数のタブや詳細のポーリングと取り合わない。backend の `RunLogHandles`（`run_progress.rs:643-675`）はプロジェクトごとに積み上げた集計で、`GetRunDetail` の呼び出しは同じ集計を `Mutex` で順に読むだけ。1 秒の詳細のポーリングが増やすのは、この `Mutex` の待ちと組み立ての費用（負荷の節）。run 詳細の 1 ページで定期的に読むのは 2 本（詳細とログ）のままにし、1 本にしない。#80 の設計と重なるので #80 の書き直しで扱い、この issue では 2 本の応答時間を L4 で測る（決め 3）。`LiveRunLog` は詳細の応答の `logTail` で積んだ行を初期化しない（`live-run-log.tsx:40-43,58-76` の今の契約）。
 
 ### D16. poller の実効間隔の式
 
@@ -282,7 +289,7 @@ run ログの追記は `/api/runs/[slug]/updates` が画面の持つ cursor（`G
 | 要求ありの送信の列 1 件 | `grpc/mod.rs` の `WATCH_DEMAND_CHANNEL_CAPACITY` | なし | `watch_state_test.rs` |
 | 失敗の待ちの上限 30 秒 | `polling.ts` が `RECONNECT_MAX_DELAY_MS` を import | `state-stream.ts` | `polling.test.ts` |
 | `localStorage` のキー | `refresh-rate.ts` の `REFRESH_RATE_STORAGE_KEY` | e2e の spec（文字列） | e2e が再読み込み後の復元を確かめる |
-| #130 の合格線（1.5 秒・3 秒・10%・50%・10%・1.5 倍） | この設計の「負荷の合格線」 | PR 1b の本文、#130 | 実測の記録（コードには置かない） |
+| #130 の合格線（L1 の 1.5 秒・3 秒・300 本、L2 の 10%、L3 の 50%・10%、L4 の 1.5 倍。L5 は記録だけ） | この設計の「負荷の合格線」 | PR 1b の本文、#130 | 実測の記録（コードには置かない） |
 
 ## 変える場所（PR ごと）
 
@@ -295,9 +302,11 @@ proto に欄を足し、型で落ちる所だけを直す。backend は新しい
 - **型で落ちる所（捨てる worktree で、proto だけを変えて確かめた全部）**
   - `backend/src/grpc/assembly.rs:229`：`DashboardState` の構造体 literal に `applied_refresh_interval_ms: 0`。
   - `backend/tests/watch_state_test.rs`（58・99・130・163・217・260・311・347・376・443・503 行）、`backend/tests/build_info_test.rs:119`、`backend/tests/write_grpc_test.rs:792`：`WatchStateRequest {}` を `WatchStateRequest::default()` に。
-  - `frontend/web/src/grpc/client.ts:357`：`client.watchState({} satisfies WatchStateRequest)` を `watchState(request: Partial<WatchStateRequest> = {})` と `client.watchState(WatchStateRequest.fromPartial(request))` に（この PR では呼び出し元は引数なし）。
+  - `frontend/cli/src/tests/fixtures.rs:32`（`sample_overview`）と `frontend/cli/src/write_command_tests.rs:755`（`pending_state`）：`DashboardState` の構造体 literal に `applied_refresh_interval_ms: 0`。`frontend/cli` も `build.rs:2` で同じ proto をビルドする workspace の member なので、ここが落ちる（E0063。3 回目の読みが `cargo check --workspace --tests --keep-going` で確かめた）。CLI の本体は `WatchState` を引数なしで呼ぶので変わらない。
+  - `frontend/web/src/grpc/client.ts:357`：`client.watchState({} satisfies WatchStateRequest)` を `watchState(request: Partial<WatchStateRequest> = {})` と `client.watchState(WatchStateRequest.fromPartial(request))` に（この PR では呼び出し元は引数なし）。`fromPartial` は値なので、`client.ts:26` の `type WatchStateRequest`（`client.ts:3-27` の `import { TaktDashServiceClient, type … } from "../proto/taktdash"` の中で型だけとして読んでいる名前）から `type` を外し、値として import する（型だけのままでは TS1361 になる）。
   - `frontend/web/src/state/restore-state.ts:335-360`：`restoreDashboardState` は `appliedRefreshIntervalMs: asNumber(raw.appliedRefreshIntervalMs)`（無ければ 0）、`dashboardStateFromProto` は `state.appliedRefreshIntervalMs` を返す。
   - `backend/tests/proto_contract.rs:127,157` は `..Default::default()` を使うので落ちない。frontend のテストは `DashboardState.create` で作るので落ちない（`tsc -p tsconfig.test.json` で確かめた）。
+  - 一覧が全部であることの確かめ（3 回目の読みが捨てる作業ツリーで流した）：proto と上の直しで `cargo check --workspace --tests` はエラー 0、`tsc`（本体・テスト）もエラー 0、`npm test` は 1061/1061。`make done` の clippy・test は `frontend/cli` も見るので、漏れがあれば PR 1a で落ちる。
 - `test/state/restore-state.test.ts`：JSON と proto のどちらの経路でも `appliedRefreshIntervalMs` が読め、無ければ 0（E30）。`:132` の 2 経路の `deepEqual` は両方に欄が増えるので緑のまま。
 
 ### PR 1b：backend の要求と BFF の転送（大きさ 5）
@@ -316,11 +325,13 @@ backend
   - `subscribe() -> watch::Receiver<()>`：登録・解放・下限の変更で通知する。
   - `DemandGuard`：`Drop` で、登録がまだ自分の `DemandId` を指すときだけ外し、通知する。`deadline()`・`is_superseded()`・`superseded()`（待てる future）を持つ。
   - `TTL_FACTOR = 3`、`TTL_MIN`、`MIN_REFRESH_MS`、`MAX_REFRESH_MS`、`const` assert（数値の置き場所）。
-- `backend/src/lib.rs`：`mod refresh;`。
+- `backend/src/lib.rs`：`pub mod refresh;`（`lib.rs:11-25` のほかのモジュールと同じく `pub`。`backend/tests` と `main.rs` は別の crate なので、`pub` でないと `RefreshDemand` が見えない）。
 - `backend/src/grpc/mod.rs`
+  - `WATCH_RESEND_INTERVAL`（`:80`、今は private）を `pub(crate) const` にする。`refresh.rs` の `TTL_MIN = crate::grpc::WATCH_RESEND_INTERVAL` が数値を書き写さずに参照するため。値は変えない。
   - `TaktDashServiceImpl` と `ServiceDeps`（`:156-164`）に `refresh_demand: RefreshDemand`。
+  - **組み立てを差し替える口**（E22 の (2)・E26 のため）：今の `watch_state` は固定の関数 `assemble_runs`（`:233`）を `assemble_state_for` に渡す（`:609`・`:646`。unary の `:323`・`:351` も同じ）。注入の口は `with_clock`・`with_run_detail_budget`（`:186`・`:204`）だけで、試験から組み立てを止められない。そこで `TaktDashServiceImpl` に `runs_assembler: RunsAssembler`（`type RunsAssembler = Arc<dyn Fn(&[model::ProjectView], &StateStore, DateTime<Utc>) -> Vec<Run> + Send + Sync>`、既定は `Arc::new(assemble_runs)`）と `pub fn with_state_assembler(mut self, assembler: RunsAssembler) -> Self` を足し、4 か所の呼び出しはこの欄を使う。`assemble_state_for`（`assembly.rs:220-225`）は `impl Fn` を受けるので変えない。試験は、`std::sync::Barrier` などで止められる関数を渡して、`blocking(...)` の中で組み立てを止める。本番の振る舞いは変わらない。
   - `watch_state`（`:598-665`）：`refresh_rate` を検証する（未知の値は `INVALID_ARGUMENT`）。`refresh_rate` が 0 なら今の処理のまま（D4）。0 でなければ `screen` は 32 文字の 16 進、`attempt` は 1 以上でなければ `INVALID_ARGUMENT`。
-  - 要求のある接続：購読 → 初期の組み立て → `applied` を入れて送信 → `acquire`（`Stale` なら `Status::aborted` を送って終わる）→ 送信タスクへ guard を移す。送信タスクの `select!` は `sender.closed()`・停止・購読の終端・`guard.superseded()`・`sleep_until(guard.deadline())`（寿命切れ）・`sleep_until(next_send)`・変化の受信（dirty にするだけ）。`next_send` の分岐で組み立て、**組み立ての後に寿命と置き換えを確かめ**（D7）、送信は `sender.send` を寿命の期限・置き換え・切断・停止と `select!` し、完了で `touch`（`Err(Expired)` なら `return`）。
+  - 要求のある接続：購読 → 初期の組み立て → `applied` を入れて送信 → `acquire` → 送信タスクへ guard を移す。`acquire` が `Stale` なら、**handler から `Err(Status::aborted(…))` を返す**（`rx` を返さずに捨てる）。初期状態はすでに列（1 件）に入っていて誰も読まないので、そこへ `Status::aborted` を `tx.send` すると完了せず handler が止まる（今の初期送信は `:606-620` のとおり handler の中で `rx` を返す前に送る）。`Err` を返せば、列の中身は `rx` と一緒に捨てられ、Next には呼び出しの失敗（`ABORTED`）として届く。送信タスクの `select!` は `sender.closed()`・停止・購読の終端・`guard.superseded()`・`sleep_until(guard.deadline())`（寿命切れ）・`sleep_until(next_send)`・変化の受信（dirty にするだけ）。`next_send` の分岐で組み立て、**組み立ての後に寿命と置き換えを確かめ**（D7）、送信は `sender.send` を寿命の期限・置き換え・切断・停止と `select!` し、完了で `touch`（`Err(Expired)` なら `return`）。
   - 列の大きさは要求ありで 1（D7）、要求なしで今の 16。
 - `backend/src/poller.rs`：`Poller` に `refresh_demand`。`with_refresh_demand` で共有する（テストで指定しなければ要求なしの `RefreshDemand`）。`read_cycle_once_at` で `refresh_demand.set_min_read(config.min_read_interval)` を呼び、`CycleReport.interval = refresh_demand.effective(Duration::from_secs(config.interval_seconds), Instant::now())`。
 - `backend/src/poller_stop.rs`：`run_until_stopped`（`:74-105`）の待ちを、`sleep_until(started + effective)` と `refresh_demand.subscribe().changed()` の `select!` にする。`started` は `tokio::time::Instant`（D17。`:76` と `:157-162` の `Utc::now()` をやめる）。通知を受けたら今の `effective` で期限を計算し直す（短くなれば切り上げ、長くなれば待ち直す）。設定の失敗の周期は D6。停止と `CYCLE_GRACE` は変えない。
@@ -341,11 +352,11 @@ BFF
 
 ### PR 2a：アクティビティと run 詳細を要素単位にする（大きさ 5）
 
-`router.refresh()` はまだ残す。Live の部品は初期値しか props から読まないので、再取得されても表示は二重にならない。
+`router.refresh()` はまだ残す。Live の部品は初期値しか props から読まないので、再取得されても表示は二重にならない。ただしこれは表示の話で、読みは重なる：2a の間は SSE の受信ごとの `router.refresh()` が RSC の `ActivityLoader`（`GetActivity`）と `RunDetailLoader`（`GetRunDetail`）を読み直し、そこに 1 秒のポーリングの `/api/activity`・`/api/runs/[slug]` が加わる。2b でページの再取得をやめるまでの一時的な増え方で、2a の負荷の測りに入れる（影響の「負荷」）。
 
 - 新規 `app/api/activity/route.ts`：`export const dynamic = "force-dynamic"`。`getBackendClient().getActivity()` を `GetActivityResponse.toJSON` で返す。成功も失敗も `Cache-Control: no-store`（`app/api/runs/[slug]/updates/route.ts:8,14` と同じ形）。失敗は既存の `toBackendUnavailableResponse`。成功を `lastActivity` に覚える。
 - 新規 `app/api/runs/[slug]/route.ts`：同じく `dynamic` と `no-store`。`getRunDetail(slug)` を JSON で返す。`RunNotFoundError` は 404、`BackendUnavailableError` は 503。成功を `lastRunDetails` に覚える。
-- `src/state/last-loaded-caches.ts`（新規）：`lastActivity` と `lastRunDetails` の実体を置く（今は `activity-loader.tsx:11` と `run-detail-loader.tsx:27` の module 変数）。Route Handler とローダーが同じものを使う。作り方は既存の `createLastLoaded`。
+- `src/state/last-loaded.ts`（既存）：`lastActivity` と `lastRunDetails` を、すでにある `lastGoalDetails`・`lastTaskDetails`（`:43-44`。Route Handler とローダーが共有する入れ物。`app/api/tasks/[project]/route.ts:4`、`task-detail-loader.tsx:10`）の隣に並べる。今は `activity-loader.tsx:11` と `run-detail-loader.tsx:27` の module 変数なので、そこから移して Route Handler とローダーが同じものを使う。作り方は同じ `createLastLoaded`。新しいファイルは作らない。
 - `activity-content.tsx`：`state` を画面の型に（D18）。`:227` の鍵を文字列に。`app/activity/page.tsx` は `dashboardStateFromProto` で変換する。
 - 新規 `live-activity.tsx`：初期値（D13）と、`GetActivity` の初期の失敗を props で受け、`useLiveState()` の `state`（サーバー名の解決）と `disconnected` と合わせて描く。`/api/activity` を 1 秒で読む（この PR ではタスク詳細などと同じ固定 1 秒。PR 3 で選んだレートにする）。
 - 新規 `live-run-detail.tsx`：初期値（D13）と `GetRunDetail` の初期の失敗を受け、`/api/runs/${slug}` を 1 秒で読む。`serverName` は `useLiveState()` の `state.servers` から引く（**prop では受けない**）。`LiveRunLog` は今と同じ `key={detail.runSlug}`。
@@ -365,18 +376,38 @@ BFF
 - ローダーを本物の `RootLayout` の中で描く試験を 1 本足す（D14）。
 - 既存テストの直し（「既存テストで変わるもの」の 2b の行）。
 
+### 読みを減らす PR（大きさ 5。合格線を外れたときだけ）
+
+**入れる条件**：PR 1b の後の実測（「負荷の合格線」）が外れたとき（決め 1）。既定の 1 秒は変えない（受け入れ条件 1）。PR 3 の前に入れ、入れた後に L1〜L5 を測り直す。PR 1b は外れてもマージしてよい（決め 6）。
+
+**中身**（決め 1。「負荷の合格線」の「外れたときにすること」の 1〜3 のとおり。細部はこの PR の設計で書く）：
+
+1. 2 段の読み。要求がある間に速く（`effective` で）読むのは `takt_list_tasks` と判断待ちの 3 つ（`takt_list_goal_questions`・`takt_list_standalone_inquiries`・`takt_list_goal_registration_proposals`）だけにする。`takt_list_goals`・`takt_get_goal`（1 周期 36 回）は遅い段（`intervalSeconds`）で読む。
+2. `takt_get_goal` は、一覧の更新時刻が変わったゴールだけを読む（差分読み）。
+3. 1 プロジェクトの中の呼び出しを並べる（今は直列）。
+
+変える場所の見込み：`poller.rs`（`read_cycle_once_at` を 2 段にし、段ごとの道具の内訳をログに出す）、`poller_stop.rs`（待ちの期限を段ごとに持つ）、`backend/tests/poller_test.rs`、Quint。
+
+**この PR の設計で合わせるもの**（3 回目の読みの I）：ゴールを遅い段で読むと、次の 3 つが嘘になるか、モデルが本番を表さなくなる。
+
+- **D6 の通知文**：1 つ目の「概要・判断待ち・プロジェクト・ゴール・アクティビティの内容はこの間隔で変わります」と、3 つ目の「読み取りに N 秒かかっています」は、ゴールの一覧にとって嘘になる。ゴールの一覧（ゴールの画面と概要のゴールの欄）は遅い段の間隔で変わる、と分けて言う文に直す。ゴール詳細（BFF が要求のたびに takt を読む）は選んだレートのまま。`readLag` の N を、どちらの段の `last_read_at` で出すかも決める。
+- **受け入れ条件 2 の言い方**：「どのページでも表示中の情報が選んだレートで更新される」は、ゴールの一覧が遅い段になる分だけ満たさなくなる。受け入れの対応表にどう書くかは受け入れ条件の読み方に触れるので、この PR の設計で takt-dash中将の判断を受ける（オーナーへは元帥経由。決め 1 と同じ経路。作業者からオーナーには聞かない）。
+- **Quint**：今の `pollerRead` は 1 本の読みで、2 段を表していない。速い段と遅い段を別の遷移と別の `lastReadAt` にし、`pollerNotLate` を速い段にかけ、遅い段には「`intervalSeconds` を越えて待たない」を足す。2 段を 1 段に戻した変異などで、新しい不変条件が恒真でないことを `mutants.sh` で確かめる。
+
+**それでも 1.5 秒を切らないとき**（決め 1）：takt-mcp 側の変更（軽い「変化の有無」の道具など）を別の issue にし、受け入れ条件 4 の読み方は元帥経由でオーナーに仰ぐ（takt-dash中将からオーナーには聞かない）。PR 3 はその答えが出るまでマージしない。
+
 ### PR 3：画面のレートの選択と、レートに従う取得（大きさ 8）
 
-**マージの条件**：PR 1b の後の #130 の実測が「負荷の合格線」を満たしていること（外れたら、読みを減らす PR が先に入って満たしていること）。
+**マージの条件**：PR 1b の後の #130 の実測が「負荷の合格線」を満たしていること（外れたら、読みを減らす PR が先に入って満たしていること）。合格線で止めるのはこの PR だけ（決め 6。1 秒を利用者に出す所だから）。
 
-- `src/state/refresh-rate.ts`：`parseStoredRefreshRate(value: unknown): RefreshRate`（4 つのどれかでなければ既定、例外を投げない）、`refreshRateLabel`、`REFRESH_RATE_STORAGE_KEY`。
+- `src/state/refresh-rate.ts`：`parseStoredRefreshRate(value: unknown): RefreshRate`（4 つのどれかでなければ既定、例外を投げない）、`refreshRateLabel`、`REFRESH_RATE_STORAGE_KEY`、読み取りの遅さの判定 `readLag`（D6 の 3 つ目の通知。純粋関数）。
 - 新規 `components/refresh-rate-provider.tsx`：`RefreshRateProvider`・`useRefreshRate()`（`refreshRate`・`ready`・`setRefreshRate`）。D10。`setRefreshRate` は state を変え、`localStorage.setItem` を試す（`SecurityError`・容量不足でも state は変える）。`storage` イベントで同じ origin の別のタブの変更を受ける。
 - 新規 `components/page-visibility.ts`：`usePageVisible()`（D9。`useSyncExternalStore`、server snapshot は `true`）。
 - 新規 `components/refresh-rate-select.tsx`：`<label for="refresh-rate">更新間隔</label>` と `<select id="refresh-rate">`。
 - `app/layout.tsx`：`RefreshRateProvider` で `StateStreamProvider` を包む。
 - `state-provider.tsx`：`screenId` と `nextAttempt`（D8）。`ready && visible` のときだけ `openStateStream({ url: "/api/state?refresh_ms=" + refreshRate, screenId, nextAttempt, … })`。依存は `[refreshRate, ready, visible]`。Context に `liveStateReceived: boolean`（SSE で一度でも状態を受けたか。必須の欄）を足し、`reduceLiveState`（`:65-80`）は `state` で `true`、`error` で前の値を保つ。
 - `state-stream.ts`：`OpenStateStreamOptions` に `nextAttempt?: () => number`。渡されたらそれで URL を作る。`screenId` の解決は入口の 1 回のまま（D8）。`RECONNECT_MAX_DELAY_MS` を export する。
-- `sidebar.tsx`・`live-sidebar.tsx`：「更新間隔」の節と D6 の通知。`refreshRate?`・`appliedRefreshIntervalMs?`・`liveStateReceived?` は任意の prop で、渡さない既存のテストは今のまま。
+- `sidebar.tsx`・`live-sidebar.tsx`：「更新間隔」の節と D6 の通知（3 つ目の「読み取りに N 秒かかっています」を含む。`live-sidebar.tsx` は受信ごとに `readLag` を呼び、前の値を `useRef` に持つ）。`refreshRate?`・`appliedRefreshIntervalMs?`・`liveStateReceived?` は任意の prop で、渡さない既存のテストは今のまま。
 - `polling.ts`：D11 の失敗の待ち。
 - `live-task-detail.tsx`・`live-goal-detail.tsx`・`live-conversation.tsx`・`live-run-log.tsx`・`live-activity.tsx`・`live-run-detail.tsx`：`intervalMs = refreshRate`、effect の条件と依存に `ready`・`visible`（D10・D11）。会話の `setInterval` は `startPolling` に置き換える。
 - `docs/requirements.md`：D12。
@@ -392,26 +423,35 @@ BFF
 - 実測で 1 秒が要ると決まった spec を `fastPollIsolatedStack` へ移し、理由をコメントに書く。
 - E18 は**新しい spec ファイル** `e2e/tests/issue-40-default-interval.spec.ts` に置く（PR 3 の `issue-40-refresh-rate.spec.ts` を変えないので、PR 4 は PR 3 の spec の中身に依存しない）。
 
-## 負荷の合格線（#130、PR 1b の受け入れ）
+## 負荷の合格線（#130。PR 1b の後に測り、PR 3 で止める）
 
 ### 測り方
 
 - PR 1b を本番へ展開した後、本番の設定（上の「本番の読み取りの実測」と同じ）のまま測る。backend は本番と同じ debug ビルド。
-- 区間は 3 つで、それぞれ 10 分。
-  1. 要求なし（基準）。
-  2. 1 秒の要求 1 本：`curl -N "http://127.0.0.1:3000/api/state?refresh_ms=1000&screen=<32 桁の 16 進>&attempt=1" > /dev/null` を読み続ける（読まないと列が詰まり、寿命で要求が外れる）。
-  3. 1 秒の要求 3 本（`screen` を変えた `curl` を 3 本）。
-- 記録は既存のものだけを使う：backend のログの周期の行（時刻・`cycle_ms`・`tool_calls`・道具ごとの内訳）と、`ps -o time=` の差（backend と takt-mcp の HTTP サーバー）。区間 2 では `/api/tasks/[project]` を 30 回読み、応答時間を測る（区間 1 でも同じく 30 回）。
-- 結果は分位と周期の本数を書く（本番の周期の裾は重く、最大 242 秒の周期がある）。
+- **測る前に決めるもの**（3 回目の読みの M）
+  - 対象のプロセス：takt-mcp の HTTP サーバーは、backend の設定の `mcpServers.<名前>.url` のポート（例の設定では `43117`）で待ち受けているプロセス（`lsof -nP -iTCP:<ポート> -sTCP:LISTEN -t`）。backend は設定の `listen`（無ければ `config.rs` の `DEFAULT_LISTEN`）のポートで待ち受けているプロセス（同じ `lsof`）。PID を記録に書く。
+  - L4 で読むもの：区間の前に、5 つのプロジェクトの `/api/tasks/[project]` を 3 回ずつ読み、応答の p50 がいちばん遅いプロジェクトを選んで全区間で使う。run は、そのプロジェクトのいちばん新しい run の slug を 1 つ選んで全区間で使う。
+- **区間**：1. 要求なし（基準）、2. 1 秒の要求 1 本、3. 1 秒の要求 3 本。それぞれ 10 分。
+  - 要求は `curl -sN --max-time 600 -o /dev/null -w '%{size_download}\n' "http://127.0.0.1:3000/api/state?refresh_ms=1000&screen=<32 桁の 16 進>&attempt=1"` で出し、読み続ける（読まないと列が詰まり、寿命で要求が外れる）。区間 3 は `screen` を変えた `curl` を 3 本。`size_download` は L5 に使う。
+- **順序（3 回目の読みの J）**：1 → 2 → 3 → 1 → 2 → 3 のように、区間を交互に **2 回以上** 繰り返す（合わせて 60 分以上）。takt のエージェントの負荷は時間で変わるので、区間をまたぐ比べ方（L2・L4）は同じ回の中の区間どうしで行い、**どの回でも満たすことを合格とする**。1 回でも外れれば不合格。
+- **記録**（既存のものだけ）：backend のログの周期の行（`poller.rs:384-393` の「定期読み取りの1サイクルを終えました」。時刻・`cycle_ms`・`tool_calls`・道具ごとの内訳）、区間の始めと終わりの `ps -o time= -p <PID>`（backend と takt-mcp の HTTP サーバー）、L4 の応答時間、L5 の `size_download`。
+- **L4 の読み方**：各区間で、10 秒ごとに次を 1 回ずつ読み、`curl -w '%{time_total}'` で応答時間を記録する（区間あたり各 60 本。p95 は上から 3 本目）。
+  - `/api/tasks/[project]`（タスク詳細の読み。takt-mcp を読む）。
+  - `/api/runs/[slug]/updates`（run 詳細のログの読み。今もある。`epoch`・`after` を付けない初回の形で読む。`route.ts` は両方無ければ位置なしとして受ける）。
+  - `/api/runs/[slug]`（run 詳細の読み。PR 2a で入るので、PR 3 の前の測り直しから）。
+  - run 詳細の 2 本のポーリングは今は 1 本にしない（決め 3。#80 の書き直しで扱う）ので、2 本とも L4 で見る。
+- 結果は、回ごと・区間ごとに分位と本数を書く（本番の周期の裾は重く、最大 242 秒の周期がある）。
+- **測り直し**：読みを減らす PR を入れたとき（入れたなら）と、PR 3 をマージする前（画面からの要求で。PR 2a の後なので `/api/runs/[slug]` も入る）。
 
 ### 合格線
 
 | # | 何を | 合格線 | 理由 |
 | --- | --- | --- | --- |
-| L1 | 鮮度：区間 2 の周期の開始の間隔 | p50 ≤ 1.5 秒、p95 ≤ 3 秒（周期 300 本以上で数える） | 不変条件 9（SSE の画面は「poller の 1 周期＋組み立て・送信・描画」で、LAN で 1〜2 秒を目標、e2e は 3 秒以内）。間隔は `max(cycle_ms, 1 秒)` なので、`cycle_ms` の分位で読んでよい |
-| L2 | 読みがタブに比例しない：区間 2 と区間 3 の 1 秒あたりの呼び出し数 | 差が 10% 以内。かつ、1 秒あたりの呼び出し ≤ 1 周期の呼び出しの最大（周期が重ならない） | 設計の約束（poller は 1 つで、要求の最小値で読む。D16） |
-| L3 | CPU：区間 2 の 10 分 | takt-mcp の HTTP サーバーが 1 コアの 50% 以下、backend が 1 コアの 10% 以下 | この Mac mini の主な仕事は takt のエージェントで、ダッシュボードの読み取りが使うのは半コアまでとした。今の 4.3%・0.5% のおよそ 10 倍・20 倍 |
-| L4 | 詳細の読みが遅れない：区間 2 と区間 1 の `/api/tasks/[project]` の応答時間 p95 の比 | 1.5 倍以下 | タスク詳細・ゴール詳細・会話・run 詳細は、要求のたびに同じ takt-mcp の HTTP サーバーを読む。判断待ちの回答も同じサーバーへ書くので、本番で書き込みを測る代わりに L4 で見る |
+| L1 | **周期の間隔**：区間 2 の poller の周期の開始の間隔（周期の行の時刻から `cycle_ms` を引いた開始どうしの差） | p50 ≤ 1.5 秒、p95 ≤ 3 秒。区間 2 ごとに周期が 300 本以上。**300 本に届かなければ不合格**（10 分で 300 本は平均 2 秒以下の周期。届かないのは周期が遅いということなので、判定できないではなく外れとして扱う） | L1 が測るのは poller の周期の間隔だけ。SSE の画面の鮮度は、これに送信の間隔（`applied` 以下。1 秒の要求で 1 秒以下）と組み立て・送信・描画が足される（不変条件 9）。合格線の数値は決め 1 のまま。周期は休まず続けて回るので、間隔は `max(cycle_ms, 1 秒)` に近い |
+| L2 | 読みがタブに比例しない：同じ回の区間 2 と区間 3 の 1 秒あたりの呼び出し数（周期の行の `tool_calls` の合計 ÷ 区間の秒数） | 差が 10% 以内。かつ、周期が重ならない：どの周期の開始（時刻 − `cycle_ms`）も、前の周期の行の時刻より後 | 設計の約束（poller は 1 つで、要求の最小値で読む。D16）。前の版の「1 秒あたりの呼び出し ≤ 1 周期の呼び出しの最大」は、ほぼいつも成り立ち、重ならないことの確かめにならなかったので、周期の行の開始と終わりを直接比べる形に替えた |
+| L3 | CPU：区間 2 の 10 分（`ps -o time=` の差 ÷ 600 秒） | takt-mcp の HTTP サーバーが 1 コアの 50% 以下、backend が 1 コアの 10% 以下 | この Mac mini の主な仕事は takt のエージェントで、ダッシュボードの読み取りが使うのは半コアまでとした。今の 4.3%・0.5% のおよそ 10 倍・20 倍 |
+| L4 | 詳細の読みが遅れない：同じ回の区間 2 と区間 1 の応答時間 p95 の比（`/api/tasks/[project]`、`/api/runs/[slug]/updates`、PR 2a の後は `/api/runs/[slug]`。それぞれで） | どれも 1.5 倍以下 | タスク詳細・ゴール詳細・会話・run 詳細は、要求のたびに読む。前の 3 つは同じ takt-mcp の HTTP サーバーを読み、run 詳細は backend の集計（D15）を読む。判断待ちの回答も同じサーバーへ書くので、本番で書き込みを測る代わりに L4 で見る |
+| L5 | 送る大きさ：区間 2・3 の 1 接続あたり毎秒のバイト数（`size_download` ÷ 600 秒。SSE として Next が画面へ送る大きさ） | **合格線は置かず、値を記録する**（決め 4） | 要求のある接続には、変化が無くても間隔ごとに `DashboardState` 全体が届く。軽くするか（変化が無ければ送らない、`read_at` だけの軽いイベント）は、記録を見て別に決める（D7 の寿命の延ばし方と画面の見張りに触れるため） |
 
 ### 今の実測からの見込み
 
@@ -421,12 +461,12 @@ BFF
 
 ### 外れたときにすること
 
-既定の 1 秒は変えない（受け入れ条件 1）。PR 3 の前に「速い読みの対象を減らす」PR（大きさ 5 の見込み。設計は別に書く）を入れ、L1〜L4 を満たすまで PR 3 をマージしない。候補は道具ごとの内訳から：
+既定の 1 秒は変えない（受け入れ条件 1。決め 1）。PR 3 の前に「読みを減らす PR」（大きさ 5。「変える場所」の節）を入れ、L1〜L4 を満たすまで PR 3 をマージしない。PR 1b は戻さない（決め 6）。中身は道具ごとの内訳からの次の 1〜3（決め 1 で採った）：
 
 1. 要求がある間に速く読むのは、変わりやすく画面の 1 秒に効く読みだけにする：`takt_list_tasks`（実行中の行）と判断待ちの 3 つ（`takt_list_goal_questions`・`takt_list_standalone_inquiries`・`takt_list_goal_registration_proposals`）。`takt_list_goals`・`takt_get_goal`（1 周期 36 回）は `intervalSeconds` のまま。
 2. `takt_get_goal` を、一覧の更新時刻が変わったゴールだけにする（1 周期 21 回の差分読み）。
 3. 1 プロジェクトの中の呼び出しを並べる（今は直列）。
-4. `takt_list_tasks` は 1 回で最大 1.46 秒かかるので、1〜3 でも 1 周期は 1.5 秒を切らない見込みがある。その場合は、takt-mcp に軽い「変化の有無」の道具を足す案（takt-mcp の変更なので、この issue の範囲の外。別の issue）か、受け入れ条件 4 の「おおむね1秒」の読み方を、takt-dash中将を通してオーナーに仰ぐ。
+4. `takt_list_tasks` は 1 回で最大 1.46 秒かかるので、1〜3 でも 1 周期は 1.5 秒を切らない見込みがある。そのときは、takt-mcp 側の変更（軽い「変化の有無」の道具など）を別の issue にし、受け入れ条件 4 の「おおむね1秒」の読み方は元帥経由でオーナーに仰ぐ（決め 1。takt-dash中将からオーナーには聞かない）。
 
 ## 状態と遷移
 
@@ -449,7 +489,7 @@ BFF
   → /api/state?refresh_ms=1000&screen=…&attempt=n（n は Provider の数え手）
   → Next の screen-streams（同じ画面の古い試行を閉じる）
   → WatchStateRequest { refresh_rate, screen, attempt }
-  → watch_state：初期状態を送る → RefreshDemand.acquire（同じ画面の古い要求を置き換える）
+  → watch_state：初期状態を送る → RefreshDemand.acquire（同じ画面の古い要求を置き換える。古い試行なら handler が Err(ABORTED) を返す）
   → 送信タスク：next_send で組み立て → 寿命と置き換えを確かめる → 送る（applied を入れる）→ touch（寿命を延ばす）
   → poller：effective = min(intervalSeconds, max(minReadIntervalMs, 期限前の要求の最小値))
   → 変化通知 → 送信タスクは dirty にするだけ
@@ -470,7 +510,7 @@ BFF
 6. **poller は生きている要求の最小値で読む**：D16 の式。期限切れ・解放済み・置き換え済みの要求は入れない。要求が変わったら、残りの待ちを計算し直す。
 7. **要求は残らない**：接続の終わり・置き換え・寿命切れで外れる。寿命切れでは送信タスクも閉じる。古い guard の解放は新しい要求を消さない。画面の最新の試行は断られない。
 8. **`applied` は予定した送信間隔**：要求のある接続が送る `applied` は、その送信で予定した `max(要求, 今の下限)`。実際の間隔はこれに組み立てと送信の時間が足される。下限を変えたら、次の送信から新しい値。0 は要求なし。寿命の切れた要求で `applied` を付けて送らない。
-9. **1 秒の遅れの約束**：SSE の画面は「poller の 1 周期＋組み立て・送信・描画」で、LAN で 1〜2 秒を目標にし、e2e は 3 秒以内で確かめる。本番では「負荷の合格線」の L1 で確かめる。ポーリングの画面は「選んだ間隔＋取得時間」。読み取りに 1 秒より長くかかれば、その分だけ遅れる（今の本番は p50 9.4 秒）。
+9. **1 秒の遅れの約束**：SSE の画面の遅れは「poller の周期の間隔＋送信の間隔（`applied` 以下）＋組み立て・送信・描画」。LAN で 1〜2 秒を目標にし（合格線ではない）、e2e は 3 秒以内で確かめる（E16）。本番で合格線を置くのは、このうち周期の間隔だけ（「負荷の合格線」の L1。p50 1.5 秒なら、送信の間隔の平均 0.5 秒を足しておよそ 2 秒）。周期の間隔 N が `2 × max(選んだ間隔, applied)` 以上になったら、画面が「読み取りに N 秒かかっています」と知らせる（D6）。ポーリングの画面は「選んだ間隔＋取得時間」。読み取りに 1 秒より長くかかれば、その分だけ遅れる（今の本番は p50 9.4 秒）。
 10. **取得は重ならず、失敗したら間隔を空ける**：D11。
 11. **失敗しても内容を消さない**：直前の内容を残して通知を出し、次の成功で戻す（#309）。初回で内容が無ければ D13。
 12. **見えていないタブは取得しない**：D9。
@@ -491,7 +531,7 @@ BFF
 | E8 | run 詳細は定期的に `/api/runs/[slug]`（詳細）と `/api/runs/[slug]/updates`（ログ。今のまま）を読み、サーバー名は layout の `GetOverview` の結果（Context）から引く。RSC のページ全体を取り直さない。ログを初期化しない。ポーリング中の 404 で止まる | 例 | `test/components/live-run-detail.test.ts`、`test/api/run-route.test.ts` | 2a |
 | E9 | 前回の完了から次まで。失敗の待ちの列（D11）。abort 後 0 回 | 例 | `test/components/polling.test.ts` | 3 |
 | E10 | `RefreshDemand`：最小値、置き換え、古い試行の拒否、解放、古い guard の解放が新しい要求を消さない、寿命（1 秒の要求で 15 秒、10 秒で 30 秒）、期限ちょうどの登録を `effective` が数えない、期限後の `touch` が `Err(Expired)` で延ばさない、下限 | 例（注入した `Instant`） | `backend/tests/refresh_demand_test.rs` | 1b |
-| E11 | 1 秒の要求で、変化がなくても 1 秒ごとに送られ、`applied = 1000`。初期状態にも入る | 例（同じプロセスで `service.watch_state` を呼び、`tokio::time::pause`。`watch_state_test.rs:299-330` と同じ形） | `backend/tests/watch_state_test.rs` | 1b |
+| E11 | 1 秒の要求で、変化がなくても 1 秒ごとに送られ、`applied = 1000`。初期状態にも入る | 例（同じプロセスで `service.watch_state` を呼ぶ形は `watch_state_test.rs:299-330` と同じ。今の `watch_state_test.rs` は `tokio::time::pause` を使っていない（grep で 0 件）ので、`#[tokio::test(start_paused = true)]` か `pause()` を新しく入れる） | `backend/tests/watch_state_test.rs` | 1b |
 | E12 | 要求なし（`WatchStateRequest::default()`）は今のまま：変化ですぐ送り、15 秒の再送、`applied = 0` | 例 | 同 | 1b |
 | E13 | レートの選択が再読み込み後も残る | e2e | `e2e/tests/issue-40-refresh-rate.spec.ts` | 3 |
 | E14 | 全ページで、状態の変更が再読み込みなしで現れる（同じ document の印） | e2e | 同、既存の flow | 2a・2b・3 |
@@ -501,12 +541,13 @@ BFF
 | E18 | e2e の backend の既定 30 秒のまま、画面の 1 秒の要求で 3 秒以内に変化が出る | e2e | `e2e/tests/issue-40-default-interval.spec.ts`（新規、PR 4 だけで足す） | 4 |
 | E19 | hidden では取得せず、visible ですぐ取得する。`usePageVisible` のサーバー描画は `true`（SSR で `document` を読まない） | 例（`visibilityState` を差し替え、`renderToStaticMarkup`） | `test/components/page-visibility.test.ts` | 3 |
 | E20 | 通知：`applied` > 選択で「backend の下限」、要求したのに 0 で「対応していない」。初回の RSC の状態では出さない | 例 | `test/components/live-sidebar.test.ts` | 3 |
+| E32 | 読み取りの遅さ（`readLag`）：N はプロジェクトごとの `lastReadAt` が進んだ間隔（受けた時刻どうしの差）の最大。`connected` が false のプロジェクトは数えない。`N ≥ 2 × max(選択, applied)` で出し、下回る間隔を 1 回受けたら消す。進まない間も経過で N が増える。全体の `readAt` だけが進んでも N は変わらない。`applied` が 0 か最初の受信の前は出さない。ストリームを開き直すと起点を捨て、開き直しの後の最初の受信では出さない（hidden の時間を N に入れない） | 例（受けた時刻を注入） | `test/state/refresh-rate.test.ts`、`test/components/live-sidebar.test.ts` | 3 |
 | E21 | `applied` の真実性：`minReadIntervalMs = 3000` の設定で、1 秒を要求した接続の各状態の `applied = 3000`、連続する送信の間隔は 3 秒以上（`pause` の下では組み立てが 0 秒なので 3 秒ちょうど）。設定を書き換えて次の周期の後、`applied` と間隔が新しい値に変わる | 例（同じプロセスで Poller と `service.watch_state`、`pause`） | `backend/tests/watch_state_test.rs` | 1b |
-| E22 | 寿命切れで送信タスクが閉じる：(1) 要求ありの接続でストリームを読まずに持ち続けると、列 1 件が埋まって送信が待ちに入り、15 秒（1 秒の要求）の後にストリームが終わり、登録が外れる。(2) 定期の組み立てを止めて寿命を越えるまで時刻を進めると、組み立ての後に送らずにストリームが終わり、登録が外れ、`effective` は `intervalSeconds` に戻る（`noSendAfterExpiry`） | 例（同じプロセスで `service.watch_state`。組み立ては試験用の止められる `assemble_runs` で止める。`pause`。h2 の窓は通らない） | 同 | 1b |
+| E22 | 寿命切れで送信タスクが閉じる：(1) 要求ありの接続でストリームを読まずに持ち続けると、列 1 件が埋まって送信が待ちに入り、15 秒（1 秒の要求）の後にストリームが終わり、登録が外れる。(2) 定期の組み立てを止めて寿命を越えるまで時刻を進めると、組み立ての後に送らずにストリームが終わり、登録が外れ、`effective` は `intervalSeconds` に戻る（`noSendAfterExpiry`） | 例（同じプロセスで `service.watch_state`。組み立ては `with_state_assembler`（PR 1b の `grpc/mod.rs`）で渡した止められる関数で止める。`pause`。h2 の窓は通らない） | 同 | 1b |
 | E23 | `refresh_ms` の解析：4 つはそのまま。無い・空・`999`・`10001`・`1e3`・負・文字・繰り返しは要求なし（`refreshRate: 0`）。ticket が無ければ要求なし。`screen`・`attempt` が渡る | 例 | `test/api/state-route.test.ts` | 1b |
 | E24 | poller の待ち：30 秒の待ちの途中で 1 秒の要求が来たら切り上げて読み、要求が消えたら 30 秒で待ち直す（`pollerNotLate` に対応）。待ちは `Instant` の時計で進む | 例（`pause`） | `backend/tests/poller_test.rs` | 1b |
-| E25 | 置き換え：同じ画面の次の試行が登録されたら、古いストリームが終わる（`guard.superseded()`）。古い試行が後から来たら `ABORTED` で終わり、登録は新しいまま | 例 | `backend/tests/watch_state_test.rs` | 1b |
-| E26 | 初期の組み立てが寿命より長くても（組み立てを止めて時刻を進める）、最初の送信の前に寿命は切れず、送った後に登録される（`noExpiryBeforeFirstSend`） | 例（`pause`） | 同 | 1b |
+| E25 | 置き換え：同じ画面の次の試行が登録されたら、古いストリームが終わる（`guard.superseded()`）。古い試行が後から来たら、`watch_state` の呼び出しそのものが `Err(ABORTED)` を返し（handler は止まらない）、登録は新しいまま | 例 | `backend/tests/watch_state_test.rs` | 1b |
+| E26 | 初期の組み立てが寿命より長くても（`with_state_assembler` の関数で組み立てを止めて時刻を進める）、最初の送信の前に寿命は切れず、送った後に登録される（`noExpiryBeforeFirstSend`） | 例（`pause`） | 同 | 1b |
 | E27 | 設定の読み込みに失敗した周期は、前に読めた下限のままで、待ちは `effective` を通る | 例 | `backend/tests/poller_test.rs` | 1b |
 | E28 | `minReadIntervalMs` の既定 1000、範囲 1000〜10000、外れは `ConfigError::Invalid`、例の設定を読める | 例 | `backend/tests/config_test.rs` | 1b |
 | E29 | 遅れ：1 秒の要求のストリームを 4 秒ごとにしか読まない（送信が毎回 4 秒待たされる）と、寿命（15 秒）は切れず、ストリームは続き、登録は残る。読むのを 16 秒止めると切れる | 例（`pause`、読み手を遅らせる） | `backend/tests/watch_state_test.rs` | 1b |
@@ -533,7 +574,7 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
 | 6 | origin ごとの `localStorage` | Playwright の 1 つのコンテキストでは別 origin を作れない。単体テスト（E2）で「キーは origin に依存しない 1 つ」を確かめ、origin ごとに分かれるのはブラウザの仕様として扱う。e2e では同じ origin の再読み込み（E13）だけ |
 | 7 | hidden の実際の挙動（タイマーの抑制、EventSource の停止） | 単体テスト（E19）で `visibilitychange` への反応を確かめる。実ブラウザのタイマーの抑制はテストしない。抑制されても、visible に戻った時点で開き直してすぐ取得するので、遅れは戻った時点で消える |
 | 8 | 1 秒で 1 秒 | 約束を書き分けた（不変条件 9）。e2e は SSE の画面を 3 秒以内、ポーリングの画面は要求の間隔（E17）で見る。本番の鮮度は L1 で測る |
-| 9 | 本番の負荷 | 「負荷の合格線」の L1〜L4 を本番で測る。自動の試験にはしない（本番の takt-mcp と、takt のエージェントの負荷に依存するため） |
+| 9 | 本番の負荷 | 「負荷の合格線」の L1〜L4 を本番で測り、L5 を記録する。自動の試験にはしない（本番の takt-mcp と、takt のエージェントの負荷に依存するため） |
 | 10 | 試行番号の単調性 | D8 の決定と Quint（`latestNeverRejected`、`resetAttemptsRejectsLatestTest`）、E4、P6 |
 | 11 | 既存テストの更新 | 下の表 |
 
@@ -544,6 +585,7 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
 | テスト | 今の期待 | 直し方 | PR |
 | --- | --- | --- | --- |
 | `backend/tests/watch_state_test.rs` の `WatchStateRequest {}`（58・99・130・163・217・260・311・347・376・443・503 行）、`build_info_test.rs:119`、`write_grpc_test.rs:792` | 要求なしの購読 | 欄が増えると構造体の literal は通らないので `WatchStateRequest::default()` にする。意味は同じ（要求なし）。期待は変えない | 1a |
+| `frontend/cli/src/tests/fixtures.rs:32`（`sample_overview`）、`frontend/cli/src/write_command_tests.rs:755`（`pending_state`） | ダミーの概要と判断待ちの状態の `DashboardState` literal | `applied_refresh_interval_ms: 0` を足す（欄が増えると literal は通らない。E0063）。値は「要求なし」で、CLI の期待は変えない | 1a |
 | `test/state/restore-state.test.ts:132` | JSON と proto の 2 経路が同じ | 変えない（両方に `appliedRefreshIntervalMs` が増える）。E30 を足す | 1a |
 | `backend/tests/watch_state_test.rs:301`、`tests/grpc_harness/mod.rs:456` | `ServiceDeps` の literal | `refresh_demand: RefreshDemand::new()` を足す。期待は変えない | 1b |
 | `test/api/state-route.test.ts` | `watchState()` を引数なしで呼ぶ | 引数なしの `/api/state` で `watchState` に `{ refreshRate: 0 }`（要求なし）が渡ることを期待に足す。既存の付け替え・204 の期待は変えない | 1b |
@@ -614,7 +656,7 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
 | 定期の組み立てが寿命より長い | 期限を過ぎた要求は poller が数えず、組み立ての後に送らずに閉じ、画面は再接続する（D7、E22） |
 | タブを閉じる・VPN が切れる | 閉じれば `sender.closed()` で外れる。届かない半開きは D7 の「寿命で捕まえられないもの」 |
 | 取得がレートより遅い・失敗が続く | D11 |
-| 読み取りの 1 周期が要求の間隔より長い（今の本番） | poller は休まずに続けて回る。鮮度は周期の所要で決まる（L1、決まっていない点 1・2） |
+| 読み取りの 1 周期が要求の間隔より長い（今の本番） | poller は休まずに続けて回る。鮮度は周期の所要で決まる（L1）。画面は「読み取りに N 秒かかっています」を出す（D6、決め 2）。合格線を外れたら読みを減らす PR（決め 1） |
 | run が消える（404） | D13 |
 | アクティビティの応答が壊れた JSON | 取得の失敗として扱い、直前の内容を残す |
 | `intervalSeconds` が 1 秒・30 秒・大きい値 | D16 の式。0 は今のとおり設定エラー |
@@ -631,28 +673,36 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
   - poller は、どれかの画面が 1 秒を求めている間、全プロジェクトを 1 秒（または下限）で読む。周期が 1 秒より長ければ休まずに回る。読み取りの回数はタブの数によらず 1 つ。
   - タブの数だけ増えるもの（見えているタブ N 枚）：要求のある WatchState の組み立て（各タブに毎秒 1 回、ストアから）と SSE の送信、ポーリングの画面の BFF の要求（アクティビティは毎秒 `GetActivity` の 7 日分の集計、run 詳細は毎秒 `GetRunDetail` の組み立て）。N は端末ごとの見えているタブの数で、hidden は 0。
   - #130 の実測は、その経路が入る PR の受け入れに入れる。
-    - PR 1b：「負荷の合格線」の L1〜L4（数値の合格線）。
-    - PR 2a：`/api/activity` と `/api/runs/[slug]` の 1 秒のポーリング。`GetActivity` と `GetRunDetail` の所要時間。
+    - PR 1b：「負荷の合格線」の L1〜L4（数値の合格線）と L5（記録）。外れてもマージしてよく、止めるのは PR 3（決め 6）。
+    - PR 2a：`/api/activity` と `/api/runs/[slug]` の 1 秒のポーリング。`GetActivity` と `GetRunDetail` の所要時間と 1 分あたりの回数。2a の間は、SSE の受信ごとの `router.refresh()` による RSC の読み直し（`ActivityLoader` の `GetActivity`、`RunDetailLoader` の `GetRunDetail`）と 1 秒のポーリングが重なり、同じ RPC が一時的に増える（2b で前者が消える）。測るときはこの 2 つを分けて数え（backend のログの RPC と、Next の `measurePage` の行）、2b の後にもう一度数えて前者が消えたことを確かめる。
     - PR 2b：`router.refresh()` をやめる前後の RSC の要求数。
-    - PR 3：見えているタブ 1 枚と 3 枚で、WatchState の組み立ての回数と送信の大きさ。L1〜L4 をもう一度測る（画面からの要求で）。
+    - 読みを減らす PR（入れたなら）：L1〜L5 を測り直す。
+    - PR 3：見えているタブ 1 枚と 3 枚で、WatchState の組み立ての回数と送信の大きさ。L1〜L5 をもう一度測る（画面からの要求で）。
 
 ## Quint
 
 ### 置き場所と範囲
 
-- 置き場所：**`specs/quint/refresh-demand/`**。`refreshDemand.qnt`（状態機械）、`refreshDemand_test.qnt`（21 件のテスト）、`README.md`（実行の記録）。`specs/quint/ci-specs.json` に登録したので、CI の `quint` ジョブが `typecheck`・`test`・`quint run --main=fixed --invariant=safety --max-steps=100 --max-samples=10000` を流す。
+- 置き場所：**`specs/quint/refresh-demand/`**。`refreshDemand.qnt`（状態機械）、`refreshDemand_test.qnt`（21 件のテスト）、`README.md`（実行の記録）、`mutants.sh`（変異を流し直す道具。下の (a)）。`specs/quint/ci-specs.json` に登録したので、CI の `quint` ジョブが `typecheck`・`test`・`quint run --main=fixed --invariant=safety --max-steps=150 --max-samples=10000` を流す。`mutants.sh` は CI に載せず、仕様を直したときに手元で流す（`review-thread-ack/mutants.sh` と同じ扱い）。
 - `state-stream-relay` に足さなかった理由：あちらは Next の中継（`route.ts`）の状態機械で、この仕様は backend の登録簿と poller と画面の試行番号の組み合わせ。マニフェストは仕様ごとに不変条件と実行条件を持つので、分けたほうが CI の記録が読める。
 - 範囲：登録簿（登録・置き換え・古い試行の拒否・解放・寿命）、送信の間隔と `applied`、定期の組み立ての時間と、その後の寿命の確かめ、poller の待ちと実効間隔（期限前の要求だけを数える。`intervalSeconds` の変更を含む）、画面の試行番号。変化の合流と送信スケジュールの細部は P3、要求なしの接続は E12 が受け持つ。
 - 時計は注入した `now`（1 目盛り = 1 秒）だけ。期限は素通りできない（`tick` は最も近い期限で止まる）。ただし定期の組み立て中の接続の寿命は、その送信タスクが `select!` の外にいるので時計が越えられる（D7）。
 
-### この版で変えたこと（2 回目の読みの指摘 5・16・18・19）
+### 3 回目の読みで変えたこと（指摘 N・O）
+
+- モデル（`refreshDemand.qnt`・`refreshDemand_test.qnt`）は変えていない。
+- 手数を 100 から 150 にした（CI の `max_steps` も）。100 手では `witnessExpiredAfterAssembly` が 0.87% で、手数を増やした理由の「1% を切らない」を満たしていなかった（N）。150 手では最も薄い跡も 2% を超える（下の (b)）。`fixed` の 10,000 サンプルは手元で約 7 秒（100 手で約 6 秒）。
+- 変異を流し直す `mutants.sh` を足した（O）。(a) の表は、この道具の `--matrix`（110 回）で 150 手で取り直した。
+- (c) の表の `isStale`・`Rejected` の行を、handler が `Err(Status::aborted)` を返す形（B）に直し、組み立てを止める試験の口（C）を書いた。
+
+### 2 回目の読みで変えたこと（指摘 5・16・18・19）
 
 - 寿命を `max(3 × applied, 15)` にした（`TTL_MIN = 15`）。
 - `effective` を「期限が `now` より後の登録だけを数える」にした（D16。前の版は期限切れの登録も数えていた）。
 - 定期の送信を `beginSend`（組み立てを始める）と `deliver`（組み立ての後に寿命を確かめて送る）の 2 つに分けた。組み立て中は `expire` が起きず、その接続の寿命の期限で時計が止まらない。定数 `CHECK_AFTER_ASSEMBLY` と、それを外した変異 `noPostAssemblyCheck`、不変条件 `noSendAfterExpiry` を足した。`noOverdueEntry` は「期限を過ぎた登録が残るのは、その送信タスクが組み立て中の間だけ」に言い直した。
 - `intervalSeconds` を変数 `configInterval`（2 秒・30 秒）にし、`configChange` が下限と一緒に変える。下限より短い設定（2 秒 < 3 秒・10 秒）を表す。
 - 誰も増やさない欄 `Fired.clientClose` を消した。
-- 1 秒の要求があると `tick` は 1 秒ずつしか進まないので、寿命 15 秒に届くには約 30 ステップかかる。60 ステップでは寿命切れの跡が 1% を切ったので、CI の `max_steps` を 100 にした（下の (b)）。
+- 1 秒の要求があると `tick` は 1 秒ずつしか進まないので、寿命 15 秒に届くには約 30 ステップかかる。60 ステップでは寿命切れの跡が 1% を切ったので、CI の `max_steps` を 100 にした（3 回目の読みで 150 にした。上）。
 
 ### 確かめたこと（quint 0.32.0、`quint-modeling` の見直しの手順）
 
@@ -683,20 +733,22 @@ Runtime
 
 #### (a) 不変条件が恒真でない
 
-11 の定数のうち 1 つだけを `false` にした変異を 11 個作り、変異ごとに不変条件を 1 つずつ渡して `quint run --max-steps=100 --max-samples=20000 --seed=0x40` を流した（110 回）。10 の不変条件は、どれも少なくとも 1 つの変異で違反する。11 の変異は、どれも少なくとも 1 つの不変条件に違反する。下の seed は違反した跡を再現する値（`--seed=<値> --backend=rust`）で、いくつかは再現を確かめた。
+11 の定数のうち 1 つだけを `false` にした変異 11 個に、不変条件を 1 つずつ渡して `quint run --max-steps=150 --max-samples=20000 --seed=0x40` を流した（110 回）。3 回目の読みの後は、この手順を `specs/quint/refresh-demand/mutants.sh --matrix` で流し直せるようにし、150 手で流し直した（負荷の高い手元で約 1 時間半。違反しない組は 20,000 本を流し切るため）。結果：違反した組は下の表と過不足なく一致し、表に無い違反は無かった（100 手での 3 回目の読みの結果とも同じ）。10 の不変条件は、どれも少なくとも 1 つの変異で違反する。11 の変異は、どれも少なくとも 1 つの不変条件に違反する。原本の `safety` は違反なし。
 
-| 不変条件 | 違反を返す変異（外したガード・変えた遷移） | 再現の seed |
+`mutants.sh` を引数なしで流すと、表の 16 組と原本と `resetAttemptsRejectsLatestTest` だけを流す（約 1 分半）。下の seed はそのときに出たもので、`--seed=<値> --max-samples=1 --backend=rust` で 1 本目に違反が出る（`noPostAssemblyCheck`／`pollerNotLate`、`acquireEarly`／`liveConnsRegistered`、`lazyExpiry`／`noOverdueEntry` で再現を確かめた）。
+
+| 不変条件 | 違反を返す変異（外したガード・変えた遷移） | 再現の seed（150 手） |
 | --- | --- | --- |
-| `liveConnsRegistered` | `keepSuperseded`（置き換えた古い送信タスクを閉じない）、`noOwnerCheck`（解放が持ち主を確かめない）、`expiryKeepsTask`（寿命切れで登録だけ外す）、`acquireEarly`（受け付けで登録する） | `0x7d40`、`0x7d40`、`0xfe0`、`0x50180`（再現した） |
+| `liveConnsRegistered` | `keepSuperseded`（置き換えた古い送信タスクを閉じない）、`noOwnerCheck`（解放が持ち主を確かめない）、`expiryKeepsTask`（寿命切れで登録だけ外す）、`acquireEarly`（受け付けで登録する） | `0x2368`、`0x2368`、`0x2368`、`0x70138`（再現した） |
 | `registryPointsToOpen` | `leakOnClose`（接続の終わりで guard を落とさない） | `0x40` |
 | `supersededOnlyByNewer` | `noRejectStale`（古い試行の拒否を外す）、`resetAttempts`（開き直しで番号を 1 に戻すと、同じ番号の試行どうしが置き換え合う） | `0x40`、`0x40` |
-| `latestNeverRejected` | `resetAttempts` | 無作為の探索では見つからない（100,000 サンプル・100 ステップ・seed 0x40 で反例なし）。決まった手順の `resetAttemptsRejectsLatestTest` で違反を確かめた |
-| `noOverdueEntry` | `lazyExpiry`（寿命の期限を時計が素通りする） | `0xfe0`（再現した） |
+| `latestNeverRejected` | `resetAttempts` | 無作為の探索では見つからない（150 手・20,000 サンプル・seed 0x40 で反例なし。2 回目の読みの後は 100 手・100,000 サンプルでも反例なし）。決まった手順の `resetAttemptsRejectsLatestTest` で違反を確かめる（`mutants.sh` は、そのテストが 1 件だけ流れて通ったことも確かめる。`--match` が何も選ばなくても `quint test` は 0 で終わるため） |
+| `noOverdueEntry` | `lazyExpiry`（寿命の期限を時計が素通りする） | `0x2368`（再現した） |
 | `noExpiryBeforeFirstSend` | `acquireEarly` | `0x40` |
-| `appliedTracksFloor` | `fixedAtStart`（`applied` を接続の開始で固定） | `0x2750` |
-| `pollerNotLate` | `noRewake`（poller が要求の増加で起きない）、`noPostAssemblyCheck`（期限後の送信の `touch` が要求を生き返らせ、poller が知らないまま速くなる） | `0x40`、`0x1b2960`（再現した） |
+| `appliedTracksFloor` | `fixedAtStart`（`applied` を接続の開始で固定） | `0x5e00` |
+| `pollerNotLate` | `noRewake`（poller が要求の増加で起きない）、`noPostAssemblyCheck`（期限後の送信の `touch` が要求を生き返らせ、poller が知らないまま速くなる） | `0x40`、`0x127ea0`（再現した） |
 | `closedReleasedGuard` | `leakOnClose` | `0x40` |
-| `noSendAfterExpiry` | `noPostAssemblyCheck`（組み立ての後に寿命を確かめない） | `0x15800`（再現した） |
+| `noSendAfterExpiry` | `noPostAssemblyCheck`（組み立ての後に寿命を確かめない） | `0x17b0` |
 
 `refreshDemand_test.qnt` の 21 件のうち 7 件は、変異が違反に至る筋書き（`acquireEarlyExpiresBeforeFirstSendTest`、`fixedAtStartIgnoresFloorTest`、`noOwnerCheckDropsNewDemandTest`、`expiryKeepsTaskLiesTest`、`noPostAssemblyCheckLiesTest`、`noRewakeSleepsThroughDemandTest`、`resetAttemptsRejectsLatestTest`）。残りの 14 件は、同じ筋書きや新しい筋書き（遅れ・遅い組み立て・下限より短い `intervalSeconds`）を設計の案でたどって不変条件が保たれることを確かめる。`slowAssemblyClosesAfterExpiryTest` と `noPostAssemblyCheckLiesTest` は同じ手順を案と変異でたどる対で、案は組み立ての後に閉じ、変異は `applied = 1` を付けて送って寿命を 45 秒まで延ばす。
 
@@ -706,28 +758,37 @@ Runtime
 
 #### (b) 各 action が実行の中で少なくとも 1 回起きる
 
-遷移ごとに回数を数える変数 `fired` を持ち、`--witnesses` で数えた（`--main=fixed --max-steps=100 --max-samples=10000 --seed=0x40`）。どの跡も 101 状態（100 ステップ）まで伸び、途中で止まる跡は無かった。
+遷移ごとに回数を数える変数 `fired` を持ち、`--witnesses` で数えた（`--main=fixed --max-steps=150 --max-samples=10000 --seed=0x40`。3 回目の読みの後に 150 手で取り直した）。quint の「Trace length statistics」は max=151・min=151 で、どの跡も 151 状態（150 ステップ）まで伸び、途中で止まる跡は無かった。
 
 | action | 起きた跡の数（10,000 本中） |
 | --- | --- |
 | `connect` | 10,000 |
-| `arrive` | 9,892 |
-| `initialSend` | 8,176 |
-| `beginSend` | 1,462 |
-| `deliver` | 569 |
-| `stall` | 4,320 |
-| `changeRate` | 9,998 |
+| `arrive` | 9,942 |
+| `initialSend` | 8,717 |
+| `beginSend` | 1,924 |
+| `deliver` | 918 |
+| `stall` | 5,352 |
+| `changeRate` | 10,000 |
 | `hide` | 10,000 |
 | `show` | 10,000 |
-| `releaseArrives` | 9,993 |
-| `expire` | 568 |
+| `releaseArrives` | 10,000 |
+| `expire` | 1,291 |
 | `configChange` | 10,000 |
 | `pollerRead` | 10,000 |
 | `tick` | 10,000 |
 
-意味のある状態：置き換え 1,174、古い試行の拒否 580、詰まった接続の寿命切れ 382、組み立ての後の寿命切れ 87（薄いが届いている。決まった手順の `slowAssemblyClosesAfterExpiryTest` でも確かめた）、下限で `applied` が上がる 5,254、poller が 1 秒で読む 3,810、2 つの画面が違うレートで同時に登録 1,339、`intervalSeconds` が下限より短く poller が設定の間隔で読む 7,105。
+意味のある状態：置き換え 1,358、古い試行の拒否 671、詰まった接続の寿命切れ 916、組み立ての後の寿命切れ 208（2.08%。決まった手順の `slowAssemblyClosesAfterExpiryTest` でも確かめた）、下限で `applied` が上がる 5,764、poller が 1 秒で読む 4,275、2 つの画面が違うレートで同時に登録 1,560、`intervalSeconds` が下限より短く poller が設定の間隔で読む 7,913。22 の到達条件は、どれも 1% を超える（最も薄いのは組み立ての後の寿命切れの 2.08%）。
 
-手数を 60 にすると `deliver` 143・`expire` 99・詰まった接続の寿命切れ 56 まで薄くなった（寿命の下限 15 秒に届くまで、1 秒の要求の下では約 30 ステップかかるため）。サンプル数で埋めず、手数を 100 にし、CI の `max_steps` も 100 にした（`fixed` の 10,000 サンプルは、CI と同じ `scripts/quint-check-specs.sh` で約 5 秒、witness を数える手元の実行で約 40 秒）。
+手数ごとの薄い跡（同じ seed・10,000 本）：
+
+| 手数 | `deliver` | `expire` | 詰まった接続の寿命切れ | 組み立ての後の寿命切れ | `fixed` の 10,000 本の時間（witness なし） |
+| --- | --- | --- | --- | --- | --- |
+| 60 | 143 | 99 | 56 | — | — |
+| 100 | 569 | 568 | 382 | 87（0.87%） | 約 6 秒 |
+| 150 | 918 | 1,291 | 916 | 208（2.08%） | 約 7 秒 |
+| 200 | 1,066 | 1,591 | 1,144 | 258（2.58%） | — |
+
+寿命の下限 15 秒に届くまで、1 秒の要求の下では約 30 ステップかかるので、跡は手数で増える。2 回目の読みの後は「寿命切れの跡が 1% を切らない」ことを理由に 100 にしたが、組み立ての後の寿命切れは 100 手で 0.87% で、その理由を満たしていなかった（3 回目の読みの N）。サンプル数で埋めず、手数を 150 にし、CI の `max_steps` も 150 にした。200 手は 150 手からの増え方が小さく、時間だけが増えるので採らない。
 
 #### (c) 状態・action と本番のコードの対応
 
@@ -743,7 +804,7 @@ Runtime
 | `Conn.phase = Requested` | 画面が `/api/state` を開いた後、backend の `watch_state` が呼ばれる前 | |
 | `arrive` | `watch_state` の入口（検証と購読） | |
 | `Assembling`・`initialSend` | 初期の `assemble_state_for` と最初の `tx.send`、その後の `RefreshDemand::acquire` | |
-| `Live`・`beginSend` | 送信タスクの `sleep_until(next_send)` の分岐（`send_schedule`）→ `blocking(assemble_state_for)` の await | |
+| `Live`・`beginSend` | 送信タスクの `sleep_until(next_send)` の分岐（`send_schedule`）→ `blocking(assemble_state_for)` の await | 組み立ての関数は `TaktDashServiceImpl` の `runs_assembler`。試験は `with_state_assembler` で止められる関数を渡し、組み立て中に時刻を進める（E22 の (2)・E26） |
 | `Conn.assembling` | 送信タスクが `blocking(...)` を待っていて、`select!` の外にいる間 | この間 `expire` は起きず、時計はこの接続の期限で止まらない |
 | `deliver` | 組み立ての後の `guard.deadline() <= now`・`guard.is_superseded()` の確かめ → `sender.send` → `touch` | `CHECK_AFTER_ASSEMBLY` |
 | `Conn.applied` | 送った `DashboardState.applied_refresh_interval_ms`（`applied_for`） | |
@@ -752,7 +813,7 @@ Runtime
 | `clientClosed`・`releaseArrives` | 画面の `EventSource.close` → Next の中継の終わり → backend の `sender.closed()` の分岐 | |
 | `Conn.held`・`releases`・`closed()` の guard | `DemandGuard` の所有と `Drop` | 本番の `Drop` は 1 回だけなので「2 回落とさない」は不変条件に入れていない（型で保つ） |
 | `register` の置き換え・`CLOSE_SUPERSEDED` | `acquire` が古い `Entry.superseded` に通知 → 古い送信タスクの `guard.superseded()` の分岐、または組み立ての後の `is_superseded()` | |
-| `isStale`・`Rejected` | `acquire` の `Err(Stale)` → `Status::aborted`。Next の `screen-streams.ts` の `admit` の `undefined` → 204 | 断る時点は Next が受け付け、backend が初期送信の後。規則は同じなので 1 つで代表した |
+| `isStale`・`Rejected` | `acquire` の `Err(Stale)` → handler が `Err(Status::aborted)` を返す（`rx` を捨てる）。Next の `screen-streams.ts` の `admit` の `undefined` → 204 | 断る時点は Next が受け付け、backend が初期送信の後。規則は同じなので 1 つで代表した |
 | `expire` | 送信タスクの `sleep_until(guard.deadline())` の分岐 → `return`（guard の `Drop`） | |
 | `pollerRead`・`lastReadAt` | `run_until_stopped` の 1 周期（`read_cycle_once_at`） | 読み取りにかかる時間は 0 として扱う |
 | `capturedInterval` | 変異 `noRewake` だけが使う（前回の `CycleReport.interval` で待つ） | 本番は `subscribe().changed()` で計算し直す |
@@ -765,11 +826,11 @@ Runtime
 
 #### (d) 検査の大きさと、それで見られないもの
 
-- 大きさ：画面 2、接続 6 本、時刻 200 秒まで、`tick` は 1・4・15 秒、レート 1・2・5・10 秒、下限 1・3・10 秒、`intervalSeconds` 2・30 秒。CI は `fixed` を 100 ステップ・10,000 サンプル（seed は毎回乱数）。変異は 100 ステップ・20,000 サンプル。
-- `fixed` の `safety` は、seed 0x40 の 10,000 サンプルに加え、CI と同じく seed を固定しない 200,000 サンプル × 5 回（合わせて 100 万本、100 ステップ）で反例なし。CI の乱数の探索が無関係な PR を止める見込みは、この範囲では小さい。
+- 大きさ：画面 2、接続 6 本、時刻 200 秒まで、`tick` は 1・4・15 秒、レート 1・2・5・10 秒、下限 1・3・10 秒、`intervalSeconds` 2・30 秒。CI は `fixed` を 150 ステップ・10,000 サンプル（seed は毎回乱数）。変異は 150 ステップ・20,000 サンプル（`mutants.sh` の既定）。
+- `fixed` の `safety` は、seed 0x40 の 10,000 サンプルに加え、CI と同じく seed を固定しない 200,000 サンプル × 5 回（合わせて 100 万本、150 ステップ。3 回目の読みの後に流し直した。どの回も跡は 151 状態まで伸びた。1 回あたり約 2 分）で反例なし。CI の乱数の探索が無関係な PR を止める見込みは、この範囲では小さい。
 - 「反例が見つからなかった」のは、上の大きさでサンプルした跡の中だけ。「成り立つ」とは言えない。
 - 見られないもの：
-  - 画面 3 つ以上、接続 7 本以上、200 秒より長い開きっぱなし、100 ステップより長い列。
+  - 画面 3 つ以上、接続 7 本以上、200 秒より長い開きっぱなし、150 ステップより長い列。
   - ミリ秒の端数（例：下限 1500ms）。秒の整数だけ。`intervalSeconds` は 2 と 30 だけ。
   - 要求なしの接続、変化の合流、`DashboardState` の中身、組み立ての失敗、停止の合図（E12・P3・既存の `watch_state_test.rs`）。
   - **組み立てと送信にかかる時間のうち、モデルにないもの**：組み立ての時間は任意の長さで入れた（`beginSend` と `deliver` の間の `tick`）。送信は「すぐ終わる」か「`stall` で永久に詰まる」かの 2 つだけで、遅れて終わる送信は遅れて起きる `beginSend`・`deliver` で近似した。送信の待ちの間に寿命が切れる経路は `stall` の後の `expire` で表した。送信の待ちが途中で解ける場合の順序（解けるのと期限が同時）は見ていない。
@@ -806,24 +867,34 @@ Quint を書いて分かったことを、ほかの節へ戻した：
 
 | PR | 内容 | 大きさ | 単独でマージしたとき |
 | --- | --- | --- | --- |
-| 1a | proto（`RefreshRate`、要求の欄と `applied`）と生成物、型で落ちる所の追従（`assembly.rs`・試験の literal 13 か所・`client.ts`・`restore-state.ts`） | 2 | backend は新しい欄を読まず、`applied` はどこでも 0。0 は「要求なし」の意味なので嘘にならない。画面は何も変わらない |
-| 1b | backend の `RefreshDemand`・`watch_state`・poller・時計・config、BFF の `refresh_ms` の転送、#130 の合格線の実測（展開の後） | 5 | 画面はまだ `refresh_ms` を付けないので、すべての接続が要求なしで今と同じ。新しい経路は E10〜E12・E21〜E29 と BFF のテストで確かめる。選択の UI が無いので、嘘になる表示は無い |
-| 2a | アクティビティと run 詳細の要素単位の更新、2 つの Route Handler、`ActivityContent` の型、既存テストの描き方、flow-9 | 5 | `router.refresh()` は残る。Live の部品は初期値しか props から読まないので、再取得されても表示は二重にならない。アクティビティと run 詳細はタスク詳細などと同じ固定 1 秒のポーリング |
+| 1a | proto（`RefreshRate`、要求の欄と `applied`）と生成物、型で落ちる所の追従（`assembly.rs`・試験の literal 13 か所・`frontend/cli` の literal 2 か所・`client.ts` の呼び出しと import・`restore-state.ts`） | 2 | backend は新しい欄を読まず、`applied` はどこでも 0。0 は「要求なし」の意味なので嘘にならない。画面は何も変わらない |
+| 1b | backend の `RefreshDemand`・`watch_state`（古い試行は handler の `Err(ABORTED)`）・組み立てを差し替える口・poller・時計・config、BFF の `refresh_ms` の転送、#130 の実測（展開の後。L1〜L5） | 5 | 画面はまだ `refresh_ms` を付けないので、すべての接続が要求なしで今と同じ。新しい経路は E10〜E12・E21〜E29 と BFF のテストで確かめる。選択の UI が無いので、嘘になる表示は無い。**合格線を外れてもマージしてよい**（決め 6） |
+| 2a | アクティビティと run 詳細の要素単位の更新、2 つの Route Handler、`ActivityContent` の型、既存テストの描き方、flow-9 | 5 | `router.refresh()` は残る。Live の部品は初期値しか props から読まないので、再取得されても表示は二重にならない（読みは 2b まで重なる。影響の「負荷」の 2a）。アクティビティと run 詳細はタスク詳細などと同じ固定 1 秒のポーリング |
 | 2b | `router.refresh()` の廃止、`LiveProjects`、`ProjectsContent` の型、残りの既存テスト | 3 | プロジェクトは SSE の状態で動く。アクティビティと run 詳細は 2a のポーリングで動き続ける。受け入れ条件 3 を満たす |
-| 3 | レートの選択・保存・復元、hidden の停止、試行番号（D8）、`applied` の通知、ポーリングのレート、requirements、e2e の新しい spec | 8 | PR 1b の backend が要求に従うので、SSE の画面も選んだレートで動く。e2e の backend は 1 秒のまま。受け入れ条件 1・2・4 を満たす。**#130 の合格線を満たすまでマージしない** |
+| 読みを減らす PR | poller の 2 段の読み（速い段は `takt_list_tasks` と判断待ちの 3 つ）、`takt_get_goal` の差分読み、プロジェクト内の並列。D6 の通知文・受け入れ条件 2 の言い方・Quint の 2 段の読みを合わせる（3 回目の読みの I）。**#130 の合格線を外れたときだけ** | 5 | 画面はまだ要求を出さない（PR 3 の前）ので、本番では読みの段が変わるだけ。ゴールの一覧が遅い段になることの言い方は、この PR の設計で中将の判断を受けてから入れる。入れた後に L1〜L5 を測り直す |
+| 3 | レートの選択・保存・復元、hidden の停止、試行番号（D8）、`applied` の通知と「読み取りに N 秒かかっています」（決め 2）、ポーリングのレート、requirements、e2e の新しい spec | 8 | PR 1b の backend が要求に従うので、SSE の画面も選んだレートで動く。e2e の backend は 1 秒のまま。受け入れ条件 1・2・4 を満たす。**#130 の合格線を満たすまでマージしない** |
 | 4 | e2e の既定 30 秒、`StartStackOptions.intervalSeconds`、実測で決めた spec の切り替え、E18（新しい spec ファイル） | 2 | e2e だけ。受け入れ条件 4 を、本番と同じ既定の backend で確かめる |
 
 - 順序は 1a → 1b →（#130 の実測）→ 2a → 2b →（合格線を外れたら、読みを減らす PR）→ 3 → 4。2a・2b は 1a・1b に依存しない（並べてもよい）が、2a は 2b より先（2b を先に入れると、アクティビティと run 詳細が `router.refresh()` を失って止まる）。3 は 1a・1b・2a・2b に依存する（`applied` の型、`LiveActivity`・`LiveRunDetail`、`router.refresh()` の廃止）。
-- 1 つの PR にまとめると 25 になるので、まとめない。
+- 1 つの PR にまとめると 30（読みを減らす PR を入れない場合も 25）になるので、まとめない。
+- **大きさの見直し（3 回目の読みと決めを入れた後）**：合わせて 30 = 1a 2 + 1b 5 + 2a 5 + 2b 3 + 読みを減らす PR 5 + 3 8 + 4 2。
+  - 1a：`frontend/cli` の 2 行と `client.ts` の import の 1 語が増えるだけで、ファイルは 9 から 11 になる（proto・生成物・`assembly.rs`・試験 3・`client.ts`・`restore-state.ts`・その試験、と `frontend/cli` の 2）。#361（1）より大きく #362（5）よりずっと小さいので 2 のまま。
+  - 1b：`with_state_assembler`（欄 1 つと関数 1 つ、呼び出し 4 か所の差し替え）、`pub mod`・`pub(crate)` の 2 語。触るファイルは増えない（`grpc/mod.rs`・`lib.rs` は前から一覧にある）。5 のまま。
+  - 2a：新しいファイル `last-loaded-caches.ts` を作らず既存の `last-loaded.ts` に並べるので、ファイルは 1 つ減る。負荷の測りの一言は本文の作業。5 のまま。
+  - 3：「読み取りに N 秒かかっています」は、純粋関数 `readLag` を PR 3 で新しく作る `refresh-rate.ts` に、表示を前から触る `live-sidebar.tsx`・`sidebar.tsx` に、試験（E32）を前から触る `refresh-rate.test.ts`・`live-sidebar.test.ts` に置く。新しいファイルは増えず、増えるのは 100 行前後の見込み。8 の幅（#362 の 18 ファイル・+1147 より大きい PR）の中に収まるので、**8 を超えない**と見た。実装で 8 の幅を超えたら（目安：ファイル 35 以上か +2,500 行以上）、3a（選択・保存・試行番号・通知）と 3b（ポーリングのレートと失敗の待ち、requirements、e2e）に分ける。そのときは合わせて 30 を超えるので、分ける前に takt-dash中将に諮る。
 
-## 決まっていない点
+## 決まっていない点（閉じた）
 
-1. **#130 の合格線を外れたときの読みを減らす PR**：今の本番の実測では L1 を 6 倍以上外れる見込み。「負荷の合格線」の候補 1〜3 で 1 周期を 1.5 秒以下にできるかは、PR 1b の後の実測と道具ごとの内訳で決める。1〜3 でも届かないときの扱い（takt-mcp の変更を別 issue にするか、受け入れ条件 4 の読み方をオーナーに仰ぐか）は takt-dash中将の判断。
-2. **周期が間隔より長いときの画面の知らせ**：`applied = 1000` の状態が毎秒届いても、中身は周期ごとにしか変わらない（D6）。サイドバーに「読み取りに N 秒かかっています」を `read_at` の古さから出すかは、PR 1b の実測の後に決める。
-3. **run 詳細の 1 秒のポーリング**：1 ページで定期的に読むのは 2 本（詳細とログ）。WatchState の run の要約（状態・今のステップ・最後のログ時刻）で変化を知ったときだけ詳細を読む形にすれば 1 本になる。#130 の実測の後に比べる。
-4. **1 秒ごとの全状態の送信の大きさ**：要求のある接続には、変化が無くても間隔ごとに `DashboardState` 全体が届く。変化が無ければ送らない、または `read_at` だけの軽いイベントにする案を、実測と合わせて比べる（その場合は D7 の寿命の延ばし方と、画面の見張りへの影響を見直す）。
-5. **画面と Next の間の半開きで残る要求**：D7 のとおり、画面が消えて TCP が切れないとき、要求は OS の再送の上限まで残り、その間 poller は速いまま。hidden での切断（D9）で多くは避けられる。残る場合に、Next の中継が「画面へ送れない時間」を見て閉じる案があるが、#385 の作りに触れるので、実測で問題になってから決める。
-6. **どの PR を合格線で止めるか**：この設計は「1b は測るためにマージして展開し、3 を止める」にした。1b 自体を合格線で止める（展開の前に別の場所で測る）ほうがよければ、takt-dash中将の判断で変える。
+前の版で残した 6 つは、takt-dash中将の決め（11/28）で閉じた。設計の本文に入れた場所を書く。
+
+1. **合格線を外れたとき**：既定 1 秒は変えず、PR 3 の前に読みを減らす PR（大きさ 5）を入れる。中身は案のとおり（速く読むのは `takt_list_tasks` と判断待ちの 3 つだけ、`takt_get_goal` は差分読み、プロジェクト内は並列）。それでも 1.5 秒を切らなければ、takt-mcp 側の変更を別の issue にし、受け入れ条件 4 の読み方は元帥経由でオーナーに仰ぐ（中将からオーナーには聞かない）。→ 「変える場所」の「読みを減らす PR」、「負荷の合格線」の「外れたときにすること」、分け方の表。
+2. **周期が間隔より長いときの知らせ**：画面に「読み取りに N 秒かかっています」を小さく出す。PR 3 の範囲。→ D6 の「画面の通知」の 3 つ目、PR 3、E32、不変条件 9。
+3. **run 詳細の 2 本のポーリング**：今は 1 本にしない。#80 の設計と重なるので #80 の書き直しで扱う。L4 で測る。→ D15、「負荷の合格線」の L4。
+4. **全状態を送る大きさ**：PR 1b の測りに L5（1 接続あたり毎秒のバイト数）として足す。合格線は置かず、値を記録する。→ 「負荷の合格線」の L5。
+5. **画面と Next の間の半開きで残る要求**：既知の制限として受け入れる（TTL は backend の列が詰まったときだけ効く）。→ D7 の「寿命で捕まえられないもの」。
+6. **合格線で止める PR**：PR 3（1 秒を利用者に出す所）。PR 1b は測るだけで、外れてもマージしてよい（画面の選択はまだ無いので、機能が嘘をつかない）。外れたら PR 3 の前に 1 の PR を入れる。→ PR 1b の受け入れ、PR 3 のマージの条件、分け方の表。
+
+大きさは 1 の PR を入れた 30 を見込みとする（先頭の「大きさ」と分け方の節）。
 
 ## 範囲の外
 
@@ -833,6 +904,41 @@ Quint を書いて分かったことを、ほかの節へ戻した：
 - DB の表・列・索引・保存形式。
 - takt と takt-mcp の変更（読みを減らすために takt-mcp の道具が要るときも、別の issue にする）。
 - 全端末で同じレートにすること（サーバー側の設定や Cookie。D1）。
+
+## 3 回目の読みとの対応表
+
+`584bd07` への 3 回目の敵対的な読み（2 回目の 22 件のうち 2〜22 は直っていて、1 は一部。新しい穴は A〜O）と、takt-dash中将の採否（すべて採る。A は PR 1a のテストに入る条件）、中将の決め 1〜6。
+
+### 指摘 A〜O
+
+| # | 指摘の要点 | 直したところ |
+| --- | --- | --- |
+| A | PR 1a の型の落ち先に `frontend/cli` の `DashboardState` の literal 2 か所が無い。`client.ts:26` の型だけの import では `fromPartial` が TS1361 | PR 1a の「型で落ちる所」（`fixtures.rs:32`・`write_command_tests.rs:755` に `applied_refresh_interval_ms: 0`、`client.ts:26` の `type` を外す、一覧が全部であることの確かめ）、分け方の表の 1a |
+| B | 古い試行を断るとき handler の中で `Status::aborted` を `tx.send` すると、列 1 件が初期状態で埋まっていて完了しない | PR 1b の `watch_state`（handler から `Err(Status::aborted)` を返し `rx` を捨てる）、E25、状態と遷移の図、Quint の (c) の `isStale` の行 |
+| C | E22 (2)・E26 の「止められる `assemble_runs`」を差し込む口が無い | PR 1b の `grpc/mod.rs` の「組み立てを差し替える口」（`with_state_assembler`）、E22・E26 |
+| D | E11 の「`watch_state_test.rs:299-330` と同じ形（`pause`）」は合わない（今は `pause` を使っていない） | E11（同じプロセスで呼ぶ形。`pause` は新しく入れる） |
+| E | `mod refresh;` では `backend/tests` と `main.rs` から見えない。`WATCH_RESEND_INTERVAL` が private | PR 1b の `lib.rs`（`pub mod refresh;`）と `grpc/mod.rs`（`pub(crate) const WATCH_RESEND_INTERVAL`） |
+| F | 新しい `last-loaded-caches.ts` は要らない | PR 2a（既存の `last-loaded.ts` に並べる） |
+| G | 2a の間は `router.refresh()` の RSC の読み直しと 1 秒のポーリングが重なる | PR 2a の冒頭、影響の「負荷」の 2a（分けて数え、2b の後に消えたことを確かめる）、分け方の表の 2a |
+| H | 中将の決めが設計に入っていない | 下の「中将の決め」の表のとおり全部入れた。分け方の表に「読みを減らす PR」の行、合わせて 30、PR 3 の大きさの見直し |
+| I | ゴールを遅い段で読むと、D6 の通知文と受け入れ条件 2 が嘘になり、Quint の `pollerRead` が 2 段を表さない | 「変える場所」の「読みを減らす PR」の「この PR の設計で合わせるもの」（通知文・受け入れ条件 2 の言い方・Quint の 2 段の読み） |
+| J | 区間が各 1 回で、時間の違いと区別できない | 「負荷の合格線」の「順序」（区間を交互に 2 回以上、どの回でも満たすことを合格に。比べるのは同じ回の中） |
+| K | L1 の周期 300 本に届かないとき判定できない | L1（届かなければ不合格） |
+| L | L1 は周期の間隔だけで、画面の鮮度ではない | L1 を「周期の間隔」と言い直した（合格線の数値は決め 1 のまま）。理由の欄と不変条件 9 に、鮮度＝周期の間隔＋送信の間隔＋組み立て・送信・描画と書いた |
+| M | L4 の読み方、L2 の後半、L3 のプロセスの特定が無い | 「負荷の合格線」の「測る前に決めるもの」（`lsof` で PID、L4 のプロジェクトと run の選び方）、「L4 の読み方」（10 秒ごと、区間あたり 60 本）、L2（周期の行の開始と終わりを直接比べる） |
+| N | `witnessExpiredAfterAssembly` が 0.87% で、手数を増やした理由の 1% を下回る | Quint の手数を 150 にした（CI の `max_steps` も）。(b) の表を 150 手で取り直した |
+| O | 変異を流し直す道具が無い | `specs/quint/refresh-demand/mutants.sh`（既定は表の組だけ、`--matrix` で 110 回）。(a) をこの道具で流し直した |
+
+### 中将の決め 1〜6
+
+| # | 決め | 入れたところ |
+| --- | --- | --- |
+| 1 | 外れたら既定 1 秒は変えず、PR 3 の前に読みを減らす PR（5）。それでも 1.5 秒を切らなければ takt-mcp 側を別 issue、受け入れ条件 4 の読み方は元帥経由でオーナーへ | 「読みを減らす PR」の節、「外れたときにすること」、分け方の表、先頭の「大きさ」、決まっていない点 1 |
+| 2 | 周期が間隔より長いときは「読み取りに N 秒かかっています」。PR 3 | D6 の「画面の通知」の 3 つ目、PR 3、E32、不変条件 9、壊しうる入力、分け方の表の 3 |
+| 3 | run 詳細の 2 本は今は 1 本にしない。#80 の書き直しで扱う。L4 で測る | D15、L4、「L4 の読み方」 |
+| 4 | 全状態を送る大きさは L5 として記録する（合格線なし） | 「負荷の合格線」の L5、区間の `curl` の `size_download`、影響の「負荷」 |
+| 5 | 半開きで残る要求は既知の制限として受け入れる | D7 の「寿命で捕まえられないもの」 |
+| 6 | 止めるのは PR 3。PR 1b は測るだけで、外れてもマージしてよい | PR 1b の受け入れ、PR 3 のマージの条件、「負荷の合格線」の見出し、分け方の表の 1b |
 
 ## 2 回目の読みとの対応表
 
