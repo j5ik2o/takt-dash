@@ -116,11 +116,12 @@ module refreshDemand {
   pure def liveEntries(reg: int -> Entry): Set[Entry] =
     SCREENS.map(s => reg.get(s)).filter(e => e.conn != NONE)
 
-  // poller の実効間隔（refresh.rs の effective）。要求が無ければ設定の間隔。
+  // poller の実効間隔（refresh.rs の effective）。要求が無ければ設定の間隔。要求があれば、要求の最小値を
+  // 下限（minRead）で切り上げ、設定の間隔より遅くはしない。
   pure def effective(reg: int -> Entry, floor: int): int = {
     val entries = liveEntries(reg)
-    if (entries.size() == 0) max2(floor, CONFIG_INTERVAL)
-    else max2(floor, min2(CONFIG_INTERVAL, entries.fold(CONFIG_INTERVAL, (acc, e) => min2(acc, e.rate))))
+    if (entries.size() == 0) CONFIG_INTERVAL
+    else min2(CONFIG_INTERVAL, max2(floor, entries.fold(MAX_RATE, (acc, e) => min2(acc, e.rate))))
   }
 
   // 接続の送信間隔（refresh.rs の applied_for）。
