@@ -342,6 +342,10 @@ test("概要の既読で空のrun集合はヘッダー・タイル・一覧・�
   const scopes = [required(document, ".page-head"), required(document, ".tile"), required(document, '[aria-labelledby="h-runs"]')];
   const content = scopes.map((scope) => `${text(scope)} ${Array.from(scope.querySelectorAll('[aria-label]')).map((item) => item.getAttribute("aria-label")).join(" ")}`).join(" ");
   // 空の表明は、タイルの「0 / 5 件」と一覧の文がそれぞれ1回ずつだけ出る（退行で二重にならない）。
+  // 「0件」「0 /」「ありません」の類をまとめて拾い、この2つのほかに空の表明が無いことを確かめる（#444）。
+  // 見出しなどに「0件の run が動いています。」のような空の表明が増えると、ここで落ちる。
+  const emptyClaims = (content.match(/(?<!\d)0\s*\/(?:\s*\d+\s*件)?|(?<!\d)0\s*件|ありません/g) ?? []).map((claim) => claim.replace(/\s+/g, ""));
+  assert.deepEqual(emptyClaims, ["0/5件", "ありません"], content);
   assert.equal((content.match(/0\s*\/\s*5\s*件/g) ?? []).length, 1, content);
   assert.equal((content.match(/走っている run はありません/g) ?? []).length, 1, content);
   assert.match(text(required(document, ".page-head")), /2台のサーバー/);
