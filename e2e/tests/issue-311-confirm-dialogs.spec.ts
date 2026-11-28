@@ -8,6 +8,9 @@ import { buildMockState, GOAL_ID, PULL_REQUEST_NUMBER } from "../support/fixture
 // takt への書き込みが1回だけ届くところまでを通す。却下は、承認のあとも登録案が残る
 // モックの状態に依存しないよう、承認していない初期状態の stack で通す。
 const CONFIRM_DELAY_MS = 600;
+// 書き込みは backend を経て届くので、1回目が届いたあとも、遅れて届く2回目を待ってから数える
+// （issue-308-operation-confirm.spec.ts と同じ待ち方）。
+const LATE_WRITE_WAIT_MS = 2_000;
 const REVISION = 7;
 const PROPOSAL_BODY = "E2E 確認ダイアログを通すゴール登録案の本文";
 
@@ -20,6 +23,8 @@ const startDialogsStack = (): Promise<Stack> =>
     }),
   });
 
+// 承認・却下のどちらも、登録案が保留中の初期状態から始める。fixture はテストごとに起動するので、
+// 却下のテストも承認のあとの状態（承認のあとも登録案が残るモックの状態）を引き継がない。
 const dialogsStack = async ({}, use: (stack: Stack) => Promise<void>): Promise<void> => {
   const stack = await startDialogsStack();
   try {
@@ -29,17 +34,7 @@ const dialogsStack = async ({}, use: (stack: Stack) => Promise<void>): Promise<v
   }
 };
 
-// 却下は、承認のあとも登録案が残るモックの状態に依存しないよう、承認していない stack で通す。
-const rejectStack = async ({}, use: (stack: Stack) => Promise<void>): Promise<void> => {
-  const stack = await startDialogsStack();
-  try {
-    await use(stack);
-  } finally {
-    await stack.stop();
-  }
-};
-
-const test = base.extend<{ dialogsStack: Stack; rejectStack: Stack }>({ dialogsStack, rejectStack });
+const test = base.extend<{ dialogsStack: Stack }>({ dialogsStack });
 
 const callsOf = async (stack: Stack, name: string) =>
   (await stack.readCalls()).filter((call) => call.name === name);
@@ -74,6 +69,8 @@ test("マージと承認の確認ダイアログが開き、確定すると一�
   await expect(mergeTrigger, "確定したあと一覧の操作へ戻る").toBeVisible();
   await expect(mergeTrigger, "確定したあと起点のボタンへフォーカスが戻る").toBeFocused();
   await expect.poll(async () => (await callsOf(stack, "takt_merge_goal_pr")).length, { timeout: 15_000 }).toBe(1);
+  await page.waitForTimeout(LATE_WRITE_WAIT_MS);
+  expect(await callsOf(stack, "takt_merge_goal_pr"), "遅れて2回目が届かない").toHaveLength(1);
   expect((await callsOf(stack, "takt_merge_goal_pr"))[0]?.arguments).toMatchObject({
     cwd: stack.projectDir,
     goalId: GOAL_ID,
@@ -100,13 +97,15 @@ test("マージと承認の確認ダイアログが開き、確定すると一�
   await expect
     .poll(async () => (await callsOf(stack, "takt_approve_goal_registration")).length, { timeout: 15_000 })
     .toBe(1);
+  await page.waitForTimeout(LATE_WRITE_WAIT_MS);
+  expect(await callsOf(stack, "takt_approve_goal_registration"), "遅れて2回目が届かない").toHaveLength(1);
   expect((await callsOf(stack, "takt_approve_goal_registration"))[0]?.arguments).toMatchObject({
     cwd: stack.projectDir,
     revision: REVISION,
   });
 });
 
-test("却下の確認ダイアログが開き、確定すると一覧へ戻って結果が出る", async ({ page, rejectStack: stack }) => {
+test("却下の確認ダイアログが開き、確定すると一覧へ戻って結果が出る", async ({ page, dialogsStack: stack }) => {
   await page.goto(`${stack.webUrl}/decisions`);
   await expect(page.getByRole("heading", { name: "判断待ち", level: 1 })).toBeVisible();
   const list = page.getByRole("region", { name: "判断待ちの一覧" });
@@ -133,6 +132,8 @@ test("却下の確認ダイアログが開き、確定すると一覧へ戻っ�
   await expect
     .poll(async () => (await callsOf(stack, "takt_reject_goal_registration")).length, { timeout: 15_000 })
     .toBe(1);
+  await page.waitForTimeout(LATE_WRITE_WAIT_MS);
+  expect(await callsOf(stack, "takt_reject_goal_registration"), "遅れて2回目が届かない").toHaveLength(1);
   expect((await callsOf(stack, "takt_reject_goal_registration"))[0]?.arguments).toMatchObject({
     cwd: stack.projectDir,
     revision: REVISION,
