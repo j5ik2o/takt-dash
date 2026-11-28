@@ -7,10 +7,10 @@ module reviewThreadAck_test {
 
   // ---- v1 ----
 
-  // 無関係な一言でも、あとから投稿されれば承認になる（#134 の穴）。
+  // 項目が 2 つある PR で、無関係な一言を 1 つ投稿するだけで両方が承認になる（#134 の穴）。
+  // v1 は確認をどの項目にも結び付けず、それより前の全項目を承認する。
   run v1UnrelatedTurnsGreenTest =
     v1::initWith(Set(), Set())
-      .then(v1::postAck(true, false, true, Set(2), Set(), Set(2)))
       .then(v1::postAck(true, false, false, Set(), Set(), Set()))
       .then(all {
         assert(v1::gateGreen),
