@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # reviewThreadAck.qnt の不変条件が恒真でないことを確かめる。
-# 規則のガードを 1 つ外した版と、遷移を 1 つ変えた版を作り、どれも `fixed` で
+# 規則のガードを 1 つ外した版、ci#43 の残る穴 4 つを 1 つずつ開けた版、遷移を 1 つ変えた版を作り、どれも `fixed` で
 # 違反が出ることを確かめる（どの不変条件に出るかも決めておく）。違反が出ない版が 1 つでもあれば失敗する。
 # リポジトリの根から実行する: specs/quint/review-thread-ack/mutants.sh
 set -euo pipefail
@@ -18,12 +18,18 @@ trap 'rm -rf "$work"' EXIT
 mutants=(
   "URL の頭を外すガードを消す|    f != UrlHead|    true|noFalseGreen"
   "ほかの項目に無い断片に限るガードを消す|      and ITEMS.forall(j => j != i implies not(its.get(j).frags.contains(f)))|      and true|noFalseGreen"
-  "1 つの確認の断片で、別の項目も承認する|    a.ids.contains(i) or a.frags.exists(f => uniqueTo(its, i, f))|    a.ids.contains(i) or a.frags.exists(f => ITEMS.exists(k => uniqueTo(its, k, f)))|noFalseGreen"
-  "id の経路を消す（正当な確認が赤になる）|    a.ids.contains(i) or a.frags.exists(f => uniqueTo(its, i, f))|    a.frags.exists(f => uniqueTo(its, i, f))|idAckTurnsGreen"
-  "最終編集より後のガードを消す|    else if (RULE == \"unique\") candidate(a) and isAfter(its.get(i), a) and refsUnique(its, i, a)|    else if (RULE == \"unique\") candidate(a) and refsUnique(its, i, a)|noFalseGreen"
-  "自動報告を外すガードを消す|  pure def candidate(a: Ack): bool = a.eligible and not(a.autoReport) and a.ackWord|  pure def candidate(a: Ack): bool = a.eligible and a.ackWord|noFalseGreen"
+  "1 つの確認の断片で、別の項目も承認する|    u.ids.contains(i) or u.frags.exists(f => uniqueTo(its, i, f))|    u.ids.contains(i) or u.frags.exists(f => ITEMS.exists(k => uniqueTo(its, k, f)))|noFalseGreen"
+  "id の経路を消す（正当な確認が赤になる）|    u.ids.contains(i) or u.frags.exists(f => uniqueTo(its, i, f))|    u.frags.exists(f => uniqueTo(its, i, f))|idAckTurnsGreen"
+  "最終編集より後のガードを消す|    isAfter(its.get(i), a),|    true,|noFalseGreen"
+  "自動報告を外すガードを消す|    not(a.autoReport),|    true,|noFalseGreen"
+  "穴 1：確認の語と参照を単位で結ばない（本文全体で見る）|    a.units.exists(u => polarity(u.word) == Pos and refsUnit(its, i, u))|    a.units.exists(u => polarity(u.word) == Pos) and a.units.exists(u => refsUnit(its, i, u))|noFalseGreen"
+  "穴 1：打ち消しの単位による拒否を消す|    not(vetoed(its, i, a)),|    true,|noFalseGreen"
+  "穴 1：まだの表明（未対応です）を打ち消しと読まない|    else if (w == Pending) Neg|    else if (w == Pending) Neutral|noFalseGreen"
+  "穴 2：引用の中の確認の語を数える|    else if (w == Quoted) Neutral|    else if (w == Quoted) Pos|noFalseGreen"
+  "穴 3：英語の助動詞を挟む否定を確認と数える|    else if (w == NegatedEn) Neg|    else if (w == NegatedEn) Pos|noFalseGreen"
+  "穴 4：日本語の後ろに付く否定を確認と数える|    else if (w == NegatedJa) Neg|    else if (w == NegatedJa) Pos|noFalseGreen"
   "遷移: 編集で最終編集の時刻を進めない|    items' = items.set(id, { ...items.get(id), updatedAt: clock + 1 }),|    items' = items,|noFalseGreen"
-  "遷移: 確認の本文の現れ方の前提を外す|    nondet fs = FRAGS.powerset().filter(fs => consistent(items, intended, ids, fs)).oneOf()|    nondet fs = FRAGS.powerset().oneOf()|noFalseGreen"
+  "遷移: 確認の本文の現れ方の前提を外す|    nondet intended = ITEMS.powerset().filter(s => consistent(items, units, s, pending)).oneOf()|    nondet intended = ITEMS.powerset().oneOf()|noFalseGreen"
 )
 
 failed=0
