@@ -490,6 +490,8 @@ REF_STAMP_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)(?: 
 
 # #421 の規則（docs/design/issue-421.md の「規則」）を、本番の正規表現を写さずに文字の比べで
 # 書き下す。空白は str.isspace、数字は str.isdecimal（正規表現の \s・\d と同じ集合）。
+# 大文字小文字を問わない比べは、1 文字ずつの casefold（ſ も s と同じに扱う。Unicode の全文字で
+# re の大文字小文字を問わない照合と一致することを確かめた）。
 REF_ERROR_WORDS = ("error", "Error", "ERR_")
 REF_BEFORE_500 = "([\"'"
 REF_AFTER_500 = ")]}\"',:;"
@@ -511,7 +513,10 @@ def ref_status_key_ends_at(body, i):
     j = ref_skip_space_back(body, j - 1)
     if j > 0 and body[j - 1] in "\"'":
         j -= 1
-    return any(j >= len(k) and body[j - len(k):j].lower() == k for k in REF_STATUS_KEYS)
+    return any(
+        j >= len(k) and all(c.casefold() == kc for c, kc in zip(body[j - len(k):j], k))
+        for k in REF_STATUS_KEYS
+    )
 
 
 def ref_500_before_ok(body, i):
@@ -541,6 +546,8 @@ DESIGN_HIT_EXAMPLES = [
     "status=500", "statusCode=500", "http_status=500", "status_code=500", "status: 500", "(500)",
     "[500]", '{"status":500}', "... status 500.", "500.", "500, …", "500",
     '{"duration_ms": 500}', '{"zipcode":500}', '{"barcode":500}', '{"decode":500}', '{"count":"500"}',
+    # 大文字小文字を問わない形の Unicode の例（ſ は s の大文字小文字の違いとして扱う）。
+    "ſtatus=500", "STATUſ=500",
 ]
 DESIGN_MISS_EXAMPLES = [
     '{"duration_ms":500}', '{"count":500}', '{"ms":500}', "500ms", "1500ms", "5000", "5001",
@@ -609,7 +616,7 @@ def random_body(rng):
 P2_HEADS = [
     "", "a", "x", "_", "日", "1", "0.", "{", "GET /api/state ", "HTTP/1.1 ", "render ",
     "status", "Status", "STATUS", "code", "Code", "statusCode", "http_status", "zipcode",
-    "stat", "ode", "duration_ms", "ms", "count", '{"status', '{"duration_ms', "'code",
+    "stat", "ode", "ſtatus", "ßtatus", "duration_ms", "ms", "count", '{"status', '{"duration_ms', "'code",
 ]
 P2_QUOTES = ["", "", '"', "'", '""', " "]
 P2_SEPS = ["", "", ":", "=", "==", ":=", ",", "{"]
