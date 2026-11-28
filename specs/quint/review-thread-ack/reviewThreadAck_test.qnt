@@ -291,4 +291,36 @@ module reviewThreadAck_test {
         assert(not(q::gateGreen)),
         q::editItem(1),
       })
+
+  // ---- 4 回目の直し：URL と HTML コメントの中の語を判定から除く ----
+
+  // 穴 5：`<!-- fixed --> #issuecomment-1`。HTML コメント（か URL）の中だけの語では承認しない。
+  // 同じ確認を作成者の文の語で書き直せば緑になる。
+  run scopedMaskedWordStaysRedTest =
+    u::initWith(Set(), Set())
+      .then(u::postAck(true, false, Set(u::unit(u::MaskedWord, Set(1), Set())), Set(), Set()))
+      .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(2), Set())), Set(2), Set()))
+      .then(all {
+        assert(not(u::gateGreen)),
+        assert(u::noFalseGreen),
+        u::postAck(true, false, Set(u::unit(u::Affirmed, Set(1), Set())), Set(1), Set()),
+      })
+      .then(all {
+        assert(u::gateGreen),
+        assert(u::noFalseGreen),
+        u::editItem(1),
+      })
+
+  // 穴 6：`https://github.com/acme/pending/pull/7#issuecomment-1 を確認しました`。打ち消しの語が URL（か
+  // HTML コメントのボットの印）の中にだけある確認は、作成者の確認として承認する。
+  run scopedMaskedCueTurnsGreenTest =
+    u::initWith(Set(), Set())
+      .then(u::postAck(true, false,
+        Set(u::unit(u::AffirmedMaskedCue, Set(1), Set()), u::unit(u::AffirmedMaskedCue, Set(2), Set())), Set(1, 2), Set()))
+      .then(all {
+        assert(u::gateGreen),
+        assert(u::noFalseGreen),
+        assert(u::idAckTurnsGreen),
+        u::editItem(1),
+      })
 }

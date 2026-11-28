@@ -2,7 +2,7 @@
 
 j5ik2o/ci の `scripts/review-thread-resolution.sh` が、トップレベルコメントとレビュー要約（項目）のどれを「承認済み」とみなすかを Quint で写したモデルです。仕様とコードは機械的にはつながっていません。判定の実装とスモークテストは j5ik2o/ci にあります。設計は `docs/design/issue-134.md` です。
 
-- `reviewThreadAck.qnt`: モデル。`legacy` がいまの v1、`window` が [j5ik2o/ci#43](https://github.com/j5ik2o/ci/pull/43) の 442d679・86a443c（20 文字の窓）、`unique` が設計 b808a29（一意に指す値。ci#43 のレビューで見つかった穴 4 つが残る）、`fixed` がこの設計の 2 回目の直しの規則です。違いは定数 `RULE` だけで、不変条件は同じです。Codex の利用上限の通知を既定で外すのは `fixed` だけです（v2 の 3 回目の直し。ほかの 3 つの規則には既定の除外がありません）。`RULE` が 3 つの値のどれでもないと関門は緑にならず、witness の `gateGreen` が 0 件になります。
+- `reviewThreadAck.qnt`: モデル。`legacy` がいまの v1、`window` が [j5ik2o/ci#43](https://github.com/j5ik2o/ci/pull/43) の 442d679・86a443c（20 文字の窓）、`unique` が設計 b808a29（一意に指す値。ci#43 のレビューで見つかった穴 4 つが残る）、`fixed` がこの設計の規則（2 回目の直しの単位と極性、3 回目の直しの既定の除外、4 回目の直しの URL と HTML コメントの中の語）です。違いは定数 `RULE` だけで、不変条件は同じです。Codex の利用上限の通知を既定で外すのは `fixed` だけです（v2 の 3 回目の直し。ほかの 3 つの規則には既定の除外がありません）。`RULE` が 3 つの値のどれでもないと関門は緑にならず、witness の `gateGreen` が 0 件になります。
 - `reviewThreadAck_test.qnt`: 筋書きを固定したテスト。名前の頭がどの規則で流すかを表します。`v1*` は `legacy`、`window*` は `window`、`unique*` は b808a29 の `unique`（穴 4 つが開いていることを固定する）、`scoped*` はこの設計の `fixed` です。
 - `mutants.sh`: 不変条件が恒真でないことを確かめる、わざと壊した版の一覧と実行（下の「確かめ (a)」）。
 
@@ -22,18 +22,20 @@ j5ik2o/ci の `scripts/review-thread-resolution.sh` が、トップレベルコ�
 | `NegatedJa` | 日本語の語が、後ろに付く否定で打ち消されている（穴 4） | `確認済みではありません` |
 | `Pending` | 確認の語が無く、まだだと書いている | `#11 は未対応です` |
 | `NoWord` | どれも無い | `対象: <URL>` |
+| `MaskedWord` | 確認の語が URL か HTML コメントの中にだけある（穴 5・7。4 回目の直し） | `<!-- fixed --> #10`、`https://github.com/acme/fixed/pull/7#issuecomment-10` |
+| `AffirmedMaskedCue` | 作成者の打ち消されない確認の語があり、打ち消し・まだ・条件の語は URL か HTML コメントの中にだけある（穴 6。4 回目の直し） | `https://github.com/acme/pending/pull/7#issuecomment-10 を確認しました`、`<!-- review-state: pending --> #10 を確認しました` |
 
 規則は `intended`・`pending` を読まず、観測できるものと項目の本文を突き合わせて、どの確認がどの項目を承認するかを計算します。仕様は `intended` と編集の記録 `editLog` を読み、規則が読む `items` の `updatedAt` とは別に、最後の編集の時刻を求めます（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）。どの文字列がどの `Word` になるかは文字列の水準の判定（設計の jq の `clauses` と `polarity`）で、モデルはその結果を観測として受け取ります。その判定の正しさは、設計のテストの観点 25〜29 の表で確かめます。
 
-規則 `scoped`（`fixed`）は、単位の極性 `polarity`（`Affirmed` は `Pos`、`NegatedEn`・`NegatedJa`・`Pending` は `Neg`、ほかは `Neutral`）を使い、`Pos` の単位の中で確認の語と一意の参照（id か、その項目だけが持つ断片）がそろい、同じ確認の `Neg` の単位がその項目に触れていない（id か、URL の頭を除く、その項目が持つ断片）ときだけ承認します。`unique`（b808a29）と `window`（ci#43）は、語を本文の全体で見て（`Affirmed`・`Quoted`・`NegatedEn`・`NegatedJa` のどれか 1 つでよい）、参照も本文の全体で探します。
+規則 `scoped`（`fixed`）は、単位の極性 `polarity`（`Affirmed`・`AffirmedMaskedCue` は `Pos`、`NegatedEn`・`NegatedJa`・`Pending` は `Neg`、ほかは `Neutral`）を使い、`Pos` の単位の中で確認の語と一意の参照（id か、その項目だけが持つ断片）がそろい、同じ確認の `Neg` の単位がその項目に触れていない（id か、URL の頭を除く、その項目が持つ断片）ときだけ承認します。`unique`（b808a29）と `window`（ci#43）は、語を本文の全体で見て（`NoWord`・`Pending` 以外のどれか 1 つでよい）、参照も本文の全体で探します。
 
 確認の本文に何が現れうるかには、次の前提を置きます（`consistent`・`pendingOk`）。前提は規則の `polarity` を使わず、`Word` を直接読みます（規則を壊しても前提が一緒に動かないように）。
 
-- `Affirmed` の単位の id と固有の散文は、承認するつもりの項目か、同じ確認で「まだ」と書いた項目のもの。
+- 作成者の語の単位（`Affirmed`・`AffirmedMaskedCue`。仕様の `authorWord`）の id と固有の散文は、承認するつもりの項目か、同じ確認で「まだ」と書いた項目のもの。
 - 打ち消しの単位（`NegatedEn`・`NegatedJa`・`Pending`）の id と固有の散文は、「まだ」と書いた項目のもの。「まだ」と書いた項目は、打ち消しの単位のどれかで触れている。
 - 「まだ」と書いた項目は、承認するつもりの項目ではない。
 - 定型文は、それを持つ項目がある PR にしか現れない。`Affirmed` の単位の定型文は、承認するつもりの項目か「まだ」と書いた項目のどれかが持つ。
-- `Quoted` と `NoWord` の単位の id と断片は、意図と無関係に現れうる（指摘を引用して質問する、別件として触れる）。URL の頭は、どの単位でも意図と無関係に現れる。
+- `Quoted`・`MaskedWord`・`NoWord` の単位の id と断片は、意図と無関係に現れうる（指摘を引用して質問する、別件として触れる）。URL の頭は、どの単位でも意図と無関係に現れる。
 
 この前提を外すと、`fixed` でも `noFalseGreen` に反例が出ます（`mutants.sh` の最後の版）。結論はこの前提に依存します。
 
@@ -41,8 +43,8 @@ j5ik2o/ci の `scripts/review-thread-resolution.sh` が、トップレベルコ�
 
 不変条件 `safety` は次の 2 つの論理積です。
 
-- `noFalseGreen`: 関門が緑なら、通知（`CodexNotice`）を除くすべての項目に、その項目を承認するつもりで、最後の編集より後に書かれた、自動報告でない、作成者が自分の文で確認の語を書いた（`Affirmed` の単位を持つ）確認がある。1 つの確認で指していない項目や「まだ」と書いた項目が承認されると反例になる。Codex のほかのコメントや、ほかの作者が通知の文で始めたコメントを外しても反例になる。
-- `idAckTurnsGreen`: 通知を除くすべての項目に、その項目の id を `Affirmed` の単位に含み、同じ確認の打ち消しの単位がその項目に触れていない有効な確認があれば緑（正当な確認を赤にしない）。打ち消しの単位で同じ定型文に触れた確認は、この条件の外です（どの項目のことか定まらないので、規則は赤の側に倒します）。通知に確認を求めないので、通知が外れずに残って赤になれば反例になります。
+- `noFalseGreen`: 関門が緑なら、通知（`CodexNotice`）を除くすべての項目に、その項目を承認するつもりで、最後の編集より後に書かれた、自動報告でない、作成者が自分の文で確認の語を書いた（`Affirmed` か `AffirmedMaskedCue` の単位を持つ）確認がある。1 つの確認で指していない項目や「まだ」と書いた項目が承認されると反例になる。Codex のほかのコメントや、ほかの作者が通知の文で始めたコメントを外しても反例になる。
+- `idAckTurnsGreen`: 通知を除くすべての項目に、その項目の id を作成者の語の単位（`Affirmed` か `AffirmedMaskedCue`）に含み、同じ確認の打ち消しの単位がその項目に触れていない有効な確認があれば緑（正当な確認を赤にしない）。打ち消しの単位で同じ定型文に触れた確認は、この条件の外です（どの項目のことか定まらないので、規則は赤の側に倒します）。通知に確認を求めないので、通知が外れずに残って赤になれば反例になります。
 
 ## 結果（quint 0.32.0）
 
@@ -59,37 +61,39 @@ quint run reviewThreadAck.qnt --main unique --invariant noFalseGreen --max-sampl
 
 `window` の反例には、両方の項目が `UrlHead` を持ち、`UrlHead` だけを含む確認（別件の URL を貼った「確認しました」）が項目を承認する形があります。[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44) と同じです。`unique` の反例の形は、テストの `uniqueScopeLeaksTest`・`uniqueQuotedWordTest`・`uniqueNegatedEnTest`・`uniqueNegatedJaTest` に 1 つずつ固定しています（ci#43 のレビューの穴 4 つ）。
 
-この設計の規則は、同じ不変条件で反例なしです（50000 の標本を調べた範囲で。証明ではありません）。手元で約 3 分かかります（2026-11-28、3 回目の直しのあと）。
+この設計の規則は、同じ不変条件で反例なしです（50000 の標本を調べた範囲で。証明ではありません）。手元で 3 分 49 秒かかります（2026-11-28、4 回目の直しのあと）。
 
 ```
-quint run reviewThreadAck.qnt --main fixed --invariant safety --max-samples 50000 --max-steps 10 --seed 134 --witnesses postedAck editedItem editInvalidatedAck approvedByQuoteOnly greenWithSharedText greenWithUrlHeadAck approvedByMixedAck vetoFired greenWithQuotedWordAck greenWithNegatedAck approvedByTwoUnitAck greenWithNoticeExcluded greenWithCodexOtherItem greenWithHeadByOtherItem gateGreen
+quint run reviewThreadAck.qnt --main fixed --invariant safety --max-samples 50000 --max-steps 10 --seed 134 --witnesses postedAck editedItem editInvalidatedAck approvedByQuoteOnly greenWithSharedText greenWithUrlHeadAck approvedByMixedAck vetoFired greenWithQuotedWordAck greenWithNegatedAck approvedByTwoUnitAck greenWithNoticeExcluded greenWithCodexOtherItem greenWithHeadByOtherItem greenWithMaskedWordAck approvedByMaskedCue gateGreen
 [ok] No violation found
-postedAck was witnessed in 49947 trace(s) out of 50000 explored (99.89%)
-editedItem was witnessed in 49951 trace(s) out of 50000 explored (99.90%)
-editInvalidatedAck was witnessed in 9335 trace(s) out of 50000 explored (18.67%)
-approvedByQuoteOnly was witnessed in 3892 trace(s) out of 50000 explored (7.78%)
-greenWithSharedText was witnessed in 7020 trace(s) out of 50000 explored (14.04%)
-greenWithUrlHeadAck was witnessed in 8437 trace(s) out of 50000 explored (16.87%)
-approvedByMixedAck was witnessed in 1375 trace(s) out of 50000 explored (2.75%)
-vetoFired was witnessed in 4198 trace(s) out of 50000 explored (8.40%)
-greenWithQuotedWordAck was witnessed in 5989 trace(s) out of 50000 explored (11.98%)
-greenWithNegatedAck was witnessed in 7415 trace(s) out of 50000 explored (14.83%)
-approvedByTwoUnitAck was witnessed in 5212 trace(s) out of 50000 explored (10.42%)
-greenWithNoticeExcluded was witnessed in 2891 trace(s) out of 50000 explored (5.78%)
-greenWithCodexOtherItem was witnessed in 2800 trace(s) out of 50000 explored (5.60%)
-greenWithHeadByOtherItem was witnessed in 2706 trace(s) out of 50000 explored (5.41%)
-gateGreen was witnessed in 9183 trace(s) out of 50000 explored (18.37%)
+postedAck was witnessed in 49956 trace(s) out of 50000 explored (99.91%)
+editedItem was witnessed in 49959 trace(s) out of 50000 explored (99.92%)
+editInvalidatedAck was witnessed in 13063 trace(s) out of 50000 explored (26.13%)
+approvedByQuoteOnly was witnessed in 5895 trace(s) out of 50000 explored (11.79%)
+greenWithSharedText was witnessed in 9803 trace(s) out of 50000 explored (19.61%)
+greenWithUrlHeadAck was witnessed in 11630 trace(s) out of 50000 explored (23.26%)
+approvedByMixedAck was witnessed in 1543 trace(s) out of 50000 explored (3.09%)
+vetoFired was witnessed in 4743 trace(s) out of 50000 explored (9.49%)
+greenWithQuotedWordAck was witnessed in 6654 trace(s) out of 50000 explored (13.31%)
+greenWithNegatedAck was witnessed in 9058 trace(s) out of 50000 explored (18.12%)
+approvedByTwoUnitAck was witnessed in 8201 trace(s) out of 50000 explored (16.40%)
+greenWithNoticeExcluded was witnessed in 4320 trace(s) out of 50000 explored (8.64%)
+greenWithCodexOtherItem was witnessed in 4312 trace(s) out of 50000 explored (8.62%)
+greenWithHeadByOtherItem was witnessed in 4368 trace(s) out of 50000 explored (8.74%)
+greenWithMaskedWordAck was witnessed in 6853 trace(s) out of 50000 explored (13.71%)
+approvedByMaskedCue was witnessed in 8014 trace(s) out of 50000 explored (16.03%)
+gateGreen was witnessed in 12666 trace(s) out of 50000 explored (25.33%)
 ```
 
 テストは次のとおりです。
 
 ```
-quint test reviewThreadAck_test.qnt --main reviewThreadAck_test   # 23 passing
+quint test reviewThreadAck_test.qnt --main reviewThreadAck_test   # 25 passing
 ```
 
 ## 確かめ (a)：不変条件が恒真でない
 
-`specs/quint/review-thread-ack/mutants.sh`（リポジトリの根から実行）は、原本のほかに 19 の壊した版を作り、それぞれ `fixed` で決めた不変条件に違反が出ることを確かめます。原本は `safety` で違反なしです。手元で全体 3 分 21 秒 でした（2026-11-28、3 回目の直しのあと、19 版すべて OK）。
+`specs/quint/review-thread-ack/mutants.sh`（リポジトリの根から実行）は、原本のほかに 21 の壊した版を作り、それぞれ `fixed` で決めた不変条件に違反が出ることを確かめます。原本は `safety` で違反なしです。手元で全体 5 分 29 秒でした（2026-11-28、4 回目の直しのあと、21 版すべて OK）。
 
 | 壊し方 | 違反が出る不変条件 |
 | --- | --- |
@@ -99,6 +103,8 @@ quint test reviewThreadAck_test.qnt --main reviewThreadAck_test   # 23 passing
 | **穴 2**：`Quoted` を `Pos` と読む（引用の中の語を数える） | `noFalseGreen` |
 | **穴 3**：`NegatedEn` を `Pos` と読む（`has not been fixed` を数える） | `noFalseGreen` |
 | **穴 4**：`NegatedJa` を `Pos` と読む（`確認済みではありません` を数える） | `noFalseGreen` |
+| **穴 5**：`MaskedWord` を `Pos` と読む（HTML コメントか URL の中だけの語を数える。06770ed の jq） | `noFalseGreen` |
+| **穴 6**：`AffirmedMaskedCue` を `Neg` と読む（URL かボットの印の中の `pending` を打ち消しと読む。06770ed の jq） | `idAckTurnsGreen` |
 | URL の頭を外すガード（`f != UrlHead`）を消す | `noFalseGreen`（URL の頭だけで当たる版） |
 | ほかの項目に無い断片に限るガードを消す | `noFalseGreen` |
 | 1 つの確認の断片で、別の項目も承認する（`uniqueTo(its, i, f)` を「どれかの項目に固有」に変える） | `noFalseGreen`（1 つの確認で別の項目が承認される版） |
@@ -117,25 +123,27 @@ quint test reviewThreadAck_test.qnt --main reviewThreadAck_test   # 23 passing
 
 ## 確かめ (b)：遷移に届く
 
-`step` の 2 つの action（`postAnyAck`、`editItem`）は、`postedAck`（99.89%）と `editedItem`（99.90%）で届きます。2 回目と 3 回目の直しで足した形にも届きます（数は 3 回目の直しのあとの走り）。
+`step` の 2 つの action（`postAnyAck`、`editItem`）は、`postedAck`（99.91%）と `editedItem`（99.92%）で届きます。2 回目・3 回目・4 回目の直しで足した形にも届きます（数は 4 回目の直しのあとの走り）。
 
 | witness | 意味 | 割合 |
 | --- | --- | --- |
-| `greenWithNoticeExcluded` | 既定で外した通知があり、ほかの項目の承認で緑（3 回目） | 5.78% |
-| `greenWithCodexOtherItem` | Codex のほかのコメント（作者だけ一致）が項目に残り、確認で承認されて緑（3 回目） | 5.60% |
-| `greenWithHeadByOtherItem` | ほかの作者の、通知の文で始まるコメント（本文だけ一致）が項目に残り、確認で承認されて緑（3 回目） | 5.41% |
-| `approvedByMixedAck` | 「まだ」と書いた単位を含む確認（まとめ返信）が、別の項目を承認する | 2.75% |
-| `vetoFired` | 肯定の単位が指した項目を、同じ確認の打ち消しの単位が拒否する | 8.40% |
-| `greenWithQuotedWordAck` | 引用の中だけの語の単位を含む確認がある PR で緑 | 11.98% |
-| `greenWithNegatedAck` | 打ち消された語（英語・日本語）の単位を含む確認がある PR で緑 | 14.83% |
-| `approvedByTwoUnitAck` | 2 つの単位を持つ確認が項目を承認する | 10.42% |
-| `editInvalidatedAck` | 確認が編集で無効になる（I4） | 18.67% |
-| `approvedByQuoteOnly` | 引用だけで承認する | 7.78% |
-| `greenWithSharedText` | 定型文がある PR で緑 | 14.04% |
-| `greenWithUrlHeadAck` | URL の頭を含む確認がある PR で緑 | 16.87% |
-| `gateGreen` | 緑（項目が 2 つとも通知で外れる、何も確かめない緑を含む） | 18.37% |
+| `greenWithMaskedWordAck` | URL か HTML コメントの中だけの語の単位を含む確認がある PR で緑（4 回目） | 13.71% |
+| `approvedByMaskedCue` | 打ち消しの語が URL か HTML コメントの中にだけある単位が、項目を承認する（4 回目） | 16.03% |
+| `greenWithNoticeExcluded` | 既定で外した通知があり、ほかの項目の承認で緑（3 回目） | 8.64% |
+| `greenWithCodexOtherItem` | Codex のほかのコメント（作者だけ一致）が項目に残り、確認で承認されて緑（3 回目） | 8.62% |
+| `greenWithHeadByOtherItem` | ほかの作者の、通知の文で始まるコメント（本文だけ一致）が項目に残り、確認で承認されて緑（3 回目） | 8.74% |
+| `approvedByMixedAck` | 「まだ」と書いた単位を含む確認（まとめ返信）が、別の項目を承認する | 3.09% |
+| `vetoFired` | 肯定の単位が指した項目を、同じ確認の打ち消しの単位が拒否する | 9.49% |
+| `greenWithQuotedWordAck` | 引用の中だけの語の単位を含む確認がある PR で緑 | 13.31% |
+| `greenWithNegatedAck` | 打ち消された語（英語・日本語）の単位を含む確認がある PR で緑 | 18.12% |
+| `approvedByTwoUnitAck` | 2 つの単位を持つ確認が項目を承認する | 16.40% |
+| `editInvalidatedAck` | 確認が編集で無効になる（I4） | 26.13% |
+| `approvedByQuoteOnly` | 引用だけで承認する | 11.79% |
+| `greenWithSharedText` | 定型文がある PR で緑 | 19.61% |
+| `greenWithUrlHeadAck` | URL の頭を含む確認がある PR で緑 | 23.26% |
+| `gateGreen` | 緑（項目が 2 つとも通知で外れる、何も確かめない緑を含む） | 25.33% |
 
-規則がいつも赤を返して違反を避けているのではありません。まとめ返信・打ち消し・引用の単位があっても、Codex のほかのコメントや通知の文で始まるコメントが項目に残っても、緑と承認に届きます。
+規則がいつも赤を返して違反を避けているのではありません。まとめ返信・打ち消し・引用・URL と HTML コメントの中だけの語の単位があっても、Codex のほかのコメントや通知の文で始まるコメントが項目に残っても、緑と承認に届きます。
 
 ## 確かめ (c)：実物との対応
 
@@ -163,6 +171,7 @@ quint test reviewThreadAck_test.qnt --main reviewThreadAck_test   # 23 passing
 | `Item.byCodex`・`Item.noticeHead` | 実物に無い（v2 で入れる）。設計の jq の `default_ignored_notice` の `report_author_login`（作者が `chatgpt-codex-connector`）と `startswith`（本文が `You have reached your Codex usage limits` で始まる） |
 | `defaultExcluded` | 実物に無い。設計の jq の `default_ignored_notice`。`is_auto_report` に入り、`$candidates` を作る時点で外れる |
 | `uniqueTo` が外した項目も「ほかの項目」に数えること | 実物に無い。設計の jq の `$excl`（`refs_in` の `$others` に、外した通知の `quote_text` を足す） |
+| `Word` の `MaskedWord`・`AffirmedMaskedCue`（4 回目） | 実物に無い。設計の jq の `acked_keys` の頭の `html_comment_lines`（フェンスの外の行全体の HTML コメントを除き、ほかの `<!--` があれば何も承認しない）、`clauses` の `$url`（`url_flags`。URL を masked で空白にし、節を切らない）。06770ed の jq は、どちらも masked に残していた |
 | `gateGreen` | `filter_unacknowledged_comments` が空を返す（未解決スレッドの判定は範囲外）。`fixed` では既定で外した項目を待たない |
 | `RULE = "v1"` | v1（2ead62a）の `filter_unacknowledged_comments` |
 | `postAck`・`editItem` | GitHub でのコメントの投稿と編集（スクリプトの外のイベント） |
@@ -179,7 +188,7 @@ quint test reviewThreadAck_test.qnt --main reviewThreadAck_test   # 23 passing
 
 ## 確かめ (d)：検査の大きさと、見られないもの
 
-- 大きさ：項目 2 つ、項目の種類 4 種、断片 4 種（固有 2・定型文 1・URL の頭 1）、確認の単位は 2 つまで、語の現れ方 6 種、ステップ 10（確認と編集で合わせて 10 回まで）、`quint run` の標本 50000（seed 134）。網羅ではない（標本を調べた範囲で反例が無い、という意味）。
+- 大きさ：項目 2 つ、項目の種類 4 種、断片 4 種（固有 2・定型文 1・URL の頭 1）、確認の単位は 2 つまで、語の現れ方 8 種、ステップ 10（確認と編集で合わせて 10 回まで）、`quint run` の標本 50000（seed 134）。網羅ではない（標本を調べた範囲で反例が無い、という意味）。
 - 見られないもの：
   - 項目が 3 つ以上のとき（3 つのうち 2 つだけが持つ定型文など）。規則はそのまま広がるが、モデルでは調べていない。
   - 単位が 3 つ以上の確認。前置きに続くリストの項目（モデルでは、前置きの語が効いた項目を `Affirmed` の単位として与える）。
@@ -189,4 +198,5 @@ quint test reviewThreadAck_test.qnt --main reviewThreadAck_test   # 23 passing
   - 前提（`consistent`・`pendingOk`）が崩れる入力。別の PR の項目の文を偶然 20 文字以上写した確認、作成者が「確認しました」と書きながら承認するつもりがない確認などは、モデルの外。
   - 未解決スレッドの判定、項目の選び方（作成者のコメント、Codex の承知）、ページ取得の順。
   - 既定の除外の文字列の水準：本文の頭の当て方（先頭の空白・改行、大小文字、通知の 2 つの文言）と、作者の login の比べ方（`[bot]` の有無）。設計のテストの観点 30 で確かめる。同じ login を騙ったアカウント、Codex が通知の文言を変えたときも、モデルの外。
+  - HTML コメントと URL の文字列の水準（4 回目）：HTML コメントの境界（閉じない `<!--`、コードの中の `<!--`）、URL の範囲（ASCII の文字、終わりの句読点、scheme の無いホスト・パス）、HTML コメントの中の参照を除くこと。境界が決まらない確認を何も承認しないことも、モデルでは確かめない（どの単位にも語の無い確認と同じ形になる）。設計のテストの観点 34・35 の表で確かめる。
   - 既定で外す通知が 2 種類以上あるとき、v1 の既存の自動投稿の除外（CodeRabbit の要約、`Codex Review` の見出し）。どちらもモデルでは項目にならないものとして扱わない（項目の側の自動報告は、項目になる前に外れるので入れない。既定の除外だけは、片方だけの一致を外さないことを確かめるために入れた）。

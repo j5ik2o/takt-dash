@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # reviewThreadAck.qnt の不変条件が恒真でないことを確かめる。
-# 規則のガードを 1 つ外した版、ci#43 の残る穴 4 つを 1 つずつ開けた版、既定の除外を壊した版、遷移を 1 つ変えた版を作り、どれも `fixed` で
+# 規則のガードを 1 つ外した版、ci#43 の残る穴 4 つと 06770ed の穴 2 つを 1 つずつ開けた版、既定の除外を壊した版、遷移を 1 つ変えた版を作り、どれも `fixed` で
 # 違反が出ることを確かめる（どの不変条件に出るかも決めておく）。違反が出ない版が 1 つでもあれば失敗する。
 # リポジトリの根から実行する: specs/quint/review-thread-ack/mutants.sh
 set -euo pipefail
@@ -28,6 +28,8 @@ mutants=(
   "穴 2：引用の中の確認の語を数える|    else if (w == Quoted) Neutral|    else if (w == Quoted) Pos|noFalseGreen"
   "穴 3：英語の助動詞を挟む否定を確認と数える|    else if (w == NegatedEn) Neg|    else if (w == NegatedEn) Pos|noFalseGreen"
   "穴 4：日本語の後ろに付く否定を確認と数える|    else if (w == NegatedJa) Neg|    else if (w == NegatedJa) Pos|noFalseGreen"
+  "穴 5：URL か HTML コメントの中だけの確認の語を数える|    else if (w == MaskedWord) Neutral|    else if (w == MaskedWord) Pos|noFalseGreen"
+  "穴 6：URL か HTML コメントの中の打ち消しを読む（正当な確認が赤になる）|    else if (w == AffirmedMaskedCue) Pos|    else if (w == AffirmedMaskedCue) Neg|idAckTurnsGreen"
   "遷移: 編集で最終編集の時刻を進めない|    items' = items.set(id, { ...items.get(id), updatedAt: clock + 1 }),|    items' = items,|noFalseGreen"
   "既定の除外：作者だけで外す（Codex のほかのコメントも外す）|    RULE == \"scoped\" and it.byCodex and it.noticeHead|    RULE == \"scoped\" and it.byCodex|noFalseGreen"
   "既定の除外：本文の頭だけで外す（ほかの作者の、通知の文で始まるコメントも外す）|    RULE == \"scoped\" and it.byCodex and it.noticeHead|    RULE == \"scoped\" and it.noticeHead|noFalseGreen"
