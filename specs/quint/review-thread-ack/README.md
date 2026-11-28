@@ -171,7 +171,7 @@ quint test reviewThreadAck_test.qnt --main reviewThreadAck_test   # 25 passing
 | `Item.byCodex`・`Item.noticeHead` | 実物に無い（v2 で入れる）。設計の jq の `default_ignored_notice` の `report_author_login`（作者が `chatgpt-codex-connector`）と `startswith`（本文が `You have reached your Codex usage limits` で始まる） |
 | `defaultExcluded` | 実物に無い。設計の jq の `default_ignored_notice`。`is_auto_report` に入り、`$candidates` を作る時点で外れる |
 | `uniqueTo` が外した項目も「ほかの項目」に数えること | 実物に無い。設計の jq の `$excl`（`refs_in` の `$others` に、外した通知の `quote_text` を足す） |
-| `Word` の `MaskedWord`・`AffirmedMaskedCue`（4 回目） | 実物に無い。設計の jq の `acked_keys` の頭の `strip_html_comments`（HTML コメントを除く）と `html_comment_ambiguous`（境界が決まらないときは何も承認しない）、`clauses` の `$url`（`url_flags`。URL を masked で空白にし、節を切らない）。06770ed の jq は、どちらも masked に残していた |
+| `Word` の `MaskedWord`・`AffirmedMaskedCue`（4 回目） | 実物に無い。設計の jq の `acked_keys` の頭の `html_comment_lines`（フェンスの外の行全体の HTML コメントを除き、ほかの `<!--` があれば何も承認しない）、`clauses` の `$url`（`url_flags`。URL を masked で空白にし、節を切らない）。06770ed の jq は、どちらも masked に残していた |
 | `gateGreen` | `filter_unacknowledged_comments` が空を返す（未解決スレッドの判定は範囲外）。`fixed` では既定で外した項目を待たない |
 | `RULE = "v1"` | v1（2ead62a）の `filter_unacknowledged_comments` |
 | `postAck`・`editItem` | GitHub でのコメントの投稿と編集（スクリプトの外のイベント） |

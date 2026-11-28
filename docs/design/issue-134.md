@@ -245,7 +245,7 @@ b808a29 の規則は、確認の語を「本文のどこかにあるか」で見
 - リストのあとの締めの文だけに確認の語がある（`- #10\n- #11\n\n以上を確認しました。`）。30 件の標本には無かった。
 - 1 つの節で、英語の否定のあとに別の英語の確認を続ける（`This doesn't affect X and is fixed`）。1 つの節で肯定と打ち消しを `and` でつなぐ（`#10 is fixed and #11 is not fixed` は 10 も承認しない）。30 件の標本には無かった。
 - 1 つの確認で、承認した項目の文を打ち消しの節でも写す（矛盾する返信）。拒否が勝つ。
-- 境界が決まらない HTML コメントを持つ確認（閉じない `<!--`、範囲にバッククォートか `~~~` を含むもの）は、ほかの部分の確認も含めて何も承認しない（4 回目の直し。「HTML コメントと URL の中の語」）。段落の途中の閉じない `<!--`（`確認しました #10 <!-- メモ`）は GitHub では文字として見えるが、赤になる。2026-11-28 に取り直した 45 件の確認には無かった。
+- フェンスの外に、行全体のコメントのほかの `<!--` を持つ確認（行の途中のコメント、エスケープ、閉じない `<!--`、範囲にバッククォートか `~~~` を含むものなど）は、ほかの部分の確認も含めて何も承認しない（4 回目の直し。「HTML コメントと URL の中の語」）。`#10 を<!-- メモ -->確認しました。`（34f）や、段落の途中の閉じない `<!--`（`確認しました #10 <!-- メモ`。GitHub では文字として見える）、インラインのコードで印を説明する返信（`` `<!-- … -->` を付けました ``。作成者の返信なら、前から自動報告の印として外れる）も赤になる。2026-11-28 に取り直した 45 件の確認には、`<!--` を含むものが無かった。
 
 逆に、この規則でも見逃す形（偽の緑の側）は「未確認のこと」に書く。
 
@@ -259,14 +259,17 @@ b808a29 の規則は、確認の語を「本文のどこかにあるか」で見
 | 6. URL の中の打ち消しの語（偽の赤） | `https://github.com/acme/pending/pull/7#issuecomment-10 を確認しました` が 10 を承認しない。パスが `/not/` でも同じ | 打ち消し・条件・疑問の語を探す前に URL を空白にする |
 | 7. URL の中の確認の語（偽の緑。今回見つけた） | `https://github.com/acme/fixed/pull/7#issuecomment-10` だけで 10 を承認する。作成者の文に確認の語が無い | 6 と同じ。確認の語も URL の中では数えない |
 
-**HTML コメント**（穴 5）。確認（`acked_keys`）は、単位に分ける前に本文から HTML コメント（`<!--` から最初の `-->` まで）を空白 1 つに置き換える。中の確認の語・打ち消し・まだの表明・id・断片のどれも読まない。画面に出ない語で承認しないためで、引用・インラインのコードと同じく作成者が画面で示した文ではないとみなす。ただし引用と違い、中の id と断片も参照に使わない（`<!-- #issuecomment-10 --> を確認しました` は承認しない）。
+**HTML コメント**（穴 5）。確認（`acked_keys`）は、単位に分ける前に、元の本文の行とフェンスの境界（`fence_split` と同じ規則）で HTML コメントを決める。除くのは、フェンスの外で、行頭（空白 3 つまで）の `<!--` から、最初の `-->` のあとが空白だけの行までの**行全体のコメント**だけで、その行を空行にする（jq の `html_comment_lines`）。中の確認の語・打ち消し・まだの表明・id・断片のどれも読まない。画面に出ない語で承認しないためで、引用・インラインのコードと同じく作成者が画面で示した文ではないとみなす。ただし引用と違い、中の id と断片も参照に使わない（`<!-- #issuecomment-10 -->\nを確認しました` は承認しない）。
 
-- **ボットの印で判定を変えない**：印（`<!-- codex-review-state:v1 {"code_review":{…,"status":"failed"}} -->`、`<!-- coderabbit-ai-generated:v1 -->`、`<!-- devin-review-badge-begin -->` など。#131・#695・#871・#926 の実物）の中の語は、確認にも打ち消しにもならない。`<!-- codex-review-state:v1 {"status":"pending"} --> #issuecomment-10 を確認しました` は承認する（06770ed は印の中の `pending` を読んで赤）。`#issuecomment-10 を確認しました。<!-- #issuecomment-10 はまだ -->` も承認する。画面に出る文だけで決める。
-- **境界が決まらない形は何も承認しない**（迷う形は赤に倒す）。2026-11-28 に GitHub の Markdown API（`POST /markdown`、GFM）で確かめた表示は次のとおりで、境界を正しく決めるには CommonMark のブロックとインラインの規則を写す必要がある。
+- **ボットの印で判定を変えない**：印（`<!-- codex-review-state:v1 {"code_review":{…,"status":"failed"}} -->`、`<!-- coderabbit-ai-generated:v1 -->`、`<!-- devin-review-badge-begin -->` など。#131・#695・#871・#926 の実物）は、どれも行全体のコメントである。中の語は、確認にも打ち消しにもならない。`#issuecomment-10 を確認しました\n<!-- review-state: pending #issuecomment-10 -->` は承認する（06770ed は印の中の `pending` を読んで、印の中の id の項目を拒否する）。画面に出る文だけで決める。
+- **それ以外の `<!--` を持つ確認は何も承認しない**（迷う形は赤に倒す）。行全体のコメントのほかに、フェンスの外に `<!--` がある確認（行の途中のコメント、`\<!--` のエスケープ、引用・見出し・字下げの深い行の中、`-->` のあとに文が続く行、閉じない `<!--`、範囲にバッククォートか `~~~` を含むもの）は、ほかの部分の確認も含めて何も承認しない。フェンスの中の `<!--` は文字なので、除かず、承認も止めない。2026-11-28 に GitHub の Markdown API（`POST /markdown`、GFM）で確かめた表示は次のとおりで、行の途中の境界を正しく決めるには CommonMark のブロックとインラインの規則（エスケープ、コードの中、HTML のブロックの始まりと終わり）を写す必要がある。
   - 行頭の閉じない `<!--` は、本文の終わりまでを隠す（`確認しました #1\n<!-- 未閉じ\nfoo #2` は `確認しました #1` だけが見える）。段落の途中の閉じない `<!--` は文字として見える（`確認しました #1 <!-- 未閉じ foo #2` は全体が見える）。
   - インラインのコードとフェンスの中の `<!--` は文字である（`` `<!--` は未対応 `-->` 確認 `` は全体が見える）。そこから外の `-->` までを除くと、見えている `未対応` が消えて緑の側に倒れる。逆に、行頭の `<!--` から始まる範囲は、中のフェンスごと隠れる。
+  - 行頭の `<!-- x -->` のあとに同じ行で続く文は、見える（`<!-- x --> fixed #10` は ` fixed #10` が見える）。
+  - `\<!--` はエスケープで、文字として見える。除くと、そのあとの見えている打ち消しが消える（PR #459 の Codex と CodeRabbit の指摘。`#issuecomment-10 is fixed. \<!-- #issuecomment-10 is not fixed -->`）。
+  - フェンスの閉じの行に続くコメント（```` ```<!-- メモ --> ````）は、その行を閉じの行でなくする（閉じの行は、バッククォートのあとが空白だけ）。先にコメントを除くと閉じの行ができ、フェンスの中の確認の語を作成者の文として読む（PR #459 の CodeRabbit の指摘）。フェンスの境界を元の本文で先に決めるのは、このためである。
 
-  そこで、閉じない `<!--` を持つ確認と、範囲（`<!--` から `-->` まで）にバッククォートか `~~~` を含む確認は、**ほかの部分を含めて何も承認しない**（jq の `html_comment_ambiguous`）。どちらの読みを選んでも、片方では見えている打ち消しを消すためである。作成者が HTML コメントを使わずに書き直せば緑になる。
+  どの読みを選んでも、片方では見えている打ち消しを消すか、隠れた語を読むので、行全体のコメントのほかは承認を止める。作成者が HTML コメントを使わずに書き直せば緑になる。
 - **ほかの判定は変えない**：HTML コメントを除くのは確認を読む所（`acked_keys`）だけである。自動報告の印（`has_takt_marker`。印そのものが HTML コメント）、フェンスだけの本文（`fenced_report_body`）、Codex の文頭一致（`ack_at_start`）、既定で外す通知の頭（`default_ignored_notice`）は、取得した本文をそのまま見る。項目の側の正規化（`norm_text`）は、前から閉じた HTML コメントを除いており、正規表現を共有する形にしただけで振る舞いは変えない（閉じない `<!--` も前のまま残す。項目から文を除くと「ほかの項目」の文が減り、断片が固有になりやすくなって緑の側に動くため）。
 
 **URL**（穴 6・7）。節の masked で、URL を同じ長さの空白にする（jq の `url_flags`。断片の照合で URL を外す `strip_urls` と同じ形の正規表現 `blank_urls` で、scheme つきと scheme の無いホスト・パスの両方。範囲だけを用途で分ける。下の「URL を広く取らない」）。URL の中の確認の語・打ち消し・条件・疑問の語を読まず、URL の中では節も切らない。id の照合は前のまま元の本文で行うので、URL の中のアンカーは参照に使える。打ち消しの節の拒否（`mentions_in`）も元の本文で照合する。
@@ -353,22 +356,44 @@ def ack_at_start:
   | ascii_downcase
   | test("^\\s*(" + trusted_ack_words + ")");
 
-# HTML コメント。`<!--` から最初の `-->` まで（途中の `>` で切らない）。項目の照合（norm_text）と
-# 確認の読み（acked_keys）が、この 1 つを共有する。自動報告の印（has_takt_marker）、フェンスだけの本文、
-# Codex の文頭一致、既定で外す通知の頭は、これを通さない（4 回目の直し）。
-def html_comment_re: "(?s)<!--.*?-->";
-
+# HTML コメント。`<!--` から最初の `-->` まで（途中の `>` で切らない）。項目の照合（norm_text）で使う（v1 から）。
 def strip_html_comments:
-  gsub(html_comment_re; " ");
+  gsub("(?s)<!--.*?-->"; " ");
 
-# 境界が決まらない HTML コメントを持つ確認（4 回目の直し）。この確認は何も承認しない（迷う形は赤に倒す）。
-# 1. 閉じない `<!--`。GitHub は、行頭なら本文の終わりまでを隠し、段落の途中なら文字として見せる。
-# 2. 範囲にバッククォートか `~~~` を含む。インラインのコードやフェンスの中の `<!--` は文字なので、
-#    外の `-->` までを除くと、見えている打ち消し（`未対応`）まで消える。
-def html_comment_ambiguous:
-  (.body // "") as $b
-  | ($b | strip_html_comments | test("<!--"))
-    or any($b | match(html_comment_re; "g") | .string; test("`|~~~"));
+# 確認の側の HTML コメント（4 回目の直し）。元の本文の行とフェンスの境界（fence_split と同じ規則）で決め、
+# 除くのは、フェンスの外で、行頭（空白 3 つまで）の `<!--` から、最初の `-->` のあとが空白だけの行までの
+# 「行全体のコメント」だけ。その行を空行にする（GitHub では HTML のブロックとして隠れ、前後の段落を切る）。
+# フェンスの中の `<!--` は文字なので触らない。それ以外の `<!--`（行の途中、`\<!--` のエスケープ、引用・見出しの中、
+# `-->` のあとに文が続く、閉じない、範囲にバッククォートか `~~~` を含む）は bad にし、その確認は何も承認しない
+# （見えている文を消すか、隠れた文を読むかが決まらない。迷う形は赤に倒す）。
+# lines: 除いたあとの行。bad: 境界が決まらない形があったか。
+def html_comment_lines:
+  reduce ((.body // "") | split("\n"))[] as $line (
+    { open: null, incom: false, lines: [], bad: false };
+    if .incom then
+      .lines += [""]
+      | (if ($line | test("`|~~~")) then .bad = true else . end)
+      | if ($line | test("-->")) then
+          .incom = false
+          | (if ($line | test("^(?:(?!-->).)*-->\\s*$")) then . else .bad = true end)
+        else . end
+    elif .open != null then
+      .lines += [$line]
+      | (if fence_closes($line; .open) then .open = null else . end)
+    elif fence_open($line) != null then
+      .open = fence_open($line) | .lines += [$line]
+    elif ($line | test("^ {0,3}<!--")) then
+      .lines += [""]
+      | (if ($line | test("`|~~~")) then .bad = true else . end)
+      | if ($line | test("^ {0,3}<!--.*-->")) then
+          (if ($line | test("^ {0,3}<!--(?:(?!-->).)*-->\\s*$")) then . else .bad = true end)
+        else .incom = true end
+    elif ($line | test("<!--")) then
+      .lines += [$line] | .bad = true
+    else
+      .lines += [$line]
+    end)
+  | if .incom then .bad = true else . end;
 
 # フェンスは残す（フェンス内の引用も照合の対象）。確認の語は norm_text を通さず、
 # 単位と節（clauses）の masked で見る。
@@ -396,29 +421,33 @@ def file_ext_labels:
   "js|mjs|cjs|jsx|ts|tsx|json|ya?ml|toml|lock|txt|kts?|scala|sbt|qnt|html?|css|go";
 
 # URL を同じ長さの空白にする（位置を保つ）。scheme つきと scheme の無いホスト・パスの両方。
-# $c は URL の文字、$tail は URL の終わりに置けない文字の後読み。正規表現の形は 1 つで、範囲だけを用途で分ける（4 回目の直し）。
-def blank_urls($body; $c; $tail):
+# $p は URL の本体（1 文字以上）、$tail は URL の終わりに置けない文字の後読み。正規表現の形は 1 つで、
+# 範囲だけを用途で分ける（4 回目の直し）。
+def blank_urls($body; $p; $tail):
   ($body // "")
-  | gsub("(?i)(?<u>https?://" + $c + "+" + $tail + ")"; .u | gsub("."; " "))
+  | gsub("(?i)(?<u>https?://" + $p + $tail + ")"; .u | gsub("."; " "))
   | gsub("(?i)(?<pre>^|[^a-z0-9_./-])(?<u>(?:[a-z0-9-]+\\.)+(?!(?:" + file_ext_labels + ")/)[a-z]{2,}/"
-         + $c + "*" + $tail + ")"; "\(.pre)" + (.u | gsub("."; " ")));
+         + "(?:" + $p + $tail + ")?)"; "\(.pre)" + (.u | gsub("."; " ")));
 
 # 断片の照合（quote_text・refs_in・mentions_in。norm_text が空白を畳む）。06770ed と同じく、URL を空白・`)`・`>`・`]` の
 # 手前まで広く取る。ここでは外し過ぎが赤の側（引用が使えない）、外し損ないが緑の側（URL の中のパスや、ASCII でない
 # 文字の後ろが 20 文字の窓として当たる）なので、広く取る。
 def strip_urls($body):
-  blank_urls($body; "[^\\s)>\\]]"; "");
+  blank_urls($body; "[^\\s)>\\]]+"; "");
 
 # 節の masked で空白にする URL の位置の印（コードポイントごとの真偽。4 回目の直し）。ここでは逆に、外し過ぎが緑の側
 # （見えている打ち消しや疑問を消す）なので、狭く取る。URL の文字を ASCII の印字できる文字（\x21〜\x7e）から
-# `)`（\x29）・`>`（\x3e）・`]`（\x5d）を除いたものに限り（空白なしで続く `…#issuecomment-11はまだです` を URL に入れない）、
+# `(`（\x28）・`)`（\x29）・`>`（\x3e）・`]`（\x5d）を除いたものに限り（空白なしで続く `…#issuecomment-11はまだです` を URL に入れない）、
 # 終わりの `?`・`!`・`.`・`,`・`:`・`*`・`_`・`~` も URL に入れない（GFM の自動リンクと同じ。`Is #10 fixed in https://…/2?` の `?`）。
-def url_char: "[\\x21-\\x28\\x2a-\\x3d\\x3f-\\x5c\\x5e-\\x7e]";
+# 対になった括弧（1 段）は URL に含める（GFM の自動リンクと同じ。Markdown のリンク先 `[状況](https://…/not/(foo)/fixed)` の
+# `)/fixed` を作成者の文として読まない）。対にならない `(` と `)` は URL に入れない。
+def url_char: "[\\x21-\\x27\\x2a-\\x3d\\x3f-\\x5c\\x5e-\\x7e]";
+def url_body: "(?:" + url_char + "|\\(" + url_char + "*\\))+";
 def url_tail: "(?<![?!.,:*_~])";
 
 def url_flags($s):
   ($s | explode) as $o
-  | (blank_urls($s; url_char; url_tail) | explode) as $m
+  | (blank_urls($s; url_body; url_tail) | explode) as $m
   | [ range(0; $o | length) as $i | $m[$i] == 32 and $o[$i] != 32 ];
 
 def quote_text($c):
@@ -658,10 +687,11 @@ def mentions_in($t; $its):
 # 確認（入力の 1 件）が承認する項目の位置の集合。
 # 確認の語・打ち消し・参照を読む前に、HTML コメントを本文から除く（4 回目の直し）。見えない語で承認せず、
 # ボットの印（`<!-- codex-review-state:v1 {…} -->` など）の中の語で打ち消しにもしない。境界が決まらない
-# HTML コメントを持つ確認は、何も承認しない。
+# HTML コメントを持つ確認は、何も承認しない（html_comment_lines）。
 def acked_keys($its; $excl):
-  if html_comment_ambiguous then [] else
-  .body |= ((. // "") | strip_html_comments)
+  html_comment_lines as $h
+  | if $h.bad then [] else
+  .body = ($h.lines | join("\n"))
   | [ $its[] | quote_text(.) ] as $texts
   | units as $us
   | attach_targets($us) as $tg
@@ -854,7 +884,8 @@ require_jq_17() {
   「確認済みではありません」のような打ち消しは確認として数えません。
   HTML コメント（<!-- -->）の中に書いた語と URL は読みません。
   URL の中の語（リポジトリ名の fixed・pending など）は、確認にも打ち消しにも数えません。
-  閉じない <!-- や、コードの中の <!-- を含む返信は確認になりません。
+  行全体の HTML コメントのほかに <!-- を含む返信（行の途中のコメント、
+  閉じない <!--、\<!--）は、確認になりません。
 
 同じ文が並ぶ自動の通知（レート制限の通知が 2 回など）は、引用ではどれも確認になりません。
 通知ごとに URL（アンカー）を貼り、同じ行に確認の語を添えてください。
@@ -1010,8 +1041,8 @@ ci_ref: v2
 31. **外した通知は「ほかの項目」に数える（3 回目の直し）。** (a) 通知と、通知の文を引用したレビュアーの項目があるとき、`「You have reached your Codex usage limits for code reviews.」を確認しました。` はレビュアーの項目を承認しない（赤）。(b) その項目の URL（アンカー）と確認の語では承認する（緑）。
 32. **jq の版と、位置に頼らない `id_match`（3 回目の直し）。** (a) **jq 1.7 の `indices` がバイト位置を返す前提でも偽の緑にならない**：項目 `#issuecomment-10` に、作成者が `確認しました #issuecomment-101` と返しても承認しない（赤）。`確認しました #issuecomment-10。` は承認する。どちらも、CI の 2 つの jq（jq 1.7 と ubuntu-latest の jq）で流す（「jq の版と、位置に頼らない判定」の CI の段）。(b) 偽の `jq --version` で、`jq-1.6`・空・読めない文字列（`jq version 1.7`）なら関門が `error` を公開して失敗し、`success` を出さない。`jq-1.7`・`jq-1.7.1`・`jq-1.8.2` なら判定に進む。d7e6d5b の `id_match` が jq 1.6・1.7 で true になること（偽の緑の再現）は、スモークではなくこの文書の記録に残す（「jq の版と、位置に頼らない判定」）。
 33. **scheme の無いホスト・パス（3 回目の直し）。** (a) `github.com/j5ik2o/ci/…`、`docs.rs/serde/…`、`whois.nic.java/…`（`java` は実在の gTLD）は外れ、別件として貼って `確認しました` と書いても承認にならない（8(c) と同じ）。(b) `node.js/lib/internal/modules/cjs/loader.js` は外れず、その文の引用と確認の語で承認できる。(c) `scripts/review-thread-resolution.sh`・`src/main.rs` は前から外れず、引用で承認できる。
-34. **HTML コメントの中の語（4 回目の直し。穴 5）。** (a) HTML コメントの中だけの確認の語（`<!-- fixed --> #issuecomment-10`、`<!-- 確認しました --> …`）では承認しない（CodeRabbit の例）。(b) HTML コメントの中の id では承認しない（`<!-- #issuecomment-10 --> を確認しました`）。(c) ボットの印の中の語で判定が変わらない：`<!-- codex-review-state:v1 {"status":"pending"} --> #issuecomment-10 を確認しました` と `#issuecomment-10 を確認しました。<!-- #issuecomment-10 はまだ -->` は承認する。(d) 語の途中に挟んだ HTML コメント（`#issuecomment-10 を<!-- メモ -->確認しました。`）は、画面のとおり承認する。(e) 境界が決まらない形（行頭と段落の途中の閉じない `<!--`、インラインのコードの `<!--` から外の `-->` まで、行頭の `<!--` から中のフェンスを越えた `-->` まで）は、ほかの部分の確認も含めて何も承認しない。(f) 引用に付いた HTML コメントの `fixed`（`> …\n<!-- fixed -->\n\nWhich one?`）では承認しない。(g) 作成者の `<!-- takt:auto-report -->` 付きの報告が自動報告として外れること（観点 16(a)）は変わらない。
-35. **URL の中の語（4 回目の直し。穴 6・7）。** (a) パスに `pending`・`not` を含む URL のアンカーと確認の語で承認する（CodeRabbit の例。scheme の無い `github.com/…` でも）。(b) 本文に書いた `#issuecomment-10 is pending` は承認しない（前のまま）。(c) 確認の語が URL の中にしか無い確認（`https://github.com/acme/fixed/pull/7#issuecomment-10`）では承認しない。(d) URL の中の `?` で疑問と読まず、節も切らない（`確認しました https://…/pull/1?notification_referrer_id=x#issuecomment-10` は承認する）。(e) URL の終わりの `?` は URL に入れず、疑問として読む（`Is #issuecomment-10 fixed in https://…/pull/2?` は承認しない）。(f) URL の直後に空白なしで続く日本語は URL に入れず、打ち消しとして読む（`- https://…#issuecomment-11はまだです` は 11 を承認しない）。(g) URL を含む混在の節・前のままの形（`… は確認しましたが、… は未対応です。`、`See <URL>, fixed.`、`will be fixed, see <URL>.`）は前と同じ結果。
+34. **HTML コメントの中の語（4 回目の直し。穴 5）。** (a) HTML コメントの中だけの確認の語（`<!-- fixed --> #issuecomment-10`、`<!-- 確認しました --> …`）では承認しない（CodeRabbit の例）。(b) HTML コメントの中の id では承認しない（`<!-- #issuecomment-10 --> を確認しました`）。(c) 行全体のコメント（ボットの印やメモ）の中の語で判定が変わらない：`#issuecomment-10 を確認しました\n<!-- review-state: pending #issuecomment-10 -->` と、複数行の `<!--\n#issuecomment-10 はまだ\n-->` を続けた確認は承認する。印だけの行（`<!-- codex-review-state:v1 {…} -->`）のあとの確認も承認する。(d) 行の途中のコメント（`#issuecomment-10 を<!-- メモ -->確認しました。`）は、画面では確認だが承認しない（誤って赤にする側）。(e) 境界が決まらない形（行頭と段落の途中の閉じない `<!--`、インラインのコードの `<!--` から外の `-->` まで、行頭の `<!--` から中のフェンスを越えた `-->` まで、`\<!--` のエスケープ、フェンスの閉じの行に続くコメント）は、ほかの部分の確認も含めて何も承認しない。(h) フェンスの中の `<!--`（閉じないものも）は承認を止めない。(f) 引用に付いた HTML コメントの `fixed`（`> …\n<!-- fixed -->\n\nWhich one?`）では承認しない。(g) 作成者の `<!-- takt:auto-report -->` 付きの報告が自動報告として外れること（観点 16(a)）は変わらない。
+35. **URL の中の語（4 回目の直し。穴 6・7）。** (a) パスに `pending`・`not` を含む URL のアンカーと確認の語で承認する（CodeRabbit の例。scheme の無い `github.com/…` でも）。(b) 本文に書いた `#issuecomment-10 is pending` は承認しない（前のまま）。(c) 確認の語が URL の中にしか無い確認（`https://github.com/acme/fixed/pull/7#issuecomment-10`）では承認しない。(d) URL の中の `?` で疑問と読まず、節も切らない（`確認しました https://…/pull/1?notification_referrer_id=x#issuecomment-10` は承認する）。(e) URL の終わりの `?` は URL に入れず、疑問として読む（`Is #issuecomment-10 fixed in https://…/pull/2?` は承認しない）。(f) URL の直後に空白なしで続く日本語は URL に入れず、打ち消しとして読む（`- https://…#issuecomment-11はまだです` は 11 を承認しない）。(g) URL を含む混在の節・前のままの形（`… は確認しましたが、… は未対応です。`、`See <URL>, fixed.`、`will be fixed, see <URL>.`、`[PR](<URL>) を確認しました`）は前と同じ結果。(h) 対になった括弧を含む URL（Markdown のリンク先 `[status](https://example.com/not/(foo)/fixed)` と、裸の URL）の残りを、作成者の文として読まない。
 
 30〜33 の入力と期待（この文書の jq を切り出して流した結果、2026-11-28。jq 1.6・1.7・1.8.1 と手元の 1.8.2 で同じ結果）。項目の作者は書いたもののほかは `reviewer`、確認は作成者で項目より後。`ignored_auto_report_author_patterns` は v1 の既定のうち CodeRabbit の 2 つと `chatgpt-codex-connector\tCodex Review`。d7e6d5b の列は前の版の jq で流した結果（jq 1.8 で。32x だけは版で変わる）。
 
@@ -1044,14 +1075,19 @@ ci_ref: v2
 | 34a | `<!-- fixed --> #issuecomment-10` | 10 | なし |
 | 34b | `<!-- 確認しました --> #issuecomment-10` | 10 | なし |
 | 34c | `<!-- #issuecomment-10 --> を確認しました` | 10 | なし |
-| 34d | `<!-- codex-review-state:v1 {"status":"pending"} --> #issuecomment-10 を確認しました` | なし | 10 |
-| 34e | `#issuecomment-10 を確認しました。<!-- #issuecomment-10 はまだ -->` | なし | 10 |
-| 34f | `#issuecomment-10 を<!-- メモ -->確認しました。` | 10 | 10 |
+| 34d | `#issuecomment-10 を確認しました\n<!-- review-state: pending #issuecomment-10 -->` | なし | 10 |
+| 34e | `#issuecomment-10 を確認しました。\n<!--\n#issuecomment-10 はまだ\n-->` | なし | 10 |
+| 34f | `#issuecomment-10 を<!-- メモ -->確認しました。` | 10 | なし |
 | 34g | `<!-- メモ\n確認しました #issuecomment-10` | 10 | なし |
 | 34h | `確認しました #issuecomment-10 <!-- 閉じないメモ` | 10 | なし |
 | 34i | `` #issuecomment-10 は `<!--` の件で未対応、`-->` の件は対応しました `` | なし | なし |
 | 34j | ```` 確認しました #issuecomment-10\n<!--\n```\n#issuecomment-11 はまだです\n```\n--> ```` | 10・11 | なし |
 | 34k | `> Action not completed / Review rate limited\n<!-- fixed -->\n\nWhich one?` | 11 | なし |
+| 34l | `#issuecomment-10 を確認しました。\n\<!-- #issuecomment-10 は未対応です -->` | なし | なし |
+| 34m | `#issuecomment-10 is fixed. \<!-- #issuecomment-10 is not fixed -->` | なし | なし |
+| 34n | ```` ログの引用です。\n```\nlog\n```<!-- メモ -->\n#issuecomment-10 を確認しました。 ```` | なし | なし |
+| 34o | ```` 確認しました #issuecomment-10\n```\n<!-- 未閉じの引用\n``` ```` | 10 | 10 |
+| 34p | `<!-- codex-review-state:v1 {"code_review":{"status":"completed"}} -->\n#issuecomment-10 を確認しました` | 10 | 10 |
 | 35a | `https://github.com/acme/pending/pull/7#issuecomment-10 を確認しました` | なし | 10 |
 | 35b | `https://github.com/acme/not/pull/7#issuecomment-10 を確認しました` | なし | 10 |
 | 35c | `github.com/acme/pending/pull/7#issuecomment-10 を確認しました` | なし | 10 |
@@ -1063,8 +1099,11 @@ ci_ref: v2
 | 35i | `https://github.com/o/r/pull/1#issuecomment-10 は確認しましたが、https://github.com/o/r/pull/1#issuecomment-11 は未対応です。` | 10 | 10 |
 | 35j | `See https://github.com/o/r/pull/1#issuecomment-10, fixed.` | 10 | 10 |
 | 35k | `#issuecomment-10 will be fixed, see https://github.com/o/r/pull/1#issuecomment-11.` | なし | なし |
+| 35l | `#issuecomment-10 [status](https://example.com/not/(foo)/fixed)` | なし | なし |
+| 35m | `#issuecomment-10 https://example.com/not/(foo)/fixed` | なし | なし |
+| 35n | `[PR](https://github.com/o/r/pull/1#issuecomment-10) を確認しました` | 10 | 10 |
 
-34j の 06770ed の列は、画面に出ないフェンスの中の `#issuecomment-11` まで承認する偽の緑である（行頭の `<!--` から `-->` までは、中のフェンスごと隠れる）。この規則では、範囲にバッククォートを含むので、見えている 10 も承認しない（誤って赤にする側）。34i は、範囲を除いてしまうと `未対応` が消えて 10 を承認する形で、範囲にバッククォートを含むので何も承認しない。35f の 06770ed の列は、URL の中の `?` で節が切れ、`確認しました …?` が疑問と読まれた偽の赤である。35g・35h は、URL の文字を空白まで（06770ed の `[^\s)>\]]+`）に戻し、終わりの句読点も URL に入れた版で流すと、35g は 10、35h は 10・11 を承認する（偽の緑）。URL を ASCII と終わりの句読点で止めることの確かめである。
+34j の 06770ed の列は、画面に出ないフェンスの中の `#issuecomment-11` まで承認する偽の緑である（行頭の `<!--` から `-->` までは、中のフェンスごと隠れる）。この規則では、範囲にバッククォートを含むので、見えている 10 も承認しない（誤って赤にする側）。34i は、範囲を除いてしまうと `未対応` が消えて 10 を承認する形で、行の途中の `<!--` なので何も承認しない。34f も行の途中のコメントで、画面では確認だが赤になる（誤って赤にする側）。34l・34m（エスケープ）と 34n（フェンスの閉じの行に続くコメント）は PR #459 のレビューの反例で、`<!--` を空白 1 つに置き換えていた前の案（この PR の最初の版）では、それぞれ 10 を承認した（見えている打ち消しを消す、フェンスの中の語を読む）。34o は、フェンスの中の閉じない `<!--` が承認を止めないこと、34p は行全体のボットの印が判定を変えないことの確かめである。35l・35m は PR #459 の Codex の指摘の反例で、対になった括弧を URL に含めないと `)/fixed` を確認の語と読み、10 を承認する。35f の 06770ed の列は、URL の中の `?` で節が切れ、`確認しました …?` が疑問と読まれた偽の赤である。35g・35h は、URL の文字を空白まで（06770ed の `[^\s)>\]]+`）に戻し、終わりの句読点も URL に入れた版で流すと、35g は 10、35h は 10・11 を承認する（偽の緑）。URL を ASCII と終わりの句読点で止めることの確かめである。
 
 25〜29 の入力と期待（この文書の jq を切り出して流した結果。7a〜7n は PR #452 のレビューで足した。項目は `#issuecomment-10`＝`Once this is fixed, please rerun the integration tests.`、`#issuecomment-11`＝`Action not completed / Review rate limited`、`#issuecomment-108`＝`You have reached your Codex usage limits for code reviews.` の 3 つ。項目の作者は作成者でも Codex でもない（108 は Codex の利用上限の通知の文だが、作者が Codex でないので既定の除外に当たらない。観点 30(d)）。b808a29 の列は 1 回目の直しの jq で流した結果で、穴の再現になる。3 回目の直しのあとの jq でも、この規則の列は 55 行すべて同じだった）。
 
@@ -1197,7 +1236,7 @@ ci_ref: v2
 
 - **(a) 不変条件が恒真でない。** `specs/quint/review-thread-ack/mutants.sh` が、原本（違反なし）のほかに 21 の壊した版を作り、すべてで決めた不変条件に違反が出ることを確かめる（4 回目の直しのあと、手元で全体 5 分 29 秒。21 版すべて OK）。4 回目の直しで足した 2 つは、**06770ed の穴 2 つを 1 つずつ開けた版**で、`MaskedWord` を肯定と読む版（HTML コメントか URL の中だけの語を数える。`noFalseGreen`）と、`AffirmedMaskedCue` を打ち消しと読む版（URL かボットの印の中の `pending` を打ち消しと読む。`idAckTurnsGreen`）である。3 回目の直しで足した 5 つは、既定の除外を作者だけで当てる版と本文の頭だけで当てる版（`noFalseGreen`）、既定の除外を消す版（`idAckTurnsGreen`）、外した通知を「ほかの項目」に数えない版（`noFalseGreen`）、観測の前提を外してどの項目も作者が Codex に見える版（`noFalseGreen`）である。2 回目までの 14 は次のとおり。**ci#43 の残る穴 4 つを 1 つずつ開けた版**が 4 つ（語と参照を本文の全体で見る、`Quoted` を肯定と読む、`NegatedEn` を肯定と読む、`NegatedJa` を肯定と読む）、穴 1 の直しの部品を外した版が 2 つ（打ち消しの単位による拒否を消す、`Pending` を打ち消しと読まない）、前からあるガードを 1 つ外した版が 6 つ（URL の頭、ほかの項目に無い断片、1 つの確認の断片で別の項目も承認、id の経路、最終編集より後、自動報告）、遷移を 1 つ変えた版が 2 つ（編集で `updatedAt` を進めない、現れ方の前提を外す）。id の経路を消した版は `idAckTurnsGreen` に、ほかの 13 は `noFalseGreen` に違反が出る。あわせて、穴 4 つを開けたままの b808a29 の規則（`unique`）も `noFalseGreen` に違反が出る。
 - **(b) 遷移に届く。** 数は 4 回目の直しのあとの走り（seed 134）。`step` の 2 つの action は witness の `postedAck`（99.91%）と `editedItem`（99.92%）で届く。4 回目の直しで足した形にも届く：URL か HTML コメントの中だけの語の単位を含む確認がある PR での緑（`greenWithMaskedWordAck`、13.71%）、打ち消しの語が URL か HTML コメントの中にだけある単位による承認（`approvedByMaskedCue`、16.03%）。3 回目の直しで足した形にも届く：既定で外した通知があり、ほかの項目の承認で緑（`greenWithNoticeExcluded`、8.64%）、Codex のほかのコメント（作者だけ一致）が項目に残り、確認で承認されて緑（`greenWithCodexOtherItem`、8.62%）、ほかの作者の通知の文で始まるコメント（本文だけ一致）が項目に残り、確認で承認されて緑（`greenWithHeadByOtherItem`、8.74%）。2 回目の直しで足した形にも届く：まとめ返信（打ち消しの単位を含む確認）が別の項目を承認する（`approvedByMixedAck`、3.09%）、肯定の単位が指した項目を打ち消しの単位が拒否する（`vetoFired`、9.49%）、引用の中だけの語の単位を含む確認がある PR での緑（`greenWithQuotedWordAck`、13.31%）、打ち消された語の単位を含む確認がある PR での緑（`greenWithNegatedAck`、18.12%）、2 つの単位を持つ確認による承認（`approvedByTwoUnitAck`、16.40%）。前からの形にも届く：確認が編集で無効になる遷移（`editInvalidatedAck`、26.13%）、引用だけでの承認（11.79%）、定型文がある PR での緑（19.61%）、URL の頭を含む確認がある PR での緑（23.26%）、緑そのもの（25.33%。項目が 2 つとも通知で外れる、何も確かめない緑を含む）。規則がいつも赤を返して違反を避けているのではない。
-- **(c) 実物と合う。** 状態と action を、j5ik2o/ci#43 の 86a443c の `scripts/review-thread-resolution.sh` の関数と値に行番号つきで対応させた（判定の部分は 442d679 から変わっておらず、行番号も同じ）。`unique`・`window` の `bodyAckWord` は実物の `ack_phrase`（534 行目。フェンスだけを外し、`negated` は直前と直後 3 文字だけを見る）に、`bodyIds`・`bodyFrags` は `references`（568 行目）が本文の全体を見ることに当たる。`scoped` の `Unit`・`polarity`・`refsUnit`・`vetoed` は実物に無く、この設計の jq の `units`・`clauses`・`polarity`・`refs_in`・`mentions_in`・`acked_keys` に当たる。3 回目の直しの `byCodex`・`noticeHead`・`defaultExcluded` は実物に無く、この設計の jq の `default_ignored_notice` に、`uniqueTo` が外した項目も見ることは `$excl` に当たる。4 回目の直しの `MaskedWord`・`AffirmedMaskedCue` は、この設計の jq の `acked_keys` の頭で HTML コメントを除くこと（`strip_html_comments`）と、`clauses` が URL を masked で空白にすること（`url_flags`）の結果の観測に当たる。06770ed の jq は、どちらも masked に残していた（`MaskedWord` を `Pos`、`AffirmedMaskedCue` を `Neg` と読む壊した版が、06770ed の穴 5・6 に当たる）。対応の無いもの（`Item.kind`、`intended`、`pending`、`editLog`、`clock`、`consistent`・`pendingOk`、`lastStep`）は、仕様・環境の前提・witness のためだけに持つ。
+- **(c) 実物と合う。** 状態と action を、j5ik2o/ci#43 の 86a443c の `scripts/review-thread-resolution.sh` の関数と値に行番号つきで対応させた（判定の部分は 442d679 から変わっておらず、行番号も同じ）。`unique`・`window` の `bodyAckWord` は実物の `ack_phrase`（534 行目。フェンスだけを外し、`negated` は直前と直後 3 文字だけを見る）に、`bodyIds`・`bodyFrags` は `references`（568 行目）が本文の全体を見ることに当たる。`scoped` の `Unit`・`polarity`・`refsUnit`・`vetoed` は実物に無く、この設計の jq の `units`・`clauses`・`polarity`・`refs_in`・`mentions_in`・`acked_keys` に当たる。3 回目の直しの `byCodex`・`noticeHead`・`defaultExcluded` は実物に無く、この設計の jq の `default_ignored_notice` に、`uniqueTo` が外した項目も見ることは `$excl` に当たる。4 回目の直しの `MaskedWord`・`AffirmedMaskedCue` は、この設計の jq の `acked_keys` の頭で HTML コメントを除くこと（`html_comment_lines`）と、`clauses` が URL を masked で空白にすること（`url_flags`）の結果の観測に当たる。06770ed の jq は、どちらも masked に残していた（`MaskedWord` を `Pos`、`AffirmedMaskedCue` を `Neg` と読む壊した版が、06770ed の穴 5・6 に当たる）。対応の無いもの（`Item.kind`、`intended`、`pending`、`editLog`、`clock`、`consistent`・`pendingOk`、`lastStep`）は、仕様・環境の前提・witness のためだけに持つ。
 - **(d) 範囲。** 項目 2 つ、項目の種類 4 種、断片 4 種、確認の単位は 2 つまで、語の現れ方 8 種、ステップ 10、標本 50000（seed 134）。網羅ではない。見られないもの：項目が 3 つ以上のとき、単位が 3 つ以上の確認、前置きに続くリストの項目（モデルでは前置きの語が効いた項目を `Affirmed` の単位として与える）、定型文が 2 種類以上・引用が固有の文と定型文にまたがるとき、文字列の水準（単位と節への分け方、かたまりの付く先、確認の語と打ち消しの一覧、項目の写しの印、正規化、URL の外し方、フェンスの境界、20 文字の下限）、時刻が同じ秒に並ぶとき（実物は厳密な比較なので、編集と同じ秒の確認は数えない）、HTML コメントの境界と URL の範囲（4 回目の直し。境界が決まらない確認を何も承認しないことを含む）、前提が崩れる入力、未解決スレッドと項目の選び方、既定の除外の文字列の水準（本文の頭の当て方、作者の login の比べ方、通知の文言の変化、login の騙り）。
 
 Quint が通ったことだけを合格の根拠にはしない。モデルが見ない文字列の水準は、テストの観点 3〜5・8・11〜13・18・23・25〜35 のスモークテストで確かめる（32 の jq の版、33 の正規表現、34・35 の HTML コメントの境界と URL の範囲は、モデルに入れない）。モデルの筋書きとテストの観点の対応は次のとおり。
@@ -1294,12 +1333,13 @@ Quint が通ったことだけを合格の根拠にはしない。モデルが�
 
 [j5ik2o/ci#43](https://github.com/j5ik2o/ci/pull/43)（先端 77ccaac）で観点 30〜33 のテストを足したとき、06770ed の jq で再現する穴が 2 つ見つかった。中将の決め（2026-11-28）に沿って直した。
 
-- **高（偽の緑）：HTML コメントの中の確認の語で承認する**（穴 5。[スレッド](https://github.com/j5ik2o/ci/pull/43#discussion_r4726604859)）：確認を読む前に（`acked_keys` の頭で）HTML コメントを本文から除く。中の語・打ち消し・id・断片のどれも読まない。ボットの印の中の語で判定が変わらない（`<!-- codex-review-state:v1 {"status":"pending"} -->` を打ち消しにしない）。境界が決まらない形（閉じない `<!--`、範囲にバッククォートか `~~~` を含む）は、GitHub の表示を Markdown API で確かめたうえで、何も承認しない形に倒した。自動報告の印・フェンスだけの本文・Codex の文頭一致・既定で外す通知の頭は変えない。jq の `html_comment_re`・`strip_html_comments`・`html_comment_ambiguous`・`acked_keys`。
+- **高（偽の緑）：HTML コメントの中の確認の語で承認する**（穴 5。[スレッド](https://github.com/j5ik2o/ci/pull/43#discussion_r4726604859)）：確認を読む前に（`acked_keys` の頭で）、フェンスの外の行全体の HTML コメントを空行にする。中の語・打ち消し・id・断片のどれも読まない。ボットの印の中の語で判定が変わらない。それ以外の `<!--` をフェンスの外に持つ確認は、GitHub の表示を Markdown API で確かめたうえで、何も承認しない形に倒した。自動報告の印・フェンスだけの本文・Codex の文頭一致・既定で外す通知の頭・項目の側の正規化は変えない。jq の `html_comment_lines`・`acked_keys`。PR #459 の最初の版は、本文のどこの `<!--` から `-->` までも空白 1 つに置き換えていて、エスケープ（`\<!--`）とフェンスの閉じの行に続くコメントで、見えている打ち消しを消すか、フェンスの中の語を読んでいた（Codex と CodeRabbit の指摘。34l〜34n）。
 - **中（偽の赤）：URL のパスの中の `pending`・`not` を打ち消しと読む**（穴 6。[スレッド](https://github.com/j5ik2o/ci/pull/43#discussion_r4726604865)）：節の masked で、URL（scheme つきと scheme の無いホスト・パス。断片の照合と同じ形の正規表現）を同じ長さの空白にし、URL の中では節を切らない。id の照合と拒否は元の本文のまま。jq の `blank_urls`（新設。`strip_urls` はこれを広い範囲で呼ぶ形にした。同じ長さの空白に置き換えるが、断片の照合の結果は変わらない）・`url_flags`・`clauses`。
 - **高（偽の緑。今回見つけた）：URL の中の確認の語で承認する**（穴 7）：`https://github.com/acme/fixed/pull/7#issuecomment-10` だけで 10 を承認していた。穴 6 と同じ直しで塞がる。決めの文言（打ち消し・条件の語）の外だが、同じ前処理で塞がるので同じ直しに入れた。
+- **URL の括弧**：masked では、対になった括弧（1 段）を URL に含める（GFM の自動リンクと同じ）。含めないと、Markdown のリンク先 `[status](https://example.com/not/(foo)/fixed)` の `)/fixed` を作成者の確認の語と読む（PR #459 の Codex の指摘。35l・35m）。
 - **URL の範囲**：masked で URL を空白にすると、URL を広く取るほど見えている打ち消しが消える（緑の側）。masked では URL の文字を ASCII（`)`・`>`・`]` を除く）に限り、終わりの句読点を URL に入れない。空白まで取る版では、35g・35h が偽の緑になることを確かめた。断片の照合は 06770ed の広い範囲のままにした（狭い範囲を断片の照合にも使う版では、ASCII でない文字を含む URL と IDN のホストで、別件の同じ URL が項目を承認する偽の緑になった）。正規表現の形は 1 つで、範囲だけを用途で分ける。
 - **CI の jq**：validate のワークフローで、jq 1.7（`tests/review-thread-resolution-smoke-jq.sh 1.7`）と ubuntu-latest の jq の 2 つでスモークを流す（「jq の版と、位置に頼らない判定」）。「タグを切る条件」の 5 件目に入れた。
-- **テストの観点**：34（HTML コメント）と 35（URL）を足し、22 行の表を置いた。25〜29 の 55 行、30〜33 の 18 例、34・35 の 22 行が、jq 1.6・1.7・1.8.1・1.8.2 で同じ結果になることを docker で確かめた。赤のときの案内、条件 4・5、I2・I6、「節に分けて極性を決める」、「誤って赤にする側」を直した。
+- **テストの観点**：34（HTML コメント）と 35（URL）を足し、30 行の表を置いた。観点 8 に (e)（ASCII でない文字を含む URL と IDN）を足した。25〜29 の 55 行、30〜33 の 18 例、34・35 の 30 行、8(b)〜(e) の例が、jq 1.6・1.7・1.8.1・1.8.2 で同じ結果になることを docker で確かめた。赤のときの案内、条件 4・5、I2・I6、「節に分けて極性を決める」、「誤って赤にする側」を直した。
 - **実データ**：5 リポジトリの直近 15 PR と 4 つの実例（79 の PR）で、06770ed とこの規則の未承認の項目は同じだった。作成者の確認 45 件に、HTML コメントも、語を含む URL も無かった（「一意に指す値として何を使うか」）。
 - **Quint**：`Word` に `MaskedWord`（語が URL か HTML コメントの中だけ。`Neutral`）と `AffirmedMaskedCue`（作成者の語があり、打ち消しは URL か HTML コメントの中だけ。`Pos`）を足した。仕様の側（`consistent`・`intendedAck`・`idAckTurnsGreen`）は、規則の `polarity` を使わずに `authorWord` で作成者の語を読む。元帥の決まりの 4 つの確かめをやり直した（「Quint の要否」と README）。
 
