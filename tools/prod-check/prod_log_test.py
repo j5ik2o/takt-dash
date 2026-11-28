@@ -22,6 +22,8 @@
      必ずエラー）。残る誤検知（`{"duration_ms": 500}` など）は設計が範囲外と決めているので
      固定しない。
   10. #421: 参照の実装（P2）も新しい規則に合わせる。
+  11. #445: 参照の実装は本番の正規表現を写さず、規則の言葉から文字の比べで書く。参照が設計の
+     例どおりに判定することを固定の例で確かめ、P2 は 500 の前後に境界の文字を置いた行も作る。
 
 本物の本番のログは読まない。すべて一時ディレクトリで完結する。
 """
@@ -296,6 +298,16 @@ HTTP_500_BODIES = [
     "\t500",
     "500",
     "500 and 500",
+    "status:500",
+    "Code=500",
+    '"code": 500',
+    "'status'=500",
+    'status"=500',
+    'status" =500',
+    "status = 500",
+    "500\t",
+    "500.あ",
+    "500. ",
 ]
 
 # 設計の「当たらない例」と、そこから規則どおりに導ける数の形。
@@ -330,6 +342,24 @@ NON_HTTP_500_BODIES = [
     "[taktDash][timing] render ms=500",
     "render duration_ms=500.81",
     "2026-11-27T00:00:00.500Z",
+    "{500}",
+    "=500",
+    ":500",
+    ",500",
+    "_500",
+    "500(",
+    "500[",
+    "500{",
+    "500=",
+    "500_",
+    "500.5",
+    "status500",
+    "status==500",
+    "status:=500",
+    'status""=500',
+    'status "=500',
+    "code:5000",
+    "status=500.81",
 ]
 
 
@@ -457,12 +487,73 @@ def test_web_error_groups_first_and_last_follow_line_order():
 # 6, 7. 性質（random の種つき）
 
 REF_STAMP_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)(?: |$)")
-# #421 の規則。500 は HTTP の状態の形のときだけエラーにする。
-REF_ERROR_RE = re.compile(
-    r"error|Error|ERR_|"
-    r"(?:(?:^|(?<=[\s(\[\"']))|(?i:status|code)[\"']?\s*[:=]\s*)"
-    r"500(?=$|[\s)\]}\"',:;]|\.(?!\d))"
-)
+
+# #421 の規則（docs/design/issue-421.md の「規則」）を、本番の正規表現を写さずに文字の比べで
+# 書き下す。空白は str.isspace、数字は str.isdecimal（正規表現の \s・\d と同じ集合）。
+REF_ERROR_WORDS = ("error", "Error", "ERR_")
+REF_BEFORE_500 = "([\"'"
+REF_AFTER_500 = ")]}\"',:;"
+REF_STATUS_KEYS = ("status", "code")
+
+
+def ref_skip_space_back(body, j):
+    while j > 0 and body[j - 1].isspace():
+        j -= 1
+    return j
+
+
+def ref_status_key_ends_at(body, i):
+    """body[:i] が「status か code（大文字小文字は問わない）、任意の引用符 1 つ、空白、
+    : か = を 1 つ、空白」で終わるか。キーの前に区切りは要らない（http_status・zipcode も当たる）。"""
+    j = ref_skip_space_back(body, i)
+    if j == 0 or body[j - 1] not in ":=":
+        return False
+    j = ref_skip_space_back(body, j - 1)
+    if j > 0 and body[j - 1] in "\"'":
+        j -= 1
+    return any(j >= len(k) and body[j - len(k):j].lower() == k for k in REF_STATUS_KEYS)
+
+
+def ref_500_before_ok(body, i):
+    if i == 0 or body[i - 1].isspace() or body[i - 1] in REF_BEFORE_500:
+        return True
+    return ref_status_key_ends_at(body, i)
+
+
+def ref_500_after_ok(body, k):
+    if k == len(body) or body[k].isspace() or body[k] in REF_AFTER_500:
+        return True
+    return body[k] == "." and not (k + 1 < len(body) and body[k + 1].isdecimal())
+
+
+def ref_is_error(body):
+    if any(w in body for w in REF_ERROR_WORDS):
+        return True
+    return any(
+        body.startswith("500", i) and ref_500_before_ok(body, i) and ref_500_after_ok(body, i + 3)
+        for i in range(len(body))
+    )
+
+
+# 設計の「当たる例」「当たらない例」と、範囲外として残す誤検知（当たる側）。
+DESIGN_HIT_EXAMPLES = [
+    "GET /api/state 500", "500 Internal Server Error", "HTTP/1.1 500", "HTTP/1.1 500:", "500:",
+    "status=500", "statusCode=500", "http_status=500", "status_code=500", "status: 500", "(500)",
+    "[500]", '{"status":500}', "... status 500.", "500.", "500, …", "500",
+    '{"duration_ms": 500}', '{"zipcode":500}', '{"barcode":500}', '{"decode":500}', '{"count":"500"}',
+]
+DESIGN_MISS_EXAMPLES = [
+    '{"duration_ms":500}', '{"count":500}', '{"ms":500}', "500ms", "1500ms", "5000", "5001",
+    "500.81", "0.500s", "duration_ms=500", "ms=500", "1,500", "x500y", "500件",
+]
+
+
+def test_reference_follows_design_examples():
+    for body in DESIGN_HIT_EXAMPLES + HTTP_500_BODIES:
+        assert ref_is_error(body), body
+    for body in DESIGN_MISS_EXAMPLES + NON_HTTP_500_BODIES:
+        assert not ref_is_error(body), body
+
 PIECES = [
     "Error: fetch failed", "error", "ERR_X", "GET /api/state 500", " ✓ Ready in 1s", "Ready",
     "   ▲ Next.js 15.5.0", "", " ", "  ", "ok", "読み取りに失敗しました", "x500y", "readY",
@@ -493,7 +584,7 @@ def ref_groups(lines, since):
         start = max((i for i, (_, b) in enumerate(parsed) if "Ready" in b), default=0)
     groups = {}
     for t, body in parsed[start:]:
-        if not REF_ERROR_RE.search(body):
+        if not ref_is_error(body):
             continue
         g = groups.setdefault(body, [0, None, None])
         g[0] += 1
@@ -512,6 +603,26 @@ def random_body(rng):
         else:
             parts.append("".join(rng.choice(ALPHABET) for _ in range(rng.randint(0, 10))))
     return "".join(parts).replace("\n", "")
+
+
+# P2 用。500 の前後に、規則の境界の両側の文字と status・code の形を置く。
+P2_HEADS = [
+    "", "a", "x", "_", "日", "1", "0.", "{", "GET /api/state ", "HTTP/1.1 ", "render ",
+    "status", "Status", "STATUS", "code", "Code", "statusCode", "http_status", "zipcode",
+    "stat", "ode", "duration_ms", "ms", "count", '{"status', '{"duration_ms', "'code",
+]
+P2_QUOTES = ["", "", '"', "'", '""', " "]
+P2_SEPS = ["", "", ":", "=", "==", ":=", ",", "{"]
+P2_BEFORE = ["", "", " ", "  ", "\t", "(", "[", '"', "'", "{", ":", "=", ",", ".", "a", "0", "日"]
+P2_AFTER = [
+    "", " ", "\t", ")", "]", "}", '"', "'", ",", ":", ";", ".", ".81", ".5", ".x", "..", ". ",
+    "(", "[", "{", "=", "_", "ms", " ms", "0", "1", "500", "a", "件", "s",
+]
+
+
+def random_500_body(rng):
+    head = rng.choice(P2_HEADS) + rng.choice(P2_QUOTES) + rng.choice(P2_SEPS) + rng.choice(P2_BEFORE)
+    return head + "500" + rng.choice(P2_AFTER) + rng.choice(["", "", random_body(rng)])
 
 
 def random_stamp(rng):
@@ -565,7 +676,10 @@ def test_property_p1_stamps_do_not_change_grouping():
 def test_property_p2_matches_reference_rules():
     rng = random.Random(PROPERTY_SEED + 1)
     for case in range(PROPERTY_CASES):
-        lines = [render(rng, random_body(rng)) for _ in range(rng.randint(0, 25))]
+        lines = [
+            render(rng, random_500_body(rng) if rng.random() < 0.5 else random_body(rng))
+            for _ in range(rng.randint(0, 25))
+        ]
         since = random_since(rng, lines)
         got = prod_log.web_error_groups(lines, since)
         want = ref_groups(lines, since)
@@ -671,6 +785,7 @@ def main() -> int:
         test_web_error_groups_since_none_uses_ready,
         test_web_error_groups_first_and_last_follow_line_order,
         test_property_p1_stamps_do_not_change_grouping,
+        test_reference_follows_design_examples,
         test_property_p2_matches_reference_rules,
         test_property_p3_number_shapes_never_error,
         test_property_p4_http_500_always_error,
