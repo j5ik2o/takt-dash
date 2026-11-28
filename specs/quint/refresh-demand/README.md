@@ -78,7 +78,7 @@ quint test refreshDemand_test.qnt --main=refreshDemand_test
 quint run refreshDemand.qnt --main=fixed --invariant=safety --max-steps=60 --max-samples=10000
 ```
 
-`--seed=0x40` で 10,000 サンプル・60 ステップで反例なし（すべての跡が 61 状態まで伸びました）。同じ条件で `--witnesses` に 19 の到達条件を渡すと、すべて到達しました（いちばん薄いのは `witnessRejectedStale` 253 件、`firedSend` 632 件）。
+`--seed=0x40` で 10,000 サンプル・60 ステップで反例なし（すべての跡が 61 状態まで伸びました）。seed を固定しない 200,000 サンプル × 5 回（合わせて 100 万本）でも反例なし。同じ条件で `--witnesses` に 19 の到達条件を渡すと、すべて到達しました（いちばん薄いのは `witnessRejectedStale` 253 件、`firedSend` 632 件）。
 
 変異は、不変条件を 1 つずつ渡すと次のものに違反します（`--max-steps=60 --max-samples=20000 --seed=0x40`）。
 

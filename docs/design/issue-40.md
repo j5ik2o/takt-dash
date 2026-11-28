@@ -21,7 +21,7 @@
 
 ### 大きさ
 
-**合わせて 17。8 を超えるので 4 本に分ける（5・5・5・2）。** 分け方と、それぞれが単独でマージできる理由は「分け方」の節にある。
+**合わせて 20。8 を超えるので 4 本に分ける（5・8・5・2）。** 分け方と、それぞれが単独でマージできる理由は「分け方」の節にある。PR 2 は 8（変えるファイルが 26 で #362 の 18 より多い）。8 を超えないので分けないが、レビューで小さくしたい場合の分け方も「分け方」に書いた。
 
 前の版の 13 から増えたのは、読み直しで足した次の作業のため：試行番号を Provider が持つ変更とその試験、寿命切れで送信タスクを閉じる経路と時計の注入、`applied` の再計算、既存テストの書き直し（一覧の 16 件）、e2e の口（`StartStackOptions.intervalSeconds`）と対象 spec の切り替え。
 
@@ -60,7 +60,7 @@
 | 2 | どのページでも、クリックや再読み込みなしで表示中の情報が選んだレートで更新される | SSE の画面（概要・判断待ち・ゴール・サイドバー・プロジェクト）は backend が接続ごとのレートで送る。ポーリングの画面（アクティビティ・run 詳細・タスク詳細・ゴール詳細・会話・run ログ）は選んだレートで BFF を読む。 | 1・2・3 |
 | 3 | ページ全体が再読み込みされない | SSE の受信ごとの `router.refresh()` をやめる。e2e で同じ document・入力値・スクロール位置を確かめる。 | 2 |
 | 4 | 1秒で takt の変化がおおむね1秒で現れる | backend に画面ごとの要求の登録簿 `RefreshDemand` を置き、poller はその最小値で読み、各接続は自分の間隔で送る。下限は `minReadIntervalMs`（既定 1000）。 | 1・3 |
-| 5 | `make done` が通る | 各 PR で `make done` を通す。proto の生成物は同じ PR でコミットする。PR 1 の受け入れに #130 の実測（1 秒と 30 秒、画面 1 枚と 3 枚）を入れる。 | 全部 |
+| 5 | `make done` が通る | 各 PR で `make done` を通す。proto の生成物は同じ PR でコミットする。#130 の実測を、その経路が入る PR ごとに受け入れに入れる（影響の「負荷」）。 | 全部 |
 
 ## 方針（決めたこと）
 
@@ -106,7 +106,7 @@ enum RefreshRate {
 
 - frontend は `make proto-gen` が作る `frontend/web/src/proto/taktdash.ts` の `RefreshRate` を使う。`make proto-check` が生成物の食い違いを落とすので、関門に乗る。`frontend/web` の外の JSON を import しないので、`next build` の解決（`outputFileTracingRoot`）にも関わらない。
   - **確かめた**：ts-proto（`frontend/web` の固定版）で上の enum を生成すると `export enum RefreshRate { REFRESH_RATE_UNSPECIFIED = 0, REFRESH_RATE_ONE_SECOND = 1000, …, REFRESH_RATE_TEN_SECONDS = 10000, UNRECOGNIZED = -1 }` になる（作業用の proto で生成して確認）。
-- backend は `backend/build.rs` の tonic-build がビルド時に生成する `RefreshRate` を使う。
+- backend は `backend/build.rs:32` の `tonic_prost_build::configure().compile_protos(...)` がビルド時に生成する `RefreshRate` を使う（確かめた）。
   - **仮定（PR 1 で確かめる）**：prost は前置きの `REFRESH_RATE_` を外して `RefreshRate::OneSecond` などの名前にする。
 - 画面の選択肢は `Object.values(RefreshRate)` のうち 0 より大きい数値（`UNSPECIFIED` と `UNRECOGNIZED` を除く）。文言は `ms / 1000` から `1秒` などを作る。数値を TypeScript に書き写さない。
 - backend が受けるのは enum の 5 つの値だけ。0 は要求なし、4 つの値は要求あり、それ以外（未知の enum 値）は `INVALID_ARGUMENT`。
@@ -191,6 +191,7 @@ enum RefreshRate {
 
 - `LiveProjects`・`LiveActivity`・`LiveRunDetail` は、`BackendUnavailableOver` を自分で描く。初期の失敗はローダーから props で受け、その後はポーリングの結果と `useLiveState()` の `disconnected` で変える。ローダーが外側に静的な通知を残すと、回復しても消えないため。
 - `useLiveState()` が Provider の外で例外を投げる今の守り（`state-provider.tsx:34-39`）は緩めない。本番ではいつも layout の Provider の中にあり、外で黙って既定値に落ちると配線の誤りが隠れるため。ローダーを単体で描いていたテストは、本番と同じく `RootLayout` の中で描く形に直す（既存テストの表）。
+- **仮定（PR 2 で確かめる）**：`await RootLayout({ children: await Loader(), params })` の要素を `renderToStaticMarkup` で描ける（今の `timing-wiring.test.ts` は `RootLayout` を呼ぶだけで描いていない）。描けない場合は、layout と同じ Provider（`StateStreamProvider` に `loadServerState()` の結果を渡す）で包むテスト用の関数を 1 つ置く。どちらでも本番の守りは緩めない。
 
 ### D15. run ログの読み位置は取り合わない
 
@@ -263,7 +264,7 @@ BFF
 
 この PR の後も画面は `refresh_ms` を付けないので、どの接続も要求なしで今と同じに動く。
 
-### PR 2：ページ単位の再取得をやめる（大きさ 5）
+### PR 2：ページ単位の再取得をやめる（大きさ 8）
 
 - `state-stream.ts`：`createStateHandlers` から `revalidate` を消す。
 - `state-provider.tsx`：`revalidate` prop と `useRouter`、`StateStreamProviderWithRefresh` を消す。`layout.tsx` は `StateStreamProvider` を直接使う。
@@ -297,6 +298,7 @@ BFF
 ### PR 4：e2e の既定を 30 秒にする（大きさ 2）
 
 - `e2e/support/stack.ts`：`StartStackOptions` に `intervalSeconds?: number`（既定 30）と `minReadIntervalMs?: number`（既定なし）を足し、`buildConfig` へ渡す。`stack.ts:308` の `intervalSeconds: 1` を `input.intervalSeconds` にする。
+- `startStack` を直接呼ぶ 5 本（`decisions-layout`・`issue-311-confirm-dialogs`・`issue-315-narrow`・`overview-responsive`・`screenshot-states`）は、新しい口を渡さず既定を使う。
 - `e2e/support/test.ts`：名前付きの stack（13・51・71・82 行の `twoProjectStack`・`longServerStack`・`longTitleStack`・`conversationStack`、103 行の `stack`、115 行の `isolatedStack`）は既定（30 秒）のまま。新しい fixture `fastPollIsolatedStack`（`startStack({ intervalSeconds: 1 })`）を足す。
 - 1 秒が要る spec を `fastPollIsolatedStack` へ移す（下の一覧）。
 - `issue-40-refresh-rate.spec.ts` に E18（既定 30 秒のまま、画面の 1 秒の要求で 3 秒以内に変化が出る）を足す。
@@ -364,7 +366,7 @@ BFF
 | E8 | run 詳細は `/api/runs/[slug]` だけを読む。ログを初期化しない。ポーリング中の 404 で止まる | 例 | `test/components/live-run-detail.test.ts`、`test/api/run-route.test.ts` | 2 |
 | E9 | 前回の完了から次まで。失敗の待ちの列（D11）。abort 後 0 回 | 例 | `test/components/polling.test.ts` | 3 |
 | E10 | `RefreshDemand`：最小値、置き換え、古い試行の拒否、解放、古い guard の解放が新しい要求を消さない、寿命切れ（注入した `Instant`）、下限 | 例 | `backend/tests/refresh_demand_test.rs` | 1 |
-| E11 | 1 秒の要求で、変化がなくても 1 秒ごとに送られ、`applied = 1000`。初期状態にも入る | 例（`tokio::time::pause`） | `backend/tests/watch_state_test.rs` | 1 |
+| E11 | 1 秒の要求で、変化がなくても 1 秒ごとに送られ、`applied = 1000`。初期状態にも入る | 例（同じプロセスで `service.watch_state` を呼び、`tokio::time::pause`。`watch_state_test.rs:300-330` と同じ形） | `backend/tests/watch_state_test.rs` | 1 |
 | E12 | 要求なし（`WatchStateRequest::default()`）は今のまま：変化ですぐ送り、15 秒の再送、`applied = 0` | 例 | 同 | 1 |
 | E13 | レートの選択が再読み込み後も残る | e2e | `e2e/tests/issue-40-refresh-rate.spec.ts` | 3 |
 | E14 | 全ページで、状態の変更が再読み込みなしで現れる（同じ document の印） | e2e | 同、既存の flow | 2・3 |
@@ -374,9 +376,14 @@ BFF
 | E18 | e2e の backend の既定 30 秒のまま、画面の 1 秒の要求で 3 秒以内に変化が出る | e2e | 同 | 4 |
 | E19 | hidden では取得せず、visible ですぐ取得する | 例（`visibilityState` を差し替え） | `test/components/page-visibility.test.ts` | 3 |
 | E20 | 通知：`applied` > 選択で「backend の下限」、要求したのに 0 で「対応していない」。初回の RSC の状態では出さない | 例 | `test/components/live-sidebar.test.ts` | 3 |
-| E21 | `applied` の真実性：`minReadIntervalMs = 3000` の設定で backend を起動し、1 秒を要求した接続の連続する送信の間隔が 3 秒で、各状態の `applied = 3000`。設定を書き換えて次の周期の後、`applied` と間隔が新しい値に変わる | 例（実 backend、`pause`） | `backend/tests/watch_state_test.rs` | 1 |
-| E22 | 寿命切れで送信タスクが閉じる：要求ありの接続でクライアントが読まない（ストリームを読まずに持ち続ける）と、列 1 件と h2 の窓が埋まり、3 × `applied` の後にストリームが終わり、登録が外れる | 例（`pause` と、読まない tonic クライアント） | 同 | 1 |
+| E21 | `applied` の真実性：`minReadIntervalMs = 3000` の設定で、1 秒を要求した接続の連続する送信の間隔が 3 秒で、各状態の `applied = 3000`。設定を書き換えて次の周期の後、`applied` と間隔が新しい値に変わる | 例（同じプロセスで Poller と `service.watch_state`、`pause`） | `backend/tests/watch_state_test.rs` | 1 |
+| E22 | 寿命切れで送信タスクが閉じる：要求ありの接続でストリームを読まずに持ち続けると、列 1 件が埋まって送信が待ちに入り、3 × `applied` の後にストリームが終わり、登録が外れる | 例（同じプロセスで `service.watch_state` を呼んで読まない。`watch_state_test.rs:300-330` の形。h2 の窓は通らないので、窓が埋まるまでの遅れは確かめない） | 同 | 1 |
 | E23 | `refresh_ms` の解析：無い・空は要求なし、4 つはそのまま、`999`・`10001`・`1e3`・負・文字は既定。ticket が無ければ要求なし。`screen`・`attempt` が渡る | 例 | `test/api/state-route.test.ts` | 1 |
+| E24 | poller の待ち：30 秒の待ちの途中で 1 秒の要求が来たら切り上げて読み、要求が消えたら 30 秒で待ち直す（`pollerNotLate` に対応） | 例（`pause`） | `backend/tests/poller_test.rs` | 1 |
+| E25 | 置き換え：同じ画面の次の試行が登録されたら、古いストリームが終わる（`guard.superseded()`）。古い試行が後から来たら `ABORTED` で終わり、登録は新しいまま | 例 | `backend/tests/watch_state_test.rs` | 1 |
+| E26 | 初期の組み立てが寿命より長くても（組み立てを止めて時刻を進める）、最初の送信の前に寿命は切れず、送った後に登録される（`noExpiryBeforeFirstSend`） | 例（`pause`） | 同 | 1 |
+| E27 | 設定の読み込みに失敗した周期は、前に読めた下限のままで、待ちは `effective` を通る（読み直しの ⑭） | 例 | `backend/tests/poller_test.rs` | 1 |
+| E28 | `minReadIntervalMs` の既定 1000、範囲 1000〜10000、外れは `ConfigError::Invalid`、例の設定を読める | 例 | `backend/tests/config_test.rs` | 1 |
 | P1 | `parseStoredRefreshRate` と `parseRefreshRateParam` はどんな入力でも例外を投げず、`RefreshRate` の値を返す | PBT | `test/state/refresh-rate.test.ts` | 1・3 |
 | P2 | 任意の acquire・drop・置き換え・時刻の列で、`effective` は D16 の式で、登録を置き換えるのは同じ画面のもっと新しい試行だけ、古い guard の drop は新しい登録を消さない、期限切れは数えない | PBT | `backend/tests/refresh_demand_test.rs` | 1 |
 | P3 | 任意の変化の到着と時刻の列で、`send_schedule` は間隔より速く送らず、最後の変化を落とさない | PBT | `backend/src/grpc` の `send_schedule` | 1 |
@@ -391,14 +398,14 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
 | # | 箇所 | どう扱うか |
 | --- | --- | --- |
 | 1 | TTL の「数倍」 | 3 倍に決めた（D7）。時刻を引数で受けるので E10・P2 で確かめる |
-| 2 | 寿命切れで送信タスクを閉じるか | E22 で、読まないクライアントで列と窓を埋めて確かめる。窓の大きさは tonic の既定に依存するので、テストは「閉じるまでの時間」ではなく「閉じる」と「登録が外れる」を見る |
+| 2 | 寿命切れで送信タスクを閉じるか | E22 で、同じプロセスの呼び出しを読まずに列を埋めて確かめる。h2 の窓が埋まるまでの遅れ（実際のネットワーク越し）はテストしない。窓は送信の待ちを遅らせるだけで、待ちに入った後の寿命切れの扱いは同じ |
 | 3 | `applied` の真実性 | E21（設定 → 実際の送信間隔 → `applied`）と E20（`applied` → 通知）。両者をつなぐのは `DashboardState` の値だけなので、間は型で保つ |
 | 4 | 15 秒と `applied` の矛盾 | 要求なしは 0 と決めて消えた（D6）。E12 |
 | 5 | frontend と Rust の定数の一致を 1 本で | 数値は proto だけに置き、両側は生成物を使う（D5）。`make proto-check` が生成物を守る。40 秒との関係だけは両側に 1 本ずつ（数値の置き場所） |
 | 6 | 正本 JSON の実行時の解決 | JSON をやめたので無くなった |
 | 7 | origin ごとの `localStorage` | Playwright の 1 つのコンテキストでは別 origin を作れない。単体テスト（E2）で「キーは origin に依存しない 1 つ」を確かめ、origin ごとに分かれるのはブラウザの仕様として扱う。e2e では同じ origin の再読み込み（E13）だけ |
 | 8 | hidden の実際の挙動（タイマーの抑制、EventSource の停止） | 単体テスト（E19）で `visibilitychange` への反応を確かめる。実ブラウザのタイマーの抑制はテストしない。抑制されても、visible に戻った時点で開き直してすぐ取得するので、遅れは戻った時点で消える |
-| 9 | 1 秒で 1 秒 | 約束を書き分けた（不変条件 9）。e2e は SSE の画面を 3 秒以内、ポーリングの画面は要求の間隔（E17）で見る。#130 の実測（PR 1）で LAN の値を記録する |
+| 9 | 1 秒で 1 秒 | 約束を書き分けた（不変条件 9）。e2e は SSE の画面を 3 秒以内、ポーリングの画面は要求の間隔（E17）で見る。#130 の実測（PR 1〜3）で LAN の値を記録する |
 | 10 | 試行番号の単調性 | D8 の決定と Quint（`latestNeverRejected`、`resetAttemptsRejectsLatestTest`）、E4、P6 |
 | 11 | 既存テストの更新 | 下の表 |
 
@@ -443,7 +450,8 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
 | `flow-7-delay-recovery.spec.ts` | ページを開いたまま遅延を入れる（要求あり） | 既定のまま。流して確かめる |
 | `issue-307-disconnected-decisions.spec.ts` | 切断中は SSE が無く要求も無い。回復の判定は画面の再接続に依存 | 既定のまま。流して確かめる（落ちたら `fastPollIsolatedStack`） |
 | `issue-383-half-open-sse.spec.ts`・`issue-385-abandoned-sse.spec.ts` | SSE の切断と再接続。要求ありの接続は 1 秒で送るので、無音の時間は今より短い | 既定のまま。流して確かめる |
-| ほかの 20 本 | ページを開いてから待つか、状態を変えない | 既定のまま |
+| `decisions-layout`・`issue-311-confirm-dialogs`・`issue-315-narrow`・`overview-responsive`・`screenshot-states` | `startStack` を直接呼ぶ。状態は `mockState` で起動前に置き、起動直後の 1 回目の読み取りで足りる | `startStack` の既定（30 秒）のまま。流して確かめる |
+| ほかの 16 本 | ページを開いてから待つか、状態を変えない | 既定のまま |
 
 - 流して落ちた spec は、機能の誤り（画面の要求で poller が速くならない）か、要求の無い間の読み取りに頼る spec かを分け、後者だけを `fastPollIsolatedStack` へ移し、理由をコメントに書く。
 
@@ -480,7 +488,10 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
   - `router.refresh()` をやめるので、SSE の受信ごとのページ全体の RSC 再取得（layout の `GetOverview` を含む）が無くなる。
   - poller は、どれかの画面が 1 秒を求めている間、全プロジェクトを 1 秒（または下限）で読む。読み取りの回数はタブの数によらず 1 つ。
   - タブの数だけ増えるもの（見えているタブ N 枚）：要求のある WatchState の組み立て（各タブに毎秒 1 回、ストアから）と SSE の送信、ポーリングの画面の BFF の要求（アクティビティは毎秒 `GetActivity` の 7 日分の集計、run 詳細は毎秒 `GetRunDetail` の組み立て）。N は端末ごとの見えているタブの数で、hidden は 0。
-  - #130 の実測を PR 1 の受け入れに入れる：実装の前後、1 秒と 30 秒、見えているタブ 1 枚と 3 枚、`GetActivity` と `GetRunDetail` の所要時間を含む。
+  - #130 の実測は、その経路が入る PR の受け入れに入れる。
+    - PR 1：poller の 1 秒と 30 秒（要求は `curl` などで `/api/state?refresh_ms=1000&screen=…&attempt=1` を開いて出す）。1 周期の時間と takt-mcp の呼び出し数。
+    - PR 2：`/api/activity` と `/api/runs/[slug]` の 1 秒のポーリング。`GetActivity` と `GetRunDetail` の所要時間、`router.refresh()` をやめる前後の RSC の要求数。
+    - PR 3：見えているタブ 1 枚と 3 枚で、WatchState の組み立ての回数と送信の大きさ。
 
 ## Quint
 
@@ -494,6 +505,27 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
 ### 確かめたこと（quint 0.32.0、`quint-modeling` の見直しの手順）
 
 `quint typecheck` は 2 ファイルともエラーなし。`quint test` は 17 件すべて成功。`bash scripts/quint-check-specs.sh` は全仕様で成功（終了コード 0）。そのうえで、Quint が通ったことだけを根拠にしないよう、次の 4 つを確かめた。
+
+#### 見直しの手順の報告（`quint-modeling` の review.md）
+
+```
+── Spec review: specs/quint/refresh-demand/refreshDemand.qnt ──
+Structural
+  guarded actions               ⚠ arrive と initialSend は登録するか・断るかの分岐を action の中に持つ
+                                  （register・isStale・dropGuard は pure def。分岐を別 action に分けると、
+                                  同じ状態から両方が選べてしまい、実装の 1 本の if と合わなくなるため残した）
+  enums over strings            ✓ Phase・CloseReason は和型
+  record grouping               ✓ Conn・Entry・Client・Fired
+  witnesses present & per-action✓ 13 の遷移すべてに firedX、意味のある到達 6
+  right abstraction             ✓ 識別子は整数、時刻は秒の整数、直列化・再試行の詳細なし
+  non-trivial invariants        ✓ 9 つとも var を参照し、どれも変異で違反する（(a)）
+Runtime
+  init assigns all vars         ✓
+  var assignment per action     ✓ どの action も全 var を代入する（typecheck と quint run が通る）
+  step exists & complete        ✓ 13 の action すべてが step の any に入る
+  invariants hold at init       ✓
+  no counterexample after acts  ✓ 反例なし（(d) の大きさで）
+```
 
 #### (a) 不変条件が恒真でない
 
@@ -570,6 +602,7 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
 #### (d) 検査の大きさと、それで見られないもの
 
 - 大きさ：画面 2、接続 6 本、時刻 200 秒まで、`tick` は 1・4・15 秒、レート 1・2・5・10 秒、下限 1・3・10 秒、`intervalSeconds` 30 秒。CI は `fixed` を 60 ステップ・10,000 サンプル（seed は毎回乱数）。変異は 60 ステップ・20,000 サンプル（`resetAttempts` だけ 100,000）。
+- `fixed` の `safety` は、seed 0x40 の 10,000 サンプルに加え、CI と同じく seed を固定しない 200,000 サンプル × 5 回（合わせて 100 万本、60 ステップ）で反例なし。CI の乱数の探索が無関係な PR を止める見込みは、この範囲では小さい。
 - 「反例が見つからなかった」のは、上の大きさでサンプルした跡の中だけ。「成り立つ」とは言えない。
 - 見られないもの：
   - 画面 3 つ以上、接続 7 本以上、200 秒より長い開きっぱなし、60 ステップより長い列。
@@ -600,14 +633,15 @@ Quint を書いて分かったことを、ほかの節へ戻した：
 
 | PR | 内容 | 大きさ | 単独でマージしたとき |
 | --- | --- | --- | --- |
-| 1 | proto（`RefreshRate`、要求と `applied`）と生成物、backend の `RefreshDemand`・`watch_state`・poller・config、BFF の `refresh_ms` の転送（`client.ts`・`route.ts`）、#130 の実測 | 5 | 画面はまだ `refresh_ms` を付けないので、すべての接続が要求なしで今と同じ。新しい経路は E10〜E12・E21〜E23 と BFF のテストで確かめる。選択の UI が無いので、嘘になる表示は無い |
-| 2 | `router.refresh()` の廃止、プロジェクト・アクティビティ・run 詳細の要素単位の更新、2 つの Route Handler、既存テストの書き直し、flow-9 | 5 | アクティビティと run 詳細はタスク詳細などと同じ固定 1 秒のポーリング、プロジェクトは SSE の状態。選択の UI はまだ無い。受け入れ条件 3 を満たす |
+| 1 | proto（`RefreshRate`、要求と `applied`）と生成物、backend の `RefreshDemand`・`watch_state`・poller・config、BFF の `refresh_ms` の転送（`client.ts`・`route.ts`）、poller の #130 の実測 | 5 | 画面はまだ `refresh_ms` を付けないので、すべての接続が要求なしで今と同じ。新しい経路は E10〜E12・E21〜E23 と BFF のテストで確かめる。選択の UI が無いので、嘘になる表示は無い |
+| 2 | `router.refresh()` の廃止、プロジェクト・アクティビティ・run 詳細の要素単位の更新、2 つの Route Handler、既存テストの書き直し、flow-9 | 8 | アクティビティと run 詳細はタスク詳細などと同じ固定 1 秒のポーリング、プロジェクトは SSE の状態。選択の UI はまだ無い。受け入れ条件 3 を満たす |
 | 3 | レートの選択・保存・復元、hidden の停止、試行番号（D8）、`applied` の通知、ポーリングのレート、requirements、e2e の新しい spec | 5 | PR 1 の backend が要求に従うので、SSE の画面も選んだレートで動く。e2e の backend は 1 秒のまま。受け入れ条件 1・2・4 を満たす |
 | 4 | e2e の既定 30 秒、`StartStackOptions.intervalSeconds`、1 秒が要る spec の切り替え、E18 | 2 | e2e だけ。受け入れ条件 4 を、本番と同じ既定の backend で確かめる |
 
 - 順序は 1 → 2 → 3 → 4。2 は 1 に依存しない（並べてもよい）。3 は 1 と 2 に依存する（`applied` の型、`LiveActivity`・`LiveRunDetail`）。
 - 前の版の分け方（A に UI、B に backend、C に通知と e2e）をやめた理由：A だけでは SSE の画面が選んだレートで動かず、選択の UI が嘘になる。C は B と A の型を参照し、単独で通らない。
-- 1 つの PR にまとめると 17 になるので、まとめない。
+- 1 つの PR にまとめると 20 になるので、まとめない。
+- PR 2 を小さくしたい場合は 2 本に分けられる。2a：アクティビティと run 詳細の要素単位の更新（Route Handler・`LiveActivity`・`LiveRunDetail`・復元・そのローダーと既存テスト・flow-9。`router.refresh()` は残すが、Live の部品は初期値しか props から読まないので、再取得されても表示は二重にならない）、大きさ 5。2b：`router.refresh()` の廃止と `LiveProjects`・残りの既存テスト、大きさ 3。2a を先に入れれば、どちらの時点でもアクティビティと run 詳細は止まらない。
 
 ## 決まっていない点
 
