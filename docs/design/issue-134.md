@@ -1,6 +1,15 @@
 # issue #134 の設計：未解決コメント関門の承認判定を厳しくする
 
-対象：[j5ik2o/takt-dash#134](https://github.com/j5ik2o/takt-dash/issues/134)。実装は j5ik2o/ci の `review-thread-resolution`（再利用ワークフローと `scripts/review-thread-resolution.sh`）になる見込みである。この文書は設計の下書きで、takt-dash と j5ik2o/ci のどちらも変更しない。日付は 2026-11-27。
+対象：[j5ik2o/takt-dash#134](https://github.com/j5ik2o/takt-dash/issues/134)。実装は j5ik2o/ci の `review-thread-resolution`（再利用ワークフローと `scripts/review-thread-resolution.sh`）になる見込みである。この文書は設計の下書きで、takt-dash の実装と j5ik2o/ci のどちらも変更しない（takt-dash には Quint のモデル `specs/quint/review-thread-ack/` だけを置く）。日付は 2026-11-27。2026-11-28 の点検で見つかった穴 3 件（[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)、[#443](https://github.com/j5ik2o/takt-dash/issues/443)、[j5ik2o/ci#45](https://github.com/j5ik2o/ci/issues/45)）を反映した。
+
+## 何に触れるか
+
+| 対象 | 触れるか | 中身 |
+| --- | --- | --- |
+| 公開 API | 触れない | takt-dash の API は変えない。j5ik2o/ci の再利用ワークフローの inputs も変えない（新しいタグ `v2` を足すだけ）。 |
+| 保存データ | 触れない | 判定は取得済みのコメントだけで完結し、何も保存しない。 |
+| 秘密 | 触れない | 使うトークンと権限は v1 と同じ。 |
+| 守りの仕組み | **触れる** | 22 リポジトリで必須チェックの `Check unresolved comments` の判定を厳しくする。誤ると、緑にしてはいけない PR がマージできる（偽の緑）か、正当な PR が止まる（偽の赤）。 |
 
 ## いまの状態（実測つき）
 
@@ -71,13 +80,65 @@ open PR 15 件のコメントとレビューを取得し、v1 の判定とこの
 2. `a` は承認できる人による。作成者（`pr_author`）、または Codex の確認コメント、または作成者が Bot のときの OWNER / MEMBER / COLLABORATOR。**作成者以外の第三者のコメントは承認に数えない**（いまも数えていない）。
 3. `a` は自動報告ではない。自動報告は判定の前に候補から外す（「判定の順序」）。自動報告かどうかは文面の語句ではなく、**著者が作成者で本文がフェンスだけ**（散文が無い）であること、または**著者が作成者で、フェンスの外に `<!-- takt:auto-report -->` を持つ**ことで決める。散文がある投稿（`対応しました\n```\n…引用…\n``` ` や、マーカー付きの報告を引用した確認）は自動報告にしない。確認の語や 20 文字以上の引用を含んでいても、自動報告なら承認にしない。**いまは作成者名義の自動投稿が承認として通るので、ここを塞ぐ。**
 4. `a` は**確認の語**を含む。`確認しました` / `確認いたしました` / `確認済み` / `承知しました` / `了解しました` / `対応しました` / `対応いたしました` / `対応済み` / `対処しました` / `修正しました` / `直しました` / `acknowledged` / `addressed` / `fixed`（英語は単語境界、大小文字を問わない）。ただし、確認の語の**直前**に否定の語（`未`、`まだ`、`未だに`、`not`、`not yet`、`un-`）が付く場合と、直後が疑問（`か` のあとに `?`・`？`・`。` が続く場合、または文末の `か`）の場合は数えない。`未確認しました`、`確認しましたか？`、`未対応済み`、`not fixed` は承認にならない。`対処しました`、`直しました`、`対応いたしました`、`確認いたしました` は v1 が受けていた正当な語なので一覧に残す。コードフェンス（バッククォート 3 つ、またはチルダ 3 つで囲んだ部分）の中の語は数えない。
-5. `a` は**対象を指す参照**を含む。次のいずれか。
-   - 対象の URL（`https://github.com/o/r/pull/N#issuecomment-123` や `#pullrequestreview-4`）そのもの、またはそのアンカー（`#issuecomment-123` / `#pullrequestreview-4`）。**URL とアンカーは本文の長さを問わず、そのまま承認に使える。**
-   - 対象本文の正規化後の連続部分で **20 文字以上**。引用符の有無は問わず、**コードフェンスで囲んだ引用も対象にする**（人が対象を引用するときにフェンスを使うのは自然なので、フェンス内の本文も照合する）。実装は、`a` の正規化後の 20 文字の窓をすべて取り、`c` の正規化後の本文に含まれる窓が 1 つでもあれば一致とする。**20 文字の下限は、この本文の引用のときにだけ掛かる。**
+5. `a` は**対象を一意に指す値**を、完全な形で含む。次のいずれか。
+   - **対象のコメントの id**。対象の URL（`https://github.com/o/r/pull/N#issuecomment-123` や `…#pullrequestreview-4`）の全体、またはそのアンカー（`#issuecomment-123` / `#pullrequestreview-4`）。アンカーの直後に数字が続く場合は一致としない（`#issuecomment-10` は `#issuecomment-101` に当たらない）。URL の全体はアンカーを含むので、照合はアンカーで足りる。**id は本文の長さを問わず、そのまま承認に使える。**
+   - **対象だけが持つ本文の断片**。URL を両方の本文から外して正規化したあとの、連続する **20 文字以上**の部分で、対象の本文にあり、**この PR のほかの項目のどれにも無い**もの。引用符の有無は問わず、**コードフェンスで囲んだ引用も対象にする**（人が対象を引用するときにフェンスを使うのは自然なので、フェンス内の本文も照合する）。実装は、`a` の 20 文字の窓をすべて取り、対象の本文に含まれ、ほかの項目の本文に含まれない窓が 1 つでもあれば一致とする。**20 文字の下限は、この断片のときにだけ掛かる。**
 
-正規化は、HTML コメント（`<!--` から `-->` まで。途中に `>` があってもそこで切らない）と HTML タグを空白にし、行頭の `>` を外し、Markdown の強調・見出し・表の記号（`*`、`_`、バッククォート、`#`、`>`、`|`）を空白にし、空白を 1 つに畳んで前後を除き、ASCII を小文字にする。コードフェンス（バッククォート 3 つ、またはチルダ 3 つ）は残す（コードの引用は正当な参照なので消さない）。確認の語の判定だけは、先に両方のフェンスを空白にする。つまり、**引用の照合はフェンス内の本文を対象にし、フェンスを外すのは確認の語の判定だけ**である。**URL とアンカーはこの正規化を通さない。** `#` を空白に落とす正規化を通すと、`#issuecomment-123` が本文側で消えて一致しなくなるため、正規化前の本文（大小文字だけ揃えたもの）に対して照合する。
+正規化は、HTML コメント（`<!--` から `-->` まで。途中に `>` があってもそこで切らない）と HTML タグを空白にし、行頭の `>` を外し、Markdown の強調・見出し・表の記号（`*`、`_`、バッククォート、`#`、`>`、`|`）を空白にし、空白を 1 つに畳んで前後を除き、ASCII を小文字にする。コードフェンス（バッククォート 3 つ、またはチルダ 3 つ）は残す（コードの引用は正当な参照なので消さない）。確認の語の判定だけは、先に両方のフェンスを空白にする。つまり、**引用の照合はフェンス内の本文を対象にし、フェンスを外すのは確認の語の判定だけ**である。**id はこの正規化を通さない。** `#` を空白に落とす正規化を通すと、`#issuecomment-123` が本文側で消えて一致しなくなるため、正規化前の本文（大小文字だけ揃えたもの）に対して照合する。
 
-補足すると、この条件は「明示の印」と「対象への参照」の連言である。参照だけでは #131 の失敗報告が通り、確認の語だけでは対象を指せない（後述）。20 文字は、実測で観測した最短の正当な引用（`Action not completed` の 20 文字）に合わせた。これより短いと、一般的な語が偶然一致しやすくなる。URL・アンカーにはこの下限がないので、対象本文が 20 文字未満でも、URL かアンカーを貼れば承認できる。
+**断片の照合の前に、URL を両方の本文から外す**（[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)）。外すのは `https?://` から空白・`)`・`>`・`]` の手前までと、scheme の無い `ホスト名/パス`（`github.com/j5ik2o/ci` の形）である。URL は id の照合にだけ使う。外さないと、`https://github.com/j`（ちょうど 20 文字）のような**どの URL にも共通の頭**が窓として一致し、作成者が別件の URL を貼って「確認しました」と書くだけで、リポジトリへのリンクを含む項目（Codex の要約など）がすべて承認になる。ci#43 の 442d679 で実際に起きた（項目に `…/g2g/blob/abc123/src/retry.rs#L10`、確認に `別件の https://github.com/j5ik2o/ci/pull/43 を確認しました` で `got 0 / success`）。項目の URL の中のパス（`src/retry.rs#L10`）も照合に使えなくなるので、その項目を指すには項目の URL を貼るか、URL の外の文を引用する。
+
+**ほかの項目にもある断片は使わない**（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）。Codex の要約の見出しや利用上限の通知のような定型文は、同じ PR の複数の項目に現れる。その引用はどの項目を指すかが定まらないので、1 つの確認で別の項目まで承認しないよう、どの項目の承認にも使わない。同じ文の項目が複数あるときは、それぞれの URL（アンカー）を貼る。「ほかの項目」は、自動報告を外した候補のうち項目（`is_item`）であるもので、承認済みかどうかは問わない（判定が承認の順に依存しないため。I5）。
+
+補足すると、この条件は「明示の印」と「対象を一意に指す値」の連言である。参照だけでは #131 の失敗報告が通り、確認の語だけでは対象を指せない（後述）。20 文字は、実測で観測した最短の正当な引用（`Action not completed` の 20 文字）に合わせた。これより短いと、一般的な語が偶然一致しやすくなる。id にはこの下限がないので、対象本文が 20 文字未満でも、URL かアンカーを貼れば承認できる。
+
+### 一意に指す値として何を使うか
+
+項目（トップレベルコメントとレビュー要約）を一意に指す値の候補を比べた。
+
+| 候補 | 一意か | 作成者が書けるか | 採否 |
+| --- | --- | --- | --- |
+| コメントの URL の全体 | 一意（アンカーに id を含む） | 関門の要約がそのまま出すので、貼るだけ | **採る**（照合はアンカーで足りる） |
+| アンカー（`#issuecomment-N` / `#pullrequestreview-N`） | 一意（N は GitHub の databaseId で、種別ごとに GitHub 全体で一意。PR を書かなくても別の PR と取り違えない） | URL の末尾を写すだけ | **採る** |
+| 項目だけが持つ 20 文字以上の断片（URL を除く） | この PR の項目の中で一意 | 引用するだけ。いまの確認の大半がこの形（下の実測） | **採る**（ほかの項目にある断片と URL は使わない） |
+| 20 文字の窓（URL の頭や定型文を含む。ci#43） | 一意でない | — | 採らない（ci#44 と #443 の穴） |
+| スレッドの id | — | — | 対象外。レビューのスレッドは解決（resolve）で外れ、承認の判定の対象ではない |
+| GraphQL の node id（`IC_kwDO…`） | 一意 | 画面に出ず、人が書けない | 採らない |
+| PR 番号と項目の順番（「#431 の項目 2」） | 一意でない | 書けるが、項目の順番はコメントが増えると変わる | 採らない |
+| 接頭辞の無い databaseId（`comment6767269753`、`レビュー 5841855907`） | 数字だけでは run id や SHA の数字部分と区別できない | 実際に書かれている（event-store-adapter-kotlin#906） | 採らない。アンカーの形にしてもらう |
+
+id（URL・アンカー）を第一の手段にする。引用を残すのは、いまの確認の大半が引用だけで書かれているためである（下の実測）。引用をやめて id だけにすると、#131 の実際の確認（02:49:20）と event-store-adapter-java#871 の確認がどちらも赤になり、「採らなかった案」の「URL だけ」と同じ移行の負担が出る。断片を「その項目だけが持つもの」に限れば、断片も PR の中で項目を一意に指す値になり、完全一致（部分文字列としての一致）で照合できる。
+
+作成者が書く確認の文の形（例）。
+
+```text
+# 推奨：URL（またはアンカー）を貼る。本文の長さ、定型文の有無を問わない。
+https://github.com/j5ik2o/takt-dash/pull/131#issuecomment-6905873562 を確認しました。
+
+# 複数の項目を 1 つのコメントで承認する。項目ごとに URL を並べる。
+次の 2 件を確認しました。
+- #issuecomment-6905873562
+- #pullrequestreview-5841855907
+
+# 引用：その項目だけが持つ 20 文字以上の文を引用する（URL の外の文）。
+Codex の「You have reached your Codex usage limits for code reviews.」を確認しました。
+
+# 承認にならない例
+別件の https://github.com/j5ik2o/ci/pull/43 を確認しました。      # 対象の id でも、対象の文でもない
+「Codex Review: Here are some automated review suggestions」を確認しました。  # 同じ見出しの要約が 2 つあるとき
+```
+
+利用者の確認の書き方（2026-11-28 時点、各リポジトリの直近 15 PR の、作成者名義で確認の語を含むコメント）。
+
+| リポジトリ | 確認 | アンカーを含む | URL を含みアンカーは無い |
+| --- | --- | --- | --- |
+| takt-dash | 6 | 0 | 0 |
+| pekko-persistence-dynamodb | 2 | 0 | 1（#1040。run の URL） |
+| event-store-adapter-kotlin | 6 | 1 | 2（#906。compare の URL と、接頭辞の無い id） |
+| dotfiles | 3 | 0 | 0 |
+| modern-ddd-book | 0 | 0 | 0 |
+
+17 件のうちアンカーを含むのは 1 件だけで、13 件は URL も含まない（引用か、項目を指さない記録。どちらかはこの集計では分けていない）。いまの v1 は内容を見ないので、どれも緑のままである。v2 では、引用の確認はその文が項目に固有なら通り続ける。URL を含みアンカーの無い 3 件は、ci#43 の規則なら URL の頭で通りえた形で、この設計では URL の外の引用か、項目のアンカーが要る。どれもタグを切る前の比較（「移行の順」2）で、承認の経路まで分けて確かめる。
 
 ### 判定の順序（自動報告を先に外す）
 
@@ -160,11 +221,29 @@ def norm_text($body):
 def raw_body:
   (.body // "") | ascii_downcase;
 
+# URL は id の照合にだけ使う。断片の照合の前に両方の本文から外す（ci#44）。
+# 外さないと `https://github.com/j` のような URL の共通の頭が 20 文字の窓として当たる。
+def strip_urls($body):
+  ($body // "")
+  | gsub("(?i)https?://[^\\s)>\\]]+"; " ")
+  | gsub("(?i)(?<pre>^|[^a-z0-9_./-])(?:[a-z0-9-]+\\.)+[a-z]{2,}/[^\\s)>\\]]*"; "\(.pre) ");
+
+def quote_text($c):
+  norm_text(strip_urls($c.body));
+
 def windows($n):
   . as $s | [range(0; (($s | length) - $n + 1)) as $i | $s[$i:$i + $n]];
 
 def anchor($u):
   ($u // "" | split("#") | if length > 1 then "#" + .[-1] else "" end);
+
+# id の完全一致。直後に数字が続く一致は数えない（#issuecomment-10 は #issuecomment-101 に当たらない）。
+def id_match($raw; $needle):
+  $needle != ""
+  and any(($raw | indices($needle))[];
+          . as $i
+          | (($raw[$i + ($needle | length):$i + ($needle | length) + 1] // "")
+             | test("^[0-9]$") | not));
 
 def report_author_login:
   (.author.login // "") | sub("\\[bot\\]$"; "");
@@ -224,14 +303,18 @@ def is_auto_report:
 def trusted_acknowledgement:
   report_author_login == "chatgpt-codex-connector" and ack_at_start;
 
-def references($target; $ack):
-  norm_text($target.body) as $tb
-  | norm_text($ack.body) as $b
+# 対象を一意に指す値の完全一致。
+# - 対象の id（アンカー）。URL の全体はアンカーを含むので、アンカーの照合で足りる。
+# - 対象だけが持つ 20 文字の断片。URL を外した本文で、$others（対象以外の項目の quote_text）の
+#   どれにも無い窓だけを数える（#443。定型文で別の項目まで承認しない）。
+def references($target; $ack; $others):
+  quote_text($target) as $tb
+  | quote_text($ack) as $b
   | ($ack | raw_body) as $raw
-  | (($target.url // "") as $u
-     | ($u != "" and ($raw | contains($u | ascii_downcase)))
-       or (anchor($u) as $an | $an != "" and ($raw | contains($an | ascii_downcase)))
-       or ($b | any(windows(20)[]; . as $w | $tb | contains($w))));
+  | id_match($raw; (anchor($target.url) | ascii_downcase))
+    or ($b | any(windows(20)[]; . as $w
+          | ($tb | contains($w))
+            and all($others[]; contains($w) | not)));
 
 def is_item:
   (trusted_acknowledgement | not)
@@ -262,17 +345,23 @@ def is_acknowledger:
 $items as $all
 | ($all | map(select(is_auto_report))) as $reports
 | ($all - $reports) as $candidates
-| [ $candidates[]
-    | select(is_item)
-    | . as $item
+| ($candidates | map(select(is_item))) as $its
+| [ $its
+    | to_entries[]
+    | .key as $k
+    | .value as $item
+    | [ $its | to_entries[] | select(.key != $k) | quote_text(.value) ] as $others
     | [ $candidates[]
         | select(is_acknowledger)
         | select(.createdAt > ($item.updatedAt // $item.createdAt))
-        | select(ack_phrase and references($item; .))
+        | select(ack_phrase and references($item; .; $others))
       ] as $acks
     | select($acks | length == 0)
+    | $item
   ]
 ````
+
+「ほかの項目」は位置（`key`）で分けるので、本文が同じ 2 つの項目（同じ利用上限の通知が 2 回など）は、互いの断片を「ほかの項目にある」とみなし、引用ではどちらも承認できない。それぞれの URL を貼る。
 
 `is_item` と `is_acknowledger` は v1 の `select` を分けただけである（自動報告の除外は `is_item` の中ではなく、その手前の `$candidates` で済ませる）。この順序なので、自動報告に対して `ack_phrase` は評価されない。また、**項目選別の中では `trusted_acknowledgement`（文頭一致）だけを見る**。`ack_phrase`（本文のどこかの確認の語）は承認の判定で評価する。`trusted_acknowledgement` は v1 と同じく `^\s*` の文頭一致で、**本文の途中に `fixed` があっても承知にしない**（v1 で赤だった Codex の要約を、項目から消して緑にしない）。`trusted_acknowledgement` は「Codex のコメントを項目から外す」ためと、Codex を承認の候補にするために使い、**ほかの項目の承認としては、上の 4 と 5 を満たすときだけ**数える。これで「Codex の 1 つの `Acknowledged.` が全項目を承認する」穴も塞がる。語彙は **v1 と同じ狭い一覧**（`acknowledged` / `addressed` / `確認しました` / `承知しました` / `了解しました` / `対応済み` / `対応しました` / `対処しました`）だけを使う。4 回目に広げた `Fixed`・`確認済み`・`修正しました`・`直しました`・`確認いたしました`・`対応いたしました` は、**著者自身の確認（条件 4）の `ack_words` にだけ**使い、Codex の承知には使わない。これで Codex の要約が `Fixed …` や `確認済みです。ただし…` で始まっても項目から消えず、v1 と同じ赤になる。文頭に来たときだけ承知なので、`確認しました` が文頭にあれば項目から外れ、本文の途中なら項目として残る。`is_auto_report` は v1 の `ignored_auto_report` に TAKT の種別判定を足しただけなので、Codex の明示の確認は自動報告に落ちない。
 
@@ -286,6 +375,8 @@ $items as $all
   確認するには、返信にこの URL を含めるか、本文を 20 文字以上引用し、
   「確認しました」などの語を添えてください（URL は長さを問いません）。
   引用はコードフェンスで囲んでもかまいません。
+  ほかの項目にもある文（定型文）と、URL の一部は引用として数えません。
+  同じ文の項目が複数あるときは、それぞれの URL を貼ってください。
 
 自動投稿（TAKT の失敗報告など）は確認として数えません。
 ```
@@ -306,7 +397,9 @@ URL をそのまま貼れるので、人が迷わない。TAKT の失敗報告�
 | --- | --- |
 | 参照だけ（URL か引用があれば承認） | **#131 の失敗報告がそのまま通る。** 失敗報告は「You have reached your Codex usage limits for code reviews.」を本文に引用しており、参照だけの判定では 02:46:31 の時点で緑になる（手元の jq で、02:49:20 の実際の確認を除いても緑になることを確認）。#134 の事象を直せない。 |
 | 確認の語だけ（対象を指さなくてよい） | どの項目への確認か分からない。「確認しました」は別件にも書けるし、自動投稿にも入れられる。項目が複数あるとき、1 つの確認で全部が通る。 |
-| URL だけ（引用を認めない） | #131 の実際の確認は URL を含まず、引用と「確認しました」だけだった。いまの緑を赤に戻す。運用も「必ず URL を貼る」に変わり、移行の負担が大きい。 |
+| URL だけ（引用を認めない） | #131 の実際の確認は URL を含まず、引用と「確認しました」だけだった。いまの緑を赤に戻す。運用も「必ず URL を貼る」に変わり、移行の負担が大きい（実測では、直近の確認 17 件のうちアンカーを含むのは 1 件）。代わりに、引用はその項目だけが持つ断片に限る（「一意に指す値として何を使うか」）。 |
+| 20 文字の窓をそのまま使う（ci#43 の 442d679） | 窓が URL の共通の頭（`https://github.com/j`）や、複数の項目に共通の定型文に当たる。別件の URL を貼った「確認しました」で全項目が承認になる（[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)）。1 つの項目を指した引用で、同じ定型文を持つ別の項目も承認になる（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）。 |
+| 窓を長くする（30 文字、40 文字） | URL の頭（scheme・ホスト・owner・repo）は 30 文字を超える（`https://github.com/j5ik2o/takt-dash/` で 36 文字）。定型文はもっと長い。長さでは「一意に指す」を保証できず、正当な短い引用（`Action not completed`）だけが落ちる。 |
 | スレッド返信があること | 対象はトップレベルの issue コメントとレビュー本文で、これらにスレッドは無い（レビューのスレッドは別の `reviewThreads` で、未解決ならすでに赤）。スレッド返信は解決（resolve）を意味しないので、承認の代わりにもならない。 |
 | 作成者のコメントを一切承認に数えない | Bot の要約や通知は解決（resolve）できないため、正当に確認しても永久に赤になる。除外リストを編集するしか解消手段が無くなる。 |
 | 自動投稿の文面パターンに TAKT の失敗報告を足す | 文面が変わると壊れる許可リストで、「内容によらず数えない」という要求に答えていない。リポジトリごとに TAKT の文面が違い、j5ik2o/ci の既定に入れると他リポジトリに副作用が出る。種別（フェンスだけの本文・フェンスの外のマーカー）で外すのが本設計である。 |
@@ -335,11 +428,21 @@ v1 を直さない理由は、22 のすべてが `Check unresolved comments` を
 - 直すときは `v2.1` を切る（`v2` は残す）。影響するリポジトリだけ `uses` と `ci_ref` を `v2.1` に上げる（2 行は同じ PR で変える）。
 - `v1` は削除しない。SHA 固定の逃げ道として `2ead62a` を README に書く。
 
+### タグを切る条件
+
+`v2` は、点検で見つかった次の 3 件が直るまで切らない。どれも、切ったあとに見つかると `v2.1` を切って全リポジトリを上げ直すことになる。
+
+- [j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)：断片の照合が URL の共通の頭に当たる。この設計の条件 5（URL を外す、ほかの項目にある断片を使わない）を実装し、スモークテストの反例（いまは `got 0 / success`）が赤になること。
+- [#443](https://github.com/j5ik2o/takt-dash/issues/443)：Quint のモデルが承認の判定を計算していない。`specs/quint/review-thread-ack/` で直した（「Quint の要否」）。takt-dash の main に入ること。
+- [j5ik2o/ci#45](https://github.com/j5ik2o/ci/issues/45)：スモーク 18a が #131 の実物の形（本文全体が ```text のフェンス）でない。テストの観点 18 の形の固定例が入ること。
+
+**新旧の比較（「移行の順」2）で差が 0 件でも、ci#44 の穴は見つからない。** v1 は対象より後ろの作成者のコメントを内容によらず承認にするので、ci#43 の規則が URL の頭で承認する項目は、v1 でも必ず承認になる。新旧がどちらも緑の偽の緑は、差には出ない（旧の判定に、内容で承認を決める経路が無い）。偽の緑は、新しい判定だけを見て、各項目が**どの経路で承認されたか**を確かめないと見つからない。2026-11-27 の「差 0 件」もこの穴を見ていない。
+
 ### 移行の順
 
-1. **j5ik2o/ci の main に実装を入れる。** スクリプト、スモークテスト、README の例。`ci_ref` の既定は **v1 のまま**にし、v2 は明示されたときだけ使う。`quint` はこのリポジトリの対象外なので、モデルは takt-dash 側の設計に置く。
-2. **タグを切る前に、open PR の新旧比較を回す。** 22 リポジトリの open PR について、v1 の判定と提案の判定を並べ、差が 0 件であることを確認する（この文書の実測と同じ手順）。差があれば、その PR のコメントを読んで、引用の長さ・URL・確認の語のどれで落ちたかを分類し、誤って赤にしない条件を直してからタグを切る。
-3. **`v2` を切る。** `git tag -a v2 -m "review-thread-resolution: require an explicit acknowledgement" <main のコミット>`、`git push origin v2`。`uses: ...@v2` が解決できることを、砂場の 1 本で確かめる。
+1. **j5ik2o/ci の main に実装を入れる。** スクリプト、スモークテスト、README の例。`ci_ref` の既定は **v1 のまま**にし、v2 は明示されたときだけ使う。`quint` はこのリポジトリの対象外なので、モデルは takt-dash の `specs/quint/review-thread-ack/` に置く。
+2. **タグを切る前に、open PR の新旧比較を回す。** 22 リポジトリの open PR について、v1 の判定と提案の判定を並べ、差が 0 件であることを確認する（この文書の実測と同じ手順）。差があれば、その PR のコメントを読んで、引用の長さ・URL・確認の語・ほかの項目との共通の断片のどれで落ちたかを分類し、誤って赤にしない条件を直してからタグを切る。**あわせて、新しい判定で承認になった項目ごとに、承認した確認と経路（id か、断片か。断片ならその 20 文字）を出し、その確認が本当にその項目を指しているかを読む。** 差の 0 件だけでは偽の緑が見えないため（「タグを切る条件」）。URL を含みアンカーの無い確認（pekko-persistence-dynamodb#1040、event-store-adapter-kotlin#906 の形）は、とくに読む。
+3. **`v2` を切る。** 「タグを切る条件」の 3 件が直っていることを確かめてから切る。 `git tag -a v2 -m "review-thread-resolution: require an explicit acknowledgement" <main のコミット>`、`git push origin v2`。`uses: ...@v2` が解決できることを、砂場の 1 本で確かめる。
 4. **ci-gate-sandbox を v2 に上げる。** すでに機能ブランチを指している砂場で、無関係コメント・URL・引用・失敗報告の 4 例を実際の PR で流す。
 5. **takt-dash を v2 に上げる。** #134 の出所であり、TAKT の自動 PR が最も多い。先に TAKT が失敗報告へ `<!-- takt:auto-report -->` を付ける変更を入れる（散文を足す形に備える）。印を付ける変更が nrslib/takt に当たる場合は、着手前に元帥へ上げる。付け忘れても、本文がコードフェンスだけなら種別で外れる。1 週間（日次の schedule を 1 回以上含む）観察する。赤になった PR があれば、その理由が「本当に未承認」か「誤って赤」かを分類する。
 6. **自動化の多い 1 リポジトリ（cqrs-es-example-java）を上げる。** 3 日観察する。
@@ -371,7 +474,7 @@ ci_ref: v2
 
 ## テストの観点
 
-`tests/review-thread-resolution-smoke.sh` の偽 `gh` を広げ、コメントの配列（作成者・本文・`createdAt`・`updatedAt`）を環境変数で差し替えられるようにする。既存の検査はそのまま残す。足す観点は次の 22 である。
+`tests/review-thread-resolution-smoke.sh` の偽 `gh` を広げ、コメントの配列（作成者・本文・`createdAt`・`updatedAt`）を環境変数で差し替えられるようにする。既存の検査はそのまま残す。足す観点は次の 24 である。
 
 1. 無関係な作成者コメント（「ありがとう」「別件です」）では通らない（#134 の核心）。
 2. 本文全体がコードフェンスの失敗報告（対象の引用だけを本文全体のフェンスに入れ、フェンスの外に散文が無い）では通らない。この投稿は**項目にも承認にもならない**（報告自体は項目から消える。対象の未承認項目が別に残っていれば赤のまま、残っていなければ緑）。散文を伴う形（フェンスの外に「対応しました」を足したもの）は自動報告にせず、5 と 16(c) のとおり承認として通ることも固定する。
@@ -380,7 +483,7 @@ ci_ref: v2
 5. 対象本文の 20 文字以上の引用と確認の語で通る（`Action not completed` の実例）。引用をコードフェンスで囲んだ `確認しました\n```\nAction not completed\n``` ` でも通る（フェンス内の本文を照合する）。
 6. 確認の語だけで、参照が無ければ通らない。
 7. 参照だけで、確認の語が無ければ通らない。
-8. 別のコメントの URL では通らない（対象の URL / アンカーだけ）。
+8. 対象を指さない URL では通らない（[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)）。(a) 別のコメントの URL・アンカーでは通らない（対象の id だけ）。`#issuecomment-10` の項目は `#issuecomment-101` を含む確認では通らない。(b) **URL の頭だけの一致では通らない。** 項目の本文が `https://github.com/j5ik2o/g2g/blob/abc123/src/retry.rs#L10` を含み、確認が `別件の https://github.com/j5ik2o/ci/pull/43 を確認しました` のとき、項目は未承認のまま（赤）。ci#43 の 442d679 ではこの例が `got 0 / success` になる（red として残す）。(c) scheme の無い `別件の github.com/j5ik2o/ci を確認しました` でも通らない。(d) 項目の URL の中のパスだけを写した確認（`src/retry.rs#L10 を確認しました`）は、URL を外した本文に一致しないので通らない（項目の URL を貼るか、URL の外の文を引用する）。
 9. 対象より前に投稿された確認では通らない。
 10. 対象の最終編集より前の確認では通らない。編集後に確認し直すと通る。
 11. コードフェンス（3 つのバッククォート）の中の確認の語は数えない（`unacknowledged` のような部分一致もしない）。
@@ -390,13 +493,24 @@ ci_ref: v2
 15. v1 が受けていた `対処しました` / `直しました` / `対応いたしました` / `確認いたしました` で通る（正当な緑を赤にしない）。
 16. 自動報告の除外を、項目と承認の両方で確かめる。(a) 著者が作成者の `<!-- takt:auto-report -->` 付き散文報告（+ 確認の語 + 20 文字以上の引用）は、フェンスの外のマーカーがあるので項目にも承認にもならない。(b) 第三者が付けた同じマーカーは承認にならず（他人のマーカーで緑にできない。著者が作成者のときだけマーカーを種別と認める）、自動報告にもせず**未承認の項目として残る**。(c) 作成者名義の `対応しました\n```\n…対象の引用…\n``` ` は、散文があるので自動報告にせず、フェンス内の引用とフェンス外の確認の語で**承認として通る**（赤にしない）。(d) マーカー付きの報告をフェンスで引用した確認は、マーカーがフェンスの中なので自動報告にならず、承認として通る。
 17. 作成者以外の第三者の確認は数えない。作成者が Bot の PR では、OWNER / MEMBER / COLLABORATOR の人間の確認だけ数える。
-18. #131 の実データをそのまま固定し、02:49:20 を含むと通り、02:48 までだと通らない（失敗報告だけでは通らない）。
+18. #131 の実データをそのまま固定し、02:49:20 を含むと通り、02:48 までだと通らない（失敗報告だけでは通らない）。失敗報告（02:46:31、[#issuecomment-6905873562](https://github.com/j5ik2o/takt-dash/pull/131#issuecomment-6905873562)）は**実物の形**で置く（[j5ik2o/ci#45](https://github.com/j5ik2o/ci/issues/45)）。実物は、本文全体が情報文字列 `text` 付きのフェンスで、フェンスの外に散文が 1 文字も無い。中に未承認の項目の引用（`『You have reached your Codex usage limits for code reviews.』`）、`acknowledge` の語（`未acknowledge`、`acknowledgeすること`）、URL（`https://github.com/j5ik2o/takt-dash/actions/runs/43793650983`）を含む。固定例は次の形（中身は実物から抜粋。改行とフェンスは実物のまま）。
+
+    ````text
+    ```text
+    TAKTのCI回復を停止しました。修正回数: 0、再実行回数: 0。…唯一の未acknowledgeトップレベルコメントは chatgpt-codex-connector[bot] の『You have reached your Codex usage limits for code reviews.』(2026-11-16T01:28:14Z)で、既定のignore対象『chatgpt-codex-connector / Codex Review』に一致しないためブロックしている。…根本修正は当該通知をトップレベルでacknowledgeすること…。最後の失敗チェック・run・job・証拠不足: {"checks":[],"unavailable":[{"name":"Check unresolved comments","url":"https://github.com/j5ik2o/takt-dash/actions/runs/43793650983","reason":"Failed check has no supported Actions log reference"}]}
+    ```
+    ````
+
+    この報告は (a) 自動報告（フェンスだけの本文）として項目にも承認にもならない、(b) 情報文字列 `text` があってもフェンスと認める、(c) 中の URL が項目の URL の頭と一致しても、自動報告なので承認にならない、の 3 点を確かめる。いまのスモーク 18a は報告をフェンスの無い散文で作っており、フェンスだけの本文の除外を実物の形で確かめていない。18a を実物の形に直すか、実物の形の例を 1 件足す。実際の確認（02:49:20）は散文で、`「You have reached your Codex usage limits for code reviews.」…を確認しました。` の引用と確認の語で通る（URL は含まない）。
 19. いま緑の PR が赤に戻らない。`event-store-adapter-java#871` の実データで緑を維持し、いま赤の `event-store-adapter-kotlin#926` と `event-store-adapter-rs#381` は赤のまま。open PR 15 件の新旧比較で差が 0 件。
 20. `ci_ref` を省略した呼び出しは v1 のスクリプトを使い、`ci_ref: v2` を明示したときだけ v2 を使う。
 21. Codex の要約 `The first point is fixed, but the retry path is still broken.` は、文頭が確認の語でないので Codex の承知にならず、**未承認の項目として残る**（v1 と同じ赤）。文頭の `Acknowledged.` だけが Codex の承知として項目から外れる。
 22. Codex の要約が `Fixed the first point, but the retry path is still broken.` や `確認済みです。ただし、再試行の経路はまだ壊れています。` のように `Fixed`・`確認済み` で**始まっても**、`trusted_acknowledgement` の語彙（v1 と同じ狭い一覧）に無いので Codex の承知にならず、**未承認の項目として残る**（v1 と同じ赤）。`Fixed`・`確認済み`・`修正しました`・`直しました`・`確認いたしました`・`対応いたしました` は、著者自身の確認（条件 4）でだけ承認に使う。
 
-補足すると、19 はスモークテストに実データを置くというより、タグを切る前の使い捨ての比較スクリプトで確かめるのが向いている。固定のフィクスチャとしては 1〜18、20〜22 を置き、19 は移行手順のチェックリストに残す。
+23. 1 つの確認で、指していない項目を承認しない（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）。同じ見出し（`Codex Review: Here are some automated review suggestions`）を持つ Codex の要約が 2 つあり、確認がその見出しだけを引用するとき、どちらの項目も未承認のまま。同じ利用上限の通知が 2 回あり、確認がその文を引用するときも、どちらも未承認のまま（それぞれの URL を貼れば通る）。項目が 1 つだけなら、同じ引用で通る（#131 の実際の確認）。
+24. 1 つの確認が、項目ごとの id か、項目ごとに固有の断片を並べれば、複数の項目を承認できる（`次の 2 件を確認しました。\n- #issuecomment-10\n- #issuecomment-11`）。
+
+補足すると、19 はスモークテストに実データを置くというより、タグを切る前の使い捨ての比較スクリプトで確かめるのが向いている。固定のフィクスチャとしては 1〜18、20〜24 を置き、19 は移行手順のチェックリストに残す。19 の差 0 件は、8(b)・23 の偽の緑を見つけない（新旧の両方が緑になるため。「タグを切る条件」）。8(b) と 23 はフィクスチャで固定する。
 
 ## 影響と戻し方
 
@@ -405,7 +519,12 @@ ci_ref: v2
 上の 22 リポジトリ。すべてで `Check unresolved comments` が必須。v2 に上げたリポジトリは、次の評価から新しい判定になる。
 
 - 既存の open PR で、内容によらない作成者コメントだけに頼って緑だったものは、赤に戻る可能性がある。2026-11-27 の 15 件では 0 件だったが、将来の PR では起こり得る。
-- 新しく赤になった PR は、作成者が URL（長さを問わない）か 20 文字以上の引用に「確認しました」を添えて返信すれば緑になる。関門の要約にその案内を出す。
+- 新しく赤になった PR は、作成者が URL（長さを問わない）か 20 文字以上の引用に「確認しました」を添えて返信すれば緑になる。関門の要約にその案内を出す。引用は、その項目だけが持つ文（URL の外）でなければ数えない。同じ文の項目が複数ある PR（同じ利用上限の通知が 2 回、同じ見出しの要約が 2 つ）では、引用の代わりにそれぞれの URL を貼る運用になる。
+- 利用者ごとの運用（「一意に指す値として何を使うか」の実測）：
+  - takt-dash、dotfiles：確認は URL を含まず、引用か記録の形。引用がその項目に固有なら、そのまま通る。TAKT の窓口が書く確認（`Codex（…）の「You have reached …」を確認しました`）も通る。同じ通知が 2 回ある PR では URL を貼る。
+  - pekko-persistence-dynamodb、event-store-adapter-kotlin：確認に run や compare の URL、接頭辞の無い id（`comment6767269753`）を含むことがある。これらは承認の経路にならないので、項目のアンカーを貼るか、URL の外の文を引用する形に変える。ci#43 の規則のまま v2 を切っていれば、この形が URL の頭で黙って通っていた。
+  - modern-ddd-book：Codex の利用上限の通知を外していないので、通知は項目として残る。通知が 1 回なら引用で通る。複数回なら URL を貼る。
+  - 5 つとも、v1 のあいだは何も変わらない。v2 に上げる PR の本文に、確認の書き方（「一意に指す値として何を使うか」の例）を貼る。
 - TAKT の失敗報告は、種別（フェンスの外の `<!-- takt:auto-report -->`、または著者が作成者で本文がフェンスだけ）で自動報告として外れるので承認に数えられない。TAKT が失敗報告を投稿しても、関門は赤のまま人を待つ。これは #134 の意図どおりである。失敗報告に確認の語を入れない規約は要らなくなった。代わりに、散文を伴う報告（フェンスの直前に一文だけ置く形を含む）にするときは `<!-- takt:auto-report -->` を付ける必要がある（別 PR、未確認）。
 - Codex の利用上限の通知は、`extra_ignored_auto_report_author_patterns` に入れているリポジトリ（takt-dash 等）では項目にならず（緑）、入れていないリポジトリ（modern-ddd-book 等）では未承認の項目として残る（赤のまま）。どちらの場合も承認には数えない。
 - SHA 固定の 2 つ（fraktor-rs、g2g）とブランチ固定の 1 つ（ci-gate-sandbox）は、v2 に上げるまで変わらない。同じ穴が残る。
@@ -418,11 +537,11 @@ ci_ref: v2
 ## 守る不変条件
 
 - I1（緑の意味）：関門が緑になるのは、未解決スレッドが 0 件で、かつすべての未承認項目に有効な承認があるときだけ。
-- I2（#134 の修正）：確認の語も対象への参照も無い作成者コメントは、決して承認にならない。
+- I2（#134 の修正）：確認の語と、対象を一意に指す値（対象の id、または URL を外した本文で対象だけが持つ 20 文字以上の断片）の両方を含む確認だけが、その対象を承認する。確認の語も対象への参照も無い作成者コメントは、決して承認にならない。**対象を指さない確認は、どの項目も承認しない**：別件の URL（URL の共通の頭 `https://github.com/j` だけが一致する。[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)）や、ほかの項目にもある定型文の引用では承認にならず、1 つの確認が指していない項目を承認することもない（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）。Quint の `noFalseGreen` が、この性質を作成者の意図と突き合わせて確かめる。
 - I3（自動報告）：自動報告（既知の自動投稿、著者が作成者でフェンスの外に `<!-- takt:auto-report -->` を持つ投稿、著者が作成者で本文がフェンスだけの TAKT の失敗報告）は、項目にも承認の候補にもならない。確認の語や引用を含んでいても承認にならない。TAKT の失敗報告かどうかは著者と種別で決め、本文の語句では決めない。第三者が付けたマーカーは種別と認めない（他人のマーカーで項目を消したり緑にしたりできない）。第三者が付けたマーカー付きのコメントは、自動報告にせず**未承認の項目として残る**。
 - I4（順序）：対象の最終編集より前のコメントは承認にならない。承認のあとで対象が編集されたら、承認し直しが必要。
 - I5（純関数）：判定は取得済みのコメントとレビューの集合だけで決まる。実行順、並行性、リトライ、ページ取得の順に依存しない。同じ入力なら同じ結論。
-- I6（正当な確認）：対象の URL / アンカーと確認の語（URL・アンカーは長さを問わない）、または 20 文字以上の引用と確認の語がそろえば、緑になる。
+- I6（正当な確認）：対象の URL / アンカーと確認の語（URL・アンカーは長さを問わない）、または対象だけが持つ 20 文字以上の引用と確認の語がそろえば、緑になる。
 - I7（API 不増）：判定のために新しい GitHub API 呼び出しをしない。
 - I8（設定不変）：ステータスの context 名と公開方法を変えない。branch protection / ruleset を触らない。
 
@@ -432,253 +551,30 @@ ci_ref: v2
 
 理由は、#134 が「緑に到達できてしまう」という到達性の問題であり、コメントの投稿・編集の並びに対して、v1 の判定と提案の判定がどこで分かれるかを反例として出せるからである。とくに「対象が編集されると承認が無効になり、緑から赤へ戻る」遷移がある。状態が無い純関数ではあるが、入力の並びに対する関門の結論の遷移はある。
 
-モデルは `specs/quint/review-thread-ack/` に置く（実装時に README と `ci-specs.json` の登録も足す）。以下は下書きで、quint 0.32.0 で `typecheck`、`test`、`run` を実行して確かめた。
+モデルは [`specs/quint/review-thread-ack/`](../../specs/quint/review-thread-ack/README.md) に置いた（`reviewThreadAck.qnt` と `reviewThreadAck_test.qnt`、`ci-specs.json` に登録済みで、CI の `quint` ジョブが流す）。
 
-<details>
-<summary>reviewThreadAck.qnt（下書き）</summary>
+### 前の下書きの穴（#443）
 
-```quint
-// -*- mode: Bluespec; -*-
-// 「Check unresolved comments」の承認判定（issue #134）の最小モデル。
-//
-// 対象は、未解決スレッドが 0 件のときに残る「未承認のトップレベルコメント／レビュー要約」。
-// 判定はコメントの集合に対する純関数で、実行中の状態機械は無い。ここで遷移として表すのは、
-// コメントの投稿・編集という入力の並びに対して、公開される関門の結論が赤と緑の間を動くことだけ。
-//
-// STRICT = false はいまの v1（作成者名義のコメントが後ろにあれば内容によらず承認）。
-// STRICT = true が提案（対象への参照と確認の語の両方を要求し、自動報告（フェンスだけの本文・フェンスの外のマーカー）と否定付きの語は候補から外す）。
-module reviewThreadAck {
-  const STRICT: bool
+前の下書き（この文書に直接書いていたもの）は、確認を投稿する時点で `{ item: ItemId, kind: AckKind }` と項目に結び付け、STRICT のとき `implementedAck` を仕様の `isStrictAck` そのものにしていた。そのため `noFalseGreen`（`gateGreen implies allStrictAcked`）は恒真で、strict の「違反なし」は何も確かめていなかった。また、確認がどの項目を承認するかをモデルが計算しないので、「1 つの確認で全項目が通る」形も、ci#44 の「URL の頭だけの一致」も表せなかった。点検は、これが ci#43 の URL の穴を見逃した理由の 1 つと見ている（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）。
 
-  type ItemId = int
-  // Unrelated: 無関係な一言。MarkerOnly: 確認の語だけ。QuoteOnly: 引用だけで確認の語がない投稿。
-  // UrlAndMarker / QuoteAndMarker: 参照と確認の語の両方。
-  // AutoReport: 自動報告（本文がフェンスだけ、またはフェンスの外に `<!-- takt:auto-report -->`。
-  // 確認の語と引用を含むが、著者・種別で候補から外れる。散文がある投稿は自動報告にしない。
-  // フェンス内の引用は QuoteAndMarker として承認に使える）。第三者が付けたマーカーは
-  // 著者条件で無効なので、モデルでは Unrelated と同じ（承認にならない）として扱う。
-  // 第三者のマーカー付きコメントは、未承認の項目として残る。
-  // NegatedMarker: 否定付きの確認の語（未確認しました等）。
-  type AckKind = Unrelated | MarkerOnly | QuoteOnly | UrlAndMarker | QuoteAndMarker | AutoReport | NegatedMarker
-  type Item = { updatedAt: int }
-  type Ack = { item: ItemId, kind: AckKind, at: int }
+### 直したモデル
 
-  pure val ITEMS: Set[ItemId] = Set(1, 2)
-  pure val MARKED: Set[AckKind] = Set(UrlAndMarker, QuoteAndMarker)
-  pure val UNRELATED: AckKind = Unrelated
-  pure val MARKER_ONLY: AckKind = MarkerOnly
-  pure val QUOTE_ONLY: AckKind = QuoteOnly
-  pure val URL_AND_MARKER: AckKind = UrlAndMarker
-  pure val QUOTE_AND_MARKER: AckKind = QuoteAndMarker
-  pure val AUTO_REPORT: AckKind = AutoReport
-  pure val NEGATED_MARKER: AckKind = NegatedMarker
+- 確認は投稿の時点ではどの項目にも結び付けない。確認が持つのは、本文から観測できるもの（承認できる人か、自動報告か、確認の語があるか、含むコメントの id、含む断片）と、作成者が指すつもりだった項目（`intended`）である。
+- 項目の本文は 20 文字以上の断片の集合に畳む。`U1` / `U2` はその項目だけが持つ散文、`S` は複数の項目に現れうる定型文、`H` は URL の頭（`https://github.com/j`）。どの項目が `S` と `H` を持つかは初期状態で非決定に選ぶ。
+- 規則は定数 `RULE` で切り替える。`v1`（いまの v1）、`window`（ci#43 の 442d679 の 20 文字の窓）、`unique`（この設計）。規則は `intended` を読まず、観測できるものと項目の本文を突き合わせて、**どの確認がどの項目を承認するかを計算する**。
+- 仕様 `noFalseGreen` は、関門が緑なら、すべての項目に「その項目を指すつもりの有効な確認」があることを求める。`intended` を読むのは仕様だけなので、規則が指していない項目を承認すると反例になる。`idAckTurnsGreen`（I6）は、すべての項目に id を含む有効な確認があれば緑であることを求める。
+- 確認の本文に何が現れうるかには前提を置く（`consistent`）。id と項目に固有の散文は、その項目を指すつもりのときにしか現れない。定型文は、それを持つ項目のどれかを指すつもりのときにしか現れない。URL の頭は意図と無関係に現れる。この前提が崩れる入力（別の PR の要約を偶然 20 文字以上写すなど）は、モデルの範囲外である。
 
-  var clock: int
-  var items: ItemId -> Item
-  var acks: Set[Ack]
+### 結果（quint 0.32.0）
 
-  action init = all {
-    clock' = 0,
-    items' = ITEMS.mapBy(i => { updatedAt: 0 }),
-    acks' = Set(),
-  }
+- `quint typecheck`：2 ファイルとも成功。
+- `quint test reviewThreadAck_test.qnt --main reviewThreadAck_test`：11 passing。ci#44 の反例（`windowUrlHeadTurnsGreenTest`）と、定型文で別の項目が承認される反例（`windowSharedQuoteApprovesOtherTest`）を `window` で緑かつ `noFalseGreen` が偽として固定し、同じ入力が `unique` では赤のままであることを固定した。
+- `quint run --main legacy --invariant noFalseGreen --max-steps 10 --max-samples 50000 --seed 134`：違反あり（#134 の形）。
+- `quint run --main window --invariant noFalseGreen --max-steps 10 --max-samples 50000 --seed 134`：違反あり。反例は、両方の項目が `H` を持ち、項目 1 を指すつもりで `H` だけを含む確認が項目 2 も承認する形（ci#44 と同じ）。
+- `quint run --main fixed --invariant safety --max-steps 10 --max-samples 50000 --seed 134 --witnesses gateGreen`：違反なし。緑に届く筋は 50000 のうち 5038（10.08%）で、規則が常に赤を返して違反を避けているのではない。
+- `fixed` の規則から、URL の頭を外す条件か、ほかの項目に無い断片に限る条件のどちらかを消すと、`noFalseGreen` に反例が出る（手元で確かめた）。2 つの条件はどちらも要る。
 
-  // 作成者（または許可された人）がコメントを投稿する。at は単調に増える。
-  action postAck(id: ItemId, kind: AckKind): bool = all {
-    clock' = clock + 1,
-    acks' = acks.union(Set({ item: id, kind: kind, at: clock + 1 })),
-    items' = items,
-  }
-
-  // シミュレーション用の入力。どれか1つが起きる。
-  action step = any {
-    postAck(1, UNRELATED),
-    postAck(1, MARKER_ONLY),
-    postAck(1, QUOTE_ONLY),
-    postAck(1, URL_AND_MARKER),
-    postAck(1, QUOTE_AND_MARKER),
-    postAck(1, AUTO_REPORT),
-    postAck(1, NEGATED_MARKER),
-    postAck(2, UNRELATED),
-    postAck(2, QUOTE_ONLY),
-    postAck(2, URL_AND_MARKER),
-    postAck(2, AUTO_REPORT),
-    editItem(1),
-    editItem(2),
-  }
-
-  // 対象コメントが編集される。最終編集時刻が進む。
-  action editItem(id: ItemId): bool = all {
-    clock' = clock + 1,
-    items' = items.set(id, { ...items.get(id), updatedAt: clock + 1 }),
-    acks' = acks,
-  }
-
-  pure def isAfter(i: Item, a: Ack): bool = a.at > i.updatedAt
-
-  // 提案: 対象への参照（URL か 20 文字以上の引用）と確認の語の両方がある。
-  // 自動報告は ack の判定より前に候補から外れる（モデルでは AutoReport を MARKED に入れない）。
-  // 否定付きの確認の語も MARKED に入れない。
-  pure def isStrictAck(i: Item, a: Ack): bool =
-    isAfter(i, a) and MARKED.contains(a.kind)
-
-  // v1: 対象より後ろの作成者コメントなら内容を問わない。
-  pure def isLegacyAck(i: Item, a: Ack): bool =
-    isAfter(i, a)
-
-  pure def implementedAck(i: Item, a: Ack): bool =
-    if (STRICT) isStrictAck(i, a) else isLegacyAck(i, a)
-
-  pure def allImplementedAcked: bool =
-    ITEMS.forall(i => acks.exists(a => a.item == i and implementedAck(items.get(i), a)))
-
-  pure def allStrictAcked: bool =
-    ITEMS.forall(i => acks.exists(a => a.item == i and isStrictAck(items.get(i), a)))
-
-  // 公開される関門の結論。
-  pure def gateGreen: bool = allImplementedAcked
-
-  // 緑なら、すべての項目に提案どおりの承認がある。
-  val noFalseGreen = gateGreen implies allStrictAcked
-}
-
-// いまの v1（内容を見ない）。
-module legacy {
-  import reviewThreadAck(STRICT = false).*
-}
-
-// 提案（参照と確認の語を要求する）。
-module strict {
-  import reviewThreadAck(STRICT = true).*
-}
-```
-
-</details>
-
-<details>
-<summary>reviewThreadAck_test.qnt（下書き）</summary>
-
-```quint
-// -*- mode: Bluespec; -*-
-// reviewThreadAck.qnt の筋書きテスト。issue #134 の実例をたどる。
-module reviewThreadAck_test {
-  import reviewThreadAck(STRICT = false) as before from "./reviewThreadAck"
-  import reviewThreadAck(STRICT = true) as after from "./reviewThreadAck"
-
-  // v1。無関係な一言でも、あとから投稿されれば承認になる（#134 の穴）。
-  run legacyUnrelatedTurnsGreenTest =
-    before::init
-      .then(before::postAck(2, before::URL_AND_MARKER))
-      .then(before::postAck(1, before::UNRELATED))
-      .then(all {
-        assert(before::gateGreen),
-        before::postAck(2, before::URL_AND_MARKER),
-      })
-
-  // 提案。無関係な一言では緑にならない。
-  run strictUnrelatedStaysRedTest =
-    after::init
-      .then(after::postAck(2, after::URL_AND_MARKER))
-      .then(after::postAck(1, after::UNRELATED))
-      .then(all {
-        assert(not(after::gateGreen)),
-        after::postAck(2, after::URL_AND_MARKER),
-      })
-
-  // 提案。引用だけでは緑にならない（#131 の TAKT 失敗報告は本文を引用していた）。
-  run strictQuoteOnlyStaysRedTest =
-    after::init
-      .then(after::postAck(2, after::URL_AND_MARKER))
-      .then(after::postAck(1, after::QUOTE_ONLY))
-      .then(all {
-        assert(not(after::gateGreen)),
-        after::postAck(1, after::URL_AND_MARKER),
-      })
-
-  // 提案。確認の語だけでは緑にならない。
-  run strictMarkerOnlyStaysRedTest =
-    after::init
-      .then(after::postAck(2, after::URL_AND_MARKER))
-      .then(after::postAck(1, after::MARKER_ONLY))
-      .then(all {
-        assert(not(after::gateGreen)),
-        after::postAck(1, after::URL_AND_MARKER),
-      })
-
-  // 提案。自動報告（フェンスだけの本文・フェンスの外のマーカー）は確認の語と引用を含んでいても、
-  // ack の判定より前に種別で外れて緑にならない。
-  run strictAutoReportStaysRedTest =
-    after::init
-      .then(after::postAck(2, after::URL_AND_MARKER))
-      .then(after::postAck(1, after::AUTO_REPORT))
-      .then(all {
-        assert(not(after::gateGreen)),
-        after::postAck(1, after::URL_AND_MARKER),
-      })
-
-  // 提案。否定付きの確認の語（未確認しました等）では緑にならない。
-  run strictNegatedMarkerStaysRedTest =
-    after::init
-      .then(after::postAck(2, after::URL_AND_MARKER))
-      .then(after::postAck(1, after::NEGATED_MARKER))
-      .then(all {
-        assert(not(after::gateGreen)),
-        after::postAck(1, after::URL_AND_MARKER),
-      })
-
-  // 提案。URL と確認の語がそろえば緑になる。
-  run strictUrlAndMarkerTurnsGreenTest =
-    after::init
-      .then(after::postAck(2, after::URL_AND_MARKER))
-      .then(after::postAck(1, after::URL_AND_MARKER))
-      .then(all {
-        assert(after::gateGreen),
-        after::postAck(2, after::URL_AND_MARKER),
-      })
-
-  // 提案。20 文字以上の引用と確認の語がそろえば緑になる（#131 の実際の確認）。
-  run strictQuoteAndMarkerTurnsGreenTest =
-    after::init
-      .then(after::postAck(2, after::URL_AND_MARKER))
-      .then(after::postAck(1, after::QUOTE_AND_MARKER))
-      .then(all {
-        assert(after::gateGreen),
-        after::postAck(2, after::URL_AND_MARKER),
-      })
-
-  // 提案。緑のあとで対象が編集されると、承認は無効になり赤へ戻る。
-  run strictEditInvalidatesAckTest =
-    after::init
-      .then(after::postAck(1, after::QUOTE_AND_MARKER))
-      .then(after::postAck(2, after::URL_AND_MARKER))
-      .then(after::editItem(1))
-      .then(all {
-        assert(not(after::gateGreen)),
-        after::postAck(1, after::QUOTE_AND_MARKER),
-      })
-
-  // 提案。対象より前の承認は数えない。
-  run strictAckBeforeItemStaysRedTest =
-    after::init
-      .then(after::editItem(1))
-      .then(after::postAck(2, after::URL_AND_MARKER))
-      .then(all {
-        assert(not(after::gateGreen)),
-        after::postAck(1, after::QUOTE_AND_MARKER),
-      })
-}
-```
-
-</details>
-
-実行結果（quint 0.32.0）。
-
-- `quint typecheck reviewThreadAck.qnt` と `quint typecheck reviewThreadAck_test.qnt`: 成功。
-- `quint test reviewThreadAck_test.qnt`: 10 passing。
-- `quint run reviewThreadAck.qnt --main=strict --invariant=noFalseGreen --max-steps=8 --max-samples=300`: 違反なし。
-- `quint run reviewThreadAck.qnt --main=legacy --invariant=noFalseGreen --max-steps=8 --max-samples=300`: 違反あり。反例は、項目 1 に引用だけ、項目 2 に無関係な一言を投稿した時点で `gateGreen` が真になる、という #134 と同じ形。
-
-モデルが表さないもの：GitHub のイベント配信、ステータスの公開遅れ（新しいコメントが来てから再評価されるまでの数秒）、API の失敗、ページ取得の順。これらはこの変更で変えない（v1 と同じ）ので、モデルの範囲外にした。文字列の正規化（URL の `#`、HTML コメントの `-->`、`~~~` のフェンス）と 20 文字の下限も、モデルではなく jq の実装とスモークテストで確かめる。
+モデルが表さないもの：GitHub のイベント配信、ステータスの公開遅れ（新しいコメントが来てから再評価されるまでの数秒）、API の失敗、ページ取得の順。これらはこの変更で変えない（v1 と同じ）ので、モデルの範囲外にした。文字列の正規化（URL の `#`、URL の外し方、HTML コメントの `-->`、`~~~` のフェンス、情報文字列付きのフェンス）、確認の語の一覧と否定、20 文字の下限も、モデルではなく jq の実装とスモークテストで確かめる。承認できる人か、自動報告か、確認の語があるかは、観測できる真偽値としてモデルに与えており、その判定の正しさはモデルでは確かめない。
 
 ## 改訂の記録（レビュー 2 回目で直した 7 点）
 
@@ -716,7 +612,19 @@ module reviewThreadAck_test {
 
 - **高（緩む穴）：`trusted_acknowledgement` の語彙**：4 回目に条件 4 の `ack_words` まで広げたため、Codex の要約が `Fixed …` や `確認済みです。ただし…` で始まると、要約自体が項目から消えて緑になっていた（v1 は赤）。`trusted_ack_words` を新設し、`trusted_acknowledgement` の語彙を v1 と同じ狭い一覧（`acknowledged` / `addressed` / `確認しました` / `承知しました` / `了解しました` / `対応済み` / `対応しました` / `対処しました`）に戻した。広げた語は著者自身の確認（条件 4）の `ack_words` にだけ残す。テストの観点 22 で、`Fixed …` と `確認済みです。ただし…` が赤のまま残ることを固定する。
 
+## 改訂の記録（2026-11-28 の点検で直した 3 点）
+
+- **高（偽の緑）：断片の照合が URL の共通の頭に当たる**（[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)）：条件 5 を「対象を一意に指す値の完全一致」に改めた。id（URL の全体かアンカー。直後に数字が続く一致は数えない）か、URL を両方の本文から外したうえで、対象だけが持ち、ほかの項目のどれにも無い 20 文字以上の断片。jq の `strip_urls`・`quote_text`・`id_match`・`references($target; $ack; $others)` を直した。一意に指す値の候補の比較、確認の文の形の例、利用者の確認の書き方の実測を足した。I2、テストの観点 8・23・24、赤のときの案内、採らなかった案、影響を直した。
+- **高（検証の穴）：Quint の `noFalseGreen` が恒真**（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）：モデルを `specs/quint/review-thread-ack/` に移し、確認を投稿の時点で項目に結び付けない形に書き直した。承認は規則が観測できるものから計算し、仕様は作成者の意図（`intended`）と突き合わせる。`window`（ci#43）で ci#44 と定型文の反例が出て、`fixed` では出ないことを確かめた。
+- **中（テストの形）：スモーク 18a が #131 の実物の形でない**（[j5ik2o/ci#45](https://github.com/j5ik2o/ci/issues/45)）：テストの観点 18 に、実物の失敗報告の形（本文全体が情報文字列 `text` 付きのフェンス、中に引用・`acknowledge`・URL）を書いた。
+- **移行**：「タグを切る条件」を足した。`v2` は上の 3 件が直るまで切らない。新旧の比較の差 0 件では ci#44 の偽の緑が見つからない（旧の判定に、内容で承認を決める経路が無い）ので、比較に承認の経路の確認を足した。
+
 ## 未確認のこと
+
+- 引用を「その項目だけが持つ断片」に限って残す設計は、元帥の方針（照合を、対象を一意に指す値の完全一致にする）の読み方の 1 つである。引用をやめて id（URL・アンカー）だけにする読み方もありうる。その場合、#131 の実際の確認と event-store-adapter-java#871 の確認が赤になり、テストの観点 5・18・19 と移行の負担が変わる。どちらにするかは元帥の確認が要る。
+- URL を含みアンカーの無い確認（pekko-persistence-dynamodb#1040、event-store-adapter-kotlin#906）が、URL の外の引用でも項目を指しているかは、まだ読んでいない（「移行の順」2 で確かめる）。
+- 同じ PR に同じ文の項目が並ぶ頻度（同じ利用上限の通知が 2 回など）は数えていない。多い場合は、引用の代わりに URL を貼る運用の負担が増える。
+- scheme の無い `ホスト名/パス` を外す正規表現が、ファイル名（`repo_gate.py/…` のような形）を巻き込まないかは、実データで確かめていない。
 
 - 手元の clone のタグ `v1` が `db3bfd0` を指す理由。リモートの `v1` が過去に付け替えられたのか、手元だけで付けたのかは分からない。
 - TAKT の merge-prepare が、赤のまま止まる挙動を受け入れられるか。失敗報告へ `<!-- takt:auto-report -->` を付ける変更を、どのワークフロー（takt-dash の `.takt/` か、takt 本体か）に入れるかは未確認。マーカーが付くまでは、本文がコードフェンスだけの旧来の形を種別で外せる。散文を伴う報告（フェンスの直前に一文を置く形を含む）は、マーカーが付くまで自動報告として外れない。
