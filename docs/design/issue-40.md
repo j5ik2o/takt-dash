@@ -4,8 +4,8 @@
 関連：[j5ik2o/takt-dash#130](https://github.com/j5ik2o/takt-dash/issues/130)（毎秒の全ページ再取得の負荷）、[j5ik2o/takt-dash#383](https://github.com/j5ik2o/takt-dash/issues/383)（SSE の無音の見張り）、[j5ik2o/takt-dash#385](https://github.com/j5ik2o/takt-dash/issues/385)（見捨てられた SSE の後始末）
 大きさの基準：[j5ik2o/takt-dash#361](https://github.com/j5ik2o/takt-dash/pull/361) = 1（+23 −2、1 ファイル）、[j5ik2o/takt-dash#362](https://github.com/j5ik2o/takt-dash/pull/362) = 5（+1147 −122、18 ファイル）
 
-確かめたコード：`110e25f`（ブランチ `j5ik2o/issue-40-design` の基点。`4fc634c` までの 2 コミットは文書だけ）。
-この版は、`4fc634c` の設計を読み直した結果（20 件の指摘、増えたものの矛盾、テストにできない 11 か所、単独マージの検討）と、takt-dash中将の採否で書き直したもの。どの指摘をどこで直したかは末尾の「読み直しの指摘との対応表」にある。前の版の「採否 N」の番号は使わない。
+確かめたコード：`110e25f`。その後に `main` へ入った `d7e6d5b` までの変更は、この設計が参照するコードでは `live-provider-wiring.test.ts` の行の位置（+6 行）だけで、本文の行番号は `d7e6d5b` に合わせた。
+この版は、前の版（`4fc634c`。`main` への付け直しで `bff010a`）の設計を読み直した結果（20 件の指摘、増えたものの矛盾、テストにできない 11 か所、単独マージの検討）と、takt-dash中将の採否で書き直したもの。どの指摘をどこで直したかは末尾の「読み直しの指摘との対応表」にある。前の版の「採否 N」の番号は使わない。
 
 ## 先頭のまとめ
 
@@ -419,9 +419,9 @@ PBT は既存の frontend と同じく、シード固定の PRNG で操作列を
 | `test/api/state-route.test.ts` | `watchState()` を引数なしで呼ぶ | 引数なしの `/api/state` で `watchState` に `{ refreshRate: 0 }`（要求なし）が渡ることを期待に足す。既存の付け替え・204 の期待は変えない | 1 |
 | `test/components/state-revalidation.test.ts:51`「受信のたびに再取得を促す」 | `revalidate` が受信ごとに呼ばれる | 「受信しても再取得を促さず、状態を適用する」に置き換える（E5）。受信が状態に反映されることの確かめは残す | 2 |
 | 同 `:73`「切断時は再取得を促さず再接続する」 | 切断で `revalidate` なし | `revalidate` の口が無くなるので、再接続の確かめだけを残す | 2 |
-| `test/components/live-provider-wiring.test.ts:730-757` | 受信で `revalidate` が 1 回 | 受信で Context の状態が変わり、`router` に触れない、に置き換える | 2 |
-| 同 `:802-830` | 再描画で effect が再実行されない（`revalidate` の同一性） | 「依存（`refreshRate`・`ready`・`visible`）が変わらない再描画では開き直さない」に置き換える（PR 2 では依存が空なので「再描画で開き直さない」） | 2・3 |
-| 同 `:835-` | `revalidate` が変わると 1 本だけ開き直す | 「レートが変わると 1 本だけ開き直し、試行番号が増える」に置き換える（E4） | 3 |
+| `test/components/live-provider-wiring.test.ts:736-763` | 受信で `revalidate` が 1 回 | 受信で Context の状態が変わり、`router` に触れない、に置き換える | 2 |
+| 同 `:808-836` | 再描画で effect が再実行されない（`revalidate` の同一性） | 「依存（`refreshRate`・`ready`・`visible`）が変わらない再描画では開き直さない」に置き換える（PR 2 では依存が空なので「再描画で開き直さない」） | 2・3 |
+| 同 `:841-` | `revalidate` が変わると 1 本だけ開き直す | 「レートが変わると 1 本だけ開き直し、試行番号が増える」に置き換える（E4） | 3 |
 | `test/components/state-stream.test.ts` | `createStateHandlers` に `revalidate` | `revalidate` を外す。再接続・見張り・`checkStale`・試行の URL の期待は変えない。`nextAttempt` を渡したときの番号を足す（P6） | 2・3 |
 | `test/pages/state-sharing.test.ts:41` | `ProjectsLoader` 単体で `["GetOverview"]` | ローダーは RPC を出さないので `[]`（GetProjects も GetOverview も呼ばない）に。内容（`corporate-site`・`run-aaa`・`判断待ち`）は `RootLayout` の中で描いて確かめる（layout の 1 回の `GetOverview` で描けることの確かめになる） | 2 |
 | 同 `:60` | `ActivityLoader` 単体で `["GetOverview","GetActivity"]` | `["GetActivity"]` に。サーバー名（`Mac mini`）は `RootLayout` の中で描いて確かめる | 2 |
@@ -624,7 +624,7 @@ Quint を書いて分かったことを、ほかの節へ戻した：
 
 - 登録は初期送信の後（D7）→ 変える場所の `watch_state`、壊しうる入力の「初期の組み立てが遅い」、E10。
 - `supersededOnlyByNewer` の言い直し（新しい試行が解放された後の、遅れた古い試行の登録はありうる）→ D8 の「断られるのは古い試行だけ」、P2 の性質を「置き換えるのは新しい試行だけ」に直した。
-- poller の式（D16）→ 不変条件 6、変える場所の `poller.rs`、Quint の `effective` を同じ式にした（`386fe5c`）。
+- poller の式（D16）→ 不変条件 6、変える場所の `poller.rs`、Quint の `effective` を同じ式にした（`76fce0b`）。
 - 寿命が延びるのは送信の完了だけ（D7）→ E22、壊しうる入力の「送信が詰まる」。
 
 ## 分け方
