@@ -21,6 +21,10 @@
 //   "scoped" この設計（2 回目の直し）。打ち消されない確認の語と参照が同じ単位にあり、同じ確認のどの
 //            打ち消しの単位もその項目に触れていないときだけ承認。
 //   それ以外の値では関門は緑にならない（定数の綴りの誤りを witness の gateGreen が 0 件で拾う）。
+//
+// 項目の種類（Kind、3 回目の直し）。v2 は Codex の利用上限の通知を共有の既定で外す。規則が読むのは、作者が
+// Codex か（byCodex）と、本文が通知の頭で始まるか（noticeHead）の 2 つの観測だけで、両方が真のときだけ外す。
+// 仕様は真の種類（kind）を読む。外すのは scoped（v2）だけで、v1・window・unique には既定の除外が無い。
 module reviewThreadAck {
   const RULE: str
 
@@ -30,7 +34,13 @@ module reviewThreadAck {
   //   Shared: 定型文。Codex の要約の見出しや利用上限の通知など、複数の項目に現れうる散文。
   //   UrlHead: URL の頭（`https://github.com/j` の 20 文字）。リポジトリへのリンクを持つ本文なら必ず含む。
   type Frag = Own(ItemId) | Shared | UrlHead
-  type Item = { updatedAt: int, frags: Set[Frag] }
+  // 項目の真の種類。規則は読まない（仕様と、観測を決める init だけが読む）。
+  //   Plain:       作成者以外の人・ボットの、ふつうの項目。
+  //   CodexNotice: Codex の利用上限の通知（作者が Codex で、本文が通知の頭で始まる）。
+  //   CodexOther:  Codex のほかのコメント（本物のレビュー・要約・指摘）。本文の途中に通知の文があってもよい。
+  //   HeadByOther: ほかの作者の、通知の文で始まるコメント（通知を写して投稿した人・ボット）。
+  type Kind = Plain | CodexNotice | CodexOther | HeadByOther
+  type Item = { updatedAt: int, frags: Set[Frag], kind: Kind, byCodex: bool, noticeHead: bool }
   // 単位の中の確認の語の現れ方。文字列の水準での分類（jq の clauses・polarity）の結果を観測として持つ。
   //   Affirmed:  作成者が自分の文で書いた、打ち消されない確認の語がある。
   //   Quoted:    確認の語が引用（行頭 `>` の行、「」『』“” の中、インラインのコード）の中にだけある（穴 2）。
@@ -65,6 +75,7 @@ module reviewThreadAck {
   pure val BOOLS: Set[bool] = Set(true, false)
   // 項目が固有の文のほかに持ちうる断片の組。
   pure val EXTRA_FRAGS: Set[Set[Frag]] = Set(Shared, UrlHead).powerset()
+  pure val KINDS: Set[Kind] = Set(Plain, CodexNotice, CodexOther, HeadByOther)
 
   pure def unit(w: Word, ids: Set[ItemId], fs: Set[Frag]): Unit = { word: w, ids: ids, frags: fs }
 
@@ -113,21 +124,32 @@ module reviewThreadAck {
     units.forall(u => u.word == Affirmed implies refersWithin(its, u, intended.union(pending))),
   }
 
-  action initWith(extra1: Set[Frag], extra2: Set[Frag]): bool = all {
+  // 観測は種類から決まる（環境の前提）。作者が Codex で本文が通知の頭で始まるのは、通知だけ。
+  pure def mkItem(fs: Set[Frag], k: Kind): Item = {
+    updatedAt: 0, frags: fs, kind: k,
+    byCodex: k == CodexNotice or k == CodexOther,
+    noticeHead: k == CodexNotice or k == HeadByOther,
+  }
+
+  action initWithKinds(extra1: Set[Frag], extra2: Set[Frag], k1: Kind, k2: Kind): bool = all {
     clock' = 0,
     items' = Map(
-      1 -> { updatedAt: 0, frags: extra1.union(Set(Own(1))) },
-      2 -> { updatedAt: 0, frags: extra2.union(Set(Own(2))) },
+      1 -> mkItem(extra1.union(Set(Own(1))), k1),
+      2 -> mkItem(extra2.union(Set(Own(2))), k2),
     ),
     acks' = Set(),
     editLog' = Set(),
     lastStep' = Started,
   }
 
+  action initWith(extra1: Set[Frag], extra2: Set[Frag]): bool = initWithKinds(extra1, extra2, Plain, Plain)
+
   action init = {
     nondet extra1 = EXTRA_FRAGS.oneOf()
     nondet extra2 = EXTRA_FRAGS.oneOf()
-    initWith(extra1, extra2)
+    nondet k1 = KINDS.oneOf()
+    nondet k2 = KINDS.oneOf()
+    initWithKinds(extra1, extra2, k1, k2)
   }
 
   // 確認を投稿する。at は投稿の時刻で、単調に増える。
@@ -189,7 +211,12 @@ module reviewThreadAck {
   pure def refsWindow(its: ItemId -> Item, i: ItemId, a: Ack): bool =
     bodyIds(a).contains(i) or bodyFrags(a).intersect(its.get(i).frags) != Set()
 
-  // URL でなく、PR の項目の中でその項目だけが持つ断片。
+  // v2 の既定の除外。作者と本文の頭の両方が一致したときだけ外す（片方だけなら外さない）。
+  pure def defaultExcluded(it: Item): bool =
+    RULE == "scoped" and it.byCodex and it.noticeHead
+
+  // URL でなく、PR の項目の中でその項目だけが持つ断片。「ほかの項目」には、既定で外した通知も数える
+  // （外した通知を引用したほかの項目を、通知の引用で承認しない）。
   pure def uniqueTo(its: ItemId -> Item, i: ItemId, f: Frag): bool =
     f != UrlHead
       and its.get(i).frags.contains(f)
@@ -236,8 +263,8 @@ module reviewThreadAck {
     else if (RULE == "scoped") approvesScoped(its, i, a)
     else false
 
-  // 公開される関門の結論。
-  val gateGreen: bool = ITEMS.forall(i => acks.exists(a => approves(items, i, a)))
+  // 公開される関門の結論。既定で外した項目は承認を待たない。
+  val gateGreen: bool = ITEMS.forall(i => defaultExcluded(items.get(i)) or acks.exists(a => approves(items, i, a)))
 
   // ---- 仕様（作成者の意図と編集の記録を読む。規則とは別に定める） ----
   // 項目 i の最後の編集の時刻（編集が無ければ 0）。
@@ -253,15 +280,20 @@ module reviewThreadAck {
     a.intended.contains(i),
   }
 
-  // 緑なら、すべての項目に、その項目を承認するつもりの確認がある。
+  // 承認を待たなくてよい項目（真の種類が Codex の利用上限の通知）。規則の defaultExcluded とは別に、kind で決める。
+  pure def isNotice(it: Item): bool = it.kind == CodexNotice
+
+  // 緑なら、通知を除くすべての項目に、その項目を承認するつもりの確認がある。
   // 1 つの確認で指していない項目や「まだ」と書いた項目が承認されたら、ここで反例になる。
+  // Codex のほかのコメントや、ほかの作者が通知の文で始めたコメントを外しても、ここで反例になる。
   val noFalseGreen: bool =
-    gateGreen implies ITEMS.forall(i => acks.exists(a => intendedAck(editLog, i, a)))
+    gateGreen implies ITEMS.forall(i => isNotice(items.get(i)) or acks.exists(a => intendedAck(editLog, i, a)))
 
   // I6: すべての項目に、その項目の id を、作成者が確認の語を書いた同じ単位に含む有効な確認があり、
   // その確認のどの打ち消しの単位もその項目に触れていなければ緑（正当な確認を赤にしない）。
+  // 通知には確認を求めない（通知が外れずに残って赤になれば、ここで反例になる）。
   val idAckTurnsGreen: bool =
-    ITEMS.forall(i => acks.exists(a => and {
+    ITEMS.forall(i => isNotice(items.get(i)) or acks.exists(a => and {
       intendedAck(editLog, i, a),
       a.units.exists(u => u.word == Affirmed and u.ids.contains(i)),
       not(a.units.exists(u => saysNotYet(u.word) and mentions(items, i, u))),
@@ -304,6 +336,16 @@ module reviewThreadAck {
   // 2 つの単位を持つ確認が項目を承認している。
   val approvedByTwoUnitAck: bool =
     ITEMS.exists(i => acks.exists(a => approves(items, i, a) and a.units.size() == 2))
+  // 既定で外した通知があり、それでも（ほかの項目を承認して）緑。
+  val greenWithNoticeExcluded: bool =
+    gateGreen and ITEMS.exists(i => defaultExcluded(items.get(i)))
+      and ITEMS.exists(i => not(defaultExcluded(items.get(i))))
+  // Codex のほかのコメント（作者だけ一致）が項目に残り、確認で承認されて緑。
+  val greenWithCodexOtherItem: bool =
+    gateGreen and ITEMS.exists(i => items.get(i).kind == CodexOther)
+  // ほかの作者の、通知の文で始まるコメント（本文だけ一致）が項目に残り、確認で承認されて緑。
+  val greenWithHeadByOtherItem: bool =
+    gateGreen and ITEMS.exists(i => items.get(i).kind == HeadByOther)
 }
 
 // いまの v1（内容を見ない）。
