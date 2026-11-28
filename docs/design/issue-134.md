@@ -57,7 +57,7 @@
 
 - SHA 固定の 2 つは 2026-06 のコミットで、v1 より古い。どちらも少なくとも同じ形の「内容を見ない」判定を含み、v1 を直しても変わらない。
 - 22 のすべてで `Check unresolved comments` が必須チェックになっている（20 はクラシックの branch protection、takt-dash と ddd-principles は ruleset）。`gh api repos/<repo>/branches/main/protection` と `rulesets` で確認した。
-- 2026-11-27 時点の 22 リポジトリの open PR は 15 件。後述の比較で、v1 と提案の判定が違った項目は 0 件だった。
+- 2026-11-27 時点の 22 リポジトリの open PR は 15 件。後述の比較で、v1 と提案の判定が違った項目は 0 件だった。この比較は 2026-11-28 の直し（対象を一意に指す値）の前の提案で行った。
 
 ### 現在の緑を赤に戻さないことの下見（実測）
 
@@ -69,6 +69,7 @@ open PR 15 件のコメントとレビューを取得し、v1 の判定とこの
   - `event-store-adapter-rs#381`: CodeRabbit の利用上限の通知。v1 も提案も赤。
 - 15 件のうち、v1 が緑で提案が赤になる PR は 0 件。v1 が赤で提案が緑になる PR も 0 件。
 - 直近の merged 48 件（takt-dash、dotfiles、event-store-adapter-java、cqrs-es-example の各 12 件）でも、未承認の項目は 0 件で、新旧の差は出なかった。ただし merged の履歴は「その時点の判定」ではなく「いま取得できるコメント」での比較であり、削除済みコメントは見えない。
+- 2026-11-28 の直しのあとの規則（この文書の jq をそのまま）で、実データを 2 件だけ測り直した。`event-store-adapter-java#871` は緑のまま（01:42 の引用「Review rate limited / Action not completed」は、この PR の項目の中で CodeRabbit の通知だけが持つ）。takt-dash#131 は 02:48 までだと利用上限の通知が未承認で赤、02:49:20 の確認を含めると緑。ほかの 14 件は測り直していない（「移行の順」2 で、承認の経路まで分けて回す）。
 
 ## 何をどう変えるか
 
@@ -588,19 +589,40 @@ ci_ref: v2
 ### 直したモデル
 
 - 確認は投稿の時点ではどの項目にも結び付けない。確認が持つのは、本文から観測できるもの（承認できる人か、自動報告か、確認の語があるか、含むコメントの id、含む断片）と、作成者が指すつもりだった項目（`intended`）である。
-- 項目の本文は 20 文字以上の断片の集合に畳む。`U1` / `U2` はその項目だけが持つ散文、`S` は複数の項目に現れうる定型文、`H` は URL の頭（`https://github.com/j`）。どの項目が `S` と `H` を持つかは初期状態で非決定に選ぶ。
+- 項目の本文は 20 文字以上の断片の集合に畳む。`Own(i)` は項目 i だけが持つ散文、`Shared` は複数の項目に現れうる定型文、`UrlHead` は URL の頭（`https://github.com/j`）。どの項目が `Shared` と `UrlHead` を持つかは初期状態で非決定に選ぶ。
 - 規則は定数 `RULE` で切り替える。`v1`（いまの v1）、`window`（ci#43 の 442d679 の 20 文字の窓）、`unique`（この設計）。規則は `intended` を読まず、観測できるものと項目の本文を突き合わせて、**どの確認がどの項目を承認するかを計算する**。
-- 仕様 `noFalseGreen` は、関門が緑なら、すべての項目に「その項目を指すつもりの有効な確認」があることを求める。`intended` を読むのは仕様だけなので、規則が指していない項目を承認すると反例になる。`idAckTurnsGreen`（I6）は、すべての項目に id を含む有効な確認があれば緑であることを求める。
-- 確認の本文に何が現れうるかには前提を置く（`consistent`）。id と項目に固有の散文は、その項目を指すつもりのときにしか現れない。定型文は、それを持つ項目のどれかを指すつもりのときにしか現れない。URL の頭は意図と無関係に現れる。この前提が崩れる入力（別の PR の要約を偶然 20 文字以上写すなど）は、モデルの範囲外である。
+- 仕様 `noFalseGreen` は、関門が緑なら、すべての項目に「その項目を指すつもりで、最後の編集より後に書かれた、自動報告でない確認の語つきの確認」があることを求める。仕様は `intended` と編集の記録 `editLog` を読み、規則が読む `updatedAt` とは別の経路で最後の編集を求める。前の下書きのように仕様と規則が同じ定義を共有すると、規則を壊しても仕様が一緒に動いて違反が出ない。`idAckTurnsGreen`（I6）は、すべての項目に id を含む有効な確認があれば緑であることを求める。
+- 確認の本文に何が現れうるかには前提を置く（`consistent`）。id と項目に固有の散文は、その項目を指すつもりのときにしか現れない。定型文は、それを持つ項目のどれかを指すつもりのときにしか現れない。URL の頭は意図と無関係に現れる。この前提を外すと `fixed` でも反例が出るので、結論はこの前提に依存する。前提が崩れる入力（別の PR の項目の文を偶然 20 文字以上写すなど）は、モデルの範囲外である。
 
 ### 結果（quint 0.32.0）
 
 - `quint typecheck`：2 ファイルとも成功。
-- `quint test reviewThreadAck_test.qnt --main reviewThreadAck_test`：11 passing。ci#44 の反例（`windowUrlHeadTurnsGreenTest`）と、定型文で別の項目が承認される反例（`windowSharedQuoteApprovesOtherTest`）を `window` で緑かつ `noFalseGreen` が偽として固定し、同じ入力が `unique` では赤のままであることを固定した。
+- `quint test reviewThreadAck_test.qnt --main reviewThreadAck_test`：11 passing。ci#44 の反例（`windowUrlHeadTurnsGreenTest`）と、定型文で別の項目が承認される反例（`windowSharedQuoteApprovesOtherTest`）を、`window` で緑かつ `noFalseGreen` が偽として固定し、同じ入力が `unique` では赤のままであることを固定した。v1 で無関係な一言 1 つが 2 つの項目を承認することも固定した（`v1UnrelatedTurnsGreenTest`）。
 - `quint run --main legacy --invariant noFalseGreen --max-steps 10 --max-samples 50000 --seed 134`：違反あり（#134 の形）。
-- `quint run --main window --invariant noFalseGreen --max-steps 10 --max-samples 50000 --seed 134`：違反あり。反例は、両方の項目が `H` を持ち、項目 1 を指すつもりで `H` だけを含む確認が項目 2 も承認する形（ci#44 と同じ）。
-- `quint run --main fixed --invariant safety --max-steps 10 --max-samples 50000 --seed 134 --witnesses gateGreen`：違反なし。緑に届く筋は 50000 のうち 5038（10.08%）で、規則が常に赤を返して違反を避けているのではない。
-- `fixed` の規則から、URL の頭を外す条件か、ほかの項目に無い断片に限る条件のどちらかを消すと、`noFalseGreen` に反例が出る（手元で確かめた）。2 つの条件はどちらも要る。
+- `quint run --main window --invariant noFalseGreen --max-steps 10 --max-samples 50000 --seed 134`：違反あり（ci#44 と同じ形）。
+- `quint run --main fixed --invariant safety --max-steps 10 --max-samples 50000 --seed 134 --witnesses …`：違反なし（50000 の標本を調べた範囲で。証明ではない）。
+
+### Quint を採る前の 4 つの確かめ
+
+元帥の追加の決まり（2026-11-28、オーナーの注意「Quint ファイルが間違っているとすべてが狂う」）に沿って、quint-modeling の見直しの手順で確かめた。詳しい表は [`specs/quint/review-thread-ack/README.md`](../../specs/quint/review-thread-ack/README.md) にある。
+
+- **(a) 不変条件が恒真でない。** `specs/quint/review-thread-ack/mutants.sh` が、原本（違反なし）のほかに 8 つの壊した版を作り、すべてで違反が出ることを確かめる。ガードを 1 つ外した版が 6 つ（URL の頭を外すガード、ほかの項目に無い断片に限るガード、1 つの確認の断片で別の項目も承認する版、id の経路、最終編集より後のガード、自動報告のガード）、遷移を 1 つ変えた版が 2 つ（編集で `updatedAt` を進めない、確認の本文の現れ方の前提を外す）。**`noFalseGreen` は、1 つの確認で別の項目が承認される版と、URL の頭だけで当たる版の両方で違反が出る。** id の経路を消した版は `idAckTurnsGreen` に違反が出る。
+- **(b) 遷移に届く。** `step` の 2 つの action は witness の `postedAck`（99.89%）と `editedItem`（99.90%）で届く。確認が編集で無効になる遷移（`editInvalidatedAck`、40.05%）、引用だけでの承認（15.24%）、定型文がある PR での緑（7.95%）、URL の頭を含む確認がある PR での緑（9.06%）、緑そのもの（10.25%）にも届く。規則がいつも赤を返して違反を避けているのではない。
+- **(c) 実物と合う。** 状態と action を、j5ik2o/ci#43 の 442d679 の `scripts/review-thread-resolution.sh` の関数と値（`is_item`、`is_acknowledger`、`is_auto_report`、`ack_phrase`、`anchor_of`・`id_match`、`norm_text` と `windows(20)`、`references`、`createdAt > updatedAt // createdAt`）に行番号つきで対応させた。`refsUnique` は実物に無く、この設計の jq の `references($target; $ack; $others)` に当たる。対応の無いもの（`intended`、`editLog`、`clock`、`consistent`、`lastStep`）は、仕様・環境の前提・witness のためだけに持つ。
+- **(d) 範囲。** 項目 2 つ、断片 4 種、ステップ 10、標本 50000（seed 134）。網羅ではない。見られないもの：項目が 3 つ以上のとき、定型文が 2 種類以上・引用が固有の文と定型文にまたがるとき、文字列の水準（正規化、URL の外し方、フェンスの境界、確認の語と否定、20 文字の下限）、時刻が同じ秒に並ぶとき（実物は厳密な比較なので、編集と同じ秒の確認は数えない）、前提が崩れる入力、未解決スレッドと項目の選び方。
+
+Quint が通ったことだけを合格の根拠にはしない。モデルが見ない文字列の水準は、テストの観点 3〜5・8・11〜13・18・23 のスモークテストで確かめる。モデルの筋書きとテストの観点の対応は次のとおり。
+
+| テストの観点 | Quint の筋書き |
+| --- | --- |
+| 1（無関係な一言） | `v1UnrelatedTurnsGreenTest`（v1 で緑になる側） |
+| 3・4・24（id で通る、複数の項目を 1 つで） | `uniqueIdsTurnGreenTest`、`uniqueOwnQuotesTurnGreenTest` |
+| 5・18 の 02:49:20（項目だけが持つ文の引用） | `uniqueSharedQuoteOnSingleItemTurnsGreenTest`、`uniqueOwnQuotesTurnGreenTest` |
+| 7（参照だけで確認の語が無い） | `uniqueQuoteWithoutAckWordStaysRedTest` |
+| 8(b)（URL の頭） | `windowUrlHeadTurnsGreenTest`、`uniqueUrlHeadStaysRedTest` |
+| 10（編集で無効、確認し直しで戻る） | `uniqueEditInvalidatesAckTest` |
+| 2・16(a)・18 の 02:46:31（自動報告） | `uniqueAutoReportStaysRedTest` |
+| 23（定型文で別の項目） | `windowSharedQuoteApprovesOtherTest`、`uniqueSharedQuoteStaysRedTest` |
 
 モデルが表さないもの：GitHub のイベント配信、ステータスの公開遅れ（新しいコメントが来てから再評価されるまでの数秒）、API の失敗、ページ取得の順。これらはこの変更で変えない（v1 と同じ）ので、モデルの範囲外にした。文字列の正規化（URL の `#`、URL の外し方、HTML コメントの `-->`、`~~~` のフェンス、情報文字列付きのフェンス）、確認の語の一覧と否定、20 文字の下限も、モデルではなく jq の実装とスモークテストで確かめる。承認できる人か、自動報告か、確認の語があるかは、観測できる真偽値としてモデルに与えており、その判定の正しさはモデルでは確かめない。
 
@@ -646,6 +668,7 @@ ci_ref: v2
 - **高（検証の穴）：Quint の `noFalseGreen` が恒真**（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）：モデルを `specs/quint/review-thread-ack/` に移し、確認を投稿の時点で項目に結び付けない形に書き直した。承認は規則が観測できるものから計算し、仕様は作成者の意図（`intended`）と突き合わせる。`window`（ci#43）で ci#44 と定型文の反例が出て、`fixed` では出ないことを確かめた。
 - **中（テストの形）：スモーク 18a が #131 の実物の形でない**（[j5ik2o/ci#45](https://github.com/j5ik2o/ci/issues/45)）：テストの観点 18 に、実物の失敗報告の形（本文全体が情報文字列 `text` 付きのフェンス、中に引用・`acknowledge`・URL）を書いた。
 - **Devin の 2026-11-27 の指摘 5 点**：(1) アンカーの前方一致（`#issuecomment-1238` が `#issuecomment-123` に当たる）は `id_match`（直後に数字が続く一致を数えない）とテストの観点 8(a) で塞いだ。(2) フェンスの境界を「フェンスの境界」の 1 つの規則（`fence_split`。閉じないフェンスは終わりまで、4 つのバッククォートは 3 つで閉じない）にまとめ、確認の語・マーカー・フェンスだけの本文で共有した（観点 11・16(d)）。(3) Codex の文頭一致は、フェンスを外す前の本文の先頭で見る形に戻した（観点 21）。(4) #131 の筋書きは #131 の時点の設定（利用上限の通知を外さない）で流すと観点 18 に書いた。(5) v1 のモデルは、確認をどの項目にも結び付けず、1 つの一言で全項目を承認する形にした（`v1UnrelatedTurnsGreenTest`）。
+- **Quint を採る前の 4 つの確かめ**（元帥の追加の決まり）：仕様が規則と定義を共有しないよう、最後の編集の時刻を編集の記録 `editLog` から求める形にし、断片と遷移を文字列でなく型で表した。わざと壊した 8 版で違反が出ること（`mutants.sh`）、各 action と主な遷移に witness が届くこと、実物の関数との対応表、検査の大きさと見られないものを「Quint の要否」と `specs/quint/review-thread-ack/README.md` に書いた。直しのあとの規則で #871 と #131 の実データを測り直した。
 - **移行**：「タグを切る条件」を足した。`v2` は上の 3 件が直るまで切らない。新旧の比較の差 0 件では ci#44 の偽の緑が見つからない（旧の判定に、内容で承認を決める経路が無い）ので、比較に承認の経路の確認を足した。
 
 ## 未確認のこと
@@ -660,5 +683,5 @@ ci_ref: v2
 - `extra_ignored_auto_report_author_patterns` に Codex の利用上限の通知を入れているリポジトリの完全な一覧は未確認（この文書では takt-dash を確認した）。入れていないリポジトリでは、通知が未承認の項目として残る。
 - 22 リポジトリのすべてを v2 に上げるか、SHA 固定の 2 つも同時に上げるかは、オーナーの判断。
 - レビューの `updatedAt` が、レビュー本文の編集でコメントと同じように進むかは、GraphQL の実データで確認していない（コメントでは確認済み）。
-- 2026-11-27 の open PR 15 件は、その日のスナップショットである。タグを切る前に同じ比較をもう一度回す。
+- 2026-11-27 の open PR 15 件は、その日のスナップショットである。タグを切る前に同じ比較をもう一度回す。2026-11-28 の直しのあとの規則では、#871 と #131 しか測っていない。
 - 既存の `ignored_auto_report` の本文パターンが、今後も Codex / CodeRabbit の通知を十分に覆うかは、別 issue の範囲である。
