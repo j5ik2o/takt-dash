@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # reviewThreadAck.qnt の不変条件が恒真でないことを確かめる。
-# 規則のガードを 1 つ外した版、ci#43 の残る穴 4 つを 1 つずつ開けた版、遷移を 1 つ変えた版を作り、どれも `fixed` で
+# 規則のガードを 1 つ外した版、ci#43 の残る穴 4 つを 1 つずつ開けた版、既定の除外を壊した版、遷移を 1 つ変えた版を作り、どれも `fixed` で
 # 違反が出ることを確かめる（どの不変条件に出るかも決めておく）。違反が出ない版が 1 つでもあれば失敗する。
 # リポジトリの根から実行する: specs/quint/review-thread-ack/mutants.sh
 set -euo pipefail
@@ -29,6 +29,11 @@ mutants=(
   "穴 3：英語の助動詞を挟む否定を確認と数える|    else if (w == NegatedEn) Neg|    else if (w == NegatedEn) Pos|noFalseGreen"
   "穴 4：日本語の後ろに付く否定を確認と数える|    else if (w == NegatedJa) Neg|    else if (w == NegatedJa) Pos|noFalseGreen"
   "遷移: 編集で最終編集の時刻を進めない|    items' = items.set(id, { ...items.get(id), updatedAt: clock + 1 }),|    items' = items,|noFalseGreen"
+  "既定の除外：作者だけで外す（Codex のほかのコメントも外す）|    RULE == \"scoped\" and it.byCodex and it.noticeHead|    RULE == \"scoped\" and it.byCodex|noFalseGreen"
+  "既定の除外：本文の頭だけで外す（ほかの作者の、通知の文で始まるコメントも外す）|    RULE == \"scoped\" and it.byCodex and it.noticeHead|    RULE == \"scoped\" and it.noticeHead|noFalseGreen"
+  "既定の除外を消す（通知が項目に残り、正当な確認でも赤）|    RULE == \"scoped\" and it.byCodex and it.noticeHead|    false|idAckTurnsGreen"
+  "外した通知を「ほかの項目」に数えない|      and ITEMS.forall(j => j != i implies not(its.get(j).frags.contains(f)))|      and ITEMS.forall(j => (j != i and not(defaultExcluded(its.get(j)))) implies not(its.get(j).frags.contains(f)))|noFalseGreen"
+  "遷移: 観測の前提を外す（どの項目も作者が Codex に見える）|    byCodex: k == CodexNotice or k == CodexOther,|    byCodex: true,|noFalseGreen"
   "遷移: 確認の本文の現れ方の前提を外す|    nondet intended = ITEMS.powerset().filter(s => consistent(items, units, s, pending)).oneOf()|    nondet intended = ITEMS.powerset().oneOf()|noFalseGreen"
 )
 

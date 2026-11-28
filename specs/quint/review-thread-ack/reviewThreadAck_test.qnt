@@ -231,4 +231,64 @@ module reviewThreadAck_test {
         assert(u::gateGreen),
         u::editItem(2),
       })
+
+  // ---- 3 回目の直し：Codex の利用上限の通知を既定で外す ----
+
+  // 通知（作者と本文の頭の両方が一致）は項目にならない。もう 1 つの項目を id で確認すれば緑。
+  run scopedCodexNoticeExcludedTest =
+    u::initWithKinds(Set(u::Shared), Set(), u::CodexNotice, u::Plain)
+      .then(all {
+        assert(not(u::gateGreen)),
+        u::postAck(true, false, Set(u::unit(u::Affirmed, Set(2), Set())), Set(2), Set()),
+      })
+      .then(all {
+        assert(u::gateGreen),
+        assert(u::noFalseGreen),
+        assert(u::greenWithNoticeExcluded),
+        u::editItem(1),
+      })
+
+  // Codex のほかのコメント（作者だけ一致）と、ほかの作者が通知の文で始めたコメント（本文だけ一致）は外さない。
+  // どちらも確認するまで赤。
+  run scopedCodexOtherAndHeadByOtherStayItemsTest =
+    u::initWithKinds(Set(), Set(), u::CodexOther, u::HeadByOther)
+      .then(all {
+        assert(not(u::gateGreen)),
+        u::postAck(true, false, Set(u::unit(u::Affirmed, Set(1), Set())), Set(1), Set()),
+      })
+      .then(all {
+        assert(not(u::gateGreen)),
+        u::postAck(true, false, Set(u::unit(u::Affirmed, Set(2), Set())), Set(2), Set()),
+      })
+      .then(all {
+        assert(u::gateGreen),
+        assert(u::noFalseGreen),
+        assert(u::greenWithCodexOtherItem),
+        assert(u::greenWithHeadByOtherItem),
+        u::editItem(1),
+      })
+
+  // 外した通知と同じ定型文を持つ項目（通知を引用したレビュー）は、通知を指した定型文の引用では承認しない。
+  // 外した通知も「ほかの項目」に数えるので、定型文はその項目だけのものにならない。URL を貼れば緑。
+  run scopedNoticeQuoteDoesNotApproveOtherTest =
+    u::initWithKinds(Set(u::Shared), Set(u::Shared), u::CodexNotice, u::Plain)
+      .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(), Set(u::Shared))), Set(1), Set()))
+      .then(all {
+        assert(not(u::gateGreen)),
+        u::postAck(true, false, Set(u::unit(u::Affirmed, Set(2), Set())), Set(2), Set()),
+      })
+      .then(all {
+        assert(u::gateGreen),
+        assert(u::noFalseGreen),
+        u::editItem(1),
+      })
+
+  // b808a29 の規則（unique）には既定の除外が無い。通知は項目のまま残り、確認するまで赤。
+  run uniqueKeepsNoticeAsItemTest =
+    q::initWithKinds(Set(), Set(), q::CodexNotice, q::Plain)
+      .then(q::postAck(true, false, Set(q::unit(q::Affirmed, Set(2), Set())), Set(2), Set()))
+      .then(all {
+        assert(not(q::gateGreen)),
+        q::editItem(1),
+      })
 }
