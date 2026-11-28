@@ -5,6 +5,9 @@
 // 判定はコメントの集合に対する純関数で、ここで遷移として表すのは、コメントの投稿・項目の編集という
 // 入力の並びに対して、公開される関門の結論が赤と緑の間を動くことだけ。
 //
+// 確認の語の現れ方（Word）には、4 回目の直し（2026-11-28）で、URL か HTML コメントの中だけにある語の 2 つを足した
+// （MaskedWord・AffirmedMaskedCue。ci#43 のレビューで見つかった、設計 06770ed の jq の穴 2 つ）。
+//
 // 確認（ack）は投稿の時点ではどの項目にも結び付けない。確認は 1 つか 2 つの単位（段落・リストの項目・節。
 // 引用とフェンスは付く先の単位に入る）に分かれ、単位ごとに、確認の語の現れ方（Word）と、含むコメントの id、
 // 含む文の断片を持つ。どの項目を承認するかは規則 RULE が項目の側の本文と突き合わせて計算する。
@@ -49,7 +52,12 @@ module reviewThreadAck {
   //   NegatedJa: 日本語の語が、後ろに付く否定で打ち消されている（`確認済みではありません`。穴 4）。
   //   Pending:   確認の語は無く、まだだと書いている（`未対応です`、`まだです`、`has not reviewed`）。
   //   NoWord:    どれも無い。
-  type Word = Affirmed | Quoted | NegatedEn | NegatedJa | Pending | NoWord
+  //   MaskedWord: 確認の語が URL か HTML コメントの中にだけある（`<!-- fixed --> #10`、
+  //              `https://github.com/acme/fixed/pull/7#issuecomment-10`。穴 5。4 回目の直し）。
+  //   AffirmedMaskedCue: 作成者が自分の文で書いた打ち消されない確認の語があり、打ち消し・まだ・条件の語は
+  //              URL か HTML コメントの中にだけある（`https://github.com/acme/pending/pull/7#issuecomment-10 を確認しました`、
+  //              ボットの印 `<!-- review-state: pending -->` を含む確認。穴 6。4 回目の直し）。
+  type Word = Affirmed | Quoted | NegatedEn | NegatedJa | Pending | NoWord | MaskedWord | AffirmedMaskedCue
   type Unit = { word: Word, ids: Set[ItemId], frags: Set[Frag] }
   type Ack = {
     at: int,
@@ -71,7 +79,7 @@ module reviewThreadAck {
 
   pure val ITEMS: Set[ItemId] = Set(1, 2)
   pure val FRAGS: Set[Frag] = Set(Own(1), Own(2), Shared, UrlHead)
-  pure val WORDS: Set[Word] = Set(Affirmed, Quoted, NegatedEn, NegatedJa, Pending, NoWord)
+  pure val WORDS: Set[Word] = Set(Affirmed, Quoted, NegatedEn, NegatedJa, Pending, NoWord, MaskedWord, AffirmedMaskedCue)
   pure val BOOLS: Set[bool] = Set(true, false)
   // 項目が固有の文のほかに持ちうる断片の組。
   pure val EXTRA_FRAGS: Set[Set[Frag]] = Set(Shared, UrlHead).powerset()
@@ -89,6 +97,8 @@ module reviewThreadAck {
   // ---- 現れ方の前提（確認の本文に、何が意図と無関係に現れうるか） ----
   // 規則の polarity は使わず、Word を直接読む（規則を壊しても前提が一緒に動かないように）。
   pure def saysNotYet(w: Word): bool = w == NegatedEn or w == NegatedJa or w == Pending
+  // 作成者が自分の文で、打ち消されない確認の語を書いた単位。URL・HTML コメントの中の打ち消しは、作成者の打ち消しではない。
+  pure def authorWord(w: Word): bool = w == Affirmed or w == AffirmedMaskedCue
 
   // 単位 u が項目 i に触れている（id、i の固有の文、i が持つ定型文のどれか）。
   pure def mentions(its: ItemId -> Item, i: ItemId, u: Unit): bool =
@@ -114,14 +124,14 @@ module reviewThreadAck {
   }
 
   // 承認するつもりの項目の前提。
-  // - 作成者が自分の文で確認の語を書いた単位（Affirmed）の id と固有の文は、承認するつもりの項目か、
+  // - 作成者が自分の文で確認の語を書いた単位（Affirmed・AffirmedMaskedCue）の id と固有の文は、承認するつもりの項目か、
   //   同じ確認で「まだ」と書いた項目のもの（「#1 と #2 を確認しました。ただし #2 はまだ」）。
   // - まだと書いた項目は、承認するつもりの項目ではない。
-  // - 引用だけ（Quoted）や語の無い単位（NoWord）の id と断片は、意図と無関係に現れうる
-  //   （指摘を引用して質問する、別件として触れる）。URL の頭は、どの単位でも意図と無関係に現れる。
+  // - 引用だけ（Quoted）、URL か HTML コメントの中だけの語（MaskedWord）、語の無い単位（NoWord）の id と断片は、
+  //   意図と無関係に現れうる（指摘を引用して質問する、別件として触れる）。URL の頭は、どの単位でも意図と無関係に現れる。
   pure def consistent(its: ItemId -> Item, units: Set[Unit], intended: Set[ItemId], pending: Set[ItemId]): bool = and {
     intended.intersect(pending) == Set(),
-    units.forall(u => u.word == Affirmed implies refersWithin(its, u, intended.union(pending))),
+    units.forall(u => authorWord(u.word) implies refersWithin(its, u, intended.union(pending))),
   }
 
   // 観測は種類から決まる（環境の前提）。作者が Codex で本文が通知の頭で始まるのは、通知だけ。
@@ -199,9 +209,10 @@ module reviewThreadAck {
   pure def isAfter(it: Item, a: Ack): bool = a.at > it.updatedAt
 
   // 本文全体で見たときの確認の語（ci#43 と b808a29）。引用の中の語も、助動詞を挟む否定も、
-  // 後ろに付く否定も確認と数える。
+  // 後ろに付く否定も、URL・HTML コメントの中の語も確認と数える。
   pure def bodyAckWord(a: Ack): bool =
-    a.units.exists(u => u.word == Affirmed or u.word == Quoted or u.word == NegatedEn or u.word == NegatedJa)
+    a.units.exists(u => u.word == Affirmed or u.word == Quoted or u.word == NegatedEn or u.word == NegatedJa
+      or u.word == MaskedWord or u.word == AffirmedMaskedCue)
   pure def bodyIds(a: Ack): Set[ItemId] = a.units.map(u => u.ids).flatten()
   pure def bodyFrags(a: Ack): Set[Frag] = a.units.map(u => u.frags).flatten()
 
@@ -226,13 +237,15 @@ module reviewThreadAck {
   pure def refsUnique(its: ItemId -> Item, i: ItemId, a: Ack): bool =
     bodyIds(a).contains(i) or bodyFrags(a).exists(f => uniqueTo(its, i, f))
 
-  // この設計: 単位の極性。穴 2〜4 は、ここで語の現れ方を肯定と読み違えること。
+  // この設計: 単位の極性。穴 2〜5 は、ここで語の現れ方を肯定と読み違えること。穴 6 は打ち消しと読み違えること。
   pure def polarity(w: Word): Pol =
     if (w == Affirmed) Pos
     else if (w == Quoted) Neutral
     else if (w == NegatedEn) Neg
     else if (w == NegatedJa) Neg
     else if (w == Pending) Neg
+    else if (w == MaskedWord) Neutral
+    else if (w == AffirmedMaskedCue) Pos
     else Neutral
 
   // 単位 u が項目 i を一意に指す（id か、その項目だけが持つ断片）。
@@ -275,7 +288,7 @@ module reviewThreadAck {
   // 確認の語を書いた確認がある。
   pure def intendedAck(log: Set[(ItemId, int)], i: ItemId, a: Ack): bool = and {
     a.eligible, not(a.autoReport),
-    a.units.exists(u => u.word == Affirmed),
+    a.units.exists(u => authorWord(u.word)),
     a.at > lastEdit(log, i),
     a.intended.contains(i),
   }
@@ -295,7 +308,7 @@ module reviewThreadAck {
   val idAckTurnsGreen: bool =
     ITEMS.forall(i => isNotice(items.get(i)) or acks.exists(a => and {
       intendedAck(editLog, i, a),
-      a.units.exists(u => u.word == Affirmed and u.ids.contains(i)),
+      a.units.exists(u => authorWord(u.word) and u.ids.contains(i)),
       not(a.units.exists(u => saysNotYet(u.word) and mentions(items, i, u))),
     }))
       implies gateGreen
@@ -346,6 +359,13 @@ module reviewThreadAck {
   // ほかの作者の、通知の文で始まるコメント（本文だけ一致）が項目に残り、確認で承認されて緑。
   val greenWithHeadByOtherItem: bool =
     gateGreen and ITEMS.exists(i => items.get(i).kind == HeadByOther)
+  // URL か HTML コメントの中だけの語の単位を含む確認があり、それでも緑（4 回目）。
+  val greenWithMaskedWordAck: bool =
+    gateGreen and acks.exists(a => a.units.exists(u => u.word == MaskedWord))
+  // 打ち消しの語が URL か HTML コメントの中にだけある単位が、項目を承認する（4 回目。規則がその単位を赤にしていない）。
+  val approvedByMaskedCue: bool =
+    ITEMS.exists(i => acks.exists(a => approves(items, i, a)
+      and a.units.exists(u => u.word == AffirmedMaskedCue and refsUnit(items, i, u))))
 }
 
 // いまの v1（内容を見ない）。
