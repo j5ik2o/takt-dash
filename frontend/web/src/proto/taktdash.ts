@@ -546,6 +546,58 @@ export function conversationSpeakerToJSON(object: ConversationSpeaker): string {
   }
 }
 
+/** 画面が選べる更新間隔。値はミリ秒。0 は要求なし。 */
+export enum RefreshRate {
+  REFRESH_RATE_UNSPECIFIED = 0,
+  REFRESH_RATE_ONE_SECOND = 1000,
+  REFRESH_RATE_TWO_SECONDS = 2000,
+  REFRESH_RATE_FIVE_SECONDS = 5000,
+  REFRESH_RATE_TEN_SECONDS = 10000,
+  UNRECOGNIZED = -1,
+}
+
+export function refreshRateFromJSON(object: any): RefreshRate {
+  switch (object) {
+    case 0:
+    case "REFRESH_RATE_UNSPECIFIED":
+      return RefreshRate.REFRESH_RATE_UNSPECIFIED;
+    case 1000:
+    case "REFRESH_RATE_ONE_SECOND":
+      return RefreshRate.REFRESH_RATE_ONE_SECOND;
+    case 2000:
+    case "REFRESH_RATE_TWO_SECONDS":
+      return RefreshRate.REFRESH_RATE_TWO_SECONDS;
+    case 5000:
+    case "REFRESH_RATE_FIVE_SECONDS":
+      return RefreshRate.REFRESH_RATE_FIVE_SECONDS;
+    case 10000:
+    case "REFRESH_RATE_TEN_SECONDS":
+      return RefreshRate.REFRESH_RATE_TEN_SECONDS;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return RefreshRate.UNRECOGNIZED;
+  }
+}
+
+export function refreshRateToJSON(object: RefreshRate): string {
+  switch (object) {
+    case RefreshRate.REFRESH_RATE_UNSPECIFIED:
+      return "REFRESH_RATE_UNSPECIFIED";
+    case RefreshRate.REFRESH_RATE_ONE_SECOND:
+      return "REFRESH_RATE_ONE_SECOND";
+    case RefreshRate.REFRESH_RATE_TWO_SECONDS:
+      return "REFRESH_RATE_TWO_SECONDS";
+    case RefreshRate.REFRESH_RATE_FIVE_SECONDS:
+      return "REFRESH_RATE_FIVE_SECONDS";
+    case RefreshRate.REFRESH_RATE_TEN_SECONDS:
+      return "REFRESH_RATE_TEN_SECONDS";
+    case RefreshRate.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 /** operation_request への回答の種類を表す。 */
 export enum OperationAnswerReport {
   OPERATION_ANSWER_REPORT_UNSPECIFIED = 0,
@@ -837,7 +889,11 @@ export interface DashboardState {
     | AnomalyThresholds
     | undefined;
   /** backend 自身のビルド元 */
-  buildInfo: BuildInfo | undefined;
+  buildInfo:
+    | BuildInfo
+    | undefined;
+  /** その送信で予定した間隔（0 は要求なし） */
+  appliedRefreshIntervalMs: number;
 }
 
 /** 概要の取得を要求する。 */
@@ -1352,6 +1408,12 @@ export interface GetConversationResponse {
 
 /** 状態ストリーミングの接続を要求する。 */
 export interface WatchStateRequest {
+  /** 画面が選んだ更新間隔（0 は要求なし） */
+  refreshRate: RefreshRate;
+  /** 画面の識別子 */
+  screen: string;
+  /** 試行番号 */
+  attempt: number;
 }
 
 /**
@@ -3540,6 +3602,7 @@ function createBaseDashboardState(): DashboardState {
     pendingDecisions: [],
     thresholds: undefined,
     buildInfo: undefined,
+    appliedRefreshIntervalMs: 0,
   };
 }
 
@@ -3568,6 +3631,9 @@ export const DashboardState: MessageFns<DashboardState> = {
     }
     if (message.buildInfo !== undefined) {
       BuildInfo.encode(message.buildInfo, writer.uint32(66).fork()).join();
+    }
+    if (message.appliedRefreshIntervalMs !== 0) {
+      writer.uint32(72).uint32(message.appliedRefreshIntervalMs);
     }
     return writer;
   },
@@ -3649,6 +3715,14 @@ export const DashboardState: MessageFns<DashboardState> = {
             message.buildInfo = BuildInfo.decode(reader, reader.uint32());
             continue;
           }
+          case 9: {
+            if (tag !== 72) {
+              break;
+            }
+
+            message.appliedRefreshIntervalMs = reader.uint32();
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -3683,6 +3757,11 @@ export const DashboardState: MessageFns<DashboardState> = {
         : isSet(object.build_info)
         ? BuildInfo.fromJSON(object.build_info)
         : undefined,
+      appliedRefreshIntervalMs: isSet(object.appliedRefreshIntervalMs)
+        ? globalThis.Number(object.appliedRefreshIntervalMs)
+        : isSet(object.applied_refresh_interval_ms)
+        ? globalThis.Number(object.applied_refresh_interval_ms)
+        : 0,
     };
   },
 
@@ -3712,6 +3791,9 @@ export const DashboardState: MessageFns<DashboardState> = {
     if (message.buildInfo !== undefined) {
       obj.buildInfo = BuildInfo.toJSON(message.buildInfo);
     }
+    if (message.appliedRefreshIntervalMs !== 0) {
+      obj.appliedRefreshIntervalMs = Math.round(message.appliedRefreshIntervalMs);
+    }
     return obj;
   },
 
@@ -3732,6 +3814,7 @@ export const DashboardState: MessageFns<DashboardState> = {
     message.buildInfo = (object.buildInfo !== undefined && object.buildInfo !== null)
       ? BuildInfo.fromPartial(object.buildInfo)
       : undefined;
+    message.appliedRefreshIntervalMs = object.appliedRefreshIntervalMs ?? 0;
     return message;
   },
 };
@@ -8470,11 +8553,20 @@ export const GetConversationResponse: MessageFns<GetConversationResponse> = {
 };
 
 function createBaseWatchStateRequest(): WatchStateRequest {
-  return {};
+  return { refreshRate: 0, screen: "", attempt: 0 };
 }
 
 export const WatchStateRequest: MessageFns<WatchStateRequest> = {
-  encode(_: WatchStateRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+  encode(message: WatchStateRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.refreshRate !== 0) {
+      writer.uint32(8).int32(message.refreshRate);
+    }
+    if (message.screen !== "") {
+      writer.uint32(18).string(message.screen);
+    }
+    if (message.attempt !== 0) {
+      writer.uint32(24).uint64(message.attempt);
+    }
     return writer;
   },
 
@@ -8491,6 +8583,30 @@ export const WatchStateRequest: MessageFns<WatchStateRequest> = {
       while (reader.pos < end) {
         const tag = reader.uint32();
         switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 8) {
+              break;
+            }
+
+            message.refreshRate = reader.int32() as any;
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.screen = reader.string();
+            continue;
+          }
+          case 3: {
+            if (tag !== 24) {
+              break;
+            }
+
+            message.attempt = longToNumber(reader.uint64());
+            continue;
+          }
         }
         if ((tag & 7) === 4 || tag === 0) {
           break;
@@ -8503,20 +8619,40 @@ export const WatchStateRequest: MessageFns<WatchStateRequest> = {
     }
   },
 
-  fromJSON(_: any): WatchStateRequest {
-    return {};
+  fromJSON(object: any): WatchStateRequest {
+    return {
+      refreshRate: isSet(object.refreshRate)
+        ? refreshRateFromJSON(object.refreshRate)
+        : isSet(object.refresh_rate)
+        ? refreshRateFromJSON(object.refresh_rate)
+        : 0,
+      screen: isSet(object.screen) ? globalThis.String(object.screen) : "",
+      attempt: isSet(object.attempt) ? globalThis.Number(object.attempt) : 0,
+    };
   },
 
-  toJSON(_: WatchStateRequest): unknown {
+  toJSON(message: WatchStateRequest): unknown {
     const obj: any = {};
+    if (message.refreshRate !== 0) {
+      obj.refreshRate = refreshRateToJSON(message.refreshRate);
+    }
+    if (message.screen !== "") {
+      obj.screen = message.screen;
+    }
+    if (message.attempt !== 0) {
+      obj.attempt = Math.round(message.attempt);
+    }
     return obj;
   },
 
   create<I extends Exact<DeepPartial<WatchStateRequest>, I>>(base?: I): WatchStateRequest {
     return WatchStateRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<WatchStateRequest>, I>>(_: I): WatchStateRequest {
+  fromPartial<I extends Exact<DeepPartial<WatchStateRequest>, I>>(object: I): WatchStateRequest {
     const message = createBaseWatchStateRequest();
+    message.refreshRate = object.refreshRate ?? 0;
+    message.screen = object.screen ?? "";
+    message.attempt = object.attempt ?? 0;
     return message;
   },
 };
