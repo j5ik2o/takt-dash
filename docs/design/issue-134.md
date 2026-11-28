@@ -1,6 +1,6 @@
 # issue #134 の設計：未解決コメント関門の承認判定を厳しくする
 
-対象：[j5ik2o/takt-dash#134](https://github.com/j5ik2o/takt-dash/issues/134)。実装は j5ik2o/ci の `review-thread-resolution`（再利用ワークフローと `scripts/review-thread-resolution.sh`）になる見込みである。この文書は設計の下書きで、takt-dash の実装と j5ik2o/ci のどちらも変更しない（takt-dash には Quint のモデル `specs/quint/review-thread-ack/` だけを置く）。日付は 2026-11-27。2026-11-28 の点検で見つかった穴 3 件（[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)、[#443](https://github.com/j5ik2o/takt-dash/issues/443)、[j5ik2o/ci#45](https://github.com/j5ik2o/ci/issues/45)）を反映した。同じ日の 2 回目の直しで、[j5ik2o/ci#43](https://github.com/j5ik2o/ci/pull/43)（先端 86a443c）のレビューで見つかった、b808a29 の規則に残る穴 4 つ（まとめ返信で確認の語が別の項目にも効く、行頭 `>` の引用の中の `fixed` を数える、`not been fixed` を確認と数える、`確認済みではありません` を確認と数える）を塞いだ（「確認の語の効く範囲と打ち消し」）。同じ日の 3 回目の直しで、元帥の決め 4 つを足した。Codex の利用上限の通知を v2 の共有の既定で外す（「Codex の利用上限の通知を既定で外す」）、赤のときの案内を直す、判定の入口で jq の版を確かめる（「jq の版を判定の入口で確かめる」）、scheme の無いホスト・パスを外す正規表現が `node.js/lib` を巻き込まないようにする、の 4 つである。
+対象：[j5ik2o/takt-dash#134](https://github.com/j5ik2o/takt-dash/issues/134)。実装は j5ik2o/ci の `review-thread-resolution`（再利用ワークフローと `scripts/review-thread-resolution.sh`）になる見込みである。この文書は設計の下書きで、takt-dash の実装と j5ik2o/ci のどちらも変更しない（takt-dash には Quint のモデル `specs/quint/review-thread-ack/` だけを置く）。日付は 2026-11-27。2026-11-28 の点検で見つかった穴 3 件（[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)、[#443](https://github.com/j5ik2o/takt-dash/issues/443)、[j5ik2o/ci#45](https://github.com/j5ik2o/ci/issues/45)）を反映した。同じ日の 2 回目の直しで、[j5ik2o/ci#43](https://github.com/j5ik2o/ci/pull/43)（先端 86a443c）のレビューで見つかった、b808a29 の規則に残る穴 4 つ（まとめ返信で確認の語が別の項目にも効く、行頭 `>` の引用の中の `fixed` を数える、`not been fixed` を確認と数える、`確認済みではありません` を確認と数える）を塞いだ（「確認の語の効く範囲と打ち消し」）。同じ日の 3 回目の直しで、元帥の決め 4 つを足した。Codex の利用上限の通知を v2 の共有の既定で外す（「Codex の利用上限の通知を既定で外す」）、赤のときの案内を直す、判定の入口で jq の版を確かめる（「jq の版と、位置に頼らない判定」）、scheme の無いホスト・パスを外す正規表現が `node.js/lib` を巻き込まないようにする、の 4 つである。
 
 ## 何に触れるか
 
@@ -91,7 +91,7 @@ open PR 15 件のコメントとレビューを取得し、v1 の判定とこの
 
 正規化は、HTML コメント（`<!--` から `-->` まで。途中に `>` があってもそこで切らない）と HTML タグを空白にし、行頭の `>` を外し、Markdown の強調・見出し・表の記号（`*`、`_`、バッククォート、`#`、`>`、`|`）を空白にし、空白を 1 つに畳んで前後を除き、ASCII を小文字にする。コードフェンス（バッククォート 3 つ、またはチルダ 3 つ）は残す（コードの引用は正当な参照なので消さない）。確認の語の判定だけは、先に両方のフェンスを空白にする。つまり、**引用の照合はフェンス内の本文を対象にし、フェンスを外すのは確認の語の判定だけ**である。**id はこの正規化を通さない。** `#` を空白に落とす正規化を通すと、`#issuecomment-123` が本文側で消えて一致しなくなるため、正規化前の本文（大小文字だけ揃えたもの）に対して照合する。
 
-**断片の照合の前に、URL を両方の本文から外す**（[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)）。外すのは `https?://` から空白・`)`・`>`・`]` の手前までと、scheme の無い `ホスト名/パス`（`github.com/j5ik2o/ci` の形）である。scheme の無い形は、最後のラベルがファイルの拡張子の一覧（`js`・`mjs`・`cjs`・`jsx`・`ts`・`tsx`・`json`・`yaml`・`yml`・`toml`・`lock`・`txt`・`java`・`kt`・`kts`・`scala`・`sbt`・`qnt`・`html`・`htm`・`css`・`go`）にあるときは外さない（3 回目の直し）。前の正規表現は `node.js/lib/internal/loader.js` のような拡張子つきの名前もホスト名として外し、その文を引用した正当な確認を赤にしていた（2026-11-28 に確かめた）。`scripts/x.sh`・`src/main.rs` は、前から外れない（直前が `/` の名前は頭にならない）。一覧に無い名前はホスト名として外す。外し過ぎは引用が使えなくなるだけで赤の側、外し損ないは URL の頭が当たる偽の緑の側なので、一覧は狭くする。`rs`・`sh`・`md`・`py` は実在の国別ドメイン（`docs.rs`・`lib.rs`・`bun.sh`）なので一覧に入れない（`docs.rs/serde/…` は外れることを確かめた）。URL は id の照合にだけ使う。外さないと、`https://github.com/j`（ちょうど 20 文字）のような**どの URL にも共通の頭**が窓として一致し、作成者が別件の URL を貼って「確認しました」と書くだけで、リポジトリへのリンクを含む項目（Codex の要約など）がすべて承認になる。ci#43 の 442d679 で実際に起きた（項目に `…/g2g/blob/abc123/src/retry.rs#L10`、確認に `別件の https://github.com/j5ik2o/ci/pull/43 を確認しました` で `got 0 / success`）。項目の URL の中のパス（`src/retry.rs#L10`）も照合に使えなくなるので、その項目を指すには項目の URL を貼るか、URL の外の文を引用する。
+**断片の照合の前に、URL を両方の本文から外す**（[j5ik2o/ci#44](https://github.com/j5ik2o/ci/issues/44)）。外すのは `https?://` から空白・`)`・`>`・`]` の手前までと、scheme の無い `ホスト名/パス`（`github.com/j5ik2o/ci` の形）である。scheme の無い形は、最後のラベルがファイルの拡張子の一覧（`js`・`mjs`・`cjs`・`jsx`・`ts`・`tsx`・`json`・`yaml`・`yml`・`toml`・`lock`・`txt`・`kt`・`kts`・`scala`・`sbt`・`qnt`・`html`・`htm`・`css`・`go`）にあるときは外さない（3 回目の直し）。前の正規表現は `node.js/lib/internal/loader.js` のような拡張子つきの名前もホスト名として外し、その文を引用した正当な確認を赤にしていた（2026-11-28 に確かめた）。`scripts/x.sh`・`src/main.rs` は、前から外れない（直前が `/` の名前は頭にならない）。一覧に無い名前はホスト名として外す。外し過ぎは引用が使えなくなるだけで赤の側、外し損ないは URL の頭が当たる偽の緑の側なので、一覧は狭くする。`rs`・`sh`・`md`・`py` は実在の国別ドメイン（`docs.rs`・`lib.rs`・`bun.sh`）、`java` は実在の gTLD なので一覧に入れない（`docs.rs/serde/…` は外れることを確かめた）。URL は id の照合にだけ使う。外さないと、`https://github.com/j`（ちょうど 20 文字）のような**どの URL にも共通の頭**が窓として一致し、作成者が別件の URL を貼って「確認しました」と書くだけで、リポジトリへのリンクを含む項目（Codex の要約など）がすべて承認になる。ci#43 の 442d679 で実際に起きた（項目に `…/g2g/blob/abc123/src/retry.rs#L10`、確認に `別件の https://github.com/j5ik2o/ci/pull/43 を確認しました` で `got 0 / success`）。項目の URL の中のパス（`src/retry.rs#L10`）も照合に使えなくなるので、その項目を指すには項目の URL を貼るか、URL の外の文を引用する。
 
 **ほかの項目にもある断片は使わない**（[#443](https://github.com/j5ik2o/takt-dash/issues/443)）。Codex の要約の見出しやボットのレート制限の通知のような定型文は、同じ PR の複数の項目に現れる。その引用はどの項目を指すかが定まらないので、1 つの確認で別の項目まで承認しないよう、どの項目の承認にも使わない。同じ文の項目が複数あるときは、それぞれの URL（アンカー）を貼る。「ほかの項目」は、自動報告を外した候補のうち項目（`is_item`）であるもので、承認済みかどうかは問わない（判定が承認の順に依存しないため。I5）。既定で外した Codex の利用上限の通知も「ほかの項目」に数える（3 回目の直し。「Codex の利用上限の通知を既定で外す」）。
 
@@ -343,9 +343,9 @@ def raw_body:
 # 外さないと `https://github.com/j` のような URL の共通の頭が 20 文字の窓として当たる。
 # scheme の無い `ホスト名/パス` は、最後のラベルがファイルの拡張子（`js`・`ts`・`json` など）なら外さない
 # （`node.js/lib` を残す。3 回目の直し）。一覧に無い名前はホスト名として外す（外し過ぎは赤の側）。
-# `rs`・`sh`・`md`・`py` は実在の国別ドメイン（`docs.rs`・`lib.rs`・`bun.sh`）なので一覧に入れない。
+# `rs`・`sh`・`md`・`py` は実在の国別ドメイン（`docs.rs`・`lib.rs`・`bun.sh`）、`java` は実在の gTLD なので一覧に入れない。
 def file_ext_labels:
-  "js|mjs|cjs|jsx|ts|tsx|json|ya?ml|toml|lock|txt|java|kts?|scala|sbt|qnt|html?|css|go";
+  "js|mjs|cjs|jsx|ts|tsx|json|ya?ml|toml|lock|txt|kts?|scala|sbt|qnt|html?|css|go";
 
 def strip_urls($body):
   ($body // "")
@@ -362,12 +362,14 @@ def anchor($u):
   ($u // "" | split("#") | if length > 1 then "#" + .[-1] else "" end);
 
 # id の完全一致。直後に数字が続く一致は数えない（#issuecomment-10 は #issuecomment-101 に当たらない）。
+# 位置（indices）を使わず、正規表現の先読みで決める（3 回目の直し）。jq 1.7 までの indices はバイト位置を返し、
+# 日本語の後ろで「直後の 1 文字」を取り違えて偽の緑になる（「jq の版と、位置に頼らない判定」）。
+def re_escape:
+  gsub("(?<c>[.^$|?*+()\\[\\]{}\\\\])"; "\\\(.c)");
+
 def id_match($raw; $needle):
   $needle != ""
-  and any(($raw | indices($needle))[];
-          . as $i
-          | (($raw[$i + ($needle | length):$i + ($needle | length) + 1] // "")
-             | test("^[0-9]$") | not));
+  and ($raw | test(($needle | re_escape) + "(?![0-9])"));
 
 # ---- 確認の語の効く範囲・引用・否定（2026-11-28 の 2 回目の直し。ci#43 の残る穴 4 つ） ----
 
@@ -461,7 +463,7 @@ def backtick_runs($cs):
   | [ range(0; $len) as $i
       | select($cs[$i] == 96 and ($i == 0 or $cs[$i - 1] != 96))
       | { start: $i,
-          len: ([ range($i; $len) as $k | select($cs[$k] != 96) | $k ] | first // $len) - $i } ];
+          len: (([ range($i; $len) as $k | select($cs[$k] != 96) | $k ] | first // $len) - $i) } ];
 
 def clauses($cover):
   explode as $cs
@@ -724,11 +726,18 @@ $items as $all
 
 `is_item` と `is_acknowledger` は v1 の `select` を分けただけである（自動報告の除外は `is_item` の中ではなく、その手前の `$candidates` で済ませる）。この順序なので、自動報告に対して `acked_keys` は評価されない。また、**項目選別の中では `trusted_acknowledgement`（文頭一致）だけを見る**。確認の語（`acked_keys` の単位ごとの語）は承認の判定で評価する。`trusted_acknowledgement` は v1 と同じく `^\s*` の文頭一致で、**本文の途中に `fixed` があっても承知にしない**（v1 で赤だった Codex の要約を、項目から消して緑にしない）。`trusted_acknowledgement` は「Codex のコメントを項目から外す」ためと、Codex を承認の候補にするために使い、**ほかの項目の承認としては、上の 4 と 5 を満たすときだけ**数える。これで「Codex の 1 つの `Acknowledged.` が全項目を承認する」穴も塞がる。語彙は **v1 と同じ狭い一覧**（`acknowledged` / `addressed` / `確認しました` / `承知しました` / `了解しました` / `対応済み` / `対応しました` / `対処しました`）だけを使う。4 回目に広げた `Fixed`・`確認済み`・`修正しました`・`直しました`・`確認いたしました`・`対応いたしました` は、**著者自身の確認（条件 4）の `ack_words` にだけ**使い、Codex の承知には使わない。これで Codex の要約が `Fixed …` や `確認済みです。ただし…` で始まっても項目から消えず、v1 と同じ赤になる。文頭に来たときだけ承知なので、`確認しました` が文頭にあれば項目から外れ、本文の途中なら項目として残る。`is_auto_report` は v1 の `ignored_auto_report` に既定の通知（作者と本文の頭の両方）と TAKT の種別判定を足しただけなので、Codex の明示の確認は自動報告に落ちない（`Acknowledged` などで始まる本文は通知の頭で始まらない）。
 
-### jq の版を判定の入口で確かめる（3 回目の直し）
+### jq の版と、位置に頼らない判定（3 回目の直し）
 
-判定は jq 1.7 以上でだけ正しい。jq 1.6 の `indices` は文字列の位置をバイトで返すので、日本語の後ろでは `id_match` が見る「アンカーの直後の 1 文字」がずれ、id の一致が誤って偽の緑になる。例：`id_match("確認しました #issuecomment-101"; "#issuecomment-10")` は、jq 1.6（ubuntu:22.04 の apt の jq）で `indices` が `[19]`（コードポイントでは 7）を返して true になる。手元の jq 1.8.2 では `[7]` で false。2026-11-28 に両方で流して確かめた。同じ日に、jq 1.6 でも `match` の `offset` はコードポイントで数える（同じ本文で 7）ことを確かめたので、ずれるのは `indices` を使う `id_match` である。
+d7e6d5b の `id_match` は `indices` で一致の位置を取り、その直後の 1 文字が数字かを見ていた。jq 1.7 までの `indices` は文字列の位置をバイトで返す（コードポイントで返すのは jq 1.8.0 から。jqlang/jq#3065）。そのため日本語の後ろでは「直後の 1 文字」がずれ、id の一致が誤って偽の緑になる。例：`id_match("確認しました #issuecomment-101"; "#issuecomment-10")` は、jq 1.6 と jq 1.7 で `indices` が `[19]`（コードポイントでは 7）を返して true になる。jq 1.8.1 では `[7]` で false。
 
-そこで、`filter_unacknowledged_comments` の頭で jq の版を確かめ、1.7 未満なら失敗にする。
+元帥の決めは「1.7 未満なら失敗」だったが、PR #456 のレビュー（Cursor Bugbot）で jq 1.7 も同じだと分かり、実物で確かめた。GitHub のランナーの系の jq（ubuntu:24.04 の apt。`jq --version` は `jq-1.7`）も `[19]` を返す。そこで中将の判断（2026-11-28）で、**下限は 1.7 のまま、`id_match` を位置を使わない形に書き直す**ことにした（根の直し）。下限を 1.8 に上げて jq を固定して入れる案は採らない（22 リポジトリのワークフローに段が要り、根の直しで足りるため）。
+
+- **`id_match`**：`indices` をやめ、正規表現の先読みで決める（`test(<アンカーをエスケープしたもの> + "(?![0-9])")`。判定の式の `re_escape` と `id_match`）。位置を一切使わないので、jq の版によらない。
+- **ほかに位置に頼る所**（判定の式を洗い出した）：`windows`（`length` と文字列の切り出し `$s[$i:$i+$n]`）、`negated2`・`pending_hits`（`match` の `offset` と切り出し）、`cover_flags`（`explode | length` と切り出し）、`clauses`・`backtick_runs`（`explode` したコードポイントの配列）。`index` は配列（`$veto`、`.keys`）にだけ使っている。jq 1.6・1.7・1.8.1 で、`match` の `offset`（7）、切り出し（`$r[7:9]` が `#i`）、`length`（24）、`explode | length`（24）がどれもコードポイントで数えることを確かめた。文字列に `indices`・`index`・`rindex` を使う所は、`id_match` のほかに無い。**方針：文字列の位置は `match` の `offset` か `explode` で取り、文字列に `indices`・`index`・`rindex` を使わない。** 実装でもこの方針を守る。
+- **構文**：2 回目の直しの `backtick_runs` は、オブジェクトの値に括弧の無い引き算（`len: (…) - $i`）を書いていて、jq 1.6・1.7 では構文の誤りで動かなかった（jq 1.8 で許された書き方）。括弧で囲んだ（`len: ((…) - $i)`）。
+- **確かめ**（2026-11-28、docker の ubuntu:22.04 の jq 1.6、ubuntu:24.04 の jq 1.7、ubuntu:24.04 に入れた jq 1.8.1）：この文書の jq を切り出して、3 つの版で同じ結果になった。25〜29 の 55 行は表どおり、30〜33 の 18 例はすべて期待どおり。書き直した `id_match` は 3 つの版で上の例が false（`#issuecomment-10。` には true、`#issuecomment-1` には false）。d7e6d5b の jq（構文だけ同じ括弧で直したもの）は、jq 1.6・1.7 で `確認しました #issuecomment-101` が `#issuecomment-10` の項目を承認する（偽の緑）。jq 1.6 でも同じ結果になったが、下限は決めのとおり 1.7 に置く（確かめた範囲を版で限るため）。
+
+そのうえで、`filter_unacknowledged_comments` の頭で jq の版を確かめ、1.7 未満なら失敗にする。
 
 ```bash
 require_jq_17() {
@@ -739,7 +748,7 @@ require_jq_17() {
     return 1
   fi
   if (( BASH_REMATCH[1] < 1 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] < 7) )); then
-    echo "::error::jq ${v#jq-} では判定できません。jq 1.7 以上が要ります（1.6 の indices はバイト位置を返す）。" >&2
+    echo "::error::jq ${v#jq-} では判定できません。jq 1.7 以上が要ります。" >&2
     return 1
   fi
 }
@@ -747,7 +756,7 @@ require_jq_17() {
 
 - 版の文字列が `jq-<数>.<数>` で始まらない（読めない）ときも失敗にする（迷う入力は赤に倒す）。`jq-1.6`・空・`jq version 1.7` は失敗、`jq-1.7`・`jq-1.7.1`・`jq-1.8.2` は通ることを、偽の `jq` で確かめた。
 - 知らせは標準エラーに出す（`filter_unacknowledged_comments` の標準出力は `unacknowledged="$(…)"` に取り込まれるので、標準出力に出すとログに残らない）。失敗は `return 1` で返し、`check_pr` が `error` のステータスを公開する経路（v1 の #39 と同じ）に乗せる。判定を飛ばして成功にしない。`main` の頭で止めると、ステータスを公開しないまま終わり、同じ head に前の評価の `success` が残りうる。そのため `ERROR_STATUS_SHA` が決まったあとの判定の入口に置く。
-- 再利用ワークフローは `ubuntu-latest`（いまは ubuntu-24.04）で動く。Ubuntu 24.04 の jq は 1.7.1 なので通る見込み（ランナーで実測はしていない）。ubuntu-22.04 や自前のランナーで jq 1.6 のときは、関門が error になる。
+- 再利用ワークフローは `ubuntu-latest`（いまは ubuntu-24.04）で動く。ubuntu:24.04 の apt の jq（`jq-1.7`）で判定が通ることは docker で確かめた。GitHub のランナーそのものでは測っていない。ubuntu-22.04 や自前のランナーで jq 1.6 のときは、関門が error になる。
 
 ### 赤のときの案内
 
@@ -913,10 +922,10 @@ ci_ref: v2
 29. 27・28 は、同じ参照を付けた肯定と否定の対で固定する（CodeRabbit の推奨）。
 30. **Codex の利用上限の通知の既定の除外（3 回目の直し）。** (a) 作者が `chatgpt-codex-connector`（GraphQL の形も REST の `…[bot]` の形も）で、本文が `You have reached your Codex usage limits` で始まる通知は、項目にならない。実物の 2 つの文言（`… for code reviews. …` と `… usage limits. You can see …`）の両方で固定する。(b) Codex の本物のレビュー（`P1: The retry path drops …`）は項目に残る（作者だけ一致）。(c) Codex のコメントで、本文の途中に通知と同じ文があるものは項目に残る。(d) ほかの作者の、通知の文で始まるコメントは項目に残る（本文だけ一致）。(e) 頭の前に改行がある本文、大小文字が違う本文は項目に残る。(f) Codex の要約（`Codex Review` の見出し）は、v1 の既存の既定で外れる（変えない）。(b)・(c) の本文は `Codex Review` を含まない形で作る（含むと既存の既定で外れ、新しい除外を確かめない）。(g) 外した通知は承認にも数えない（通知の本文に確認の語とほかの項目の id があっても、その項目を承認しない）。(h) `ignored_auto_report_author_patterns` を空で上書きしても、(a) は外れる（入力で消せない）。
 31. **外した通知は「ほかの項目」に数える（3 回目の直し）。** (a) 通知と、通知の文を引用したレビュアーの項目があるとき、`「You have reached your Codex usage limits for code reviews.」を確認しました。` はレビュアーの項目を承認しない（赤）。(b) その項目の URL（アンカー）と確認の語では承認する（緑）。
-32. **jq の版（3 回目の直し）。** 偽の `jq --version` で、`jq-1.6`・空・読めない文字列（`jq version 1.7`）なら関門が `error` を公開して失敗し、`success` を出さない。`jq-1.7`・`jq-1.7.1`・`jq-1.8.2` なら判定に進む。jq 1.6 で `id_match("確認しました #issuecomment-101"; "#issuecomment-10")` が true になること（偽の緑の再現）は、スモークではなくこの文書の記録に残す（ランナーに 1.6 を置かないため）。
-33. **scheme の無いホスト・パス（3 回目の直し）。** (a) `github.com/j5ik2o/ci/…` と `docs.rs/serde/…` は外れ、別件として貼って `確認しました` と書いても承認にならない（8(c) と同じ）。(b) `node.js/lib/internal/modules/cjs/loader.js` は外れず、その文の引用と確認の語で承認できる。(c) `scripts/review-thread-resolution.sh`・`src/main.rs` は前から外れず、引用で承認できる。
+32. **jq の版と、位置に頼らない `id_match`（3 回目の直し）。** (a) **jq 1.7 の `indices` がバイト位置を返す前提でも偽の緑にならない**：項目 `#issuecomment-10` に、作成者が `確認しました #issuecomment-101` と返しても承認しない（赤）。`確認しました #issuecomment-10。` は承認する。どちらも jq 1.7（ランナーの系）で流す。(b) 偽の `jq --version` で、`jq-1.6`・空・読めない文字列（`jq version 1.7`）なら関門が `error` を公開して失敗し、`success` を出さない。`jq-1.7`・`jq-1.7.1`・`jq-1.8.2` なら判定に進む。d7e6d5b の `id_match` が jq 1.6・1.7 で true になること（偽の緑の再現）は、スモークではなくこの文書の記録に残す（「jq の版と、位置に頼らない判定」）。
+33. **scheme の無いホスト・パス（3 回目の直し）。** (a) `github.com/j5ik2o/ci/…`、`docs.rs/serde/…`、`whois.nic.java/…`（`java` は実在の gTLD）は外れ、別件として貼って `確認しました` と書いても承認にならない（8(c) と同じ）。(b) `node.js/lib/internal/modules/cjs/loader.js` は外れず、その文の引用と確認の語で承認できる。(c) `scripts/review-thread-resolution.sh`・`src/main.rs` は前から外れず、引用で承認できる。
 
-30〜33 の入力と期待（この文書の jq を切り出して流した結果、2026-11-28）。項目の作者は書いたもののほかは `reviewer`、確認は作成者で項目より後。`ignored_auto_report_author_patterns` は v1 の既定のうち CodeRabbit の 2 つと `chatgpt-codex-connector\tCodex Review`。d7e6d5b の列は前の版の jq で流した結果。
+30〜33 の入力と期待（この文書の jq を切り出して流した結果、2026-11-28。jq 1.6・1.7・1.8.1 と手元の 1.8.2 で同じ結果）。項目の作者は書いたもののほかは `reviewer`、確認は作成者で項目より後。`ignored_auto_report_author_patterns` は v1 の既定のうち CodeRabbit の 2 つと `chatgpt-codex-connector\tCodex Review`。d7e6d5b の列は前の版の jq で流した結果（jq 1.8 で。32x だけは版で変わる）。
 
 | 例 | 項目と確認 | d7e6d5b で残る項目 | この規則で残る項目 |
 | --- | --- | --- | --- |
@@ -930,12 +939,15 @@ ci_ref: v2
 | 30g | 項目 1：`reviewer` の指摘。項目 2：Codex の `<通知> 確認しました #issuecomment-1`（項目 1 より後） | 1・2 | 1 |
 | 31a | 項目 1：Codex の通知。項目 2：`reviewer` の `> You have reached your Codex usage limits for code reviews.\n\nCan you rerun the review later?`。確認：`「You have reached your Codex usage limits for code reviews.」を確認しました。` | 1・2 | 2 |
 | 31b | 31a の項目、確認：`#issuecomment-2 を確認しました。` | 1 | なし |
+| 32x | 項目 10：`P1: the retry path drops the last event.`、確認：`確認しました #issuecomment-101` | 項目（jq 1.6・1.7 ではなし＝偽の緑） | 項目 |
+| 32y | 32x の項目、確認：`確認しました #issuecomment-10。` | なし | なし |
 | 33a | 項目：`See github.com/j5ik2o/ci/blob/main/README.md for the gate.`、確認：`別件の github.com/j5ik2o/ci/pull/43 を確認しました` | 項目 | 項目 |
 | 33a' | 項目：`See docs.rs/serde/latest/serde/de/index.html for this.`、確認：`別件の docs.rs/serde/latest/serde/ser/index.html を確認しました` | 項目 | 項目 |
+| 33a'' | 項目：`See whois.nic.java/reference/first for the details.`、確認：`別件の whois.nic.java/reference/second を確認しました` | 項目（7f2ee61 の一覧に `java` があった版では「なし」＝偽の緑） | 項目 |
 | 33b | 項目：`The loader in node.js/lib/internal/modules/cjs/loader.js is slow.`、確認：`node.js/lib/internal/modules/cjs/loader.js を確認しました。` | 項目 | なし |
 | 33c | 項目：`scripts/review-thread-resolution.sh and src/main.rs disagree.`、確認：`scripts/review-thread-resolution.sh を確認しました。` | なし | なし |
 
-31a は、外した通知を「ほかの項目」に数えない版（`$excl` を空にした jq）で流すと、レビュアーの項目も承認して「なし」になる。`$excl` が効いていることの確かめである。
+32x の d7e6d5b の列は、jq 1.8 では「項目」、jq 1.6・1.7 では「なし」（`確認しました #issuecomment-101` が `#issuecomment-10` の項目を承認する偽の緑）になる。31a は、外した通知を「ほかの項目」に数えない版（`$excl` を空にした jq）で流すと、レビュアーの項目も承認して「なし」になる。`$excl` が効いていることの確かめである。
 
 25〜29 の入力と期待（この文書の jq を切り出して流した結果。7a〜7n は PR #452 のレビューで足した。項目は `#issuecomment-10`＝`Once this is fixed, please rerun the integration tests.`、`#issuecomment-11`＝`Action not completed / Review rate limited`、`#issuecomment-108`＝`You have reached your Codex usage limits for code reviews.` の 3 つ。項目の作者は作成者でも Codex でもない（108 は Codex の利用上限の通知の文だが、作者が Codex でないので既定の除外に当たらない。観点 30(d)）。b808a29 の列は 1 回目の直しの jq で流した結果で、穴の再現になる。3 回目の直しのあとの jq でも、この規則の列は 55 行すべて同じだった）。
 
@@ -1154,7 +1166,7 @@ Quint が通ったことだけを合格の根拠にはしない。モデルが�
 
 - **Codex の利用上限の通知を、v2 の共有の既定で外す**：作者と本文の頭の両方が一致したときだけ自動報告として外し、片方だけなら外さない。一覧は jq に固定し、inputs にしない。呼び出し側の個別の除外は足さず、残っている行は v2 に上げる PR で消す。外した通知は「ほかの項目」には数える（外した通知を引用した別の項目を、通知の引用で承認しない）。オーナーの言葉（11/28）で、11/13 の統一仕様の 4 をこの点で置き換えた経緯を書いた。v1 は動かさず、v2 に移るまでは通知に URL つきで返信して通す。「Codex の利用上限の通知を既定で外す」、jq の `default_ignored_notice`・`is_auto_report`・`$excl`・`refs_in`、I3、テストの観点 18・19・23・30・31。前の版で赤とした #871 と modern-ddd-book#695 は、既定の除外で緑に戻ることを測り直した（#926 も緑になる。#131 は最初から緑になるので、観点 18 は通知の作者を替えて流す）。
 - **赤のときの案内**：Codex の利用上限の通知への案内は要らなくなった。同じ文が並ぶ自動の通知には、通知ごとに URL（アンカー）を貼って同じ行に確認の語を添える形を書いた。確認の文の形の例も合わせた。
-- **jq の版**：判定の入口（`filter_unacknowledged_comments` の頭）で jq の版を確かめ、1.7 未満か読めないときは error にする。jq 1.6 で `id_match` が偽の緑になることを ubuntu:22.04 の jq 1.6 で再現した。前の版の「未確認のこと」の、jq 1.6 では `match` の `offset` もバイト位置を返す、という書き方は誤りだった（jq 1.6 でも `match` はコードポイントで数える）。テストの観点 32。
+- **jq の版と、位置に頼らない判定**：判定の入口（`filter_unacknowledged_comments` の頭）で jq の版を確かめ、1.7 未満か読めないときは error にする。PR #456 のレビュー（Cursor Bugbot）で、jq 1.7 の `indices` もバイト位置を返すと分かった（直ったのは jq 1.8.0）。中将の判断で、下限は 1.7 のまま、`id_match` を `indices` を使わない正規表現の先読みに書き直した。判定の中で文字列の位置に頼るほかの所（`match` の `offset`、切り出し、`explode`）は、jq 1.6・1.7・1.8.1 でコードポイントで数えることを確かめた。2 回目の直しの `backtick_runs` が jq 1.6・1.7 で構文の誤りになっていたのも括弧で直した。3 つの版で、55 行と 30〜33 の 18 例が同じ結果になることを docker で確かめた。前の版の「未確認のこと」の、jq 1.6 では `match` の `offset` もバイト位置を返す、という書き方は誤りだった（jq 1.6 でも `match` はコードポイントで数える）。テストの観点 32。
 - **scheme の無いホスト・パスを外す正規表現**：最後のラベルがファイルの拡張子なら外さない（`node.js/lib` を残す）。`github.com/j5ik2o/ci`・`docs.rs/serde` は外す。テストの観点 33。
 - **移行**：「移行の順」7 に、既定で外れない自動の通知が残る開いた PR は、作成者が通知の URL つきで返信すれば緑になること、呼び出し側に残る除外の行を同じ PR で消すことを書いた。
 - **Quint**：項目に真の種類（`Kind`）と、規則が読む 2 つの観測（作者が Codex か、本文が通知の頭で始まるか）を足し、`fixed`（`scoped`）だけが両方の一致で外す形にした。元帥の決まりの 4 つの確かめをやり直した（「Quint の要否」と README）。
@@ -1168,7 +1180,7 @@ Quint が通ったことだけを合格の根拠にはしない。モデルが�
 - 引用を「その項目だけが持つ断片」に限って残す設計は、元帥の方針（照合を、対象を一意に指す値の完全一致にする）の読み方の 1 つである。引用をやめて id（URL・アンカー）だけにする読み方もありうる。その場合、event-store-adapter-java#871 の CodeRabbit の通知への確認（01:42 の引用）と、観点 18 の筋書き（通知の作者を替えて項目に残す #131）の 02:49:20 の確認が赤になり、テストの観点 5・18・19 と移行の負担が変わる。どちらにするかは元帥の確認が要る。
 - URL を含みアンカーの無い確認（pekko-persistence-dynamodb#1040、event-store-adapter-kotlin#906）が、URL の外の引用でも項目を指しているかは、まだ読んでいない（「移行の順」2 で確かめる）。
 - 同じ PR に同じ文の項目が並ぶ頻度（既定で外れないボットの通知が 2 回など）は数えていない。多い場合は、引用の代わりに URL を貼る運用の負担が増える。
-- scheme の無い `ホスト名/パス` を外す正規表現の拡張子の一覧（3 回目の直し）は、実データの確認の本文で数えていない。一覧に無い拡張子の名前（`foo.rb/…` など）はホスト名として外れ、その文の引用は使えない（赤の側）。逆に、一覧の拡張子と同じ名前の国別ドメインが今後できると、そのホストは外れない（偽の緑の側。いまは一覧のどれも国別ドメインではない）。
+- scheme の無い `ホスト名/パス` を外す正規表現の拡張子の一覧（3 回目の直し）は、実データの確認の本文で数えていない。一覧に無い拡張子の名前（`foo.rb/…` など）はホスト名として外れ、その文の引用は使えない（赤の側）。逆に、一覧の拡張子と同じ名前の国別ドメインが今後できると、そのホストは外れない（偽の緑の側。2026-11-28 に `dig NS` で、一覧のどれも実在の TLD でないことを確かめた）。
 
 - 手元の clone のタグ `v1` が `db3bfd0` を指す理由。リモートの `v1` が過去に付け替えられたのか、手元だけで付けたのかは分からない。
 - TAKT の merge-prepare が、赤のまま止まる挙動を受け入れられるか。失敗報告へ `<!-- takt:auto-report -->` を付ける変更を、どのワークフロー（takt-dash の `.takt/` か、takt 本体か）に入れるかは未確認。マーカーが付くまでは、本文がコードフェンスだけの旧来の形を種別で外せる。散文を伴う報告（フェンスの直前に一文を置く形を含む）は、マーカーが付くまで自動報告として外れない。
