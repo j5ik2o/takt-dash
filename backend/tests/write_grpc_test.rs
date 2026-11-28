@@ -789,7 +789,7 @@ async fn watch_state_delivers_a_goal_registration_proposal_on_the_same_stream() 
   let mut client = client(server.address).await;
 
   let mut stream =
-    client.watch_state(WatchStateRequest {}).await.expect("状態ストリーミングへ接続できます").into_inner();
+    client.watch_state(WatchStateRequest::default()).await.expect("状態ストリーミングへ接続できます").into_inner();
   let first = timeout(Duration::from_secs(5), stream.message())
     .await
     .expect("初回の全件は即時に届きます")

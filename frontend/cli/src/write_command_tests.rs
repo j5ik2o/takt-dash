@@ -753,11 +753,11 @@ fn timestamp(seconds: i64) -> Timestamp {
 /// 問い合わせ・マージ待ち・別プロジェクトの問い合わせを含む判断待ちの状態。
 fn pending_state() -> v1::DashboardState {
   v1::DashboardState {
-    read_at:           Some(timestamp(1_700_000_000)),
-    servers:           Vec::new(),
-    projects:          Vec::new(),
-    goals:             Vec::new(),
-    runs:              Vec::new(),
+    read_at: Some(timestamp(1_700_000_000)),
+    servers: Vec::new(),
+    projects: Vec::new(),
+    goals: Vec::new(),
+    runs: Vec::new(),
     pending_decisions: vec![
       v1::PendingDecision {
         r#type:          v1::PendingDecisionType::Inquiry as i32,
@@ -808,11 +808,9 @@ fn pending_state() -> v1::DashboardState {
         body_truncated:  false,
       },
     ],
-    thresholds:        Some(v1::AnomalyThresholds {
-      pending_decision_stale_minutes: 240,
-      run_log_silent_minutes:         10,
-    }),
-    build_info:        None,
+    thresholds: Some(v1::AnomalyThresholds { pending_decision_stale_minutes: 240, run_log_silent_minutes: 10 }),
+    build_info: None,
+    applied_refresh_interval_ms: 0,
   }
 }
 

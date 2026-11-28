@@ -30,17 +30,15 @@ pub(super) fn ts(secs: i64) -> Timestamp {
 
 pub(super) fn sample_overview() -> DashboardState {
   DashboardState {
-    read_at:           Some(ts(1_731_600_000)),
-    servers:           sample_overview_servers(),
-    projects:          sample_overview_projects(),
-    goals:             sample_overview_goals(),
-    runs:              sample_overview_runs(),
+    read_at: Some(ts(1_731_600_000)),
+    servers: sample_overview_servers(),
+    projects: sample_overview_projects(),
+    goals: sample_overview_goals(),
+    runs: sample_overview_runs(),
     pending_decisions: sample_overview_pending_decisions(),
-    thresholds:        Some(v1::AnomalyThresholds {
-      pending_decision_stale_minutes: 240,
-      run_log_silent_minutes:         10,
-    }),
-    build_info:        None,
+    thresholds: Some(v1::AnomalyThresholds { pending_decision_stale_minutes: 240, run_log_silent_minutes: 10 }),
+    build_info: None,
+    applied_refresh_interval_ms: 0,
   }
 }
 

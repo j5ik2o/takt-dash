@@ -27,6 +27,7 @@ import {
   type GetTaskDetailResponse,
   type RejectGoalRegistrationRequest,
   type RejectGoalRegistrationResponse,
+  type WatchStateRequest,
 } from "../../src/proto/taktdash.ts";
 
 export type ServerError = { code: grpc.status; details: string };
@@ -98,6 +99,8 @@ export type RunningServer = {
   requests: RecordedCall[];
   // 受け取った GetConversation の要求を到着順に記録する。
   conversationRequests: GetConversationRequest[];
+  // 受け取った WatchState の要求を到着順に記録する。
+  watchRequests: WatchStateRequest[];
   shutdown: () => Promise<void>;
 };
 
@@ -141,6 +144,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
   const server = new grpc.Server();
   const requests: RecordedCall[] = [];
   const conversationRequests: GetConversationRequest[] = [];
+  const watchRequests: WatchStateRequest[] = [];
   server.addService(TaktDashServiceService, {
     getOverview: (call: grpc.ServerUnaryCall<unknown, unknown>, callback: grpc.sendUnaryData<DashboardState>) => {
       behavior.calls?.push("GetOverview");
@@ -313,8 +317,9 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
       }
       callback(null, result);
     },
-    watchState: (call: grpc.ServerWritableStream<unknown, DashboardState>) => {
+    watchState: (call: grpc.ServerWritableStream<WatchStateRequest, DashboardState>) => {
       behavior.calls?.push("WatchState");
+      watchRequests.push(call.request);
       let cancelled = false;
       call.on("cancelled", () => {
         cancelled = true;
@@ -390,6 +395,7 @@ export async function startTaktDashServer(behavior: ServerBehavior): Promise<Run
     port,
     requests,
     conversationRequests,
+    watchRequests,
     shutdown: () =>
       new Promise<void>((resolve) => {
         // 応答を返さない unary を残したままでもテストが終わるよう、猶予後に強制停止する。
