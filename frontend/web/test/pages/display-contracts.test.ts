@@ -27,6 +27,9 @@ const required = (root: ParentNode, selector: string): Element => {
   return element;
 };
 const text = (element: Element): string => element.textContent?.replace(/\s+/g, " ").trim() ?? "";
+// 要素の境界をまたいで文字がつながらないよう、テキストノードを改行で区切って並べる（#444）。
+// textContent では「状態 2」の次の段落の「0件」が「20件」と読め、空の表明を取りこぼす。
+const textByNode = (node: Node): string => node.nodeType === node.TEXT_NODE ? node.nodeValue ?? "" : Array.from(node.childNodes, textByNode).join("\n");
 const projectSection = (document: Document): Element => required(document, '[aria-labelledby="h-projects"]');
 const activeCount = (document: Document): number => {
   const section = text(projectSection(document));
@@ -340,7 +343,7 @@ test("概要は読み取り前の空の一覧でrunの件数を0件と確定し�
 test("概要の既読で空のrun集合はヘッダー・タイル・一覧・読み上げを通して一度だけ空と示す", () => {
   const document = overview(withCoverage("complete", [0, 0]));
   const scopes = [required(document, ".page-head"), required(document, ".tile"), required(document, '[aria-labelledby="h-runs"]')];
-  const content = scopes.map((scope) => `${text(scope)} ${[scope, ...Array.from(scope.querySelectorAll('[aria-label]'))].map((item) => item.getAttribute("aria-label")).join(" ")}`).join(" ");
+  const content = scopes.map((scope) => `${textByNode(scope)} ${[scope, ...Array.from(scope.querySelectorAll('[aria-label]'))].map((item) => item.getAttribute("aria-label")).join(" ")}`).join(" ");
   // 空の表明は、タイルの「0 / 5 件」と一覧の文がそれぞれ1回ずつだけ出る（退行で二重にならない）。
   // 「0件」「0 /」「ありません」の類をまとめて拾い、この2つのほかに空の表明が無いことを確かめる（#444）。
   // 見出しなどに「0件の run が動いています。」のような空の表明が増えると、ここで落ちる。
