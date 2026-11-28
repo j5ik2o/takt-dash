@@ -582,7 +582,7 @@ test("同じライブ画面とサイドバーは未読から空、非空への�
         assertRejectsUnreadEmptyClaim(before);
         assert.match(before.querySelector('[role="status"]')?.textContent ?? "", /応答がありません/);
         const emptyRunScopes = [zero.querySelector(".page-head"), zero.querySelector(".tile"), zero.querySelector('[aria-labelledby="h-runs"]')];
-        const emptyRunText = emptyRunScopes.map((scope) => `${scope?.textContent} ${Array.from(scope?.querySelectorAll('[aria-label]') ?? []).map((item) => item.getAttribute('aria-label')).join(' ')}`).join(' ');
+        const emptyRunText = emptyRunScopes.map((scope) => `${scope?.textContent} ${(scope ? [scope, ...Array.from(scope.querySelectorAll('[aria-label]'))] : []).map((item) => item.getAttribute('aria-label')).join(' ')}`).join(' ');
         // 「0件」「0 /」「ありません」の類をまとめて拾い、タイルの「0 / 8 件」と一覧の文のほかに空の表明が無いことを確かめる（#444）。
         const emptyRunClaims = (emptyRunText.match(/(?<!\d)0\s*\/(?:\s*\d+\s*件)?|(?<!\d)0\s*件|ありません/g) ?? []).map((claim) => claim.replace(/\s+/g, ""));
         assert.deepEqual(emptyRunClaims, ["0/8件", "ありません"], emptyRunText);
