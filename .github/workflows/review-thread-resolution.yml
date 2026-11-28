@@ -23,7 +23,7 @@ on:
 
 jobs:
   refresh:
-    uses: j5ik2o/ci/.github/workflows/review-thread-resolution.yml@v1
+    uses: j5ik2o/ci/.github/workflows/review-thread-resolution.yml@v2
     permissions:
       contents: read
       checks: write
@@ -35,4 +35,4 @@ jobs:
       wait_for_other_checks: ${{ format('{0}', inputs.wait_for_other_checks) }}
       base_branch: main
       required_context: Check unresolved comments
-      ci_ref: v1
+      ci_ref: v2
