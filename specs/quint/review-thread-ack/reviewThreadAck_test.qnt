@@ -145,7 +145,7 @@ module reviewThreadAck_test {
       })
 
   // ci#44 の反例。URL の頭は引用の照合に使わないので、緑にならない。
-  run uniqueUrlHeadStaysRedTest =
+  run scopedUrlHeadStaysRedTest =
     u::initWith(Set(u::UrlHead), Set(u::UrlHead))
       .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(), Set(u::UrlHead))), Set(), Set()))
       .then(all {
@@ -155,7 +155,7 @@ module reviewThreadAck_test {
       })
 
   // 2 つの項目に共通の定型文の引用は、どちらの項目も承認しない。
-  run uniqueSharedQuoteStaysRedTest =
+  run scopedSharedQuoteStaysRedTest =
     u::initWith(Set(u::Shared), Set(u::Shared))
       .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(), Set(u::Shared))), Set(1), Set()))
       .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(2), Set())), Set(2), Set()))
@@ -166,7 +166,7 @@ module reviewThreadAck_test {
       })
 
   // 定型文でも、PR の項目の中でその項目だけが持つなら、引用で承認できる（#131 の実際の確認）。
-  run uniqueSharedQuoteOnSingleItemTurnsGreenTest =
+  run scopedSharedQuoteOnSingleItemTurnsGreenTest =
     u::initWith(Set(u::Shared), Set())
       .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(), Set(u::Shared))), Set(1), Set()))
       .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(2), Set())), Set(2), Set()))
@@ -177,7 +177,7 @@ module reviewThreadAck_test {
       })
 
   // 1 つの確認で、それぞれの項目の固有の文を引用すれば、両方を承認できる。
-  run uniqueOwnQuotesTurnGreenTest =
+  run scopedOwnQuotesTurnGreenTest =
     u::initWith(Set(u::UrlHead), Set(u::Shared))
       .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(), Set(u::Own(1), u::Own(2)))), Set(1, 2), Set()))
       .then(all {
@@ -188,7 +188,7 @@ module reviewThreadAck_test {
 
   // コメントの id（URL の全体かアンカー）は、定型文の有無によらず承認に使える。
   // リストの項目ごとに確認の語を書く形（「- #1 を確認しました」「- #2 を確認しました」）。
-  run uniqueIdsTurnGreenTest =
+  run scopedIdsTurnGreenTest =
     u::initWith(Set(u::Shared, u::UrlHead), Set(u::Shared, u::UrlHead))
       .then(u::postAck(true, false,
         Set(u::unit(u::Affirmed, Set(1), Set(u::UrlHead)), u::unit(u::Affirmed, Set(2), Set(u::UrlHead))), Set(1, 2), Set()))
@@ -200,7 +200,7 @@ module reviewThreadAck_test {
       })
 
   // 自動報告（#131 の、本文全体がフェンスの失敗報告）は、引用と確認の語を含んでも承認にならない。
-  run uniqueAutoReportStaysRedTest =
+  run scopedAutoReportStaysRedTest =
     u::initWith(Set(u::Shared), Set())
       .then(u::postAck(true, true, Set(u::unit(u::Affirmed, Set(), Set(u::Shared, u::UrlHead))), Set(1), Set()))
       .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(2), Set())), Set(2), Set()))
@@ -210,7 +210,7 @@ module reviewThreadAck_test {
       })
 
   // 引用だけで確認の語が無ければ緑にならない。
-  run uniqueQuoteWithoutAckWordStaysRedTest =
+  run scopedQuoteWithoutAckWordStaysRedTest =
     u::initWith(Set(), Set())
       .then(u::postAck(true, false, Set(u::unit(u::NoWord, Set(), Set(u::Own(1), u::Own(2)))), Set(1, 2), Set()))
       .then(all {
@@ -219,7 +219,7 @@ module reviewThreadAck_test {
       })
 
   // 緑のあとで項目が編集されると、承認は無効になり赤へ戻る。確認し直すと緑に戻る。
-  run uniqueEditInvalidatesAckTest =
+  run scopedEditInvalidatesAckTest =
     u::initWith(Set(), Set())
       .then(u::postAck(true, false, Set(u::unit(u::Affirmed, Set(1, 2), Set())), Set(1, 2), Set()))
       .then(all { assert(u::gateGreen), u::editItem(1) })

@@ -729,8 +729,8 @@ v1 を直さない理由は、22 のすべてが `Check unresolved comments` を
 ### 移行の順
 
 1. **j5ik2o/ci の main に実装を入れる。** スクリプト、スモークテスト、README の例。`ci_ref` の既定は **v1 のまま**にし、v2 は明示されたときだけ使う。`quint` はこのリポジトリの対象外なので、モデルは takt-dash の `specs/quint/review-thread-ack/` に置く。
-2. **タグを切る前に、open PR の新旧比較を回す。** 22 リポジトリの open PR について、v1 の判定と提案の判定を並べ、差が 0 件であることを確認する（この文書の実測と同じ手順）。差があれば、その PR のコメントを読んで、引用の長さ・URL・確認の語・ほかの項目との共通の断片のどれで落ちたかを分類し、誤って赤にしない条件を直してからタグを切る。**あわせて、新しい判定で承認になった項目ごとに、承認した確認と経路（id か、断片か。断片ならその 20 文字）を出し、その確認が本当にその項目を指しているかを読む。** 差の 0 件だけでは偽の緑が見えないため（「タグを切る条件」）。URL を含みアンカーの無い確認（pekko-persistence-dynamodb#1040、event-store-adapter-kotlin#906 の形）は、とくに読む。
-3. **`v2` を切る。** 「タグを切る条件」の 3 件が直っていることを確かめてから切る。 `git tag -a v2 -m "review-thread-resolution: require an explicit acknowledgement" <main のコミット>`、`git push origin v2`。`uses: ...@v2` が解決できることを、砂場の 1 本で確かめる。
+2. **タグを切る前に、open PR の新旧比較を回す。** 22 リポジトリの open PR について、v1 の判定と提案の判定を並べ、差が 0 件であることを確認する（この文書の実測と同じ手順）。差があれば、その PR のコメントを読んで、引用の長さ・URL・確認の語・ほかの項目との共通の断片のどれで落ちたかを分類し、誤って赤にしない条件を直してからタグを切る。確認の語の無い単位で項目を指しているだけの差（2026-11-28 の event-store-adapter-java#871 の形）は、規則の誤りではなく意図した赤として一覧に残し、その PR の作成者に確認の書き方を伝える。**あわせて、新しい判定で承認になった項目ごとに、承認した確認と経路（id か、断片か。断片ならその 20 文字）を出し、その確認が本当にその項目を指しているかを読む。** 差の 0 件だけでは偽の緑が見えないため（「タグを切る条件」）。URL を含みアンカーの無い確認（pekko-persistence-dynamodb#1040、event-store-adapter-kotlin#906 の形）は、とくに読む。
+3. **`v2` を切る。** 「タグを切る条件」の 4 件が直っていることを確かめ、元帥が 2 の差の一覧と承認の経路を見てから切る。 `git tag -a v2 -m "review-thread-resolution: require an explicit acknowledgement" <main のコミット>`、`git push origin v2`。`uses: ...@v2` が解決できることを、砂場の 1 本で確かめる。
 4. **ci-gate-sandbox を v2 に上げる。** すでに機能ブランチを指している砂場で、無関係コメント・URL・引用・失敗報告の 4 例を実際の PR で流す。
 5. **takt-dash を v2 に上げる。** #134 の出所であり、TAKT の自動 PR が最も多い。先に TAKT が失敗報告へ `<!-- takt:auto-report -->` を付ける変更を入れる（散文を足す形に備える）。印を付ける変更が nrslib/takt に当たる場合は、着手前に元帥へ上げる。付け忘れても、本文がコードフェンスだけなら種別で外れる。1 週間（日次の schedule を 1 回以上含む）観察する。赤になった PR があれば、その理由が「本当に未承認」か「誤って赤」かを分類する。
 6. **自動化の多い 1 リポジトリ（cqrs-es-example-java）を上げる。** 3 日観察する。
@@ -927,13 +927,13 @@ Quint が通ったことだけを合格の根拠にはしない。モデルが�
 | テストの観点 | Quint の筋書き |
 | --- | --- |
 | 1（無関係な一言） | `v1UnrelatedTurnsGreenTest`（v1 で緑になる側） |
-| 3・4・24（id で通る、複数の項目を 1 つで） | `uniqueIdsTurnGreenTest`、`uniqueOwnQuotesTurnGreenTest` |
-| 5・18 の 02:49:20（項目だけが持つ文の引用） | `uniqueSharedQuoteOnSingleItemTurnsGreenTest`、`uniqueOwnQuotesTurnGreenTest` |
-| 7（参照だけで確認の語が無い） | `uniqueQuoteWithoutAckWordStaysRedTest` |
-| 8(b)（URL の頭） | `windowUrlHeadTurnsGreenTest`、`uniqueUrlHeadStaysRedTest` |
-| 10（編集で無効、確認し直しで戻る） | `uniqueEditInvalidatesAckTest` |
-| 2・16(a)・18 の 02:46:31（自動報告） | `uniqueAutoReportStaysRedTest` |
-| 23（定型文で別の項目） | `windowSharedQuoteApprovesOtherTest`、`uniqueSharedQuoteStaysRedTest` |
+| 3・4・24（id で通る、複数の項目を 1 つで） | `scopedIdsTurnGreenTest`、`scopedOwnQuotesTurnGreenTest` |
+| 5・18 の 02:49:20（項目だけが持つ文の引用） | `scopedSharedQuoteOnSingleItemTurnsGreenTest`、`scopedOwnQuotesTurnGreenTest` |
+| 7（参照だけで確認の語が無い） | `scopedQuoteWithoutAckWordStaysRedTest` |
+| 8(b)（URL の頭） | `windowUrlHeadTurnsGreenTest`、`scopedUrlHeadStaysRedTest` |
+| 10（編集で無効、確認し直しで戻る） | `scopedEditInvalidatesAckTest` |
+| 2・16(a)・18 の 02:46:31（自動報告） | `scopedAutoReportStaysRedTest` |
+| 23（定型文で別の項目） | `windowSharedQuoteApprovesOtherTest`、`scopedSharedQuoteStaysRedTest` |
 | 25（確認の語の効く範囲。穴 1） | `uniqueScopeLeaksTest`（b808a29 で緑）、`scopedMixedReplyTest`、`scopedVetoTest`、`scopedQuoteAttachedToAckTest` |
 | 26（引用の中の語。穴 2） | `uniqueQuotedWordTest`（b808a29 で緑）、`scopedQuotedAndNegatedStayRedTest` |
 | 27（英語の否定。穴 3） | `uniqueNegatedEnTest`（b808a29 で緑）、`scopedQuotedAndNegatedStayRedTest` |

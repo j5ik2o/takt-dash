@@ -3,7 +3,7 @@
 j5ik2o/ci の `scripts/review-thread-resolution.sh` が、トップレベルコメントとレビュー要約（項目）のどれを「承認済み」とみなすかを Quint で写したモデルです。仕様とコードは機械的にはつながっていません。判定の実装とスモークテストは j5ik2o/ci にあります。設計は `docs/design/issue-134.md` です。
 
 - `reviewThreadAck.qnt`: モデル。`legacy` がいまの v1、`window` が [j5ik2o/ci#43](https://github.com/j5ik2o/ci/pull/43) の 442d679・86a443c（20 文字の窓）、`unique` が設計 b808a29（一意に指す値。ci#43 のレビューで見つかった穴 4 つが残る）、`fixed` がこの設計の 2 回目の直しの規則です。違いは定数 `RULE` だけで、不変条件は同じです。`RULE` が 3 つの値のどれでもないと関門は緑にならず、witness の `gateGreen` が 0 件になります。
-- `reviewThreadAck_test.qnt`: 筋書きを固定したテスト。
+- `reviewThreadAck_test.qnt`: 筋書きを固定したテスト。名前の頭がどの規則で流すかを表します。`v1*` は `legacy`、`window*` は `window`、`unique*` は b808a29 の `unique`（穴 4 つが開いていることを固定する）、`scoped*` はこの設計の `fixed` です。
 - `mutants.sh`: 不変条件が恒真でないことを確かめる、わざと壊した版の一覧と実行（下の「確かめ (a)」）。
 
 ## モデルの範囲
